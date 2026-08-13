@@ -33,12 +33,9 @@ public final class JdbcQueueStore implements QueueStore {
 
         // tenta UPDATE primeiro; 0 linhas afetadas = nome novo, faz INSERT
         // (mesma disciplina de JdbcJobStore.upsert — sem SELECT prévio).
-        int updated = jdbcTemplate.update(
-                "UPDATE mohs_job_queues SET max_concurrent = :maxConcurrent WHERE name = :name", params);
+        int updated = jdbcTemplate.update("UPDATE mohs_job_queues SET max_concurrent = :maxConcurrent WHERE name = :name", params);
         if (updated == 0) {
-            jdbcTemplate.update(
-                    "INSERT INTO mohs_job_queues (name, max_concurrent, running_count) VALUES (:name, :maxConcurrent, 0)",
-                    params);
+            jdbcTemplate.update("INSERT INTO mohs_job_queues (name, max_concurrent, running_count) VALUES (:name, :maxConcurrent, 0)", params);
         }
         return queue;
     }
@@ -55,8 +52,7 @@ public final class JdbcQueueStore implements QueueStore {
 
     @Override
     public Stream<StoredQueue> findAll() {
-        return jdbcTemplate.queryForStream(
-                "SELECT * FROM mohs_job_queues", new MapSqlParameterSource(), (rs, rowNum) -> mapRow(rs));
+        return jdbcTemplate.queryForStream("SELECT * FROM mohs_job_queues", new MapSqlParameterSource(), (rs, rowNum) -> mapRow(rs));
     }
 
     private static StoredQueue mapRow(ResultSet rs) throws SQLException {

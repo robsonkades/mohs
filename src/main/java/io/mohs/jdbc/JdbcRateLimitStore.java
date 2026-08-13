@@ -32,13 +32,9 @@ public final class JdbcRateLimitStore implements RateLimitStore {
                 .addValue("maxCount", rateLimit.max())
                 .addValue("windowDuration", rateLimit.window().toString());
 
-        int updated = jdbcTemplate.update(
-                "UPDATE mohs_rate_limits SET max_count = :maxCount, window_duration = :windowDuration WHERE name = :name",
-                params);
+        int updated = jdbcTemplate.update("UPDATE mohs_rate_limits SET max_count = :maxCount, window_duration = :windowDuration WHERE name = :name", params);
         if (updated == 0) {
-            jdbcTemplate.update(
-                    "INSERT INTO mohs_rate_limits (name, max_count, window_duration) VALUES (:name, :maxCount, :windowDuration)",
-                    params);
+            jdbcTemplate.update("INSERT INTO mohs_rate_limits (name, max_count, window_duration) VALUES (:name, :maxCount, :windowDuration)", params);
         }
         return rateLimit;
     }
@@ -55,8 +51,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
 
     @Override
     public Stream<RateLimit> findAll() {
-        return jdbcTemplate.queryForStream(
-                "SELECT * FROM mohs_rate_limits", new MapSqlParameterSource(), (rs, rowNum) -> mapRow(rs));
+        return jdbcTemplate.queryForStream("SELECT * FROM mohs_rate_limits", new MapSqlParameterSource(), (rs, rowNum) -> mapRow(rs));
     }
 
     private static RateLimit mapRow(ResultSet rs) throws SQLException {

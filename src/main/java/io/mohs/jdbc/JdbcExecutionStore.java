@@ -99,8 +99,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
 
     @Override
     public Stream<Execution> findAll() {
-        return jdbcTemplate.queryForStream(
-                "SELECT * FROM mohs_executions", new MapSqlParameterSource(), (rs, rowNum) -> mapRow(rs));
+        return jdbcTemplate.queryForStream("SELECT * FROM mohs_executions", new MapSqlParameterSource(), (rs, rowNum) -> mapRow(rs));
     }
 
     /**
