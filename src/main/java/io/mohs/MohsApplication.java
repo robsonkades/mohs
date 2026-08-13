@@ -1,4 +1,4 @@
-package io.github.robsonkades.mohs;
+package io.mohs;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
