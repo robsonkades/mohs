@@ -77,6 +77,34 @@ Antes de finalizar qualquer trecho, responda:
    (job, trigger, schedule, execution)?
    Se a resposta a qualquer uma for "não", refatore antes de seguir.
 
+## Referências de design obrigatórias
+Todo código e toda organização de pacotes/módulos passam pelo crivo destas
+quatro obras — não é leitura de fundo, é critério de revisão:
+- **Effective Java** (Joshua Bloch): fábrica estática > construtor público
+  quando o nome ajuda ou a construção não é 1:1 (Item 1); builder para
+  tipos com muitos parâmetros/opcionais (Item 2); minimize acessibilidade
+  de classes e membros (Item 15); minimize mutabilidade — records, sem
+  setters (Item 17); cópia defensiva em campos mutáveis expostos (Item 50);
+  enum em vez de constantes int/String (Item 34); referencie objetos pela
+  interface, não pela implementação (Item 64).
+- **Design Patterns** (Gamma/Helm/Johnson/Vlissides — GoF): use o nome do
+  padrão (Builder, Observer, Strategy, Chain of Responsibility, Factory
+  Method etc.) no Javadoc quando ele economiza explicação de intenção; não
+  aplique um padrão como decoração — só onde o problema que ele resolve
+  está de fato presente.
+- **Refactoring** (Martin Fowler): os "code smells" do livro (Long Parameter
+  List, Primitive Obsession, Long Method, Feature Envy, Shotgun Surgery
+  etc.) são checklist de toda revisão — inclusive em código novo, não só em
+  refactor. Prefira sequências de mudanças pequenas e reversíveis, suíte
+  verde a cada passo (já é a prática de commit deste projeto).
+- **Patterns of Enterprise Application Architecture** (Martin Fowler):
+  vocabulário e padrões de persistência/domínio (Repository, Unit of Work,
+  Data Mapper, Identity Map, Value Object, Domain Model vs. Transaction
+  Script) orientam `io.mohs.jdbc` e o motor — cite o padrão pelo nome onde
+  isso for exatamente o que o código faz; não force PoEAA em código sem
+  persistência (ex.: contratos puros em `io.mohs` são Value Objects, não
+  têm Repository nenhum para citar).
+
 ## Preferências Java 25
 - Records para value objects e DTOs; imutabilidade por padrão.
 - Sealed interfaces + pattern matching para modelar estados de job
