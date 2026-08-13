@@ -182,6 +182,26 @@ obras — não é leitura de fundo, é critério de revisão:
 - `ScopedValue` em vez de `ThreadLocal` para contexto de execução.
 - Nada de abstração especulativa: só generalize com três usos reais.
 
+## Nulidade — JSpecify sempre
+- Todo `package-info.java` (produção) leva `@NullMarked`
+  (`org.jspecify.annotations`) — não-nulo é o default, `@Nullable` marca a
+  exceção. Sem dependência nova: `org.jspecify:jspecify` já é transitiva
+  via `spring-core` (Spring Framework usa JSpecify desde 6.2+), versão
+  gerenciada pelo BOM do `spring-boot-dependencies` — mesmo padrão já
+  usado para `org.springframework.lang.CheckReturnValue`.
+- Regra de decisão: um campo/parâmetro/retorno só leva `@Nullable` se
+  puder genuinamente ser null em algum caminho real (ex.:
+  `Attempt.finishedAt()` enquanto a tentativa ainda roda,
+  `JobDefinition.name()` quando nenhum rótulo customizado foi definido).
+  Não anote "por garantia" — isso é ruído que esconde os `@Nullable` que
+  importam.
+- Novo tipo/método sem anotação nenhuma = não-nulo, garantido pelo
+  `@NullMarked` do pacote. Se aparecer um `Optional` E um `@Nullable` para
+  a mesma coisa, é sinal de indecisão — este projeto usa `@Nullable` em
+  campo/parâmetro e `Optional` só em retorno de método quando a ausência é
+  parte do protocolo (ex.: `NextFireCalculator.nextFireAfter`, que retorna
+  vazio para jobs sob demanda).
+
 ## Concorrência (prioridade nº 1)
 - Classifique cada workload antes de escolher o modelo de thread:
     - I/O-bound (DB, HTTP, arquivo, mensageria) → virtual threads via
