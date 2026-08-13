@@ -1,0 +1,84 @@
+-- Schema JDBC do Mohs (io.mohs.jdbc). Durations viram VARCHAR via
+-- Duration.toString()/Duration.parse() (ISO-8601, ex. "PT30S") — mais
+-- legível pra debug manual que millis, nenhuma delas precisa de range
+-- query. Sem execution_windows/runners: os dois são bean-resolved
+-- ("predicados só existem em código", §5.8 do documento mestre), não
+-- dado persistido.
+
+CREATE TABLE IF NOT EXISTS job_definitions (
+    job_key         VARCHAR(255) PRIMARY KEY,
+    name            VARCHAR(255),
+    handler_type    VARCHAR(500) NOT NULL,
+    schedule_type   VARCHAR(20)  NOT NULL, -- CRON | INTERVAL | ON_DEMAND
+    cron_expression VARCHAR(255),
+    cron_zone       VARCHAR(100),
+    interval_duration      VARCHAR(50),
+    interval_after_finish  BOOLEAN,
+    runner          VARCHAR(255),
+    queue_name      VARCHAR(255),
+    window_name     VARCHAR(255),
+    misfire         VARCHAR(20)  NOT NULL,
+    retries         INT          NOT NULL DEFAULT 0,
+    timeout         VARCHAR(50),
+    retry_policy    VARCHAR(255),
+    source          VARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
+    orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
+    paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
+    created_at      TIMESTAMP    NOT NULL,
+    updated_at      TIMESTAMP    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS batches (
+    id         VARCHAR(255) PRIMARY KEY,
+    total      INT NOT NULL DEFAULT 0,
+    succeeded  INT NOT NULL DEFAULT 0,
+    failed     INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL
+);
+
+-- id é UUIDv7 (io.github.robsonkades:uuidv7) — time-ordered, mantém
+-- inserts localizados no fim do índice da tabela mais quente do sistema.
+CREATE TABLE IF NOT EXISTS executions (
+    id               VARCHAR(255) PRIMARY KEY,
+    job_key          VARCHAR(255) NOT NULL REFERENCES job_definitions(job_key),
+    state            VARCHAR(20)  NOT NULL,
+    scheduled_at     TIMESTAMP    NOT NULL,
+    fired_at         TIMESTAMP,
+    actor            VARCHAR(255) NOT NULL,
+    idempotency_key  VARCHAR(255),
+    priority         VARCHAR(20),
+    node_id          VARCHAR(255),  -- claim, etapa 3 (ADR-0016)
+    lease_expires_at TIMESTAMP,     -- claim, etapa 3 (ADR-0012/0016)
+    batch_id         VARCHAR(255) REFERENCES batches(id),
+    payload          CLOB         NOT NULL,
+    payload_type     VARCHAR(500) NOT NULL,
+    created_at       TIMESTAMP    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_executions_claim ON executions (state, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_executions_job_key ON executions (job_key);
+CREATE INDEX IF NOT EXISTS idx_executions_idempotency_key ON executions (idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_executions_batch_id ON executions (batch_id);
+
+CREATE TABLE IF NOT EXISTS attempts (
+    execution_id VARCHAR(255) NOT NULL REFERENCES executions(id),
+    number       INT          NOT NULL,
+    started_at   TIMESTAMP    NOT NULL,
+    finished_at  TIMESTAMP,
+    outcome      VARCHAR(20)  NOT NULL,
+    error        CLOB,
+    PRIMARY KEY (execution_id, number)
+);
+
+-- running_count: contador ADR-0009 (ainda Proposed, não Decided) — esta
+-- etapa só cria a coluna; etapa 3 (claim) é quem escreve nela.
+CREATE TABLE IF NOT EXISTS job_queues (
+    name           VARCHAR(255) PRIMARY KEY,
+    max_concurrent INT NOT NULL,
+    running_count  INT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS rate_limits (
+    name            VARCHAR(255) PRIMARY KEY,
+    max_count       INT NOT NULL,
+    window_duration VARCHAR(50) NOT NULL
+);
