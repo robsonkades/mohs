@@ -79,7 +79,7 @@ Antes de finalizar qualquer trecho, responda:
 
 ## Referências de design obrigatórias
 Todo código e toda organização de pacotes/módulos passam pelo crivo destas
-quatro obras — não é leitura de fundo, é critério de revisão:
+obras — não é leitura de fundo, é critério de revisão:
 - **Effective Java** (Joshua Bloch): fábrica estática > construtor público
   quando o nome ajuda ou a construção não é 1:1 (Item 1); builder para
   tipos com muitos parâmetros/opcionais (Item 2); minimize acessibilidade
@@ -104,6 +104,38 @@ quatro obras — não é leitura de fundo, é critério de revisão:
   isso for exatamente o que o código faz; não force PoEAA em código sem
   persistência (ex.: contratos puros em `io.mohs` são Value Objects, não
   têm Repository nenhum para citar).
+- **Designing Data-Intensive Applications** (Martin Kleppmann): o vocabulário
+  de confiabilidade/consistência/at-least-once vs. exactly-once, isolamento
+  de transação e replicação orienta claim (`FOR UPDATE SKIP LOCKED`),
+  contrato de execução e qualquer decisão de enforcement cluster-wide
+  (ex.: gate de benchmark de `docs/adr/0009-queue-enforcement.md`) —
+  aplica-se a partir de M3 (`io.mohs.engine`/`io.mohs.jdbc`); não força
+  vocabulário de storage engine em contratos puros de `io.mohs`.
+- **Java Concurrency in Practice** (Brian Goetz): a autoridade por trás da
+  seção "Concorrência" deste arquivo — publicação segura, confinamento de
+  thread, Java Memory Model, `ReentrantLock`/`Condition` em vez de
+  `synchronized`/`wait` em caminho de I/O, cancelamento cooperativo
+  (`JobContext.cancellationRequested()`, Watchdog Bound). Toda revisão de
+  código concorrente cita o capítulo/padrão relevante, não só "parece
+  thread-safe".
+- **Designing Distributed Systems** (Brendan Burns): padrões operacionais
+  (sidecar/ambassador, health/readiness, graceful shutdown coordenado com
+  orquestrador) orientam o lifecycle do engine (`DRAINING`,
+  `terminationGracePeriodSeconds`, `GET /nodes`) — ver
+  `docs/adr/0007-engine-lifecycle.md` e `docs/adr/0012-liveness-heartbeat-lease-reaper.md`.
+- **Distributed Systems** (Maarten van Steen / Andrew S. Tanenbaum):
+  fundamentação acadêmica para sincronização de relógio (`Clock` injetado,
+  `DatabaseSyncedClock`, amostragem de offset estilo NTP — §5.12) e
+  detecção de falha (heartbeat/lease/reaper) — a base teórica por trás de
+  `docs/adr/0008-configurable-time-source.md` e
+  `docs/adr/0012-liveness-heartbeat-lease-reaper.md`.
+- **Enterprise Integration Patterns** (Gregor Hohpe / Bobby Woolf): o
+  transactional outbox da cláusula 4 do contrato assíncrono
+  (`docs/adr/0003-async-and-transactional-contract.md`) É o padrão
+  Transactional Outbox deste livro — cite-o pelo nome; idem para
+  Idempotent Receiver (`Idempotency-Key`), Dead Letter Channel (retries
+  esgotados) e Competing Consumers (claim multi-nó). Referência natural
+  quando SSE/webhooks saírem do roadmap.
 
 ## Preferências Java 25
 - Records para value objects e DTOs; imutabilidade por padrão.
