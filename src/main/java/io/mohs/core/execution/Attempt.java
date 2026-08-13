@@ -9,9 +9,10 @@ import org.jspecify.annotations.Nullable;
  * Uma única tentativa de uma {@link Execution}. Retry incrementa
  * {@link #number()}; o {@link ExecutionId} da execução dona nunca muda
  * entre tentativas. {@code finishedAt} é {@code null} enquanto a tentativa
- * ainda está em execução.
+ * ainda está em execução. {@code error} é a mensagem da falha, presente só
+ * quando {@code outcome} é {@link ExecutionState#FAILED}.
  */
-public record Attempt(int number, Instant startedAt, @Nullable Instant finishedAt, ExecutionState outcome) {
+public record Attempt(int number, Instant startedAt, @Nullable Instant finishedAt, ExecutionState outcome, @Nullable String error) {
 
     public Attempt {
         if (number < 1) {

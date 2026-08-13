@@ -16,13 +16,13 @@ class ExecutionTest {
     @Test
     void copiesAttemptsDefensively() {
         List<Attempt> mutable = new ArrayList<>();
-        mutable.add(new Attempt(1, Instant.now(), null, ExecutionState.RUNNING));
+        mutable.add(new Attempt(1, Instant.now(), null, ExecutionState.RUNNING, null));
 
         Execution execution = new Execution(
                 ExecutionId.of("exec-1"), JobKey.of("job-1"), ExecutionState.RUNNING,
                 Instant.now(), null, mutable, "application");
 
-        mutable.add(new Attempt(2, Instant.now(), null, ExecutionState.RUNNING));
+        mutable.add(new Attempt(2, Instant.now(), null, ExecutionState.RUNNING, null));
 
         assertThat(execution.attempts()).hasSize(1);
     }

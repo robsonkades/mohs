@@ -10,7 +10,7 @@ class AttemptTest {
 
     @Test
     void rejectsAttemptNumberBelowOne() {
-        assertThatThrownBy(() -> new Attempt(0, Instant.now(), null, ExecutionState.RUNNING))
+        assertThatThrownBy(() -> new Attempt(0, Instant.now(), null, ExecutionState.RUNNING, null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }
