@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     queue_name      VARCHAR(255),
     window_name     VARCHAR(255),
     misfire         VARCHAR(20)  NOT NULL,
+    allow_concurrent_executions BOOLEAN NOT NULL DEFAULT FALSE,
     retries         INT          NOT NULL DEFAULT 0,
     timeout         VARCHAR(50),
     retry_policy    VARCHAR(255),

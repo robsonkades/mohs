@@ -32,6 +32,7 @@ public record JobDefinition(
         @Nullable String queue,
         @Nullable String window,
         Misfire misfire,
+        boolean allowConcurrentExecutions,
         int retries,
         @Nullable Duration timeout,
         @Nullable String retryPolicy,

@@ -20,6 +20,9 @@ public sealed interface PolicySpec permits JobSpecImpl {
 
     PolicySpec misfire(Misfire policy);
 
+    /** Permite mais de uma execução do mesmo job simultaneamente. Default: exclusão mútua (uma por vez). */
+    PolicySpec allowConcurrentExecutions();
+
     PolicySpec retries(int max);
 
     PolicySpec timeout(Duration timeout);

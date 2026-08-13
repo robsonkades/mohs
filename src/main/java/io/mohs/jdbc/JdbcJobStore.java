@@ -72,6 +72,7 @@ public final class JdbcJobStore implements JobStore {
                 .addValue("queueName", definition.queue())
                 .addValue("windowName", definition.window())
                 .addValue("misfire", definition.misfire().name())
+                .addValue("allowConcurrentExecutions", definition.allowConcurrentExecutions())
                 .addValue("retries", definition.retries())
                 .addValue("timeout", definition.timeout() == null ? null : definition.timeout().toString())
                 .addValue("retryPolicy", definition.retryPolicy())
@@ -87,7 +88,8 @@ public final class JdbcJobStore implements JobStore {
                     cron_expression = :cronExpression, cron_zone = :cronZone,
                     interval_duration = :intervalDuration, interval_after_finish = :intervalAfterFinish,
                     runner = :runner, queue_name = :queueName, window_name = :windowName,
-                    misfire = :misfire, retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
+                    misfire = :misfire, allow_concurrent_executions = :allowConcurrentExecutions,
+                    retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
                     source = :source, updated_at = :updatedAt
                 WHERE job_key = :jobKey
                 """, params);
@@ -97,11 +99,13 @@ public final class JdbcJobStore implements JobStore {
                     INSERT INTO mohs_job_definitions (
                         job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
                         interval_duration, interval_after_finish, runner, queue_name, window_name,
-                        misfire, retries, timeout, retry_policy, source, orphaned, paused, created_at, updated_at)
+                        misfire, allow_concurrent_executions, retries, timeout, retry_policy, source,
+                        orphaned, paused, created_at, updated_at)
                     VALUES (
                         :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
                         :intervalDuration, :intervalAfterFinish, :runner, :queueName, :windowName,
-                        :misfire, :retries, :timeout, :retryPolicy, :source, FALSE, FALSE, :createdAt, :updatedAt)
+                        :misfire, :allowConcurrentExecutions, :retries, :timeout, :retryPolicy, :source,
+                        FALSE, FALSE, :createdAt, :updatedAt)
                     """, params.addValue("createdAt", now));
         }
         return definition;
@@ -121,15 +125,13 @@ public final class JdbcJobStore implements JobStore {
 
     @Override
     public Stream<StoredJob> findAll() {
-        return jdbcTemplate.queryForStream(
-                        "SELECT * FROM mohs_job_definitions", new MapSqlParameterSource(), JdbcJobStore::mapRowOrNull)
+        return jdbcTemplate.queryForStream("SELECT * FROM mohs_job_definitions", new MapSqlParameterSource(), JdbcJobStore::mapRowOrNull)
                 .filter(Objects::nonNull);
     }
 
     @Override
     public void markOrphaned(JobKey key) {
-        jdbcTemplate.update("UPDATE mohs_job_definitions SET orphaned = TRUE WHERE job_key = :jobKey",
-                new MapSqlParameterSource("jobKey", key.value()));
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET orphaned = TRUE WHERE job_key = :jobKey", new MapSqlParameterSource("jobKey", key.value()));
     }
 
     @Override
@@ -182,7 +184,8 @@ public final class JdbcJobStore implements JobStore {
         JobDefinition definition = new JobDefinition(
                 JobKey.of(jobKey), rs.getString("name"), handlerType, schedule,
                 rs.getString("runner"), rs.getString("queue_name"), rs.getString("window_name"),
-                Misfire.valueOf(rs.getString("misfire")), rs.getInt("retries"), timeout, rs.getString("retry_policy"),
+                Misfire.valueOf(rs.getString("misfire")), rs.getBoolean("allow_concurrent_executions"),
+                rs.getInt("retries"), timeout, rs.getString("retry_policy"),
                 DefinitionSource.valueOf(rs.getString("source")));
 
         return new StoredJob(definition, rs.getBoolean("orphaned"), rs.getBoolean("paused"));

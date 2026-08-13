@@ -60,6 +60,9 @@ public @interface MohsJob {
     /** Política de misfire. Default {@link Misfire#IGNORE}. */
     Misfire misfire() default Misfire.IGNORE;
 
+    /** Permite mais de uma execução deste job simultaneamente. Default: exclusão mútua (uma por vez). */
+    boolean allowConcurrentExecutions() default false;
+
     /** Número máximo de tentativas de retry. */
     int retries() default 0;
 

@@ -80,7 +80,22 @@ class JobDefinitionTest {
     void rejectsNegativeRetries() {
         assertThatThrownBy(() -> new JobDefinition(
                 JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
-                null, null, null, Misfire.IGNORE, -1, null, null, DefinitionSource.PROGRAMMATIC))
+                null, null, null, Misfire.IGNORE, false, -1, null, null, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void allowConcurrentExecutionsDefaultsToFalse() {
+        JobDefinition definition = JobDefinition.of("import-file", Handler.class, spec -> spec.onDemand());
+
+        assertThat(definition.allowConcurrentExecutions()).isFalse();
+    }
+
+    @Test
+    void allowConcurrentExecutionsCanBeOptedIn() {
+        JobDefinition definition = JobDefinition.of("import-file", Handler.class,
+                spec -> spec.onDemand().allowConcurrentExecutions());
+
+        assertThat(definition.allowConcurrentExecutions()).isTrue();
     }
 }
