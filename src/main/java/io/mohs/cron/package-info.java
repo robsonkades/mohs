@@ -16,4 +16,7 @@
  * {@code CronSpec.expression()} e o cálculo de próxima ocorrência é
  * responsabilidade do motor (M3), não deste pacote.
  */
+@NullMarked
 package io.mohs.cron;
+
+import org.jspecify.annotations.NullMarked;

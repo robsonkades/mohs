@@ -15,4 +15,7 @@
  * vive em {@code io.mohs.engine} e {@code io.mohs.jdbc}, dos quais nenhum
  * tipo público pode depender (regra ArchUnit).
  */
+@NullMarked
 package io.mohs;
+
+import org.jspecify.annotations.NullMarked;

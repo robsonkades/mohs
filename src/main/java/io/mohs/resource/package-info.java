@@ -5,4 +5,7 @@
  * {@link io.mohs.resource.ExecutionWindow} (janela de exclusão de disparo).
  * Sem dependência de nenhum outro subpacote público.
  */
+@NullMarked
 package io.mohs.resource;
+
+import org.jspecify.annotations.NullMarked;

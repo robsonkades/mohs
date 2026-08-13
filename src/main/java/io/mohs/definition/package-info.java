@@ -5,4 +5,7 @@
  * para o caminho programático. Depende de {@code io.mohs} (identidade) e
  * {@code io.mohs.schedule} (o gatilho).
  */
+@NullMarked
 package io.mohs.definition;
+
+import org.jspecify.annotations.NullMarked;

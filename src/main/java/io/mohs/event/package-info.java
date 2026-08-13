@@ -7,4 +7,7 @@
  * {@code io.mohs} (identidade) e {@code io.mohs.execution}
  * ({@code JobContext}, só em {@code ExecutionInterceptor}).
  */
+@NullMarked
 package io.mohs.event;
+
+import org.jspecify.annotations.NullMarked;

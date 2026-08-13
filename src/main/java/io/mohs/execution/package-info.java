@@ -5,4 +5,7 @@
  * {@link io.mohs.execution.Priority}. Depende só de {@code io.mohs}
  * (identidade).
  */
+@NullMarked
 package io.mohs.execution;
+
+import org.jspecify.annotations.NullMarked;
