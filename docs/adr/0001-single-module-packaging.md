@@ -1,5 +1,12 @@
 # ADR-0001: Empacotamento — módulo único, full Spring Boot
 
+> **Nota (2026-08-13):** o ponto 1 da Decision (fronteira por pacote —
+> `io.mohs` como pacote único) foi revisado pela
+> [ADR-0013](0013-public-api-subpackaging.md): `io.mohs` deixou de ser um
+> pacote único e se dividiu em subpacotes coesos. O restante desta ADR
+> (módulo Maven único, web opcional, test kit no jar) permanece decidido
+> e inalterado.
+
 ## Status
 Decided — 2026-08-12
 

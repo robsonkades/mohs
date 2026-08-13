@@ -168,11 +168,17 @@ db-scheduler, JobRunr e Quartz servem esse público). Decisão mantida — sigo.
 
 O que substitui a disciplina do multi-módulo:
 
-1. **Fronteira por pacote, guardada por ArchUnit:** `io.mohs` (API pública:
-   annotations, `Mohs`, `JobRef`, specs, eventos) · `io.mohs.engine` e
+1. **Fronteira por pacote, guardada por ArchUnit:** API pública subdividida
+   em `io.mohs` (fachada + identidade: `Mohs`, `JobKey`, `JobRef`) ·
+   `io.mohs.schedule` (agenda) · `io.mohs.definition` (`JobDefinition`,
+   `@MohsJob`) · `io.mohs.execution` (`Execution`, `JobContext`) ·
+   `io.mohs.event` (eventos, listeners, interceptors) · `io.mohs.resource`
+   (runners, queues, windows) — **[DECIDIDO EM ADR-0013]**, revisando a
+   versão anterior (pacote único) desta mesma decisão · `io.mohs.engine` e
    `io.mohs.jdbc` (internos, `@Internal`) · `io.mohs.autoconfigure` ·
    `io.mohs.rest` · `io.mohs.test`. Regras no build: interno não vaza para a
-   API; `rest` só enxerga a API pública; `test` não vaza para produção.
+   API pública (nenhum dos seis pacotes acima); `rest` só enxerga a API
+   pública; `test` não vaza para produção.
 2. **Web opcional:** `spring-web` como `<optional>`; REST/dashboard ativam
    via `@ConditionalOnClass` + `mohs.api.enabled` (padrão actuator). Teste
    de contrato: app sem web no classpath sobe.
@@ -559,6 +565,7 @@ definida.
 | 0010 | API REST v1 | decidido |
 | 0011 | Serialização e versionamento de payload | decidido |
 | 0012 | Liveness: heartbeat, lease e reaper (Watchdog Bound) | decidido |
+| 0013 | Subpacotes da API pública (revisa ponto 1 da ADR-0001) | decidido |
 
 **Etapas geradas pelo design** (entram no PLAN.md, sequenciadas em
 milestones em §9): esqueleto de módulo + ArchUnit; contratos do core

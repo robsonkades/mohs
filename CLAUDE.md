@@ -73,12 +73,34 @@ Expectativas que definem "pronto" neste projeto:
 - Flags úteis: `-Djdk.tracePinnedThreads=short` para diagnosticar pinning
 
 ## Arquitetura (mapa, não enciclopédia)
-<!-- PREENCHER: módulos reais e responsabilidades, 1 linha cada -->
-- [ex.: io.mohs.engine — motor: claim, runners, misfire, retry]
-- [ex.: io.mohs.autoconfigure — auto-config, properties, validações de boot]
-- Fluxo de um job: trigger devido → aquisição (lock/claim) → dispatch para o
-  executor → execução → transição de estado → persistência do resultado
-- Pontos de entrada para leitura: [preencher: classe do scheduler principal]
+API pública (contratos, M1 — ver `docs/adr/0013-public-api-subpackaging.md`):
+- `io.mohs` — fachada (`Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`,
+  `BatchBuilder`) e identidade compartilhada (`JobKey`, `ExecutionId`, `JobRef`)
+- `io.mohs.schedule` — agenda: `Schedule` selado (`CronSpec`/`IntervalSpec`/
+  `OnDemandSpec`), `Misfire`
+- `io.mohs.definition` — `JobDefinition`, `@MohsJob`, builder staged
+  `JobSpec`/`Configured`
+- `io.mohs.execution` — `Execution`, `Attempt`, `ExecutionState`,
+  `JobContext`, `Priority`
+- `io.mohs.event` — `ExecutionEvent` selado, `ExecutionListener`,
+  `ExecutionInterceptor`, `@OnExecution`
+- `io.mohs.resource` — `MohsRunner`, `JobQueue`, `ExecutionWindow`
+
+Internos e infraestrutura (esqueleto de M0, implementação ainda vazia —
+M3/M2):
+- `io.mohs.engine` — motor: claim, runners, misfire, retry
+- `io.mohs.jdbc` — persistência JDBC de jobs, execuções e filas
+- `io.mohs.autoconfigure` — auto-config, properties, validações de boot
+- `io.mohs.rest` — API REST/dashboard operacional (M2)
+- `io.mohs.test` — test kit embarcado no jar
+
+Fluxo de um job: trigger devido → aquisição (lock/claim) → dispatch para o
+executor → execução → transição de estado → persistência do resultado.
+
+Pontos de entrada para leitura: `io.mohs.Mohs` (fachada pública) e
+`io.mohs.definition.JobDefinition` (o que é um job) são o ponto de partida
+mais curto para entender o vocabulário; `src/test/java/io/mohs/ArchitectureTest.java`
+é a fronteira executável entre público e interno.
 
 ## Princípios de código
 Antes de finalizar qualquer trecho, responda:
