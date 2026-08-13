@@ -95,13 +95,13 @@ public final class JdbcJobStore implements JobStore {
     public Optional<StoredJob> find(JobKey key) {
         Objects.requireNonNull(key, "key");
         List<@Nullable StoredJob> rows = jdbcTemplate.query(
-                "SELECT * FROM job_definitions WHERE job_key = ?", this::mapRowOrNull, key.value());
+                "SELECT * FROM job_definitions WHERE job_key = ?", JdbcJobStore::mapRowOrNull, key.value());
         return rows.stream().filter(Objects::nonNull).findFirst();
     }
 
     @Override
     public List<StoredJob> findAll() {
-        return jdbcTemplate.query("SELECT * FROM job_definitions", this::mapRowOrNull)
+        return jdbcTemplate.query("SELECT * FROM job_definitions", JdbcJobStore::mapRowOrNull)
                 .stream().filter(Objects::nonNull).toList();
     }
 
@@ -134,7 +134,7 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /** {@code null} se {@code handler_type} não resolve mais (handler removido do código) — linha pulada, WARN logado. */
-    private @Nullable StoredJob mapRowOrNull(ResultSet rs, int rowNum) throws SQLException {
+    private static @Nullable StoredJob mapRowOrNull(ResultSet rs, int rowNum) throws SQLException {
         String jobKey = rs.getString("job_key");
         String handlerTypeName = rs.getString("handler_type");
         Class<?> handlerType;
