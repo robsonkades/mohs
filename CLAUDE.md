@@ -1,5 +1,16 @@
 # Mohs — Componente de Agendamento de Jobs
 
+## Idioma
+- Documentação escrita no código (Javadoc, comentários, `package-info.java`)
+  é em **português** — convenção deste projeto, sobrepõe o padrão global de
+  inglês (que permite exceção por convenção do projeto). Migração para
+  inglês fica para um momento futuro, ainda não definido.
+- Identificadores (classes, métodos, campos, pacotes) continuam em inglês —
+  é o vocabulário já fechado em `docs/API-DESIGN.md`/
+  `docs/MOHS-DOCUMENTO-MESTRE.md` (`JobKey`, `Schedule`, `MohsRunner` etc.);
+  a convenção de idioma vale para prosa explicativa, não para nomes.
+- Mensagens de commit continuam em inglês (prática já estabelecida desde M0).
+
 ## Contexto
 Mohs é um componente de agendamento de jobs em Java 25 + Spring Boot, com a
 ambição de ser referência de mercado em performance e confiabilidade de
