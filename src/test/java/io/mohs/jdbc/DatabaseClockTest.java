@@ -80,39 +80,74 @@ class DatabaseClockTest {
         assertThat(clock.currentOffset()).isBetween(expected.minus(TOLERANCE), expected.plus(TOLERANCE));
     }
 
+    /**
+     * TEST-2 do code review: a versão anterior deste teste afirmava sobre
+     * {@code clock.instant()} (= {@code appClock.instant() + offset}) — como
+     * o {@code appClock.advance(1h)} já embute o salto de +1h na leitura do
+     * app, um clamp quebrado que aplicasse cegamente o offset negativo
+     * incorreto (~-1h) cancelaria o salto e produziria um {@code second}
+     * quase igual a {@code first} de qualquer forma — a asserção passava
+     * até no contrafactual quebrado. Afirmar sobre {@link DatabaseClock#currentOffset()}
+     * direto (antes/depois do segundo {@code sync()}) é o que realmente
+     * distingue "clamp aplicado" de "clamp ausente".
+     */
     @Test
-    void instantNeverGoesBackwardsAcrossAResampleThatWouldMoveItBackward() {
+    void offsetNeverDecreasesAcrossAResampleThatWouldMoveItBackward() {
         MutableClock appClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
         DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
         clock.sync();
-        Instant first = clock.instant();
+        Duration offsetAfterFirstSync = clock.currentOffset();
 
         // App clock corre uma hora à frente; o banco continua no tempo real —
         // a próxima amostra tentaria aplicar um offset negativo grande o
-        // bastante pra voltar no tempo.
+        // bastante pra voltar no tempo. O clamp deve descartar essa amostra
+        // e manter o offset anterior intocado.
         appClock.advance(Duration.ofHours(1));
         clock.sync();
-        Instant second = clock.instant();
 
-        assertThat(second).isAfterOrEqualTo(first);
+        assertThat(clock.currentOffset()).isEqualTo(offsetAfterFirstSync);
+    }
+
+    /**
+     * TEST-3 do code review: a versão anterior construía um
+     * {@link DatabaseClock} NOVO diretamente contra um {@link DataSource}
+     * quebrado — {@code currentOffset() == Duration.ZERO} só provava que o
+     * valor default do campo sobrevive a uma falha, nunca que um offset
+     * não-zero **já aprendido** sobrevive a uma resincronização que falha
+     * depois (a propriedade que de fato importa). Aqui a mesma instância
+     * sincroniza com sucesso uma vez (aprendendo um offset não-zero) e só
+     * então passa a falhar.
+     */
+    @Test
+    void keepsThePreviouslyLearnedOffsetWhenAResyncFails() throws SQLException {
+        Duration expected = Duration.ofSeconds(3);
+        MutableClock appClock = new MutableClock(Instant.now().minus(expected), ZoneId.of("UTC"));
+        DataSource flaky = Mockito.mock(DataSource.class);
+        Mockito.when(flaky.getConnection())
+                .thenReturn(dataSource.getConnection())
+                .thenThrow(new SQLException("connection refused"));
+        DatabaseClock clock = new DatabaseClock(flaky, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+
+        clock.sync();
+        Duration offsetAfterSuccess = clock.currentOffset();
+        assertThat(offsetAfterSuccess).isBetween(expected.minus(TOLERANCE), expected.plus(TOLERANCE));
+
+        assertThatCode(clock::sync).doesNotThrowAnyException();
+
+        assertThat(clock.currentOffset()).isEqualTo(offsetAfterSuccess);
     }
 
     @Test
-    void keepsThePreviousOffsetWhenTheDatabaseIsUnreachable() throws SQLException {
-        Duration expected = Duration.ofSeconds(3);
-        MutableClock appClock = new MutableClock(Instant.now().minus(expected), ZoneId.of("UTC"));
+    void withZoneKeepsTheSameInstantAndDelegatesFutureSyncs() {
+        MutableClock appClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
         DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
         clock.sync();
-        Duration offsetAfterSuccess = clock.currentOffset();
 
-        DataSource broken = Mockito.mock(DataSource.class);
-        Mockito.when(broken.getConnection()).thenThrow(new SQLException("connection refused"));
-        DatabaseClock brokenClock = new DatabaseClock(broken, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        var saoPaulo = clock.withZone(ZoneId.of("America/Sao_Paulo"));
 
-        assertThatCode(brokenClock::sync).doesNotThrowAnyException();
-        assertThat(brokenClock.currentOffset()).isEqualTo(Duration.ZERO);
-        assertThat(offsetAfterSuccess).isBetween(expected.minus(TOLERANCE), expected.plus(TOLERANCE));
+        assertThat(saoPaulo.getZone()).isEqualTo(ZoneId.of("America/Sao_Paulo"));
+        assertThat(saoPaulo.instant()).isEqualTo(clock.instant());
     }
 
     @Test

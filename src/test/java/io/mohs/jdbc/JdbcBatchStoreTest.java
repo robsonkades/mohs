@@ -21,6 +21,7 @@ import io.mohs.engine.BatchCounters;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class JdbcBatchStoreTest {
 
@@ -52,6 +53,11 @@ class JdbcBatchStoreTest {
         assertThat(counters.succeeded()).isZero();
         assertThat(counters.failed()).isZero();
         assertThat(counters.pending()).isEqualTo(10);
+    }
+
+    @Test
+    void createRejectsNegativeTotal() {
+        assertThatThrownBy(() -> store.create("batch-1", -1)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
