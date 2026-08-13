@@ -363,12 +363,21 @@ cpu→platform). Customs = bulkheads por integração.
 mohs:
   runners:
     io:   { mode: io,  max: 64 }
-    cpu:  { mode: cpu, max: 8 }
+    cpu:  { mode: cpu, core-size: 4, max-size: 8, queue-capacity: 0, keep-alive: 60s }
     smtp: { mode: io,  max: 8 }
 ```
 ```java
 @Bean MohsRunner s3() { return MohsRunner.io("s3").maxConcurrent(32).build(); }
+@Bean MohsRunner batch() {
+    return MohsRunner.cpu("batch").coreSize(4).maxSize(8)
+        .queueCapacity(0).keepAlive(Duration.ofSeconds(60)).build();
+}
 ```
+Properties de `cpu` espelham `spring.task.execution.pool.*`
+(`core-size`/`max-size`/`queue-capacity`/`keep-alive`) — mas com defaults
+diferentes dos do Spring, deliberadamente (ver ADR-0014): pool fixo
+(`max-size` = núcleos por padrão) e fila sem capacidade (`queue-capacity: 0`,
+direct handoff), não ilimitados.
 
 ### 5.8 Queues, windows e o enforcement em revisão
 
@@ -566,6 +575,7 @@ definida.
 | 0011 | Serialização e versionamento de payload | decidido |
 | 0012 | Liveness: heartbeat, lease e reaper (Watchdog Bound) | decidido |
 | 0013 | Subpacotes da API pública (revisa ponto 1 da ADR-0001) | decidido |
+| 0014 | Properties de pool estilo Spring para o runner CPU | decidido |
 
 **Etapas geradas pelo design** (entram no PLAN.md, sequenciadas em
 milestones em §9): esqueleto de módulo + ArchUnit; contratos do core

@@ -313,18 +313,30 @@ mohs.batch("import-2026-08", b ->                            // lote flat
 mohs:
   runners:
     io:   { mode: io,  max: 64 }   # built-in: virtual threads + semáforo
-    cpu:  { mode: cpu, max: 8 }    # built-in: platform pool limitado
+    cpu:  { mode: cpu, core-size: 4, max-size: 8, queue-capacity: 0, keep-alive: 60s }  # built-in: platform pool
     smtp: { mode: io,  max: 8 }    # bulkhead custom por integração
 ```
 
 ```java
 @Bean MohsRunner s3Runner() { return MohsRunner.io("s3").maxConcurrent(32).build(); }
+@Bean MohsRunner batchRunner() {
+    return MohsRunner.cpu("batch").coreSize(4).maxSize(8)
+        .queueCapacity(0).keepAlive(Duration.ofSeconds(60)).build();
+}
 ```
 
 [DECIDIDO — referência por nome estilo `@Async("...")`, mas o bean é um spec
 (`MohsRunner`), não um `Executor`: o Mohs cria e é dono das threads — requisito
 para cancelamento cooperativo, timeout por interrupt, métricas por runner e a
 regra io→virtual/cpu→platform.]
+
+[DECIDIDO EM ADR-0014 — as quatro properties de `cpu` espelham
+`spring.task.execution.pool.*`, mas com defaults deliberadamente diferentes
+dos do Spring: `max-size` default = núcleos disponíveis (pool fixo, não
+elástico) e `queue-capacity` default 0 (direct handoff, não ilimitada) —
+o Spring não sabe se o trabalho é CPU ou I/O-bound; `MohsRunner.CPU` sabe,
+e "backpressure em toda borda... nunca espera infinita" já é regra do
+projeto.]
 
 ### Queues e windows — bean define a estrutura, property ajusta o número
 
