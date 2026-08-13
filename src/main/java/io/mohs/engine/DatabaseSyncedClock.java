@@ -6,7 +6,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicReference;
 
 import javax.sql.DataSource;
 
@@ -19,7 +18,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * Implementação "database" das três de
  * {@code docs/adr/0008-configurable-time-source.md}: o banco é a
  * autoridade de tempo do cluster — {@link #instant()} nunca faz I/O, é
- * O(1) sobre o offset já amostrado por {@link #sampleOnce()}.
+ * O(1) sobre o offset já amostrado por {@link #sync()}.
  *
  * <p>Só o offset é responsabilidade desta classe — "de quanto em quanto
  * tempo reamostrar" é decisão de quem a usa (agendamento entra em
@@ -40,7 +39,7 @@ public final class DatabaseSyncedClock extends Clock {
     private final Duration skewWarnThreshold;
     private final ZoneId zone;
     private final Clock systemClock;
-    private final AtomicReference<Duration> offset = new AtomicReference<>(Duration.ZERO);
+    private volatile Duration offset = Duration.ZERO;
 
     public DatabaseSyncedClock(DataSource dataSource, Duration skewWarnThreshold) {
         this(dataSource, skewWarnThreshold, ZoneId.of("UTC"), Clock.systemUTC());
@@ -82,12 +81,12 @@ public final class DatabaseSyncedClock extends Clock {
 
     @Override
     public Instant instant() {
-        return systemClock.instant().plus(offset.get());
+        return systemClock.instant().plus(offset);
     }
 
     /** Offset atual (banco − app), exposto pra quando a infra de métricas existir. */
     public Duration currentOffset() {
-        return offset.get();
+        return offset;
     }
 
     /** Uma amostra: mede o offset banco×app com compensação de ida-e-volta e aplica o clamp monotônico. */
@@ -97,11 +96,15 @@ public final class DatabaseSyncedClock extends Clock {
             long t0 = System.nanoTime();
             Timestamp databaseTimestamp = jdbcTemplate.queryForObject(NOW_QUERY, Timestamp.class);
             long t1 = System.nanoTime();
-            Duration roundTrip = Duration.ofNanos(t1 - t0);
 
-            Instant databaseNow = Objects.requireNonNull(databaseTimestamp).toInstant();
+            if (databaseTimestamp == null) {
+                log.warn("'{}' returned no result, keeping last known offset {}", NOW_QUERY, offset);
+                return;
+            }
+
+            Duration roundTrip = Duration.ofNanos(t1 - t0);
             Instant appNowAtMidpoint = beforeQuery.plus(roundTrip.dividedBy(2));
-            Duration sampledOffset = Duration.between(appNowAtMidpoint, databaseNow);
+            Duration sampledOffset = Duration.between(appNowAtMidpoint, databaseTimestamp.toInstant());
 
             if (sampledOffset.abs().compareTo(skewWarnThreshold) > 0) {
                 log.warn("clock skew {} exceeds threshold {}", sampledOffset, skewWarnThreshold);
@@ -109,24 +112,24 @@ public final class DatabaseSyncedClock extends Clock {
 
             applyIfMonotonic(sampledOffset);
         } catch (DataAccessException e) {
-            log.warn("failed to sync clock with database, keeping last known offset {}", offset.get(), e);
+            log.warn("failed to sync clock with database, keeping last known offset {}", offset, e);
         }
     }
 
     /**
-     * Escritor único (quem agenda a chamada a {@link #sampleOnce()} não
-     * chama de duas threads ao mesmo tempo), por isso o clamp não precisa
-     * de um segundo campo atômico: só compara o que o offset novo daria
-     * agora contra o que o offset atual daria agora. Reamostragem que
-     * voltaria no tempo (ADR-0008) é descartada — não ajustada pra um
-     * valor mínimo seguro — e tenta de novo na próxima chamada, quando o
-     * tempo real já terá avançado o bastante.
+     * Escritor único (quem agenda a chamada a {@link #sync()} não chama de
+     * duas threads ao mesmo tempo), por isso o clamp não precisa de um
+     * segundo campo atômico. "now + sampledOffset < now + offset atual"
+     * simplifica pra "sampledOffset < offset atual" — o {@code now} é o
+     * mesmo dos dois lados, não precisa ler o relógio de novo pra comparar.
+     * Reamostragem que voltaria no tempo (ADR-0008) é descartada — não
+     * ajustada pra um valor mínimo seguro — e tenta de novo na próxima
+     * chamada, quando o tempo real já terá avançado o bastante.
      */
     private void applyIfMonotonic(Duration sampledOffset) {
-        Instant now = systemClock.instant();
-        if (now.plus(sampledOffset).isBefore(now.plus(offset.get()))) {
+        if (sampledOffset.compareTo(offset) < 0) {
             return;
         }
-        offset.set(sampledOffset);
+        offset = sampledOffset;
     }
 }
