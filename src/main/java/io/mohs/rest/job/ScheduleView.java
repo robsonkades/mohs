@@ -15,7 +15,7 @@ import io.mohs.core.schedule.Schedule;
  * no JSON, não inferido pelo nome da classe (portável entre linguagens de
  * cliente).
  */
-@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY, property = "type")
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY, property = "type", visible = true)
 @JsonSubTypes({
         @JsonSubTypes.Type(value = CronView.class, name = "CRON"),
         @JsonSubTypes.Type(value = IntervalView.class, name = "INTERVAL"),
