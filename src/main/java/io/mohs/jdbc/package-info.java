@@ -14,7 +14,12 @@
  * {@link io.mohs.engine.SyncableClock}, a implementação "database" da
  * ADR-0008; é a única classe do projeto onde ler o relógio de verdade é
  * o propósito, não uma violação (exceção nomeada em
- * {@code ArchitectureTest}). Não faz parte da API pública — ver
+ * {@code ArchitectureTest}). {@link io.mohs.jdbc.JdbcClaimer} implementa
+ * {@link io.mohs.engine.Claimer} — claim e transição pra
+ * {@code RUNNING} num único {@code UPDATE} (ADR-0016), mutex por job e
+ * admissão de queue via {@code FOR UPDATE OF ... SKIP LOCKED} e
+ * {@link io.mohs.engine.QueueStore#tryIncrementRunning} dentro da mesma
+ * transação (ADR-0017). Não faz parte da API pública — ver
  * {@code io.mohs.core} para os contratos públicos.
  */
 @NullMarked

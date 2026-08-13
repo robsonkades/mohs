@@ -19,6 +19,11 @@
  * mesma separação definicional×operacional de {@link io.mohs.engine.StoredJob})
  * e {@link io.mohs.engine.RateLimitStore} fecham as portas de persistência
  * da etapa 2 de M3.
+ *
+ * <p>{@link io.mohs.engine.Claimer} é a etapa 3a: aquisição sem contenção
+ * (claim), diferente dos {@code *Store} acima porque cruza três tabelas
+ * numa transação só — mutex por job e admissão de queue decididos dentro
+ * dela (ADR-0016, ADR-0017), não uma porta de uma entidade só.
  */
 @NullMarked
 package io.mohs.engine;
