@@ -150,4 +150,21 @@ class JdbcExecutionStoreTest {
                     ExecutionId.of("019abc-7"), ExecutionId.of("019abc-8"));
         }
     }
+
+    @Test
+    void findByIdsReturnsOnlyTheRequestedExecutionsInASingleQuery() {
+        store.insert(execution("019abc-9", "welcome-email"), new WelcomeEmail("a", 1));
+        store.insert(execution("019abc-10", "welcome-email"), new WelcomeEmail("b", 2));
+        store.insert(execution("019abc-11", "welcome-email"), new WelcomeEmail("c", 3));
+
+        List<Execution> found = store.findByIds(List.of(ExecutionId.of("019abc-9"), ExecutionId.of("019abc-11")));
+
+        assertThat(found).extracting(Execution::id).containsExactlyInAnyOrder(
+                ExecutionId.of("019abc-9"), ExecutionId.of("019abc-11"));
+    }
+
+    @Test
+    void findByIdsReturnsEmptyForAnEmptyList() {
+        assertThat(store.findByIds(List.of())).isEmpty();
+    }
 }

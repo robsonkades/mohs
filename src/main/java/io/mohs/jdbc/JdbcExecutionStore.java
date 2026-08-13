@@ -89,6 +89,19 @@ public final class JdbcExecutionStore implements ExecutionStore {
     }
 
     @Override
+    public List<Execution> findByIds(List<ExecutionId> ids) {
+        Objects.requireNonNull(ids, "ids");
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        List<String> rawIds = ids.stream().map(ExecutionId::value).toList();
+        return jdbcTemplate.query(
+                "SELECT * FROM mohs_executions WHERE id IN (:ids)",
+                new MapSqlParameterSource("ids", rawIds),
+                (rs, rowNum) -> mapRow(rs));
+    }
+
+    @Override
     public Stream<Execution> findByJobKey(JobKey jobKey) {
         Objects.requireNonNull(jobKey, "jobKey");
         return jdbcTemplate.queryForStream(

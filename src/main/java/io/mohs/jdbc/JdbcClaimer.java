@@ -8,7 +8,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 
@@ -77,9 +80,24 @@ public final class JdbcClaimer implements Claimer {
         }
 
         List<String> claimedIds = transactionTemplate.execute(status -> claimWithinTransaction(nodeId, batchSize));
+        if (claimedIds.isEmpty()) {
+            return List.of();
+        }
 
+        // uma consulta em lote, não uma por id (N+1) — a ordem de retorno de
+        // findByIds não é garantida, então reordena pelos ids já ordenados
+        // por prioridade/scheduled_at que claimWithinTransaction produziu.
+        Map<String, Execution> byId = executionStore.findByIds(claimedIds.stream().map(ExecutionId::of).toList())
+                .stream()
+                .collect(Collectors.toMap(e -> e.id().value(), Function.identity()));
         return claimedIds.stream()
-                .map(id -> executionStore.find(ExecutionId.of(id)).orElseThrow())
+                .map(id -> {
+                    Execution execution = byId.get(id);
+                    if (execution == null) {
+                        throw new IllegalStateException("claimed execution " + id + " not found after claim — should be unreachable");
+                    }
+                    return execution;
+                })
                 .toList();
     }
 

@@ -1,5 +1,6 @@
 package io.mohs.engine;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -26,6 +27,16 @@ public interface ExecutionStore {
     Execution insert(Execution execution, Object payload);
 
     Optional<Execution> find(ExecutionId id);
+
+    /**
+     * Busca várias execuções por id numa única consulta — evita N+1 quando
+     * o chamador já tem a lista de ids em mãos (ex.: hidratar o resultado
+     * de um claim em lote). Limitado pelo tamanho de {@code ids}, por isso
+     * {@code List}, não {@code Stream} (ver {@link #findAll} pra leitura
+     * não limitada). Ordem do retorno não é garantida — quem chama reordena
+     * se precisar.
+     */
+    List<Execution> findByIds(List<ExecutionId> ids);
 
     /**
      * Stream sobre um cursor aberto — não materializa em memória de uma
