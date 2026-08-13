@@ -580,6 +580,7 @@ definida.
 | 0013 | Subpacotes da API pública (revisa ponto 1 da ADR-0001) | decidido |
 | 0014 | Properties de pool estilo Spring para o runner CPU | decidido |
 | 0015 | Consolidar a API pública sob `io.mohs.core` (revisa ADR-0013) | decidido |
+| 0016 | Claim e transição para `RUNNING` são atômicos | decidido |
 
 **Etapas geradas pelo design** (entram no PLAN.md, sequenciadas em
 milestones em §9): esqueleto de módulo + ArchUnit; contratos do core
