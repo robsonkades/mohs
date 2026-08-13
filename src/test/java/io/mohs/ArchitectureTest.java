@@ -9,6 +9,8 @@ import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
 import com.tngtech.archunit.lang.ArchRule;
 
+import io.mohs.engine.DatabaseSyncedClock;
+
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 
 @AnalyzeClasses(packages = "io.mohs", importOptions = ImportOption.DoNotIncludeTests.class)
@@ -43,6 +45,15 @@ class ArchitectureTest {
             .should().dependOnClassesThat().resideInAPackage("io.mohs.test..");
 
     /**
+     * {@link DatabaseSyncedClock} é a única exceção: é o próprio relógio
+     * injetado, então ler o relógio de verdade ali é o propósito da
+     * classe, não uma violação — ela amostra o offset banco×app em
+     * background pra que {@code instant()} nunca precise fazer I/O.
+     */
+    private static final DescribedPredicate<JavaClass> IS_DATABASE_SYNCED_CLOCK =
+            JavaClass.Predicates.equivalentTo(DatabaseSyncedClock.class);
+
+    /**
      * "Todo agora vem do Clock injetado, leitura direta proibida" (CLAUDE.md)
      * — {@code System.nanoTime()} fica de fora de propósito, é a duração
      * monotônica que o próprio CLAUDE.md pede pra medir intervalo, não
@@ -51,6 +62,7 @@ class ArchitectureTest {
     @ArchTest
     static final ArchRule engine_never_reads_wall_clock_directly =
         noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..")
+            .and(DescribedPredicate.not(IS_DATABASE_SYNCED_CLOCK))
             .should().callMethod(Instant.class, "now")
             .orShould().callMethod(System.class, "currentTimeMillis");
 }
