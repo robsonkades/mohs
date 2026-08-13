@@ -7,8 +7,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 
 /** Uma nova tentativa foi agendada após {@link AttemptFailed}. */
-public record RetryScheduled(ExecutionId executionId, JobKey jobKey, int nextAttempt, Instant retryAt)
-        implements ExecutionEvent {
+public record RetryScheduled(ExecutionId executionId, JobKey jobKey, int nextAttempt, Instant retryAt) implements ExecutionEvent {
 
     public RetryScheduled {
         Objects.requireNonNull(executionId, "executionId");

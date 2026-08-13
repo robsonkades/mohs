@@ -11,8 +11,7 @@ import io.mohs.core.job.JobKey;
  * gancho típico de alerta, ex.:
  * {@code case Failed f when f.attemptsExhausted() -> alert(...)}.
  */
-public record Failed(ExecutionId executionId, JobKey jobKey, int attempt, Throwable error, boolean attemptsExhausted)
-        implements ExecutionEvent {
+public record Failed(ExecutionId executionId, JobKey jobKey, int attempt, Throwable error, boolean attemptsExhausted) implements ExecutionEvent {
 
     public Failed {
         Objects.requireNonNull(executionId, "executionId");

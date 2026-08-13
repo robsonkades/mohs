@@ -13,8 +13,7 @@ import io.mohs.core.ScheduleCommand;
  * {@link ExecutionEvent} correspondente — "retorno é recibo, nunca
  * {@code Future} do resultado" já descreve os dois papéis com o mesmo dado.
  */
-public record Enqueued(ExecutionId executionId, JobKey jobKey, Instant scheduledAt, String actor)
-        implements ExecutionEvent {
+public record Enqueued(ExecutionId executionId, JobKey jobKey, Instant scheduledAt, String actor) implements ExecutionEvent {
 
     public Enqueued {
         Objects.requireNonNull(executionId, "executionId");

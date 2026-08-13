@@ -41,11 +41,7 @@ public class JobsController {
 
     @PostMapping("/{jobKey}/schedule")
     @ResponseStatus(HttpStatus.ACCEPTED)
-    public ResponseEntity<AcceptedExecutionResponse> schedule(
-            @PathVariable String jobKey,
-            @RequestBody ScheduleJobRequest body,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            HttpServletRequest request) {
+    public ResponseEntity<AcceptedExecutionResponse> schedule(@PathVariable String jobKey, @RequestBody ScheduleJobRequest body, @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey, HttpServletRequest request) {
         throw new UnsupportedOperationException("M3: ainda não implementado");
     }
 
@@ -60,8 +56,7 @@ public class JobsController {
     }
 
     @GetMapping("/{jobKey}/executions")
-    public CursorPage<ExecutionResponse> executions(
-            @PathVariable String jobKey, @RequestParam(required = false) String cursor) {
+    public CursorPage<ExecutionResponse> executions(@PathVariable String jobKey, @RequestParam(required = false) String cursor) {
         throw new UnsupportedOperationException("M3: ainda não implementado");
     }
 }

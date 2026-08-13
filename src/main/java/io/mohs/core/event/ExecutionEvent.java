@@ -7,6 +7,5 @@ package io.mohs.core.event;
  * em todo listener existente, não um {@code default} silencioso.
  */
 public sealed interface ExecutionEvent
-        permits Enqueued, Started, AttemptFailed, RetryScheduled,
-                Succeeded, Failed, Cancelled, BatchCompleted {
+        permits Enqueued, Started, AttemptFailed, RetryScheduled, Succeeded, Failed, Cancelled, BatchCompleted {
 }

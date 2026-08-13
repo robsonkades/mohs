@@ -28,8 +28,7 @@ public class QueuesController {
     }
 
     @PatchMapping("/{name}")
-    public RuntimePatchResponse<QueueResponse> patch(
-            @PathVariable String name, @RequestBody QueuePatchRequest body, HttpServletRequest request) {
+    public RuntimePatchResponse<QueueResponse> patch(@PathVariable String name, @RequestBody QueuePatchRequest body, HttpServletRequest request) {
         throw new UnsupportedOperationException("M3: ainda não implementado");
     }
 }

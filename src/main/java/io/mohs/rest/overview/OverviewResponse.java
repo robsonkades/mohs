@@ -11,10 +11,7 @@ import io.mohs.core.execution.ExecutionState;
  * status, profundidade por queue, throughput da janela recente (ver
  * {@code docs/REST-API-DESIGN.md}, {@code GET /overview}).
  */
-public record OverviewResponse(
-        Map<ExecutionState, Long> executionCountsByStatus,
-        List<QueueDepthView> queueDepths,
-        ThroughputView throughput) {
+public record OverviewResponse(Map<ExecutionState, Long> executionCountsByStatus, List<QueueDepthView> queueDepths, ThroughputView throughput) {
 
     public OverviewResponse {
         Objects.requireNonNull(executionCountsByStatus, "executionCountsByStatus");
