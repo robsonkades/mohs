@@ -1,5 +1,7 @@
 package io.mohs;
 
+import java.time.Instant;
+
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.importer.ImportOption;
@@ -39,4 +41,16 @@ class ArchitectureTest {
     static final ArchRule test_kit_does_not_leak_into_production =
         noClasses().that().resideOutsideOfPackage("io.mohs.test..")
             .should().dependOnClassesThat().resideInAPackage("io.mohs.test..");
+
+    /**
+     * "Todo agora vem do Clock injetado, leitura direta proibida" (CLAUDE.md)
+     * — {@code System.nanoTime()} fica de fora de propósito, é a duração
+     * monotônica que o próprio CLAUDE.md pede pra medir intervalo, não
+     * "agora".
+     */
+    @ArchTest
+    static final ArchRule engine_never_reads_wall_clock_directly =
+        noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..")
+            .should().callMethod(Instant.class, "now")
+            .orShould().callMethod(System.class, "currentTimeMillis");
 }

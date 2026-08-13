@@ -34,6 +34,7 @@ public record JobDefinition(
         Misfire misfire,
         int retries,
         @Nullable Duration timeout,
+        @Nullable String retryPolicy,
         DefinitionSource source) {
 
     public JobDefinition {

@@ -23,4 +23,7 @@ public sealed interface PolicySpec permits JobSpecImpl {
     PolicySpec retries(int max);
 
     PolicySpec timeout(Duration timeout);
+
+    /** Nome do bean de uma política de retry customizada, para casos que {@link #retries(int)} não expressa. */
+    PolicySpec retryPolicy(String beanName);
 }

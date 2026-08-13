@@ -28,7 +28,8 @@ class JobDefinitionTest {
                 .window("business-days")
                 .misfire(Misfire.FIRE_NOW)
                 .retries(8)
-                .timeout(Duration.ofMinutes(5)));
+                .timeout(Duration.ofMinutes(5))
+                .retryPolicy("smtpRetryPolicy"));
 
         assertThat(definition.key()).isEqualTo(JobKey.of("welcome-email"));
         assertThat(definition.handlerType()).isEqualTo(Handler.class);
@@ -39,6 +40,7 @@ class JobDefinitionTest {
         assertThat(definition.misfire()).isEqualTo(Misfire.FIRE_NOW);
         assertThat(definition.retries()).isEqualTo(8);
         assertThat(definition.timeout()).isEqualTo(Duration.ofMinutes(5));
+        assertThat(definition.retryPolicy()).isEqualTo("smtpRetryPolicy");
         assertThat(definition.source()).isEqualTo(DefinitionSource.PROGRAMMATIC);
     }
 
@@ -78,7 +80,7 @@ class JobDefinitionTest {
     void rejectsNegativeRetries() {
         assertThatThrownBy(() -> new JobDefinition(
                 JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
-                null, null, null, Misfire.IGNORE, -1, null, DefinitionSource.PROGRAMMATIC))
+                null, null, null, Misfire.IGNORE, -1, null, null, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

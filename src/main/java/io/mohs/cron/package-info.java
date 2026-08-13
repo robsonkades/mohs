@@ -11,7 +11,7 @@
  * só a dependência.
  *
  * <p>{@link io.mohs.cron.CronExpression} é utilitário autocontido — não
- * conhece {@link io.mohs.schedule.CronSpec}, {@link io.mohs.definition.JobDefinition}
+ * conhece {@link io.mohs.core.schedule.CronSpec}, {@link io.mohs.core.definition.JobDefinition}
  * nem nada do vocabulário de job. A costura entre a string crua de
  * {@code CronSpec.expression()} e o cálculo de próxima ocorrência é
  * responsabilidade do motor (M3), não deste pacote.

@@ -28,6 +28,7 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     private Misfire misfire = Misfire.IGNORE;
     private int retries;
     private @Nullable Duration timeout;
+    private @Nullable String retryPolicy;
 
     @Override
     public PolicySpec cron(String expression, ZoneId zone) {
@@ -89,6 +90,12 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
         return this;
     }
 
+    @Override
+    public PolicySpec retryPolicy(String beanName) {
+        this.retryPolicy = beanName;
+        return this;
+    }
+
     JobDefinition toDefinition(JobKey key, Class<?> handlerType) {
         if (schedule == null) {
             throw new IllegalStateException(
@@ -96,6 +103,6 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
                             + "or onDemand() before JobDefinition.of returns");
         }
         return new JobDefinition(key, null, handlerType, schedule, runner, queue, window,
-                misfire, retries, timeout, DefinitionSource.PROGRAMMATIC);
+                misfire, retries, timeout, retryPolicy, DefinitionSource.PROGRAMMATIC);
     }
 }

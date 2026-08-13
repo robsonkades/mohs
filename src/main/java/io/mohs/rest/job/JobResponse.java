@@ -25,6 +25,7 @@ public record JobResponse(
         Misfire misfire,
         int retries,
         @Nullable Duration timeout,
+        @Nullable String retryPolicy,
         DefinitionSource source,
         boolean paused,
         @Nullable Instant nextFireAt) {
