@@ -8,9 +8,9 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Optional;
 
-import io.mohs.schedule.CronSpec;
-import io.mohs.schedule.IntervalSpec;
-import io.mohs.schedule.OnDemandSpec;
+import io.mohs.core.schedule.CronSpec;
+import io.mohs.core.schedule.IntervalSpec;
+import io.mohs.core.schedule.OnDemandSpec;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
