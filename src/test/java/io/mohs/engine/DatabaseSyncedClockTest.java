@@ -64,7 +64,7 @@ class DatabaseSyncedClockTest {
         MutableClock appClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
         DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
-        clock.sampleOnce();
+        clock.sync();
 
         assertThat(clock.currentOffset().abs()).isLessThan(TOLERANCE);
     }
@@ -75,7 +75,7 @@ class DatabaseSyncedClockTest {
         MutableClock appClock = new MutableClock(Instant.now().minus(expected), ZoneId.of("UTC"));
         DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
-        clock.sampleOnce();
+        clock.sync();
 
         assertThat(clock.currentOffset()).isBetween(expected.minus(TOLERANCE), expected.plus(TOLERANCE));
     }
@@ -85,14 +85,14 @@ class DatabaseSyncedClockTest {
         MutableClock appClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
         DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
-        clock.sampleOnce();
+        clock.sync();
         Instant first = clock.instant();
 
         // App clock corre uma hora à frente; o banco continua no tempo real —
         // a próxima amostra tentaria aplicar um offset negativo grande o
         // bastante pra voltar no tempo.
         appClock.advance(Duration.ofHours(1));
-        clock.sampleOnce();
+        clock.sync();
         Instant second = clock.instant();
 
         assertThat(second).isAfterOrEqualTo(first);
@@ -103,14 +103,14 @@ class DatabaseSyncedClockTest {
         Duration expected = Duration.ofSeconds(3);
         MutableClock appClock = new MutableClock(Instant.now().minus(expected), ZoneId.of("UTC"));
         DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
-        clock.sampleOnce();
+        clock.sync();
         Duration offsetAfterSuccess = clock.currentOffset();
 
         DataSource broken = Mockito.mock(DataSource.class);
         Mockito.when(broken.getConnection()).thenThrow(new SQLException("connection refused"));
         DatabaseSyncedClock brokenClock = new DatabaseSyncedClock(broken, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
-        assertThatCode(brokenClock::sampleOnce).doesNotThrowAnyException();
+        assertThatCode(brokenClock::sync).doesNotThrowAnyException();
         assertThat(brokenClock.currentOffset()).isEqualTo(Duration.ZERO);
         assertThat(offsetAfterSuccess).isBetween(expected.minus(TOLERANCE), expected.plus(TOLERANCE));
     }
@@ -120,7 +120,7 @@ class DatabaseSyncedClockTest {
         MutableClock appClock = new MutableClock(Instant.now().minus(Duration.ofMinutes(1)), ZoneId.of("UTC"));
         DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
-        clock.sampleOnce();
+        clock.sync();
 
         assertThat(logAppender.list)
                 .anyMatch(event -> event.getFormattedMessage().contains("clock skew"));

@@ -91,7 +91,7 @@ public final class DatabaseSyncedClock extends Clock {
     }
 
     /** Uma amostra: mede o offset banco×app com compensação de ida-e-volta e aplica o clamp monotônico. */
-    public void sampleOnce() {
+    public void sync() {
         try {
             Instant beforeQuery = systemClock.instant();
             long t0 = System.nanoTime();
