@@ -6,7 +6,6 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneId;
-import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -17,6 +16,7 @@ import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ResultSetExtractor;
 
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
@@ -94,8 +94,13 @@ public final class JdbcJobStore implements JobStore {
     @Override
     public Optional<StoredJob> find(JobKey key) {
         Objects.requireNonNull(key, "key");
-        List<@Nullable StoredJob> rows = jdbcTemplate.query("SELECT * FROM mohs_job_definitions WHERE job_key = ?", JdbcJobStore::mapRowOrNull, key.value());
-        return rows.stream().filter(Objects::nonNull).findFirst();
+        // job_key é PK — no máximo uma linha; ResultSetExtractor lê essa
+        // linha única direto, sem passar por List/stream/findFirst.
+        StoredJob result = jdbcTemplate.query(
+                "SELECT * FROM mohs_job_definitions WHERE job_key = ?",
+                (ResultSetExtractor<@Nullable StoredJob>) rs -> rs.next() ? mapRowOrNull(rs, 1) : null,
+                key.value());
+        return Optional.ofNullable(result);
     }
 
     @Override
