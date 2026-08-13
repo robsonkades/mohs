@@ -6,13 +6,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
-import io.mohs.cron.CronExpression;
 import io.mohs.core.schedule.CronSpec;
 import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.schedule.OnDemandSpec;
 import io.mohs.core.schedule.Schedule;
-
-import org.jspecify.annotations.Nullable;
+import io.mohs.cron.CronExpression;
 
 /**
  * Calcula o próximo disparo de uma {@link Schedule}. Nunca lê o relógio —

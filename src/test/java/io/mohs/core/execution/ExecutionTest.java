@@ -6,8 +6,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
-import io.mohs.core.ExecutionId;
-import io.mohs.core.JobKey;
+import io.mohs.core.job.JobKey;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;

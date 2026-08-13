@@ -4,7 +4,7 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.function.Consumer;
 
-import io.mohs.core.JobKey;
+import io.mohs.core.job.JobKey;
 import io.mohs.core.Mohs;
 import io.mohs.core.schedule.Misfire;
 import io.mohs.core.schedule.Schedule;

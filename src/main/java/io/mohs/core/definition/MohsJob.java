@@ -5,7 +5,7 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
-import io.mohs.core.JobKey;
+import io.mohs.core.job.JobKey;
 import io.mohs.core.Mohs;
 import io.mohs.core.execution.JobContext;
 import io.mohs.core.resource.ExecutionWindow;

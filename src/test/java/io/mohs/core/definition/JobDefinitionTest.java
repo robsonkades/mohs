@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.time.ZoneId;
 
-import io.mohs.core.JobKey;
+import io.mohs.core.job.JobKey;
 import io.mohs.core.schedule.CronSpec;
 import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.schedule.Misfire;

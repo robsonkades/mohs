@@ -1,8 +1,6 @@
-package io.mohs.core;
+package io.mohs.core.execution;
 
 import java.util.Objects;
-
-import io.mohs.core.execution.Execution;
 
 /**
  * Identidade de uma única {@link Execution}. Opaco por design — o motor

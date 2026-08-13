@@ -4,8 +4,8 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 
-import io.mohs.core.ExecutionId;
-import io.mohs.core.JobKey;
+import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.job.JobKey;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

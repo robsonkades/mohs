@@ -2,6 +2,8 @@ package io.mohs.core;
 
 import java.util.function.Consumer;
 
+import io.mohs.core.job.JobKey;
+import io.mohs.core.job.JobRef;
 import org.springframework.lang.CheckReturnValue;
 
 import io.mohs.core.definition.JobDefinition;

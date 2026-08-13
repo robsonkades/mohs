@@ -2,8 +2,7 @@ package io.mohs.core.execution;
 
 import java.time.Instant;
 
-import io.mohs.core.ExecutionId;
-import io.mohs.core.JobKey;
+import io.mohs.core.job.JobKey;
 
 /**
  * Parâmetro opcional do handler carregando contexto por tentativa:

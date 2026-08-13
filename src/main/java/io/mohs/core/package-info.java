@@ -2,10 +2,10 @@
  * API pública do Mohs — "Contratos do core" no vocabulário de
  * {@code docs/MOHS-DOCUMENTO-MESTRE.md} (M1). Este pacote carrega a
  * fachada ({@link io.mohs.core.Mohs}, {@link io.mohs.core.MohsLifecycle},
- * {@link io.mohs.core.ScheduleCommand}, {@link io.mohs.core.Batch},
- * {@link io.mohs.core.BatchBuilder}) e a identidade compartilhada
- * ({@link io.mohs.core.JobKey}, {@link io.mohs.core.ExecutionId},
- * {@link io.mohs.core.JobRef}) — os tipos que um consumidor típico importa
+ * {@link io.mohs.core.ScheduleCommand}, {@link Batch},
+ * {@link BatchBuilder}) e a identidade compartilhada
+ * ({@link JobKey}, {@link ExecutionId},
+ * {@link JobRef}) — os tipos que um consumidor típico importa
  * primeiro. O restante do vocabulário público vive em subpacotes coesos:
  * {@code io.mohs.core.schedule}, {@code io.mohs.core.definition},
  * {@code io.mohs.core.execution}, {@code io.mohs.core.event},
@@ -22,4 +22,7 @@
 @NullMarked
 package io.mohs.core;
 
+import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.job.JobKey;
+import io.mohs.core.job.JobRef;
 import org.jspecify.annotations.NullMarked;

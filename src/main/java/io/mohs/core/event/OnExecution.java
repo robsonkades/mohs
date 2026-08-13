@@ -5,7 +5,7 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
-import io.mohs.core.JobKey;
+import io.mohs.core.job.JobKey;
 
 /**
  * Açúcar por método para {@link ExecutionListener}, filtrado por job e tipo

@@ -1,4 +1,6 @@
-package io.mohs.core;
+package io.mohs.core.job;
+
+import io.mohs.core.Mohs;
 
 import java.util.Objects;
 
