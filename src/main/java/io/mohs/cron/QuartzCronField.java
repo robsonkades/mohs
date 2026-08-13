@@ -15,9 +15,9 @@
  *
  * Adapted from Spring Framework's org.springframework.scheduling.support.QuartzCronField
  * (https://github.com/spring-projects/spring-framework), under the same license. Changes: moved
- * to this package; dropped the org.springframework.util.Assert and
- * org.jspecify.annotations.Nullable dependencies (Assert in this package covers the same call);
- * no other functional changes.
+ * to this package; dropped the org.springframework.util.Assert dependency (Assert in this
+ * package covers the same call) — org.jspecify.annotations.Nullable is back, now that this
+ * project depends on JSpecify directly; no other functional changes.
  */
 package io.mohs.cron;
 
@@ -28,6 +28,8 @@ import java.time.temporal.ChronoUnit;
 import java.time.temporal.Temporal;
 import java.time.temporal.TemporalAdjuster;
 import java.time.temporal.TemporalAdjusters;
+
+import org.jspecify.annotations.Nullable;
 
 /**
  * Extension of {@link CronField} for
@@ -345,7 +347,7 @@ final class QuartzCronField extends CronField {
 
 
     @Override
-    public <T extends Temporal & Comparable<? super T>> T nextOrSame(T temporal) {
+    public <T extends Temporal & Comparable<? super T>> @Nullable T nextOrSame(T temporal) {
         T result = adjust(temporal);
         if (result != null) {
             if (result.compareTo(temporal) < 0) {
@@ -361,7 +363,10 @@ final class QuartzCronField extends CronField {
     }
 
     @SuppressWarnings("unchecked")
-    private <T extends Temporal & Comparable<? super T>> T adjust(T temporal) {
+    private <T extends Temporal & Comparable<? super T>> @Nullable T adjust(T temporal) {
+        // this.adjuster (a TemporalAdjuster, JDK-owned interface, not JSpecify-annotated) can
+        // itself return null - see weekdayNearestTo() and dayOfWeekInMonth() above, both of
+        // which fall through to "return null;" when MAX_ATTEMPTS/12 months is exceeded.
         return (T) this.adjuster.adjustInto(temporal);
     }
 

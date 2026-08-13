@@ -15,13 +15,15 @@
  *
  * Adapted from Spring Framework's org.springframework.scheduling.support.CompositeCronField
  * (https://github.com/spring-projects/spring-framework), under the same license. Changes: moved
- * to this package; dropped the org.springframework.util.Assert and
- * org.jspecify.annotations.Nullable dependencies (Assert in this package covers the same calls);
- * no other functional changes.
+ * to this package; dropped the org.springframework.util.Assert dependency (Assert in this
+ * package covers the same calls) — org.jspecify.annotations.Nullable is back, now that this
+ * project depends on JSpecify directly; no other functional changes.
  */
 package io.mohs.cron;
 
 import java.time.temporal.Temporal;
+
+import org.jspecify.annotations.Nullable;
 
 /**
  * Extension of {@link CronField} that wraps an array of cron fields.
@@ -56,7 +58,7 @@ final class CompositeCronField extends CronField {
 
 
     @Override
-    public <T extends Temporal & Comparable<? super T>> T nextOrSame(T temporal) {
+    public <T extends Temporal & Comparable<? super T>> @Nullable T nextOrSame(T temporal) {
         T result = null;
         for (CronField field : this.fields) {
             T candidate = field.nextOrSame(temporal);

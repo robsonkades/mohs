@@ -8,18 +8,22 @@ import io.mohs.ExecutionId;
 import io.mohs.JobKey;
 import io.mohs.definition.JobDefinition;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * Um único disparo de um {@link JobDefinition}: identidade, estado atual,
  * o actor que causou o disparo e cada {@link Attempt} feita até agora. A
  * trilha de actor é inegociável em toda invocação (ver
  * {@code docs/API-DESIGN.md} §"Actor e regressão ergonômica assumida").
+ * {@code firedAt} é {@code null} enquanto a execução ainda não disparou
+ * (ex.: estado {@link ExecutionState#ENQUEUED}).
  */
 public record Execution(
         ExecutionId id,
         JobKey jobKey,
         ExecutionState state,
         Instant scheduledAt,
-        Instant firedAt,
+        @Nullable Instant firedAt,
         List<Attempt> attempts,
         String actor) {
 

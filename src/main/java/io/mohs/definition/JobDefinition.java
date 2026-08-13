@@ -9,6 +9,8 @@ import io.mohs.Mohs;
 import io.mohs.schedule.Misfire;
 import io.mohs.schedule.Schedule;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * Um job, definido uma vez: handler, agenda e políticas. Invocado de N
  * formas (cron, {@link Mohs#schedule}, {@link Mohs#batch}, o dashboard) —
@@ -23,15 +25,15 @@ import io.mohs.schedule.Schedule;
  */
 public record JobDefinition(
         JobKey key,
-        String name,
+        @Nullable String name,
         Class<?> handlerType,
         Schedule schedule,
-        String runner,
-        String queue,
-        String window,
+        @Nullable String runner,
+        @Nullable String queue,
+        @Nullable String window,
         Misfire misfire,
         int retries,
-        Duration timeout,
+        @Nullable Duration timeout,
         DefinitionSource source) {
 
     public JobDefinition {

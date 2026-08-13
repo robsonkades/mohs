@@ -12,6 +12,8 @@ import io.mohs.schedule.IntervalSpec;
 import io.mohs.schedule.OnDemandSpec;
 import io.mohs.schedule.Schedule;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * Calcula o próximo disparo de uma {@link Schedule}. Nunca lê o relógio —
  * quem chama fornece {@code reference} (o "agora" do {@code Clock}
@@ -29,7 +31,7 @@ import io.mohs.schedule.Schedule;
  */
 public final class NextFireCalculator {
 
-    private final Map<String, CronExpression> cronCache = new ConcurrentHashMap<>();
+    private final Map<String, CronExpression> CRON_CACHE = new ConcurrentHashMap<>();
 
     /**
      * Próximo disparo estritamente após {@code reference}. Vazio só para
@@ -47,12 +49,11 @@ public final class NextFireCalculator {
     }
 
     private Instant nextCronFire(CronSpec cron, Instant reference) {
-        CronExpression parsed = cronCache.computeIfAbsent(cron.expression(), CronExpression::parse);
+        CronExpression parsed = CRON_CACHE.computeIfAbsent(cron.expression(), CronExpression::parse);
         ZonedDateTime seed = reference.atZone(cron.zone());
         ZonedDateTime next = parsed.next(seed);
         if (next == null) {
-            throw new IllegalArgumentException(
-                    "Cron expression never fires within the search bound: " + cron.expression());
+            throw new IllegalArgumentException("Cron expression never fires within the search bound: " + cron.expression());
         }
         return next.toInstant();
     }

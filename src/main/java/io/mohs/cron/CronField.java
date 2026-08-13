@@ -15,9 +15,9 @@
  *
  * Adapted from Spring Framework's org.springframework.scheduling.support.CronField
  * (https://github.com/spring-projects/spring-framework), under the same license. Changes: moved
- * to this package; dropped the org.springframework.util.Assert/StringUtils and
- * org.jspecify.annotations.Nullable dependencies (Assert/StringUtils in this package cover the
- * same calls); no other functional changes.
+ * to this package; dropped the org.springframework.util.Assert/StringUtils dependency
+ * (Assert/StringUtils in this package cover the same calls) — org.jspecify.annotations.Nullable
+ * is back, now that this project depends on JSpecify directly; no other functional changes.
  */
 package io.mohs.cron;
 
@@ -28,6 +28,8 @@ import java.time.temporal.Temporal;
 import java.time.temporal.ValueRange;
 import java.util.Locale;
 import java.util.function.BiFunction;
+
+import org.jspecify.annotations.Nullable;
 
 /**
  * Single field in a cron pattern. Created using the {@code parse*} methods,
@@ -155,9 +157,10 @@ abstract class CronField {
      * Get the next or same {@link Temporal} in the sequence matching this
      * cron field.
      * @param temporal the seed value
-     * @return the next or same temporal matching the pattern
+     * @return the next or same temporal matching the pattern, or {@code null}
+     * if no such temporal can be found within the search bound
      */
-    public abstract <T extends Temporal & Comparable<? super T>> T nextOrSame(T temporal);
+    public abstract <T extends Temporal & Comparable<? super T>> @Nullable T nextOrSame(T temporal);
 
 
     protected Type type() {

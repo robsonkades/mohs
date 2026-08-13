@@ -201,6 +201,12 @@ obras — não é leitura de fundo, é critério de revisão:
   campo/parâmetro e `Optional` só em retorno de método quando a ausência é
   parte do protocolo (ex.: `NextFireCalculator.nextFireAfter`, que retorna
   vazio para jobs sob demanda).
+- **Nunca `@Nullable` em variável local.** Campo, parâmetro e retorno são
+  contrato de API — precisam de anotação explícita. Variável local não: a
+  nulidade dela é inferida do fluxo (inicializador, checagem de null), não
+  declarada. `@Nullable` numa local é sintaxe válida mas redundante/sem
+  efeito — IDE aponta como inspeção ("Nullability annotation is not
+  applicable to local variables").
 
 ## Concorrência (prioridade nº 1)
 - Classifique cada workload antes de escolher o modelo de thread:

@@ -31,14 +31,7 @@ import java.util.Objects;
  * (CLAUDE.md) já é regra do projeto. Ver a ADR-0014 para o raciocínio
  * completo dos defaults.
  */
-public record MohsRunner(
-        String name,
-        RunnerMode mode,
-        int maxConcurrent,
-        int coreSize,
-        int maxSize,
-        int queueCapacity,
-        Duration keepAlive) {
+public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int coreSize, int maxSize, int queueCapacity, Duration keepAlive) {
 
     public MohsRunner {
         Objects.requireNonNull(name, "name");

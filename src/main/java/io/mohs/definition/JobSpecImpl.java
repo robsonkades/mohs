@@ -11,6 +11,8 @@ import io.mohs.schedule.Misfire;
 import io.mohs.schedule.OnDemandSpec;
 import io.mohs.schedule.Schedule;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * Única implementação de {@link JobSpec}/{@link PolicySpec} — acumulador
  * mutável por trás do builder staged, package-private porque nada fora de
@@ -19,13 +21,13 @@ import io.mohs.schedule.Schedule;
  */
 final class JobSpecImpl implements JobSpec, PolicySpec {
 
-    private Schedule schedule;
-    private String runner;
-    private String queue;
-    private String window;
+    private @Nullable Schedule schedule;
+    private @Nullable String runner;
+    private @Nullable String queue;
+    private @Nullable String window;
     private Misfire misfire = Misfire.IGNORE;
     private int retries;
-    private Duration timeout;
+    private @Nullable Duration timeout;
 
     @Override
     public PolicySpec cron(String expression, ZoneId zone) {

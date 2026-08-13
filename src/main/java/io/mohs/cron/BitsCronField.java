@@ -15,15 +15,17 @@
  *
  * Adapted from Spring Framework's org.springframework.scheduling.support.BitsCronField
  * (https://github.com/spring-projects/spring-framework), under the same license. Changes: moved
- * to this package; dropped the org.springframework.util.Assert/StringUtils and
- * org.jspecify.annotations.Nullable dependencies (Assert/StringUtils in this package cover the
- * same calls); no other functional changes.
+ * to this package; dropped the org.springframework.util.Assert/StringUtils dependency
+ * (Assert/StringUtils in this package cover the same calls) — org.jspecify.annotations.Nullable
+ * is back, now that this project depends on JSpecify directly; no other functional changes.
  */
 package io.mohs.cron;
 
 import java.time.DateTimeException;
 import java.time.temporal.Temporal;
 import java.time.temporal.ValueRange;
+
+import org.jspecify.annotations.Nullable;
 
 /**
  * Efficient bitwise-operator extension of {@link CronField}.
@@ -168,7 +170,7 @@ final class BitsCronField extends CronField {
 
 
     @Override
-    public <T extends Temporal & Comparable<? super T>> T nextOrSame(T temporal) {
+    public <T extends Temporal & Comparable<? super T>> @Nullable T nextOrSame(T temporal) {
         int current = type().get(temporal);
         int next = nextSetBit(current);
         if (next == -1) {

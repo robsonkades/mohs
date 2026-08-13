@@ -15,15 +15,17 @@
  *
  * Adapted from Spring Framework's org.springframework.scheduling.support.CronExpression
  * (https://github.com/spring-projects/spring-framework), under the same license. Changes: moved
- * to this package; dropped the org.springframework.util.Assert/StringUtils and
- * org.jspecify.annotations.Nullable dependencies (Assert/StringUtils in this package cover the
- * same calls); no other functional changes.
+ * to this package; dropped the org.springframework.util.Assert/StringUtils dependency
+ * (Assert/StringUtils in this package cover the same calls) — org.jspecify.annotations.Nullable
+ * is back, now that this project depends on JSpecify directly; no other functional changes.
  */
 package io.mohs.cron;
 
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.Temporal;
 import java.util.Arrays;
+
+import org.jspecify.annotations.Nullable;
 
 /**
  * Representation of a
@@ -232,12 +234,12 @@ public final class CronExpression {
      * @return the next temporal that matches this expression, or {@code null}
      * if no such temporal can be found
      */
-    public <T extends Temporal & Comparable<? super T>> T next(T temporal) {
+    public <T extends Temporal & Comparable<? super T>> @Nullable T next(T temporal) {
         return nextOrSame(ChronoUnit.NANOS.addTo(temporal, 1));
     }
 
 
-    private <T extends Temporal & Comparable<? super T>> T nextOrSame(T temporal) {
+    private <T extends Temporal & Comparable<? super T>> @Nullable T nextOrSame(T temporal) {
         for (int i = 0; i < MAX_ATTEMPTS; i++) {
             T result = nextOrSameInternal(temporal);
             if (result == null || result.equals(temporal)) {
@@ -248,12 +250,13 @@ public final class CronExpression {
         return null;
     }
 
-    private <T extends Temporal & Comparable<? super T>> T nextOrSameInternal(T temporal) {
+    private <T extends Temporal & Comparable<? super T>> @Nullable T nextOrSameInternal(T temporal) {
         for (CronField field : this.fields) {
-            temporal = field.nextOrSame(temporal);
-            if (temporal == null) {
+            T next = field.nextOrSame(temporal);
+            if (next == null) {
                 return null;
             }
+            temporal = next;
         }
         return temporal;
     }
