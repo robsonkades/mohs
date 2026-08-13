@@ -18,4 +18,18 @@ public record BatchResponse(String batchId, BatchState state, int total, int suc
             throw new IllegalArgumentException("counters must not be negative");
         }
     }
+
+    /**
+     * Deriva {@code pending} e {@code state} dos três contadores (DUP-4) —
+     * mesmo padrão de fábrica estática de {@code JobDefinition#of}/
+     * {@code ExecutionId#of}. Preferível ao construtor canônico sempre que
+     * os contadores vêm de uma fonte só (ex.: {@code BatchCounters} do
+     * motor), que nunca deveria poder divergir de {@code pending} por
+     * construção.
+     */
+    public static BatchResponse of(String batchId, int total, int succeeded, int failed) {
+        int pending = total - succeeded - failed;
+        BatchState state = pending == 0 ? BatchState.COMPLETED : BatchState.RUNNING;
+        return new BatchResponse(batchId, state, total, succeeded, failed, pending);
+    }
 }

@@ -42,6 +42,37 @@ class ExecutionWindowTest {
         assertThat(window.excludes(noon)).isFalse();
     }
 
+    /** TEST-9: from > to cruza a meia-noite em vez de virar um no-op silencioso. */
+    @Test
+    void excludeDailyWrapsAroundMidnightWhenFromIsAfterTo() {
+        ExecutionWindow window = ExecutionWindow.named("overnight-maintenance")
+                .excludeDaily(LocalTime.of(22, 0), LocalTime.of(2, 0))
+                .build();
+
+        Instant justBeforeStart = LocalDate.of(2026, 8, 17).atTime(21, 59).toInstant(ZoneOffset.UTC);
+        Instant atStart = LocalDate.of(2026, 8, 17).atTime(22, 0).toInstant(ZoneOffset.UTC);
+        Instant midnight = LocalDate.of(2026, 8, 18).atTime(0, 0).toInstant(ZoneOffset.UTC);
+        Instant justBeforeEnd = LocalDate.of(2026, 8, 18).atTime(1, 59).toInstant(ZoneOffset.UTC);
+        Instant atEnd = LocalDate.of(2026, 8, 18).atTime(2, 0).toInstant(ZoneOffset.UTC);
+
+        assertThat(window.excludes(justBeforeStart)).isFalse();
+        assertThat(window.excludes(atStart)).isTrue();
+        assertThat(window.excludes(midnight)).isTrue();
+        assertThat(window.excludes(justBeforeEnd)).isTrue();
+        assertThat(window.excludes(atEnd)).isFalse();
+    }
+
+    @Test
+    void excludeDailyWithEqualFromAndToExcludesNothing() {
+        ExecutionWindow window = ExecutionWindow.named("empty")
+                .excludeDaily(LocalTime.of(10, 0), LocalTime.of(10, 0))
+                .build();
+
+        Instant tenAm = LocalDate.of(2026, 8, 17).atTime(10, 0).toInstant(ZoneOffset.UTC);
+
+        assertThat(window.excludes(tenAm)).isFalse();
+    }
+
     @Test
     void excludeDatesExcludesGivenDates() {
         LocalDate holiday = LocalDate.of(2026, 9, 7);
