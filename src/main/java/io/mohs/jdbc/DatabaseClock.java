@@ -1,4 +1,4 @@
-package io.mohs.engine;
+package io.mohs.jdbc;
 
 import java.sql.Timestamp;
 import java.time.Clock;
@@ -14,11 +14,16 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import io.mohs.engine.SyncableClock;
+
 /**
  * Implementação "database" das três de
  * {@code docs/adr/0008-configurable-time-source.md}: o banco é a
  * autoridade de tempo do cluster — {@link #instant()} nunca faz I/O, é
- * O(1) sobre o offset já amostrado por {@link #sync()}.
+ * O(1) sobre o offset já amostrado por {@link #sync()}. Implementa
+ * {@link SyncableClock} (porta em {@code io.mohs.engine}) em vez de expor
+ * {@code sync()}/{@code currentOffset()} só como métodos concretos —
+ * mesmo padrão adapter de {@code JdbcJobStore}/{@code JobStore}.
  *
  * <p>Só o offset é responsabilidade desta classe — "de quanto em quanto
  * tempo reamostrar" é decisão de quem a usa (agendamento entra em
@@ -30,7 +35,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * da regra "todo agora vem do Clock injetado" — {@code ArchitectureTest}
  * abre exceção só para esta classe.
  */
-public final class DatabaseClock extends Clock {
+public final class DatabaseClock extends Clock implements SyncableClock {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseClock.class);
     private static final String NOW_QUERY = "SELECT CURRENT_TIMESTAMP";
@@ -84,12 +89,13 @@ public final class DatabaseClock extends Clock {
         return systemClock.instant().plus(offset);
     }
 
-    /** Offset atual (banco − app), exposto pra quando a infra de métricas existir. */
+    @Override
     public Duration currentOffset() {
         return offset;
     }
 
-    /** Uma amostra: mede o offset banco×app com compensação de ida-e-volta e aplica o clamp monotônico. */
+    /** Mede o offset banco×app com compensação de ida-e-volta e aplica o clamp monotônico. */
+    @Override
     public void sync() {
         try {
             Instant beforeQuery = systemClock.instant();

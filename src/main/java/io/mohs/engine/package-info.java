@@ -8,6 +8,10 @@
  * contrato. {@link io.mohs.engine.StoredJob} combina
  * {@link io.mohs.core.definition.JobDefinition} com o estado operacional
  * que a ADR-0006 mantém separado do definicional.
+ * {@link io.mohs.engine.SyncableClock} é a mesma ideia aplicada ao
+ * {@code Clock}: a porta mora aqui, {@code DatabaseClock}
+ * (io.mohs.jdbc) implementa — o motor nunca importa
+ * {@code NamedParameterJdbcTemplate}/{@code DataSource}.
  */
 @NullMarked
 package io.mohs.engine;

@@ -1,4 +1,4 @@
-package io.mohs.engine;
+package io.mohs.jdbc;
 
 import java.sql.SQLException;
 import java.time.Duration;
