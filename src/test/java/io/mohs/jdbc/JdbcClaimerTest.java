@@ -153,6 +153,28 @@ class JdbcClaimerTest {
         assertThat(stateOf("exec-low")).isEqualTo(ExecutionState.ENQUEUED);
     }
 
+    /**
+     * TEST-4: cobre as 5 prioridades explícitas (o teste irmão só exercita
+     * LOW/NORMAL/CRITICAL) mais uma execução com prioridade nula no mesmo
+     * lote, provando de uma vez a ordem inteira do CASE do claim e que null
+     * ordena como NORMAL (o ELSE 3 pretendido).
+     */
+    @Test
+    void claimOrdersAllFivePrioritiesPlusNullAsNormal() {
+        seedJob("alerts", PolicySpec::allowConcurrentExecutions);
+        seedExecution("exec-background", "alerts", NOW.minusSeconds(6), "BACKGROUND");
+        seedExecution("exec-low", "alerts", NOW.minusSeconds(5), "LOW");
+        seedExecution("exec-null", "alerts", NOW.minusSeconds(4), null);
+        seedExecution("exec-high", "alerts", NOW.minusSeconds(3), "HIGH");
+        seedExecution("exec-critical", "alerts", NOW.minusSeconds(2), "CRITICAL");
+        seedExecution("exec-normal", "alerts", NOW.minusSeconds(1), "NORMAL");
+
+        List<Execution> claimed = claimer.claim("node-a", 10);
+
+        assertThat(claimed).extracting(e -> e.id().value()).containsExactly(
+                "exec-critical", "exec-high", "exec-null", "exec-normal", "exec-low", "exec-background");
+    }
+
     @Test
     void claimStopsClaimingOnceQueueIsFull() {
         queueStore.upsert(JobQueue.named("emails").maxConcurrent(1).build());

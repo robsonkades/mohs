@@ -25,14 +25,22 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.StringTokenizer;
 
-/** The subset of {@code org.springframework.util.StringUtils} this package's copied cron code calls. */
+import org.jspecify.annotations.Nullable;
+
+/**
+ * The subset of {@code org.springframework.util.StringUtils} this
+ * package's copied cron code calls. {@code str} is {@code @Nullable} on
+ * the two methods below (CRON-1) — each already handles it explicitly
+ * (returns an empty array), matching upstream Spring's own annotation
+ * that the initial JSpecify port dropped.
+ */
 final class StringUtils {
 
     private StringUtils() {
     }
 
     /** Splits {@code str} on any character in {@code delimiters}, trimming tokens and dropping empty ones. */
-    static String[] tokenizeToStringArray(String str, String delimiters) {
+    static String[] tokenizeToStringArray(@Nullable String str, String delimiters) {
         if (str == null) {
             return new String[0];
         }
@@ -48,7 +56,7 @@ final class StringUtils {
     }
 
     /** Splits {@code str} on the literal (possibly multi-character) {@code delimiter} — no trimming. */
-    static String[] delimitedListToStringArray(String str, String delimiter) {
+    static String[] delimitedListToStringArray(@Nullable String str, @Nullable String delimiter) {
         if (str == null) {
             return new String[0];
         }

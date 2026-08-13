@@ -372,7 +372,7 @@ final class QuartzCronField extends CronField {
 
 
     @Override
-    public boolean equals(Object other) {
+    public boolean equals(@Nullable Object other) {
         return (this == other || (other instanceof QuartzCronField that &&
                 type() == that.type() && this.value.equals(that.value)));
     }

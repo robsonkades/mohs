@@ -202,7 +202,7 @@ public final class CronExpression {
      * @param expression the expression to evaluate
      * @return {@code true} if the given expression is a valid cron expression
      */
-    public static boolean isValidExpression(String expression) {
+    public static boolean isValidExpression(@Nullable String expression) {
         if (expression == null) {
             return false;
         }
@@ -263,7 +263,7 @@ public final class CronExpression {
 
 
     @Override
-    public boolean equals(Object other) {
+    public boolean equals(@Nullable Object other) {
         return (this == other || (other instanceof CronExpression that &&
                 Arrays.equals(this.fields, that.fields)));
     }

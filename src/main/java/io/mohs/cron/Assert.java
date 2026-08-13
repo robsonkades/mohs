@@ -21,7 +21,15 @@
  */
 package io.mohs.cron;
 
-/** The subset of {@code org.springframework.util.Assert} this package's copied cron code calls. */
+import org.jspecify.annotations.Nullable;
+
+/**
+ * The subset of {@code org.springframework.util.Assert} this package's
+ * copied cron code calls. Parameters are {@code @Nullable} here (CRON-1):
+ * the whole point of these methods is validating a value that may
+ * genuinely be null, mirroring upstream Spring's own annotations, which
+ * the initial JSpecify port dropped.
+ */
 final class Assert {
 
     private Assert() {
@@ -33,19 +41,25 @@ final class Assert {
         }
     }
 
-    static void notNull(Object object, String message) {
+    static void notNull(@Nullable Object object, String message) {
         if (object == null) {
             throw new IllegalArgumentException(message);
         }
     }
 
-    static void hasLength(String text, String message) {
+    static void hasLength(@Nullable String text, String message) {
         if (text == null || text.isEmpty()) {
             throw new IllegalArgumentException(message);
         }
     }
 
-    static void notEmpty(Object[] array, String message) {
+    /**
+     * Só a referência do array é nullable, não os elementos — todo call
+     * site real deste pacote já popula elementos non-null (upstream usa
+     * {@code @Nullable Object @Nullable []}, mas anotar por garantia é
+     * ruído que este projeto evita).
+     */
+    static void notEmpty(@Nullable Object[] array, String message) {
         if (array == null || array.length == 0) {
             throw new IllegalArgumentException(message);
         }
