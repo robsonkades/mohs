@@ -20,5 +20,12 @@ public record Attempt(int number, Instant startedAt, @Nullable Instant finishedA
         }
         Objects.requireNonNull(startedAt, "startedAt");
         Objects.requireNonNull(outcome, "outcome");
+        if (outcome == ExecutionState.ENQUEUED || outcome == ExecutionState.RETRY_SCHEDULED) {
+            throw new IllegalArgumentException(
+                    "outcome " + outcome + " does not describe a single attempt's result — it describes the owning Execution's state");
+        }
+        if ((outcome == ExecutionState.FAILED) != (error != null)) {
+            throw new IllegalArgumentException("error must be present if and only if outcome is FAILED");
+        }
     }
 }

@@ -47,6 +47,19 @@ public record JobDefinition(
         if (retries < 0) {
             throw new IllegalArgumentException("retries must not be negative");
         }
+        if (timeout != null && !timeout.isPositive()) {
+            throw new IllegalArgumentException("timeout must be positive");
+        }
+        requireNotBlankIfPresent(runner, "runner");
+        requireNotBlankIfPresent(queue, "queue");
+        requireNotBlankIfPresent(window, "window");
+        requireNotBlankIfPresent(retryPolicy, "retryPolicy");
+    }
+
+    private static void requireNotBlankIfPresent(@Nullable String value, String field) {
+        if (value != null && value.isBlank()) {
+            throw new IllegalArgumentException(field + " must not be blank");
+        }
     }
 
     /**

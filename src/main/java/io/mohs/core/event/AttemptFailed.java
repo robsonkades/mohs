@@ -13,5 +13,8 @@ public record AttemptFailed(ExecutionId executionId, JobKey jobKey, int attempt,
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(error, "error");
+        if (attempt < 1) {
+            throw new IllegalArgumentException("attempt is 1-based, must be >= 1");
+        }
     }
 }

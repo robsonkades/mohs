@@ -32,6 +32,9 @@ public record Execution(
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(scheduledAt, "scheduledAt");
         Objects.requireNonNull(actor, "actor");
+        if (actor.isBlank()) {
+            throw new IllegalArgumentException("actor must not be blank");
+        }
         attempts = List.copyOf(attempts); // cópia defensiva (Effective Java, Item 50)
     }
 }

@@ -14,5 +14,8 @@ public record Started(ExecutionId executionId, JobKey jobKey, int attempt, Insta
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(firedAt, "firedAt");
+        if (attempt < 1) {
+            throw new IllegalArgumentException("attempt is 1-based, must be >= 1");
+        }
     }
 }

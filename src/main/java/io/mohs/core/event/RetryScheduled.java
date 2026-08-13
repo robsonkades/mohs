@@ -13,5 +13,8 @@ public record RetryScheduled(ExecutionId executionId, JobKey jobKey, int nextAtt
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(retryAt, "retryAt");
+        if (nextAttempt < 1) {
+            throw new IllegalArgumentException("nextAttempt is 1-based, must be >= 1");
+        }
     }
 }

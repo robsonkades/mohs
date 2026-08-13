@@ -20,5 +20,8 @@ public record BatchCompleted(String batchId, int total, int succeeded, int faile
         if (total < 0 || succeeded < 0 || failed < 0) {
             throw new IllegalArgumentException("counters must not be negative");
         }
+        if (succeeded + failed > total) {
+            throw new IllegalArgumentException("succeeded + failed must not exceed total");
+        }
     }
 }

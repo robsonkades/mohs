@@ -20,5 +20,8 @@ public record Enqueued(ExecutionId executionId, JobKey jobKey, Instant scheduled
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(scheduledAt, "scheduledAt");
         Objects.requireNonNull(actor, "actor");
+        if (actor.isBlank()) {
+            throw new IllegalArgumentException("actor must not be blank");
+        }
     }
 }

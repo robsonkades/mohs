@@ -98,4 +98,50 @@ class JobDefinitionTest {
 
         assertThat(definition.allowConcurrentExecutions()).isTrue();
     }
+
+    @Test
+    void rejectsNonPositiveTimeout() {
+        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class,
+                spec -> spec.onDemand().timeout(Duration.ZERO)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsBlankRunnerQueueWindowRetryPolicy() {
+        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class, spec -> spec.onDemand().runner(" ")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class, spec -> spec.onDemand().queue(" ")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class, spec -> spec.onDemand().window(" ")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class, spec -> spec.onDemand().retryPolicy(" ")))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsNullKeyHandlerTypeScheduleMisfireSource() {
+        assertThatThrownBy(() -> new JobDefinition(
+                null, null, Handler.class, new OnDemandSpec(), null, null, null, Misfire.IGNORE, false, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new JobDefinition(
+                JobKey.of("id"), null, null, new OnDemandSpec(), null, null, null, Misfire.IGNORE, false, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new JobDefinition(
+                JobKey.of("id"), null, Handler.class, null, null, null, null, Misfire.IGNORE, false, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new JobDefinition(
+                JobKey.of("id"), null, Handler.class, new OnDemandSpec(), null, null, null, null, false, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new JobDefinition(
+                JobKey.of("id"), null, Handler.class, new OnDemandSpec(), null, null, null, Misfire.IGNORE, false, 0, null, null, null))
+                .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void rejectsASecondTriggerChosenInSeparateStatements() {
+        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class, spec -> {
+            spec.cron("0 0 2 * * *", ZoneId.of("UTC"));
+            spec.every(Duration.ofSeconds(30));
+        })).isInstanceOf(IllegalStateException.class);
+    }
 }

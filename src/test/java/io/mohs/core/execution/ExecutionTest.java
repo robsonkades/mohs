@@ -34,4 +34,12 @@ class ExecutionTest {
                 Instant.now(), null, List.of(), null))
                 .isInstanceOf(NullPointerException.class);
     }
+
+    @Test
+    void rejectsBlankActor() {
+        assertThatThrownBy(() -> new Execution(
+                ExecutionId.of("exec-1"), JobKey.of("job-1"), ExecutionState.RUNNING,
+                Instant.now(), null, List.of(), " "))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

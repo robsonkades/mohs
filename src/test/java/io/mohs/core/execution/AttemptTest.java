@@ -13,4 +13,36 @@ class AttemptTest {
         assertThatThrownBy(() -> new Attempt(0, Instant.now(), null, ExecutionState.RUNNING, null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void rejectsNullStartedAt() {
+        assertThatThrownBy(() -> new Attempt(1, null, null, ExecutionState.RUNNING, null))
+                .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void rejectsNullOutcome() {
+        assertThatThrownBy(() -> new Attempt(1, Instant.now(), null, null, null))
+                .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void rejectsEnqueuedAndRetryScheduledAsOutcome() {
+        assertThatThrownBy(() -> new Attempt(1, Instant.now(), null, ExecutionState.ENQUEUED, null))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new Attempt(1, Instant.now(), null, ExecutionState.RETRY_SCHEDULED, null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsErrorPresentWhenOutcomeIsNotFailed() {
+        assertThatThrownBy(() -> new Attempt(1, Instant.now(), Instant.now(), ExecutionState.SUCCEEDED, "boom"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsMissingErrorWhenOutcomeIsFailed() {
+        assertThatThrownBy(() -> new Attempt(1, Instant.now(), Instant.now(), ExecutionState.FAILED, null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

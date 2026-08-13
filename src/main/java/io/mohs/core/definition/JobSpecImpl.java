@@ -33,26 +33,45 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
 
     @Override
     public PolicySpec cron(String expression, ZoneId zone) {
+        requireNoTriggerYet();
         this.schedule = new CronSpec(expression, zone);
         return this;
     }
 
     @Override
     public PolicySpec every(Duration interval) {
+        requireNoTriggerYet();
         this.schedule = new IntervalSpec(interval, false);
         return this;
     }
 
     @Override
     public PolicySpec everyAfterFinish(Duration interval) {
+        requireNoTriggerYet();
         this.schedule = new IntervalSpec(interval, true);
         return this;
     }
 
     @Override
     public PolicySpec onDemand() {
+        requireNoTriggerYet();
         this.schedule = new OnDemandSpec();
         return this;
+    }
+
+    /**
+     * {@code cron}/{@code every}/{@code everyAfterFinish}/{@code onDemand}
+     * são mutuamente exclusivos só por construção no estilo encadeado
+     * ({@code PolicySpec} não expõe métodos de gatilho) — em statements
+     * separados, nada barrava uma segunda chamada sobrescrever a primeira
+     * em silêncio.
+     */
+    private void requireNoTriggerYet() {
+        if (schedule != null) {
+            throw new IllegalStateException(
+                    "a trigger (cron/every/everyAfterFinish/onDemand) was already chosen for this JobSpec — "
+                            + "call exactly one, not several statements on the same configurer");
+        }
     }
 
     @Override

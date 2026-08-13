@@ -12,5 +12,8 @@ public record Cancelled(ExecutionId executionId, JobKey jobKey, int attempt) imp
     public Cancelled {
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");
+        if (attempt < 1) {
+            throw new IllegalArgumentException("attempt is 1-based, must be >= 1");
+        }
     }
 }
