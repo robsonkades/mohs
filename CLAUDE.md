@@ -58,7 +58,9 @@ Expectativas que definem "pronto" neste projeto:
 - Org GitHub: mohs-io · groupId Maven: io.mohs · domínio: mohs.io / mohs.dev
 - Artefato único: `io.mohs:mohs` — módulo Maven único, full Spring Boot;
   REST/dashboard condicionais com web `<optional>` (padrão actuator)
-- Pacotes: io.mohs (API pública) · io.mohs.engine/jdbc (internos) ·
+- Pacotes: io.mohs.core (API pública, com subpacotes schedule/definition/
+  execution/event/resource) · io.mohs (raiz, só bootstrap Spring Boot deste
+  módulo) · io.mohs.cron (utilitário) · io.mohs.engine/jdbc (internos) ·
   io.mohs.autoconfigure · io.mohs.rest · io.mohs.test — fronteiras ArchUnit
 - Pacotes Java: io.mohs.* — nenhum código novo usa o pacote antigo (cadrix)
 
@@ -73,18 +75,23 @@ Expectativas que definem "pronto" neste projeto:
 - Flags úteis: `-Djdk.tracePinnedThreads=short` para diagnosticar pinning
 
 ## Arquitetura (mapa, não enciclopédia)
-API pública (contratos, M1 — ver `docs/adr/0013-public-api-subpackaging.md`):
-- `io.mohs` — fachada (`Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`,
+API pública (contratos, M1 — ver `docs/adr/0015-consolidate-public-api-under-core.md`,
+que revisa `docs/adr/0013-public-api-subpackaging.md`), toda sob `io.mohs.core`:
+- `io.mohs.core` — fachada (`Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`,
   `BatchBuilder`) e identidade compartilhada (`JobKey`, `ExecutionId`, `JobRef`)
-- `io.mohs.schedule` — agenda: `Schedule` selado (`CronSpec`/`IntervalSpec`/
+- `io.mohs.core.schedule` — agenda: `Schedule` selado (`CronSpec`/`IntervalSpec`/
   `OnDemandSpec`), `Misfire`
-- `io.mohs.definition` — `JobDefinition`, `@MohsJob`, builder staged
+- `io.mohs.core.definition` — `JobDefinition`, `@MohsJob`, builder staged
   `JobSpec`/`PolicySpec`
-- `io.mohs.execution` — `Execution`, `Attempt`, `ExecutionState`,
+- `io.mohs.core.execution` — `Execution`, `Attempt`, `ExecutionState`,
   `JobContext`, `Priority`
-- `io.mohs.event` — `ExecutionEvent` selado, `ExecutionListener`,
+- `io.mohs.core.event` — `ExecutionEvent` selado, `ExecutionListener`,
   `ExecutionInterceptor`, `@OnExecution`
-- `io.mohs.resource` — `MohsRunner`, `JobQueue`, `ExecutionWindow`
+- `io.mohs.core.resource` — `MohsRunner`, `JobQueue`, `ExecutionWindow`
+
+Fora de `core` (não é vocabulário de job):
+- `io.mohs` (raiz) — só o bootstrap Spring Boot deste módulo
+  (`MohsApplication`), não API da biblioteca
 - `io.mohs.cron` — parsing e próxima ocorrência de expressões cron
   seconds-first (Quartz L/W/#), vendorizado de
   `org.springframework.scheduling.support` (Spring Framework, Apache 2.0).
@@ -102,9 +109,9 @@ M3/M2):
 Fluxo de um job: trigger devido → aquisição (lock/claim) → dispatch para o
 executor → execução → transição de estado → persistência do resultado.
 
-Pontos de entrada para leitura: `io.mohs.Mohs` (fachada pública) e
-`io.mohs.definition.JobDefinition` (o que é um job) são o ponto de partida
-mais curto para entender o vocabulário; `src/test/java/io/mohs/ArchitectureTest.java`
+Pontos de entrada para leitura: `io.mohs.core.Mohs` (fachada pública) e
+`io.mohs.core.definition.JobDefinition` (o que é um job) são o ponto de
+partida mais curto para entender o vocabulário; `src/test/java/io/mohs/ArchitectureTest.java`
 é a fronteira executável entre público e interno.
 
 ## Princípios de código

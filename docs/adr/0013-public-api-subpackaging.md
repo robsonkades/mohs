@@ -1,5 +1,13 @@
 # ADR-0013: Subpacotes da API pública
 
+> **Nota (2026-08-13):** esta ADR foi revisada pela
+> [ADR-0015](0015-consolidate-public-api-under-core.md): a fachada e
+> identidade que aqui ficavam soltas em `io.mohs` (raiz) migraram para
+> `io.mohs.core`, junto com os subpacotes já descritos abaixo (agora
+> `io.mohs.core.schedule`, `.definition`, `.execution`, `.event`,
+> `.resource`). A regra ArchUnit descrita aqui não mudou — só passou a
+> cobrir a nova localização automaticamente.
+
 ## Status
 Decided — 2026-08-13
 

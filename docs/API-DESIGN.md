@@ -608,19 +608,23 @@ reabrir essa porta no futuro será caro.
 
 O que substitui a disciplina que o multi-módulo dava de graça:
 
-1. **Fronteira por pacote, guardada por ArchUnit:**
-   - `io.mohs` — fachada + identidade compartilhada (`Mohs`, `JobKey`, `JobRef`)
-   - `io.mohs.schedule` · `io.mohs.definition` · `io.mohs.execution` ·
-     `io.mohs.event` · `io.mohs.resource` — resto da API pública, dividida
-     por concern **[DECIDIDO EM ADR-0013]** (revisa a versão anterior desta
-     decisão, que descrevia `io.mohs` como pacote único)
+1. **Fronteira por pacote, guardada por ArchUnit:** API pública toda sob
+   `io.mohs.core` **[DECIDIDO EM ADR-0015]** (revisa a ADR-0013, que deixava
+   fachada/identidade soltas em `io.mohs` raiz):
+   - `io.mohs.core` — fachada + identidade compartilhada (`Mohs`, `JobKey`, `JobRef`)
+   - `io.mohs.core.schedule` · `io.mohs.core.definition` · `io.mohs.core.execution` ·
+     `io.mohs.core.event` · `io.mohs.core.resource` — resto da API pública,
+     dividida por concern (ADR-0013)
+   - `io.mohs` (raiz) — só o bootstrap Spring Boot deste módulo
+     (`MohsApplication`), não API
+   - `io.mohs.cron` — utilitário à parte, não é vocabulário de job, não
+     migrou pra `core`
    - `io.mohs.engine` · `io.mohs.jdbc` — internos (`@Internal`)
    - `io.mohs.autoconfigure` — auto-config, properties, validações de boot
    - `io.mohs.rest` — API REST/dashboard
    - `io.mohs.test` — test kit
-   Regras de arquitetura no build: interno não vaza para a API pública
-   (nenhum dos seis pacotes públicos); `rest` só enxerga a API pública;
-   `test` não vaza para produção.
+   Regras de arquitetura no build: interno não vaza para a API pública;
+   `rest` só enxerga a API pública; `test` não vaza para produção.
 2. **Web opcional:** dependências de `spring-web` marcadas `<optional>`;
    REST/dashboard ativam via `@ConditionalOnClass` + `mohs.api.enabled`
    (padrão actuator). Teste de contrato: app sem web no classpath sobe.
