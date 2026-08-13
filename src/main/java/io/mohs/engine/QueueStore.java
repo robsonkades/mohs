@@ -20,4 +20,17 @@ public interface QueueStore {
 
     /** Stream sobre um cursor aberto — quem chama é dono do ciclo de vida (try-with-resources). */
     Stream<StoredQueue> findAll();
+
+    /**
+     * Reserva uma vaga se {@code runningCount < maxConcurrent} — incremento
+     * atômico guardado, sem `SELECT` prévio (mesma disciplina de
+     * {@code JdbcBatchStore#incrementSucceeded}, com a guarda a mais).
+     * Chamado pelo claim (etapa 3), candidato a candidato, dentro da mesma
+     * transação — não um `SELECT`/decide em memória, que reabriria a corrida
+     * entre nós que a ADR-0017 resolve pro mutex por job.
+     *
+     * @return {@code true} se reservou a vaga; {@code false} se a queue já
+     *         está no limite (candidato fica de fora deste batch de claim).
+     */
+    boolean tryIncrementRunning(String name);
 }

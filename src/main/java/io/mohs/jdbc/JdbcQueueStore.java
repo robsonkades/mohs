@@ -55,6 +55,16 @@ public final class JdbcQueueStore implements QueueStore {
         return jdbcTemplate.queryForStream("SELECT * FROM mohs_job_queues", new MapSqlParameterSource(), (rs, rowNum) -> mapRow(rs));
     }
 
+    @Override
+    public boolean tryIncrementRunning(String name) {
+        Objects.requireNonNull(name, "name");
+        int updated = jdbcTemplate.update(
+                "UPDATE mohs_job_queues SET running_count = running_count + 1 "
+                      + "WHERE name = :name AND running_count < max_concurrent",
+                new MapSqlParameterSource("name", name));
+        return updated == 1;
+    }
+
     private static StoredQueue mapRow(ResultSet rs) throws SQLException {
         JobQueue queue = JobQueue.named(rs.getString("name"))
                 .maxConcurrent(rs.getInt("max_concurrent"))

@@ -1,6 +1,11 @@
 package io.mohs.jdbc;
 
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
 import javax.sql.DataSource;
 
@@ -66,5 +71,42 @@ class JdbcQueueStoreTest {
         try (var all = store.findAll()) {
             assertThat(all.map(sq -> sq.queue().name())).containsExactlyInAnyOrder("emails", "sms");
         }
+    }
+
+    @Test
+    void tryIncrementRunningReservesASlotWhenBelowLimit() {
+        store.upsert(JobQueue.named("emails").maxConcurrent(2).build());
+
+        assertThat(store.tryIncrementRunning("emails")).isTrue();
+
+        assertThat(store.find("emails")).map(StoredQueue::runningCount).contains(1);
+    }
+
+    @Test
+    void tryIncrementRunningFailsWhenAtLimit() {
+        store.upsert(JobQueue.named("emails").maxConcurrent(1).build());
+        assertThat(store.tryIncrementRunning("emails")).isTrue();
+
+        assertThat(store.tryIncrementRunning("emails")).isFalse();
+
+        assertThat(store.find("emails")).map(StoredQueue::runningCount).contains(1);
+    }
+
+    @Test
+    void tryIncrementRunningIsAtomicUnderConcurrentContention() throws InterruptedException {
+        store.upsert(JobQueue.named("emails").maxConcurrent(10).build());
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        AtomicInteger accepted = new AtomicInteger();
+
+        IntStream.range(0, 100).forEach(i -> executor.submit(() -> {
+            if (store.tryIncrementRunning("emails")) {
+                accepted.incrementAndGet();
+            }
+        }));
+        executor.shutdown();
+        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(accepted.get()).isEqualTo(10);
+        assertThat(store.find("emails")).map(StoredQueue::runningCount).contains(10);
     }
 }
