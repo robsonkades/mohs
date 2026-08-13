@@ -30,9 +30,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * da regra "todo agora vem do Clock injetado" — {@code ArchitectureTest}
  * abre exceção só para esta classe.
  */
-public final class DatabaseSyncedClock extends Clock {
+public final class DatabaseClock extends Clock {
 
-    private static final Logger log = LoggerFactory.getLogger(DatabaseSyncedClock.class);
+    private static final Logger log = LoggerFactory.getLogger(DatabaseClock.class);
     private static final String NOW_QUERY = "SELECT CURRENT_TIMESTAMP";
 
     private final JdbcTemplate jdbcTemplate;
@@ -41,11 +41,11 @@ public final class DatabaseSyncedClock extends Clock {
     private final Clock systemClock;
     private volatile Duration offset = Duration.ZERO;
 
-    public DatabaseSyncedClock(DataSource dataSource, Duration skewWarnThreshold) {
+    public DatabaseClock(DataSource dataSource, Duration skewWarnThreshold) {
         this(dataSource, skewWarnThreshold, ZoneId.of("UTC"), Clock.systemUTC());
     }
 
-    DatabaseSyncedClock(DataSource dataSource, Duration skewWarnThreshold, ZoneId zone, Clock systemClock) {
+    DatabaseClock(DataSource dataSource, Duration skewWarnThreshold, ZoneId zone, Clock systemClock) {
         this.jdbcTemplate = new JdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
         this.skewWarnThreshold = Objects.requireNonNull(skewWarnThreshold, "skewWarnThreshold");
         this.zone = Objects.requireNonNull(zone, "zone");
@@ -69,12 +69,12 @@ public final class DatabaseSyncedClock extends Clock {
 
             @Override
             public Clock withZone(ZoneId newZone) {
-                return DatabaseSyncedClock.this.withZone(newZone);
+                return DatabaseClock.this.withZone(newZone);
             }
 
             @Override
             public Instant instant() {
-                return DatabaseSyncedClock.this.instant();
+                return DatabaseClock.this.instant();
             }
         };
     }

@@ -30,14 +30,14 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * positivo, clamp, skew) são construídos manipulando o {@link MutableClock}
  * do lado do app, não fingindo a hora do banco.
  */
-class DatabaseSyncedClockTest {
+class DatabaseClockTest {
 
     private static final Duration SKEW_WARN_THRESHOLD = Duration.ofSeconds(1);
     private static final Duration TOLERANCE = Duration.ofSeconds(2);
 
     private final DataSource dataSource = h2DataSource();
     private final ch.qos.logback.classic.Logger logger =
-            (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(DatabaseSyncedClock.class);
+            (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(DatabaseClock.class);
     private final ListAppender<ILoggingEvent> logAppender = new ListAppender<>();
 
     @BeforeEach
@@ -62,7 +62,7 @@ class DatabaseSyncedClockTest {
     @Test
     void appliesTheSampledOffsetWhenDatabaseAndAppClockAgree() {
         MutableClock appClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
-        DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
         clock.sync();
 
@@ -73,7 +73,7 @@ class DatabaseSyncedClockTest {
     void appliesAPositiveOffsetWhenTheDatabaseIsAhead() {
         Duration expected = Duration.ofSeconds(5);
         MutableClock appClock = new MutableClock(Instant.now().minus(expected), ZoneId.of("UTC"));
-        DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
         clock.sync();
 
@@ -83,7 +83,7 @@ class DatabaseSyncedClockTest {
     @Test
     void instantNeverGoesBackwardsAcrossAResampleThatWouldMoveItBackward() {
         MutableClock appClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
-        DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
         clock.sync();
         Instant first = clock.instant();
@@ -102,13 +102,13 @@ class DatabaseSyncedClockTest {
     void keepsThePreviousOffsetWhenTheDatabaseIsUnreachable() throws SQLException {
         Duration expected = Duration.ofSeconds(3);
         MutableClock appClock = new MutableClock(Instant.now().minus(expected), ZoneId.of("UTC"));
-        DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
         clock.sync();
         Duration offsetAfterSuccess = clock.currentOffset();
 
         DataSource broken = Mockito.mock(DataSource.class);
         Mockito.when(broken.getConnection()).thenThrow(new SQLException("connection refused"));
-        DatabaseSyncedClock brokenClock = new DatabaseSyncedClock(broken, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        DatabaseClock brokenClock = new DatabaseClock(broken, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
         assertThatCode(brokenClock::sync).doesNotThrowAnyException();
         assertThat(brokenClock.currentOffset()).isEqualTo(Duration.ZERO);
@@ -118,7 +118,7 @@ class DatabaseSyncedClockTest {
     @Test
     void warnsWhenSkewExceedsTheThreshold() {
         MutableClock appClock = new MutableClock(Instant.now().minus(Duration.ofMinutes(1)), ZoneId.of("UTC"));
-        DatabaseSyncedClock clock = new DatabaseSyncedClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
 
         clock.sync();
 
