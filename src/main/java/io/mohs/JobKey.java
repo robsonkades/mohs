@@ -2,6 +2,8 @@ package io.mohs;
 
 import java.util.Objects;
 
+import io.mohs.definition.JobDefinition;
+
 /**
  * Identidade estável de um {@link JobDefinition}, usada como sua chave de
  * persistência. Ao contrário de {@link JobDefinition#name()}, o valor de

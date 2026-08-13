@@ -4,6 +4,8 @@ import java.util.function.Consumer;
 
 import org.springframework.lang.CheckReturnValue;
 
+import io.mohs.definition.JobDefinition;
+
 /**
  * Fachada pública do Mohs — um verbo por operação, sempre sobre definição
  * existente. Corpo ainda não ligado ao motor: M1 é só o contrato; a

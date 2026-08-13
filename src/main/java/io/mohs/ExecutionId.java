@@ -2,6 +2,8 @@ package io.mohs;
 
 import java.util.Objects;
 
+import io.mohs.execution.Execution;
+
 /**
  * Identidade de uma única {@link Execution}. Opaco por design — o motor
  * decide o formato concreto (ex.: ULID) quando começar a gerá-los em

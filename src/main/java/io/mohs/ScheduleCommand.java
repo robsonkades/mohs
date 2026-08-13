@@ -5,6 +5,10 @@ import java.time.Instant;
 
 import org.springframework.lang.CheckReturnValue;
 
+import io.mohs.definition.JobDefinition;
+import io.mohs.event.Enqueued;
+import io.mohs.execution.Priority;
+
 /**
  * Cadeia fluente sobre uma definição já existente. Pré-terminais ajustam só
  * a instância — {@code priority}, {@code as}, {@code idempotencyKey}; a

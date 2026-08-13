@@ -1,5 +1,7 @@
 package io.mohs;
 
+import com.tngtech.archunit.base.DescribedPredicate;
+import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
@@ -10,9 +12,22 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 @AnalyzeClasses(packages = "io.mohs", importOptions = ImportOption.DoNotIncludeTests.class)
 class ArchitectureTest {
 
+    /**
+     * "API pública" = qualquer coisa em io.mohs.. que não seja um dos 5
+     * pacotes internos conhecidos. Lista os internos (estável, fixados em
+     * M0) em vez dos subpacotes públicos (cresce a cada milestone) — evita
+     * que um subpacote público novo escape da regra por esquecimento (ver
+     * docs/adr/0013-public-api-subpackaging.md).
+     */
+    private static final DescribedPredicate<JavaClass> PUBLIC_API =
+            JavaClass.Predicates.resideInAPackage("io.mohs..")
+                    .and(DescribedPredicate.not(JavaClass.Predicates.resideInAnyPackage(
+                            "io.mohs.engine..", "io.mohs.jdbc..", "io.mohs.autoconfigure..",
+                            "io.mohs.rest..", "io.mohs.test..")));
+
     @ArchTest
     static final ArchRule internal_packages_do_not_leak_into_public_api =
-        noClasses().that().resideInAPackage("io.mohs")
+        noClasses().that(PUBLIC_API)
             .should().dependOnClassesThat().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..");
 
     @ArchTest

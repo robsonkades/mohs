@@ -2,6 +2,9 @@ package io.mohs;
 
 import java.util.function.Consumer;
 
+import io.mohs.event.BatchCompleted;
+import io.mohs.event.ExecutionListener;
+
 /**
  * Recibo de um lote — {@link #batchId()} já está disponível de forma
  * síncrona, mesma durabilidade da cláusula 2 do contrato assíncrono
