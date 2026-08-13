@@ -13,65 +13,45 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.sql.DataSource;
 
-import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Implementação "database" das três de
  * {@code docs/adr/0008-configurable-time-source.md}: o banco é a
- * autoridade de tempo do cluster, amostrada em background estilo NTP —
- * {@link #instant()} nunca faz I/O, é O(1) sobre o offset já amostrado.
+ * autoridade de tempo do cluster — {@link #instant()} nunca faz I/O, é
+ * O(1) sobre o offset já amostrado por {@link #sampleOnce()}.
+ *
+ * <p>Só o offset é responsabilidade desta classe — "de quanto em quanto
+ * tempo reamostrar" é decisão de quem a usa (agendamento entra em
+ * {@code io.mohs.autoconfigure}, junto do resto do property binding de
+ * {@code mohs.time.*}).
  *
  * <p>É o único lugar do motor onde ler o relógio de verdade
  * ({@link Clock#systemUTC()}) é o propósito da classe, não uma violação
  * da regra "todo agora vem do Clock injetado" — {@code ArchitectureTest}
  * abre exceção só para esta classe.
  */
-public final class DatabaseSyncedClock extends Clock implements AutoCloseable {
+public final class DatabaseSyncedClock extends Clock {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseSyncedClock.class);
     private static final String NOW_QUERY = "SELECT CURRENT_TIMESTAMP";
 
     private final DataSource dataSource;
-    private final Duration syncInterval;
     private final Duration skewWarnThreshold;
     private final ZoneId zone;
     private final Clock systemClock;
     private final AtomicReference<Duration> offset = new AtomicReference<>(Duration.ZERO);
 
-    private volatile boolean running;
-    private @Nullable Thread samplerThread;
-
-    public DatabaseSyncedClock(DataSource dataSource, Duration syncInterval, Duration skewWarnThreshold) {
-        this(dataSource, syncInterval, skewWarnThreshold, ZoneId.of("UTC"), Clock.systemUTC());
+    public DatabaseSyncedClock(DataSource dataSource, Duration skewWarnThreshold) {
+        this(dataSource, skewWarnThreshold, ZoneId.of("UTC"), Clock.systemUTC());
     }
 
-    DatabaseSyncedClock(DataSource dataSource, Duration syncInterval, Duration skewWarnThreshold,
-            ZoneId zone, Clock systemClock) {
+    DatabaseSyncedClock(DataSource dataSource, Duration skewWarnThreshold, ZoneId zone, Clock systemClock) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
-        this.syncInterval = Objects.requireNonNull(syncInterval, "syncInterval");
         this.skewWarnThreshold = Objects.requireNonNull(skewWarnThreshold, "skewWarnThreshold");
         this.zone = Objects.requireNonNull(zone, "zone");
         this.systemClock = Objects.requireNonNull(systemClock, "systemClock");
-    }
-
-    /** Sobe a virtual thread de amostragem em background. Idempotente. */
-    public void start() {
-        if (running) {
-            return;
-        }
-        running = true;
-        samplerThread = Thread.ofVirtual().name("mohs-clock-sync").start(this::samplingLoop);
-    }
-
-    @Override
-    public void close() {
-        running = false;
-        Thread thread = samplerThread;
-        if (thread != null) {
-            thread.interrupt();
-        }
     }
 
     @Override
@@ -79,7 +59,7 @@ public final class DatabaseSyncedClock extends Clock implements AutoCloseable {
         return zone;
     }
 
-    /** View com outro zone, delegando {@link #instant()} pra este mesmo relógio — não sobe uma segunda amostragem. */
+    /** View com outro zone, delegando {@link #instant()} pra este mesmo relógio. */
     @Override
     public Clock withZone(ZoneId zone) {
         Objects.requireNonNull(zone, "zone");
@@ -111,20 +91,8 @@ public final class DatabaseSyncedClock extends Clock implements AutoCloseable {
         return offset.get();
     }
 
-    private void samplingLoop() {
-        while (running) {
-            sampleOnce();
-            try {
-                Thread.sleep(syncInterval);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-        }
-    }
-
-    /** Package-private: uma amostra isolada, sem esperar o loop — usado direto pelos testes. */
-    void sampleOnce() {
+    /** Uma amostra: mede o offset banco×app com compensação de ida-e-volta e aplica o clamp monotônico. */
+    public void sampleOnce() {
         try (Connection connection = dataSource.getConnection()) {
             Instant beforeQuery = systemClock.instant();
             long t0 = System.nanoTime();
@@ -146,12 +114,13 @@ public final class DatabaseSyncedClock extends Clock implements AutoCloseable {
     }
 
     /**
-     * Escritor único (só a thread de amostragem chama isto), por isso o
-     * clamp não precisa de um segundo campo atômico: só compara o que o
-     * offset novo daria agora contra o que o offset atual daria agora.
-     * Reamostragem que voltaria no tempo (ADR-0008) é descartada — não
-     * ajustada pra um valor mínimo seguro — e tenta de novo no próximo
-     * ciclo, quando o tempo real já terá avançado o bastante.
+     * Escritor único (quem agenda a chamada a {@link #sampleOnce()} não
+     * chama de duas threads ao mesmo tempo), por isso o clamp não precisa
+     * de um segundo campo atômico: só compara o que o offset novo daria
+     * agora contra o que o offset atual daria agora. Reamostragem que
+     * voltaria no tempo (ADR-0008) é descartada — não ajustada pra um
+     * valor mínimo seguro — e tenta de novo na próxima chamada, quando o
+     * tempo real já terá avançado o bastante.
      */
     private void applyIfMonotonic(Duration sampledOffset) {
         Instant now = systemClock.instant();
