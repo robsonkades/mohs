@@ -3,9 +3,9 @@ package io.mohs;
 import java.util.Objects;
 
 /**
- * Identity of a single {@link Execution}. Opaque by design — the engine
- * decides the concrete format (e.g. ULID) when it starts minting these in
- * {@code io.mohs.jdbc}; this contract only requires a non-blank value.
+ * Identidade de uma única {@link Execution}. Opaco por design — o motor
+ * decide o formato concreto (ex.: ULID) quando começar a gerá-los em
+ * {@code io.mohs.jdbc}; este contrato só exige um valor não vazio.
  */
 public record ExecutionId(String value) {
 

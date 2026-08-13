@@ -3,9 +3,10 @@ package io.mohs;
 import java.util.Objects;
 
 /**
- * Stable identity of a {@link JobDefinition}, used as its persistence key.
- * Unlike {@link JobDefinition#name()}, a {@code JobKey}'s value never
- * changes for a given job — renaming a job's label does not change its key.
+ * Identidade estável de um {@link JobDefinition}, usada como sua chave de
+ * persistência. Ao contrário de {@link JobDefinition#name()}, o valor de
+ * um {@code JobKey} nunca muda para um dado job — renomear o rótulo de um
+ * job não muda sua chave.
  */
 public record JobKey(String value) {
 
@@ -17,8 +18,8 @@ public record JobKey(String value) {
     }
 
     /**
-     * Static factory over a public constructor (Effective Java, Item 1):
-     * reads as a conversion at call sites such as {@code JobKey.of(id)}.
+     * Fábrica estática em vez de construtor público (Effective Java, Item 1):
+     * lê como uma conversão no ponto de chamada, ex. {@code JobKey.of(id)}.
      */
     public static JobKey of(String value) {
         return new JobKey(value);

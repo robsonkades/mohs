@@ -1,5 +1,5 @@
 /**
- * Spring Boot auto-configuration, {@code mohs.*} properties and boot-time
- * validations.
+ * Auto-configuração Spring Boot, propriedades {@code mohs.*} e validações
+ * de boot.
  */
 package io.mohs.autoconfigure;

@@ -5,10 +5,10 @@ import java.time.ZoneId;
 import java.util.Objects;
 
 /**
- * Sole implementation of {@link JobSpec}/{@link Configured} — mutable
- * accumulator behind the staged builder, package-private because nothing
- * outside {@link JobDefinition#of} needs to see it (Effective Java Item 15:
- * minimize accessibility).
+ * Única implementação de {@link JobSpec}/{@link Configured} — acumulador
+ * mutável por trás do builder staged, package-private porque nada fora de
+ * {@link JobDefinition#of} precisa vê-la (Effective Java Item 15: minimize
+ * acessibilidade).
  */
 final class JobSpecImpl implements JobSpec, Configured {
 

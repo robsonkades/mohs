@@ -4,9 +4,9 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * Interval-based schedule: fixed-rate when {@code afterFinish} is
- * {@code false} (anchored to the scheduled fire time), fixed-delay when
- * {@code true} (anchored to the previous execution's end).
+ * Agenda baseada em intervalo: fixed-rate quando {@code afterFinish} é
+ * {@code false} (ancorado no horário de disparo agendado), fixed-delay
+ * quando {@code true} (ancorado no fim da execução anterior).
  */
 public record IntervalSpec(Duration interval, boolean afterFinish) implements Schedule {
 

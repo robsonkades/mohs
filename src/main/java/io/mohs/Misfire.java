@@ -1,18 +1,19 @@
 package io.mohs;
 
 /**
- * Policy applied when a scheduled fire is missed (node down, engine
- * paused, clock jump). {@link #IGNORE} is the default: a missed fire is
- * simply skipped, the job resumes on its next regular occurrence.
+ * Política aplicada quando um disparo agendado é perdido (nó fora do ar,
+ * motor pausado, salto de relógio). {@link #IGNORE} é o default: um disparo
+ * perdido é simplesmente ignorado, o job retoma na próxima ocorrência
+ * regular.
  */
 public enum Misfire {
 
-    /** Skip missed fires; resume on the next regular occurrence. Default. */
+    /** Ignora disparos perdidos; retoma na próxima ocorrência regular. Default. */
     IGNORE,
 
-    /** Fire once immediately for the most recent missed occurrence. */
+    /** Dispara uma vez imediatamente para a ocorrência perdida mais recente. */
     FIRE_NOW,
 
-    /** Replay every missed occurrence, capped and drained, never discarded. */
+    /** Reproduz cada ocorrência perdida, com teto, drenada, nunca descartada. */
     FIRE_ALL_MISSED
 }

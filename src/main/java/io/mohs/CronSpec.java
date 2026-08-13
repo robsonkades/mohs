@@ -4,8 +4,8 @@ import java.time.ZoneId;
 import java.util.Objects;
 
 /**
- * Cron-based schedule: Quartz-style, seconds-first expression, evaluated in
- * the given {@link ZoneId} — never the JVM default zone.
+ * Agenda baseada em cron: sintaxe estilo Quartz, seconds-first, avaliada no
+ * {@link ZoneId} informado — nunca no zone default da JVM.
  */
 public record CronSpec(String expression, ZoneId zone) implements Schedule {
 

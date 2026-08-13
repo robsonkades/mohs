@@ -6,57 +6,58 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Declares a job on a method of a Spring-managed bean — no {@code Job}
- * interface, no {@code implements}. The starter turns each annotated method
- * into exactly one {@link JobDefinition} at boot (source
+ * Declara um job num método de um bean gerenciado pelo Spring — sem
+ * interface {@code Job}, sem {@code implements}. O starter transforma cada
+ * método anotado em exatamente um {@link JobDefinition} no boot (source
  * {@link DefinitionSource#ANNOTATION}).
  *
- * <p>{@link #cron()}, {@link #every()}, and {@link #everyAfterFinish()} are
- * mutually exclusive; all three absent means the job only fires on demand
- * (via {@link Mohs#schedule}, {@link Mohs#batch}, or the dashboard). Method
- * parameters follow the same convention regardless of trigger: up to one
- * payload and one {@link JobContext}, optional, any order.
+ * <p>{@link #cron()}, {@link #every()} e {@link #everyAfterFinish()} são
+ * mutuamente exclusivos; os três ausentes significam que o job só dispara
+ * sob demanda (via {@link Mohs#schedule}, {@link Mohs#batch} ou o
+ * dashboard). Os parâmetros do método seguem a mesma convenção
+ * independente do gatilho: até um payload e um {@link JobContext},
+ * opcionais, em qualquer ordem.
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
 public @interface MohsJob {
 
-    /** Stable identity — becomes the {@link JobKey}. Required, boot-time upsert. */
+    /** Identidade estável — vira o {@link JobKey}. Obrigatório, upsert no boot. */
     String id();
 
-    /** Mutable display label. Defaults to the id when left empty. */
+    /** Rótulo de exibição mutável. Default para o id quando deixado vazio. */
     String name() default "";
 
-    /** Quartz-style seconds-first cron expression. Requires {@link #zone()}. */
+    /** Expressão cron estilo Quartz, seconds-first. Exige {@link #zone()}. */
     String cron() default "";
 
-    /** Zone the cron expression is evaluated in. Required when {@link #cron()} is set. */
+    /** Zone em que a expressão cron é avaliada. Obrigatório quando {@link #cron()} está definido. */
     String zone() default "";
 
-    /** Fixed-rate interval (ISO-8601 duration, e.g. {@code "PT30S"}), anchored to the scheduled fire time. */
+    /** Intervalo fixed-rate (duração ISO-8601, ex. {@code "PT30S"}), ancorado no horário de disparo agendado. */
     String every() default "";
 
-    /** Fixed-delay interval (ISO-8601 duration), anchored to the previous execution's end. */
+    /** Intervalo fixed-delay (duração ISO-8601), ancorado no fim da execução anterior. */
     String everyAfterFinish() default "";
 
-    /** Named {@link MohsRunner} this job executes on. */
+    /** {@link MohsRunner} nomeado em que este job executa. */
     String runner() default "";
 
-    /** Named {@link JobQueue} this job's concurrency is capped by. */
+    /** {@link JobQueue} nomeada que limita a concorrência deste job. */
     String queue() default "";
 
-    /** Named {@link ExecutionWindow} excluding fire times. */
+    /** {@link ExecutionWindow} nomeada que exclui horários de disparo. */
     String window() default "";
 
-    /** Misfire policy. Defaults to {@link Misfire#IGNORE}. */
+    /** Política de misfire. Default {@link Misfire#IGNORE}. */
     Misfire misfire() default Misfire.IGNORE;
 
-    /** Maximum retry attempts. */
+    /** Número máximo de tentativas de retry. */
     int retries() default 0;
 
-    /** Attempt timeout (ISO-8601 duration, e.g. {@code "PT5M"}). */
+    /** Timeout da tentativa (duração ISO-8601, ex. {@code "PT5M"}). */
     String timeout() default "";
 
-    /** Bean name of a custom retry policy, for cases {@link #retries()} can't express. */
+    /** Nome do bean de uma política de retry customizada, para casos que {@link #retries()} não expressa. */
     String retryPolicy() default "";
 }

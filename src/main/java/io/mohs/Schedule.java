@@ -1,14 +1,14 @@
 package io.mohs;
 
 /**
- * When a job fires: cron, fixed-rate, fixed-delay, or on demand. Sealed so
- * the engine can switch over the three variants exhaustively — adding a
- * fourth kind of schedule is a compile error at every call site until it's
- * handled, not a silent {@code default} branch.
+ * Quando um job dispara: cron, fixed-rate, fixed-delay ou sob demanda.
+ * Selado para que o motor faça switch exaustivo sobre as três variantes —
+ * adicionar um quarto tipo de agenda é erro de compilação em todo ponto de
+ * uso até ser tratado, não um {@code default} silencioso.
  *
- * <p>This type carries only the trigger itself. Job policies (runner,
- * queue, window, misfire, retries, timeout) live on {@link JobDefinition};
- * see {@link JobSpec} for the staged builder that assembles both.
+ * <p>Este tipo carrega só o gatilho. Políticas do job (runner, queue,
+ * window, misfire, retries, timeout) vivem em {@link JobDefinition}; ver
+ * {@link JobSpec} para o builder staged que monta os dois.
  */
 public sealed interface Schedule permits CronSpec, IntervalSpec, OnDemandSpec {
 }

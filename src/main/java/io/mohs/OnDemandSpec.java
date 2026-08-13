@@ -1,10 +1,11 @@
 package io.mohs;
 
 /**
- * No automatic trigger — the job only fires via {@link Mohs#schedule},
- * {@link Mohs#batch}, or the dashboard. Explicit rather than "no schedule
- * set", so a job with no cron/every is a deliberate choice, not an
- * oversight (see {@code docs/adr/0002-definition-vs-invocation.md}).
+ * Sem gatilho automático — o job só dispara via {@link Mohs#schedule},
+ * {@link Mohs#batch} ou o dashboard. Explícito em vez de "sem agenda
+ * definida", para que um job sem cron/every seja uma escolha deliberada,
+ * não um esquecimento (ver
+ * {@code docs/adr/0002-definition-vs-invocation.md}).
  */
 public record OnDemandSpec() implements Schedule {
 }

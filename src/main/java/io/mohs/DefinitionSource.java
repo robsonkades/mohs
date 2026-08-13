@@ -1,11 +1,11 @@
 package io.mohs;
 
 /**
- * Where a {@link JobDefinition} came from. Annotation-sourced definitions
- * that disappear from the code on redeploy become {@code ORPHANED} rather
- * than silently deleted (see
+ * De onde veio um {@link JobDefinition}. Definições anotadas que
+ * desaparecem do código num redeploy viram {@code ORPHANED} em vez de
+ * apagadas silenciosamente (ver
  * {@code docs/adr/0006-registration-lifecycle-and-conflict-policy.md});
- * programmatic ones are retired explicitly via {@link Mohs#remove}.
+ * as programáticas são aposentadas explicitamente via {@link Mohs#remove}.
  */
 public enum DefinitionSource {
     ANNOTATION,

@@ -5,16 +5,16 @@ import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * A job, defined once: handler, schedule, and policies. Invoked N ways
- * (cron, {@link Mohs#schedule}, {@link Mohs#batch}, the dashboard) — none
- * of which redefine policy (see
+ * Um job, definido uma vez: handler, agenda e políticas. Invocado de N
+ * formas (cron, {@link Mohs#schedule}, {@link Mohs#batch}, o dashboard) —
+ * nenhuma delas redefine política (ver
  * {@code docs/adr/0002-definition-vs-invocation.md}).
  *
- * <p>Use {@link #of(String, Class, Consumer)} to build one programmatically
- * (dynamic, data-driven schedules — e.g. per-tenant registration). In a
- * typical Spring app you don't call this directly: the starter translates
- * each {@link MohsJob @MohsJob}-annotated method into exactly one of these
- * at boot.
+ * <p>Use {@link #of(String, Class, Consumer)} para montar uma
+ * programaticamente (agendas dinâmicas, orientadas a dados — ex.: registro
+ * por tenant). Num app Spring típico você não chama isso diretamente: o
+ * starter traduz cada método anotado com {@link MohsJob @MohsJob} em
+ * exatamente uma destas no boot.
  */
 public record JobDefinition(
         JobKey key,
@@ -41,8 +41,8 @@ public record JobDefinition(
     }
 
     /**
-     * Builds a {@code PROGRAMMATIC} definition via the staged {@link JobSpec}
-     * builder, e.g. {@code JobDefinition.of("id", Handler.class, spec ->
+     * Monta uma definição {@code PROGRAMMATIC} via o builder staged
+     * {@link JobSpec}, ex. {@code JobDefinition.of("id", Handler.class, spec ->
      * spec.cron(expr, zone).runner("io").queue("tenant-sync"))}.
      */
     public static JobDefinition of(String id, Class<?> handlerType, Consumer<JobSpec> configurer) {

@@ -4,17 +4,17 @@ import java.time.Duration;
 import java.time.ZoneId;
 
 /**
- * Staged builder for programmatic job definitions (see
- * {@link JobDefinition#of}). Picking a trigger — {@link #cron},
- * {@link #every}, {@link #everyAfterFinish}, or {@link #onDemand} — is the
- * first move and returns {@link Configured}, which does not expose these
- * methods again: the compiler makes "cron and every" unrepresentable
- * instead of a boot-time validation error (see
- * {@code docs/API-DESIGN.md} §"Disciplina de interfaces fluentes", point 3).
+ * Builder staged para definições de job programáticas (ver
+ * {@link JobDefinition#of}). Escolher um gatilho — {@link #cron},
+ * {@link #every}, {@link #everyAfterFinish} ou {@link #onDemand} — é o
+ * primeiro passo e retorna {@link Configured}, que não expõe esses métodos
+ * de novo: o compilador torna "cron e every" irrepresentável em vez de um
+ * erro de validação no boot (ver {@code docs/API-DESIGN.md} §"Disciplina
+ * de interfaces fluentes", ponto 3).
  *
- * <p>Sealed to a single implementation on purpose (Design Patterns, staged
- * Builder): it keeps this binary-compatible for new methods in minor
- * releases, since nothing outside this package can implement it.
+ * <p>Selado para uma única implementação de propósito (Design Patterns,
+ * Builder staged): mantém compatibilidade binária para novos métodos em
+ * minor releases, já que nada fora deste pacote pode implementá-la.
  */
 public sealed interface JobSpec permits JobSpecImpl {
 

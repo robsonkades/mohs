@@ -1,5 +1,5 @@
 /**
- * Operational REST API. Depends only on the public API in {@code io.mohs} —
- * never directly on {@code io.mohs.engine} or {@code io.mohs.jdbc}.
+ * API REST operacional. Depende só da API pública em {@code io.mohs} —
+ * nunca diretamente de {@code io.mohs.engine} ou {@code io.mohs.jdbc}.
  */
 package io.mohs.rest;

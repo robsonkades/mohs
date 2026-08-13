@@ -3,11 +3,12 @@ package io.mohs;
 import java.util.Objects;
 
 /**
- * Typed reference to a job definition, binding its {@link JobKey} to the
- * payload type at compile time. Passing a {@code JobRef<WelcomeEmail>} to
- * {@link Mohs#schedule(JobRef, Object)} makes a payload/definition mismatch
- * a compile error instead of a runtime surprise — the point of "typed over
- * stringly" (see {@code docs/adr/0002-definition-vs-invocation.md}).
+ * Referência tipada a uma definição de job, amarrando seu {@link JobKey} ao
+ * tipo do payload em tempo de compilação. Passar um {@code JobRef<WelcomeEmail>}
+ * para {@link Mohs#schedule(JobRef, Object)} torna um payload incompatível
+ * com a definição um erro de compilação, não uma surpresa em runtime — o
+ * ponto do "tipado > stringly" (ver
+ * {@code docs/adr/0002-definition-vs-invocation.md}).
  */
 public record JobRef<T>(JobKey key, Class<T> payloadType) {
 

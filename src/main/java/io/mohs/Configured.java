@@ -3,9 +3,10 @@ package io.mohs;
 import java.time.Duration;
 
 /**
- * The {@link JobSpec} stage reached once a trigger has been chosen. Carries
- * every job policy that isn't the trigger itself — runner, queue, window,
- * misfire, retries, timeout — each optional and settable in any order.
+ * O estágio de {@link JobSpec} alcançado depois que um gatilho foi
+ * escolhido. Carrega toda política do job que não é o gatilho em si —
+ * runner, queue, window, misfire, retries, timeout — cada uma opcional e
+ * ajustável em qualquer ordem.
  */
 public sealed interface Configured permits JobSpecImpl {
 
