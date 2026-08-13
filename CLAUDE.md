@@ -85,6 +85,11 @@ API pública (contratos, M1 — ver `docs/adr/0013-public-api-subpackaging.md`):
 - `io.mohs.event` — `ExecutionEvent` selado, `ExecutionListener`,
   `ExecutionInterceptor`, `@OnExecution`
 - `io.mohs.resource` — `MohsRunner`, `JobQueue`, `ExecutionWindow`
+- `io.mohs.cron` — parsing e próxima ocorrência de expressões cron
+  seconds-first (Quartz L/W/#), vendorizado de
+  `org.springframework.scheduling.support` (Spring Framework, Apache 2.0).
+  Utilitário autocontido, não conhece `CronSpec`/`JobDefinition` — a
+  costura com o resto do vocabulário é trabalho do motor (M3)
 
 Internos e infraestrutura (esqueleto de M0, implementação ainda vazia —
 M3/M2):
