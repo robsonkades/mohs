@@ -96,10 +96,7 @@ public final class JdbcJobStore implements JobStore {
         Objects.requireNonNull(key, "key");
         // job_key é PK — no máximo uma linha; ResultSetExtractor lê essa
         // linha única direto, sem passar por List/stream/findFirst.
-        StoredJob result = jdbcTemplate.query(
-                "SELECT * FROM mohs_job_definitions WHERE job_key = ?",
-                (ResultSetExtractor<@Nullable StoredJob>) rs -> rs.next() ? mapRowOrNull(rs, 1) : null,
-                key.value());
+        StoredJob result = jdbcTemplate.query("SELECT * FROM mohs_job_definitions WHERE job_key = ?", rs -> rs.next() ? mapRowOrNull(rs, 1) : null, key.value());
         return Optional.ofNullable(result);
     }
 
