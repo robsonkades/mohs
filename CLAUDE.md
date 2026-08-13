@@ -61,8 +61,9 @@ Expectativas que definem "pronto" neste projeto:
 - Pacotes: io.mohs.core (API pública, com subpacotes job/schedule/definition/
   execution/event/resource) · io.mohs (raiz, só bootstrap Spring Boot deste
   módulo) · io.mohs.cron (utilitário) · io.mohs.engine/jdbc (internos) ·
-  io.mohs.autoconfigure · io.mohs.rest (raiz + subpacotes error/job/
-  execution/resource, M2) · io.mohs.test — fronteiras ArchUnit
+  io.mohs.autoconfigure · io.mohs.rest (raiz + subpacotes error/overview/
+  job/execution/batch/queue/ratelimit/runner/node, um por controller, M2) ·
+  io.mohs.test — fronteiras ArchUnit
 - Pacotes Java: io.mohs.* — nenhum código novo usa o pacote antigo (cadrix)
 
 ## Comandos
@@ -109,15 +110,21 @@ M3, exceto `io.mohs.rest` que é M2, já implementado como contrato):
 - `io.mohs.jdbc` — persistência JDBC de jobs, execuções e filas
 - `io.mohs.autoconfigure` — auto-config, properties, validações de boot
 - `io.mohs.rest` — API REST operacional (M2, contrato sem implementação —
-  `ProblemDetail`/lógica real ficam pra M3):
-  - `io.mohs.rest` (raiz) — `ActorResolver` (SPI), `CursorPage`,
-    `AcceptedExecutionResponse`, `RuntimePatchResponse`, `OverviewController`
+  `ProblemDetail`/lógica real ficam pra M3). Um subpacote por controller
+  (navegabilidade 1:1 com a tabela de `docs/REST-API-DESIGN.md`), mais
+  raiz e `error` como infra cross-cutting sem controller próprio:
+  - `io.mohs.rest` (raiz) — `ActorResolver` (SPI), `HeaderActorResolver`,
+    `CursorPage`, `AcceptedExecutionResponse`, `RuntimePatchResponse`
   - `io.mohs.rest.error` — exceções de domínio + `RestExceptionHandler`
     (RFC 7807)
+  - `io.mohs.rest.overview` — `OverviewController`
   - `io.mohs.rest.job` — `JobsController`, `ScheduleView` selado
-  - `io.mohs.rest.execution` — `ExecutionsController`, `BatchesController`
-  - `io.mohs.rest.resource` — `QueuesController`, `RateLimitsController`,
-    `RunnersController`, `NodesController`
+  - `io.mohs.rest.execution` — `ExecutionsController`
+  - `io.mohs.rest.batch` — `BatchesController`
+  - `io.mohs.rest.queue` — `QueuesController`
+  - `io.mohs.rest.ratelimit` — `RateLimitsController`
+  - `io.mohs.rest.runner` — `RunnersController`
+  - `io.mohs.rest.node` — `NodesController`
 - `io.mohs.test` — test kit embarcado no jar
 
 Fluxo de um job: trigger devido → aquisição (lock/claim) → dispatch para o
