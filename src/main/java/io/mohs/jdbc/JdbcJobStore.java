@@ -15,8 +15,8 @@ import javax.sql.DataSource;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ResultSetExtractor;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
@@ -34,59 +34,75 @@ import io.mohs.engine.StoredJob;
  * {@code updated_at}/{@code created_at} vêm do {@link Clock} injetado —
  * nunca leitura direta (regra ArchUnit de {@code io.mohs.engine}/
  * {@code io.mohs.jdbc}).
+ *
+ * <p>{@link NamedParameterJdbcTemplate} em vez de {@code JdbcTemplate}
+ * cru: {@link #upsert} sozinho tem 16 colunas — contar {@code ?}
+ * posicional contra uma lista de argumentos nessa largura é risco real de
+ * bug silencioso (troca de posição não quebra a compilação nem sempre
+ * falha em runtime); parâmetro nomeado (`:coluna`) elimina essa classe de
+ * erro e deixa o SQL autodescritivo.
  */
 public final class JdbcJobStore implements JobStore {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcJobStore.class);
 
-    private final JdbcTemplate jdbcTemplate;
+    private final NamedParameterJdbcTemplate jdbcTemplate;
     private final Clock clock;
 
     public JdbcJobStore(DataSource dataSource, Clock clock) {
-        this.jdbcTemplate = new JdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
+        this.jdbcTemplate = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     @Override
     public JobDefinition upsert(JobDefinition definition) {
         Objects.requireNonNull(definition, "definition");
-        String key = definition.key().value();
         Timestamp now = Timestamp.from(clock.instant());
 
-        Integer existing = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_job_definitions WHERE job_key = ?", Integer.class, key);
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("jobKey", definition.key().value())
+                .addValue("name", definition.name())
+                .addValue("handlerType", definition.handlerType().getName())
+                .addValue("scheduleType", scheduleType(definition.schedule()))
+                .addValue("cronExpression", definition.schedule() instanceof CronSpec cron ? cron.expression() : null)
+                .addValue("cronZone", definition.schedule() instanceof CronSpec cron ? cron.zone().getId() : null)
+                .addValue("intervalDuration", definition.schedule() instanceof IntervalSpec interval ? interval.interval().toString() : null)
+                .addValue("intervalAfterFinish", definition.schedule() instanceof IntervalSpec interval ? interval.afterFinish() : null)
+                .addValue("runner", definition.runner())
+                .addValue("queueName", definition.queue())
+                .addValue("windowName", definition.window())
+                .addValue("misfire", definition.misfire().name())
+                .addValue("retries", definition.retries())
+                .addValue("timeout", definition.timeout() == null ? null : definition.timeout().toString())
+                .addValue("retryPolicy", definition.retryPolicy())
+                .addValue("source", definition.source().name())
+                .addValue("updatedAt", now);
 
-        String scheduleType = scheduleType(definition.schedule());
-        String cronExpression = definition.schedule() instanceof CronSpec cron ? cron.expression() : null;
-        String cronZone = definition.schedule() instanceof CronSpec cron ? cron.zone().getId() : null;
-        String intervalDuration = definition.schedule() instanceof IntervalSpec interval ? interval.interval().toString() : null;
-        Boolean intervalAfterFinish = definition.schedule() instanceof IntervalSpec interval ? interval.afterFinish() : null;
-        String timeout = definition.timeout() == null ? null : definition.timeout().toString();
+        // tenta UPDATE primeiro; 0 linhas afetadas = chave nova, faz INSERT.
+        // Evita o round-trip extra (e a corrida TOCTOU) de um SELECT COUNT
+        // prévio pra decidir qual dos dois caminhos tomar.
+        int updated = jdbcTemplate.update("""
+                UPDATE mohs_job_definitions SET
+                    name = :name, handler_type = :handlerType, schedule_type = :scheduleType,
+                    cron_expression = :cronExpression, cron_zone = :cronZone,
+                    interval_duration = :intervalDuration, interval_after_finish = :intervalAfterFinish,
+                    runner = :runner, queue_name = :queueName, window_name = :windowName,
+                    misfire = :misfire, retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
+                    source = :source, updated_at = :updatedAt
+                WHERE job_key = :jobKey
+                """, params);
 
-        if (existing != null && existing > 0) {
-            jdbcTemplate.update("""
-                    UPDATE mohs_job_definitions SET
-                        name = ?, handler_type = ?, schedule_type = ?, cron_expression = ?, cron_zone = ?,
-                        interval_duration = ?, interval_after_finish = ?, runner = ?, queue_name = ?,
-                        window_name = ?, misfire = ?, retries = ?, timeout = ?, retry_policy = ?,
-                        source = ?, updated_at = ?
-                    WHERE job_key = ?
-                    """,
-                    definition.name(), definition.handlerType().getName(), scheduleType, cronExpression, cronZone,
-                    intervalDuration, intervalAfterFinish, definition.runner(), definition.queue(),
-                    definition.window(), definition.misfire().name(), definition.retries(), timeout, definition.retryPolicy(),
-                    definition.source().name(), now, key);
-        } else {
+        if (updated == 0) {
             jdbcTemplate.update("""
                     INSERT INTO mohs_job_definitions (
                         job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
                         interval_duration, interval_after_finish, runner, queue_name, window_name,
                         misfire, retries, timeout, retry_policy, source, orphaned, paused, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, FALSE, ?, ?)
-                    """,
-                    key, definition.name(), definition.handlerType().getName(), scheduleType, cronExpression, cronZone,
-                    intervalDuration, intervalAfterFinish, definition.runner(), definition.queue(), definition.window(),
-                    definition.misfire().name(), definition.retries(), timeout, definition.retryPolicy(),
-                    definition.source().name(), now, now);
+                    VALUES (
+                        :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
+                        :intervalDuration, :intervalAfterFinish, :runner, :queueName, :windowName,
+                        :misfire, :retries, :timeout, :retryPolicy, :source, FALSE, FALSE, :createdAt, :updatedAt)
+                    """, params.addValue("createdAt", now));
         }
         return definition;
     }
@@ -96,34 +112,42 @@ public final class JdbcJobStore implements JobStore {
         Objects.requireNonNull(key, "key");
         // job_key é PK — no máximo uma linha; ResultSetExtractor lê essa
         // linha única direto, sem passar por List/stream/findFirst.
-        StoredJob result = jdbcTemplate.query("SELECT * FROM mohs_job_definitions WHERE job_key = ?", rs -> rs.next() ? mapRowOrNull(rs, 1) : null, key.value());
+        StoredJob result = jdbcTemplate.query(
+                "SELECT * FROM mohs_job_definitions WHERE job_key = :jobKey",
+                new MapSqlParameterSource("jobKey", key.value()),
+                rs -> rs.next() ? mapRowOrNull(rs, 1) : null);
         return Optional.ofNullable(result);
     }
 
     @Override
     public Stream<StoredJob> findAll() {
-        return jdbcTemplate.queryForStream("SELECT * FROM mohs_job_definitions", JdbcJobStore::mapRowOrNull)
+        return jdbcTemplate.queryForStream(
+                        "SELECT * FROM mohs_job_definitions", new MapSqlParameterSource(), JdbcJobStore::mapRowOrNull)
                 .filter(Objects::nonNull);
     }
 
     @Override
     public void markOrphaned(JobKey key) {
-        jdbcTemplate.update("UPDATE mohs_job_definitions SET orphaned = TRUE WHERE job_key = ?", key.value());
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET orphaned = TRUE WHERE job_key = :jobKey",
+                new MapSqlParameterSource("jobKey", key.value()));
     }
 
     @Override
     public void pause(JobKey key) {
-        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = TRUE WHERE job_key = ?", key.value());
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = TRUE WHERE job_key = :jobKey",
+                new MapSqlParameterSource("jobKey", key.value()));
     }
 
     @Override
     public void resume(JobKey key) {
-        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = FALSE WHERE job_key = ?", key.value());
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = FALSE WHERE job_key = :jobKey",
+                new MapSqlParameterSource("jobKey", key.value()));
     }
 
     @Override
     public void remove(JobKey key) {
-        jdbcTemplate.update("DELETE FROM mohs_job_definitions WHERE job_key = ?", key.value());
+        jdbcTemplate.update("DELETE FROM mohs_job_definitions WHERE job_key = :jobKey",
+                new MapSqlParameterSource("jobKey", key.value()));
     }
 
     private static String scheduleType(Schedule schedule) {
