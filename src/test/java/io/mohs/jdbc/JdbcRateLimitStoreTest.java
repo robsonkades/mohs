@@ -2,6 +2,12 @@ package io.mohs.jdbc;
 
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import javax.sql.DataSource;
 
@@ -64,5 +70,26 @@ class JdbcRateLimitStoreTest {
         try (var all = store.findAll()) {
             assertThat(all.map(RateLimit::name)).containsExactlyInAnyOrder("smtp", "partner-api");
         }
+    }
+
+    /** CONC-2 — ver JdbcQueueStoreTest.upsertHandlesConcurrentFirstTimeInsertWithoutThrowing. */
+    @Test
+    void upsertHandlesConcurrentFirstTimeInsertWithoutThrowing() throws Exception {
+        RateLimit rateLimit = new RateLimit("smtp", 100, Duration.ofMinutes(1));
+        CyclicBarrier barrier = new CyclicBarrier(2);
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        Callable<RateLimit> upsert = () -> {
+            barrier.await();
+            return store.upsert(rateLimit);
+        };
+
+        Future<RateLimit> futureA = executor.submit(upsert);
+        Future<RateLimit> futureB = executor.submit(upsert);
+        futureA.get(10, TimeUnit.SECONDS);
+        futureB.get(10, TimeUnit.SECONDS);
+        executor.shutdown();
+        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(store.find("smtp")).contains(rateLimit);
     }
 }

@@ -9,6 +9,7 @@ import java.util.stream.Stream;
 
 import javax.sql.DataSource;
 
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
@@ -32,9 +33,14 @@ public final class JdbcRateLimitStore implements RateLimitStore {
                 .addValue("maxCount", rateLimit.max())
                 .addValue("windowDuration", rateLimit.window().toString());
 
+        // ver CONC-2 em JdbcQueueStore.upsert — mesma corrida, mesma correção.
         int updated = jdbcTemplate.update("UPDATE mohs_rate_limits SET max_count = :maxCount, window_duration = :windowDuration WHERE name = :name", params);
         if (updated == 0) {
-            jdbcTemplate.update("INSERT INTO mohs_rate_limits (name, max_count, window_duration) VALUES (:name, :maxCount, :windowDuration)", params);
+            try {
+                jdbcTemplate.update("INSERT INTO mohs_rate_limits (name, max_count, window_duration) VALUES (:name, :maxCount, :windowDuration)", params);
+            } catch (DuplicateKeyException e) {
+                jdbcTemplate.update("UPDATE mohs_rate_limits SET max_count = :maxCount, window_duration = :windowDuration WHERE name = :name", params);
+            }
         }
         return rateLimit;
     }

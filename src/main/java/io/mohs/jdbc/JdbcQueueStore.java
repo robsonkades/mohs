@@ -8,6 +8,7 @@ import java.util.stream.Stream;
 
 import javax.sql.DataSource;
 
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
@@ -33,9 +34,17 @@ public final class JdbcQueueStore implements QueueStore {
 
         // tenta UPDATE primeiro; 0 linhas afetadas = nome novo, faz INSERT
         // (mesma disciplina de JdbcJobStore.upsert — sem SELECT prévio).
+        // Dois nós inicializando a mesma queue nova ao mesmo tempo podem os
+        // dois ver 0 linhas e os dois tentar INSERT — quem perde a corrida
+        // recebe DuplicateKeyException (a linha já existe, o outro venceu)
+        // e vira UPDATE, não erro (CONC-2).
         int updated = jdbcTemplate.update("UPDATE mohs_job_queues SET max_concurrent = :maxConcurrent WHERE name = :name", params);
         if (updated == 0) {
-            jdbcTemplate.update("INSERT INTO mohs_job_queues (name, max_concurrent, running_count) VALUES (:name, :maxConcurrent, 0)", params);
+            try {
+                jdbcTemplate.update("INSERT INTO mohs_job_queues (name, max_concurrent, running_count) VALUES (:name, :maxConcurrent, 0)", params);
+            } catch (DuplicateKeyException e) {
+                jdbcTemplate.update("UPDATE mohs_job_queues SET max_concurrent = :maxConcurrent WHERE name = :name", params);
+            }
         }
         return queue;
     }

@@ -1,8 +1,11 @@
 package io.mohs.jdbc;
 
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
@@ -118,6 +121,31 @@ class JdbcQueueStoreTest {
         store.decrementRunning("emails");
 
         assertThat(store.find("emails")).map(StoredQueue::runningCount).contains(0);
+    }
+
+    /**
+     * CONC-2: dois nós registrando a mesma queue nova ao mesmo tempo podem
+     * os dois ver 0 linhas no UPDATE e os dois tentar INSERT — antes da
+     * correção, um dos dois propagava DuplicateKeyException pro bootstrap.
+     */
+    @Test
+    void upsertHandlesConcurrentFirstTimeInsertWithoutThrowing() throws Exception {
+        JobQueue queue = JobQueue.named("emails").maxConcurrent(5).build();
+        CyclicBarrier barrier = new CyclicBarrier(2);
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        Callable<JobQueue> upsert = () -> {
+            barrier.await();
+            return store.upsert(queue);
+        };
+
+        Future<JobQueue> futureA = executor.submit(upsert);
+        Future<JobQueue> futureB = executor.submit(upsert);
+        futureA.get(10, TimeUnit.SECONDS);
+        futureB.get(10, TimeUnit.SECONDS);
+        executor.shutdown();
+        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(store.find("emails")).map(sq -> sq.queue().maxConcurrent()).contains(5);
     }
 
     @Test

@@ -6,6 +6,12 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import javax.sql.DataSource;
@@ -168,6 +174,27 @@ class JdbcJobStoreTest {
         store.remove(key);
 
         assertThat(store.find(key)).isEmpty();
+    }
+
+    /** CONC-2 — ver JdbcQueueStoreTest.upsertHandlesConcurrentFirstTimeInsertWithoutThrowing. */
+    @Test
+    void upsertHandlesConcurrentFirstTimeInsertWithoutThrowing() throws Exception {
+        JobDefinition definitionToRegister = definition("welcome-email", new OnDemandSpec());
+        CyclicBarrier barrier = new CyclicBarrier(2);
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        Callable<JobDefinition> upsert = () -> {
+            barrier.await();
+            return store.upsert(definitionToRegister);
+        };
+
+        Future<JobDefinition> futureA = executor.submit(upsert);
+        Future<JobDefinition> futureB = executor.submit(upsert);
+        futureA.get(10, TimeUnit.SECONDS);
+        futureB.get(10, TimeUnit.SECONDS);
+        executor.shutdown();
+        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(store.find(JobKey.of("welcome-email"))).map(StoredJob::definition).contains(definitionToRegister);
     }
 
     @Test

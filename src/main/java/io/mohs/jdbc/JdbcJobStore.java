@@ -15,6 +15,7 @@ import javax.sql.DataSource;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
@@ -81,8 +82,12 @@ public final class JdbcJobStore implements JobStore {
 
         // tenta UPDATE primeiro; 0 linhas afetadas = chave nova, faz INSERT.
         // Evita o round-trip extra (e a corrida TOCTOU) de um SELECT COUNT
-        // prévio pra decidir qual dos dois caminhos tomar.
-        int updated = jdbcTemplate.update("""
+        // prévio pra decidir qual dos dois caminhos tomar. Isso não fecha a
+        // corrida sozinho: dois nós registrando o mesmo job no boot podem os
+        // dois ver 0 linhas e os dois tentar INSERT — quem perde recebe
+        // DuplicateKeyException (job_key já existe, o outro venceu) e vira
+        // UPDATE, não erro propagado pro bootstrap (CONC-2).
+        String updateSql = """
                 UPDATE mohs_job_definitions SET
                     name = :name, handler_type = :handlerType, schedule_type = :scheduleType,
                     cron_expression = :cronExpression, cron_zone = :cronZone,
@@ -92,21 +97,26 @@ public final class JdbcJobStore implements JobStore {
                     retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
                     source = :source, updated_at = :updatedAt
                 WHERE job_key = :jobKey
-                """, params);
+                """;
+        int updated = jdbcTemplate.update(updateSql, params);
 
         if (updated == 0) {
-            jdbcTemplate.update("""
-                    INSERT INTO mohs_job_definitions (
-                        job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
-                        interval_duration, interval_after_finish, runner, queue_name, window_name,
-                        misfire, allow_concurrent_executions, retries, timeout, retry_policy, source,
-                        orphaned, paused, created_at, updated_at)
-                    VALUES (
-                        :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
-                        :intervalDuration, :intervalAfterFinish, :runner, :queueName, :windowName,
-                        :misfire, :allowConcurrentExecutions, :retries, :timeout, :retryPolicy, :source,
-                        FALSE, FALSE, :createdAt, :updatedAt)
-                    """, params.addValue("createdAt", now));
+            try {
+                jdbcTemplate.update("""
+                        INSERT INTO mohs_job_definitions (
+                            job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
+                            interval_duration, interval_after_finish, runner, queue_name, window_name,
+                            misfire, allow_concurrent_executions, retries, timeout, retry_policy, source,
+                            orphaned, paused, created_at, updated_at)
+                        VALUES (
+                            :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
+                            :intervalDuration, :intervalAfterFinish, :runner, :queueName, :windowName,
+                            :misfire, :allowConcurrentExecutions, :retries, :timeout, :retryPolicy, :source,
+                            FALSE, FALSE, :createdAt, :updatedAt)
+                        """, params.addValue("createdAt", now));
+            } catch (DuplicateKeyException e) {
+                jdbcTemplate.update(updateSql, params);
+            }
         }
         return definition;
     }
