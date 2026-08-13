@@ -214,4 +214,41 @@ class JdbcJobStoreTest {
             assertThat(all).extracting(job -> job.definition().key()).containsExactly(JobKey.of("still-here"));
         }
     }
+
+    /** DUP-3: uma linha com handler não resolvido se torna visível como ORPHANED em vez de simplesmente sumir dos dois lados (find/findAll). */
+    @Test
+    void findAllMarksRowsWithUnresolvedHandlerAsOrphaned() {
+        Timestamp now = Timestamp.from(clock.instant());
+        JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_job_definitions (
+                    job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
+                VALUES ('ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
+                """, now, now);
+
+        try (Stream<StoredJob> all = store.findAll()) {
+            all.forEach(job -> { });
+        }
+
+        Boolean orphaned = rawJdbcTemplate.queryForObject(
+                "SELECT orphaned FROM mohs_job_definitions WHERE job_key = ?", Boolean.class, "ghost-handler");
+        assertThat(orphaned).isTrue();
+    }
+
+    @Test
+    void findMarksTheRowWithUnresolvedHandlerAsOrphaned() {
+        Timestamp now = Timestamp.from(clock.instant());
+        JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_job_definitions (
+                    job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
+                VALUES ('ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
+                """, now, now);
+
+        assertThat(store.find(JobKey.of("ghost-handler"))).isEmpty();
+
+        Boolean orphaned = rawJdbcTemplate.queryForObject(
+                "SELECT orphaned FROM mohs_job_definitions WHERE job_key = ?", Boolean.class, "ghost-handler");
+        assertThat(orphaned).isTrue();
+    }
 }

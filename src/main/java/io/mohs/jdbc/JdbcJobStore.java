@@ -6,6 +6,8 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -124,19 +126,40 @@ public final class JdbcJobStore implements JobStore {
     @Override
     public Optional<StoredJob> find(JobKey key) {
         Objects.requireNonNull(key, "key");
+        List<String> unresolvedHandlerJobKeys = new ArrayList<>();
         // job_key é PK — no máximo uma linha; ResultSetExtractor lê essa
         // linha única direto, sem passar por List/stream/findFirst.
         StoredJob result = jdbcTemplate.query(
                 "SELECT * FROM mohs_job_definitions WHERE job_key = :jobKey",
                 new MapSqlParameterSource("jobKey", key.value()),
-                rs -> rs.next() ? mapRowOrNull(rs, 1) : null);
+                rs -> rs.next() ? mapRowOrNull(rs, 1, unresolvedHandlerJobKeys) : null);
+        markOrphanedForUnresolvedHandlers(unresolvedHandlerJobKeys);
         return Optional.ofNullable(result);
     }
 
     @Override
     public Stream<StoredJob> findAll() {
-        return jdbcTemplate.queryForStream("SELECT * FROM mohs_job_definitions", new MapSqlParameterSource(), JdbcJobStore::mapRowOrNull)
-                .filter(Objects::nonNull);
+        List<String> unresolvedHandlerJobKeys = new ArrayList<>();
+        return jdbcTemplate.queryForStream("SELECT * FROM mohs_job_definitions", new MapSqlParameterSource(),
+                        (rs, rowNum) -> mapRowOrNull(rs, rowNum, unresolvedHandlerJobKeys))
+                .filter(Objects::nonNull)
+                // registrado depois do cursor interno do queryForStream — roda só
+                // depois que ele já fechou, então o UPDATE de baixo nunca disputa
+                // conexão com um ResultSet ainda aberto (DUP-3).
+                .onClose(() -> markOrphanedForUnresolvedHandlers(unresolvedHandlerJobKeys));
+    }
+
+    /**
+     * Rotina de auto-cura (DUP-3): antes, uma linha com {@code handler_type}
+     * não resolvido simplesmente sumia de {@link #find}/{@link #findAll} —
+     * mesmo modo de falha que a ADR-0006 já resolveu pra "annotation ausente
+     * do código" (vira ORPHANED, nunca some em silêncio), só que sem essa
+     * classe de falha, mais severa (a classe nem existe mais), acionar o
+     * mesmo mecanismo. Chamado depois que a leitura já terminou — nunca
+     * durante, pra não escrever com um cursor ainda aberto na mesma conexão.
+     */
+    private void markOrphanedForUnresolvedHandlers(List<String> jobKeys) {
+        jobKeys.forEach(jobKey -> markOrphaned(JobKey.of(jobKey)));
     }
 
     @Override
@@ -170,15 +193,21 @@ public final class JdbcJobStore implements JobStore {
         };
     }
 
-    /** {@code null} se {@code handler_type} não resolve mais (handler removido do código) — linha pulada, WARN logado. */
-    private static @Nullable StoredJob mapRowOrNull(ResultSet rs, int rowNum) throws SQLException {
+    /**
+     * {@code null} se {@code handler_type} não resolve mais (handler
+     * removido do código) — linha pulada do resultado, WARN logado, e o
+     * {@code job_key} anotado em {@code unresolvedHandlerJobKeys} pra
+     * {@link #markOrphanedForUnresolvedHandlers} marcar depois.
+     */
+    private static @Nullable StoredJob mapRowOrNull(ResultSet rs, int rowNum, List<String> unresolvedHandlerJobKeys) throws SQLException {
         String jobKey = rs.getString("job_key");
         String handlerTypeName = rs.getString("handler_type");
         Class<?> handlerType;
         try {
             handlerType = Class.forName(handlerTypeName);
         } catch (ClassNotFoundException e) {
-            log.warn("handler type '{}' for job '{}' not found on classpath, skipping row", handlerTypeName, jobKey);
+            log.warn("handler type '{}' for job '{}' not found on classpath, marking orphaned", handlerTypeName, jobKey);
+            unresolvedHandlerJobKeys.add(jobKey);
             return null;
         }
 
