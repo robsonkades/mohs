@@ -1,5 +1,3 @@
 spring:
   application:
     name: mohs
-  jpa:
-    open-in-view: false
