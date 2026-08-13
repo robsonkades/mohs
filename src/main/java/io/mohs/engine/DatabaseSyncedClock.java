@@ -1,9 +1,6 @@
 package io.mohs.engine;
 
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
+import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -15,6 +12,8 @@ import javax.sql.DataSource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * Implementação "database" das três de
@@ -37,7 +36,7 @@ public final class DatabaseSyncedClock extends Clock {
     private static final Logger log = LoggerFactory.getLogger(DatabaseSyncedClock.class);
     private static final String NOW_QUERY = "SELECT CURRENT_TIMESTAMP";
 
-    private final DataSource dataSource;
+    private final JdbcTemplate jdbcTemplate;
     private final Duration skewWarnThreshold;
     private final ZoneId zone;
     private final Clock systemClock;
@@ -48,7 +47,7 @@ public final class DatabaseSyncedClock extends Clock {
     }
 
     DatabaseSyncedClock(DataSource dataSource, Duration skewWarnThreshold, ZoneId zone, Clock systemClock) {
-        this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.jdbcTemplate = new JdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
         this.skewWarnThreshold = Objects.requireNonNull(skewWarnThreshold, "skewWarnThreshold");
         this.zone = Objects.requireNonNull(zone, "zone");
         this.systemClock = Objects.requireNonNull(systemClock, "systemClock");
@@ -93,13 +92,14 @@ public final class DatabaseSyncedClock extends Clock {
 
     /** Uma amostra: mede o offset banco×app com compensação de ida-e-volta e aplica o clamp monotônico. */
     public void sampleOnce() {
-        try (Connection connection = dataSource.getConnection()) {
+        try {
             Instant beforeQuery = systemClock.instant();
             long t0 = System.nanoTime();
-            Instant databaseNow = queryDatabaseNow(connection);
+            Timestamp databaseTimestamp = jdbcTemplate.queryForObject(NOW_QUERY, Timestamp.class);
             long t1 = System.nanoTime();
             Duration roundTrip = Duration.ofNanos(t1 - t0);
 
+            Instant databaseNow = Objects.requireNonNull(databaseTimestamp).toInstant();
             Instant appNowAtMidpoint = beforeQuery.plus(roundTrip.dividedBy(2));
             Duration sampledOffset = Duration.between(appNowAtMidpoint, databaseNow);
 
@@ -108,7 +108,7 @@ public final class DatabaseSyncedClock extends Clock {
             }
 
             applyIfMonotonic(sampledOffset);
-        } catch (SQLException e) {
+        } catch (DataAccessException e) {
             log.warn("failed to sync clock with database, keeping last known offset {}", offset.get(), e);
         }
     }
@@ -128,13 +128,5 @@ public final class DatabaseSyncedClock extends Clock {
             return;
         }
         offset.set(sampledOffset);
-    }
-
-    private static Instant queryDatabaseNow(Connection connection) throws SQLException {
-        try (Statement statement = connection.createStatement();
-                ResultSet resultSet = statement.executeQuery(NOW_QUERY)) {
-            resultSet.next();
-            return resultSet.getTimestamp(1).toInstant();
-        }
     }
 }
