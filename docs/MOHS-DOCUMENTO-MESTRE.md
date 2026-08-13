@@ -634,6 +634,11 @@ Fonte: REST-API-DESIGN.md (superfície completa da tabela).
 - `ProblemDetail` (RFC 7807) como formato único de erro
 - `ActorResolver` como SPI (interface); resolução real fica pra M3
 
+Status: implementado — ver `io.mohs.rest` (5 pacotes: raiz + `error`/
+`job`/`execution`/`resource`). Complemento pontual ao M1 nesse meio-tempo:
+`Attempt.error` e `io.mohs.core.resource.RateLimit`, que o design REST
+precisava e o M1 não tinha congelado ainda.
+
 ### M3 — Implementação do motor
 
 Construção do zero, atrás dos contratos M1/M2 já congelados:

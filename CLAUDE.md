@@ -58,10 +58,11 @@ Expectativas que definem "pronto" neste projeto:
 - Org GitHub: mohs-io · groupId Maven: io.mohs · domínio: mohs.io / mohs.dev
 - Artefato único: `io.mohs:mohs` — módulo Maven único, full Spring Boot;
   REST/dashboard condicionais com web `<optional>` (padrão actuator)
-- Pacotes: io.mohs.core (API pública, com subpacotes schedule/definition/
+- Pacotes: io.mohs.core (API pública, com subpacotes job/schedule/definition/
   execution/event/resource) · io.mohs (raiz, só bootstrap Spring Boot deste
   módulo) · io.mohs.cron (utilitário) · io.mohs.engine/jdbc (internos) ·
-  io.mohs.autoconfigure · io.mohs.rest · io.mohs.test — fronteiras ArchUnit
+  io.mohs.autoconfigure · io.mohs.rest (raiz + subpacotes error/job/
+  execution/resource, M2) · io.mohs.test — fronteiras ArchUnit
 - Pacotes Java: io.mohs.* — nenhum código novo usa o pacote antigo (cadrix)
 
 ## Comandos
@@ -77,17 +78,21 @@ Expectativas que definem "pronto" neste projeto:
 ## Arquitetura (mapa, não enciclopédia)
 API pública (contratos, M1 — ver `docs/adr/0015-consolidate-public-api-under-core.md`,
 que revisa `docs/adr/0013-public-api-subpackaging.md`), toda sob `io.mohs.core`:
-- `io.mohs.core` — fachada (`Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`,
-  `BatchBuilder`) e identidade compartilhada (`JobKey`, `ExecutionId`, `JobRef`)
+- `io.mohs.core` — fachada (`Mohs`, `MohsLifecycle`, `EngineState`,
+  `ScheduleCommand`) e recibo de agendamento (`Batch`, `BatchBuilder`)
+- `io.mohs.core.job` — identidade compartilhada (`JobKey`, `JobRef`),
+  extraída à parte porque `definition`/`execution`/`event`/raiz dependem
+  dela sem depender uns dos outros
 - `io.mohs.core.schedule` — agenda: `Schedule` selado (`CronSpec`/`IntervalSpec`/
   `OnDemandSpec`), `Misfire`
 - `io.mohs.core.definition` — `JobDefinition`, `@MohsJob`, builder staged
   `JobSpec`/`PolicySpec`
-- `io.mohs.core.execution` — `Execution`, `Attempt`, `ExecutionState`,
-  `JobContext`, `Priority`
+- `io.mohs.core.execution` — `Execution`, `Attempt` (com `error`),
+  `ExecutionId`, `ExecutionState`, `JobContext`, `Priority`
 - `io.mohs.core.event` — `ExecutionEvent` selado, `ExecutionListener`,
   `ExecutionInterceptor`, `@OnExecution`
-- `io.mohs.core.resource` — `MohsRunner`, `JobQueue`, `ExecutionWindow`
+- `io.mohs.core.resource` — `MohsRunner`, `JobQueue`, `RateLimit`,
+  `ExecutionWindow`
 
 Fora de `core` (não é vocabulário de job):
 - `io.mohs` (raiz) — só o bootstrap Spring Boot deste módulo
@@ -99,11 +104,20 @@ Fora de `core` (não é vocabulário de job):
   costura com o resto do vocabulário é trabalho do motor (M3)
 
 Internos e infraestrutura (esqueleto de M0, implementação ainda vazia —
-M3/M2):
-- `io.mohs.engine` — motor: claim, runners, misfire, retry
+M3, exceto `io.mohs.rest` que é M2, já implementado como contrato):
+- `io.mohs.engine` — motor: claim, runners, misfire, retry, `NextFireCalculator`
 - `io.mohs.jdbc` — persistência JDBC de jobs, execuções e filas
 - `io.mohs.autoconfigure` — auto-config, properties, validações de boot
-- `io.mohs.rest` — API REST/dashboard operacional (M2)
+- `io.mohs.rest` — API REST operacional (M2, contrato sem implementação —
+  `ProblemDetail`/lógica real ficam pra M3):
+  - `io.mohs.rest` (raiz) — `ActorResolver` (SPI), `CursorPage`,
+    `AcceptedExecutionResponse`, `RuntimePatchResponse`, `OverviewController`
+  - `io.mohs.rest.error` — exceções de domínio + `RestExceptionHandler`
+    (RFC 7807)
+  - `io.mohs.rest.job` — `JobsController`, `ScheduleView` selado
+  - `io.mohs.rest.execution` — `ExecutionsController`, `BatchesController`
+  - `io.mohs.rest.resource` — `QueuesController`, `RateLimitsController`,
+    `RunnersController`, `NodesController`
 - `io.mohs.test` — test kit embarcado no jar
 
 Fluxo de um job: trigger devido → aquisição (lock/claim) → dispatch para o
