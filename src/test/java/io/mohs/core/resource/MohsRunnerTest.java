@@ -92,4 +92,16 @@ class MohsRunnerTest {
         assertThatThrownBy(() -> MohsRunner.cpu("crunch").keepAlive(Duration.ofSeconds(-1)).build())
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void canonicalConstructorRejectsCpuFieldsSetOnAnIoRunner() {
+        assertThatThrownBy(() -> new MohsRunner("s3", RunnerMode.IO, 5, 4, 4, 0, Duration.ofSeconds(60)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void canonicalConstructorRejectsMaxConcurrentSetOnACpuRunner() {
+        assertThatThrownBy(() -> new MohsRunner("crunch", RunnerMode.CPU, 5, 4, 4, 0, Duration.ofSeconds(60)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

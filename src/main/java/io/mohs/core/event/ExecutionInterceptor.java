@@ -9,11 +9,13 @@ import io.mohs.core.execution.JobContext;
  * exceção de interceptor É falha da tentativa e segue o fluxo normal de
  * retry: quem está no caminho crítico participa do desfecho.
  */
+@FunctionalInterface
 public interface ExecutionInterceptor {
 
     void intercept(JobContext ctx, Chain chain) throws Exception;
 
     /** Continuação da cadeia de interceptors até o handler. */
+    @FunctionalInterface
     interface Chain {
         void proceed() throws Exception;
     }

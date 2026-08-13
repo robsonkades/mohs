@@ -16,9 +16,11 @@ import io.mohs.core.definition.JobDefinition;
  */
 public interface Mohs {
 
+    @CheckReturnValue
     <T> ScheduleCommand schedule(JobRef<T> ref, T payload);
 
     /** Overload por string; tipo do payload é checado em runtime contra a definição (erro claro, não CCE). */
+    @CheckReturnValue
     ScheduleCommand schedule(String jobId, Object payload);
 
     @CheckReturnValue

@@ -20,10 +20,13 @@ import io.mohs.core.execution.Priority;
  */
 public interface ScheduleCommand {
 
+    @CheckReturnValue
     ScheduleCommand priority(Priority priority);
 
+    @CheckReturnValue
     ScheduleCommand as(String actor);
 
+    @CheckReturnValue
     ScheduleCommand idempotencyKey(String key);
 
     @CheckReturnValue

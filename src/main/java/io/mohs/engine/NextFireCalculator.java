@@ -29,7 +29,7 @@ import io.mohs.cron.CronExpression;
  */
 public final class NextFireCalculator {
 
-    private final Map<String, CronExpression> CRON_CACHE = new ConcurrentHashMap<>();
+    private final Map<String, CronExpression> cronCache = new ConcurrentHashMap<>();
 
     /**
      * Próximo disparo estritamente após {@code reference}. Vazio só para
@@ -47,7 +47,7 @@ public final class NextFireCalculator {
     }
 
     private Instant nextCronFire(CronSpec cron, Instant reference) {
-        CronExpression parsed = CRON_CACHE.computeIfAbsent(cron.expression(), CronExpression::parse);
+        CronExpression parsed = cronCache.computeIfAbsent(cron.expression(), CronExpression::parse);
         ZonedDateTime seed = reference.atZone(cron.zone());
         ZonedDateTime next = parsed.next(seed);
         if (next == null) {

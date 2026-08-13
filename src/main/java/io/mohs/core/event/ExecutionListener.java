@@ -8,6 +8,7 @@ package io.mohs.core.event;
  * (cláusula 4 do contrato assíncrono,
  * {@code docs/adr/0003-async-and-transactional-contract.md}).
  */
+@FunctionalInterface
 public interface ExecutionListener {
     void on(ExecutionEvent event);
 }

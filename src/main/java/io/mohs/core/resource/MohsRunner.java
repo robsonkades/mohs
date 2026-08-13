@@ -44,6 +44,9 @@ public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int co
             if (maxConcurrent < 1) {
                 throw new IllegalArgumentException("maxConcurrent must be at least 1");
             }
+            if (coreSize != 0 || maxSize != 0 || queueCapacity != 0 || !keepAlive.isZero()) {
+                throw new IllegalArgumentException("CPU-only fields (coreSize/maxSize/queueCapacity/keepAlive) must be zero for an IO runner");
+            }
         } else {
             if (coreSize < 1) {
                 throw new IllegalArgumentException("coreSize must be at least 1");
@@ -56,6 +59,9 @@ public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int co
             }
             if (keepAlive.isNegative()) {
                 throw new IllegalArgumentException("keepAlive must not be negative");
+            }
+            if (maxConcurrent != 0) {
+                throw new IllegalArgumentException("maxConcurrent (IO-only field) must be zero for a CPU runner");
             }
         }
     }
