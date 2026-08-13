@@ -15,6 +15,10 @@
  * {@link io.mohs.engine.ExecutionStore} e {@link io.mohs.engine.BatchStore}
  * seguem o mesmo padrão pra {@link io.mohs.core.execution.Execution} e
  * contadores de lote ({@link io.mohs.engine.BatchCounters}).
+ * {@link io.mohs.engine.QueueStore} (com {@link io.mohs.engine.StoredQueue},
+ * mesma separação definicional×operacional de {@link io.mohs.engine.StoredJob})
+ * e {@link io.mohs.engine.RateLimitStore} fecham as portas de persistência
+ * da etapa 2 de M3.
  */
 @NullMarked
 package io.mohs.engine;

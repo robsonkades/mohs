@@ -1,12 +1,15 @@
 /**
- * Persistência JDBC interna para jobs, execuções, attempts, lotes e
- * filas — Data Mapper (PoEAA) sobre as portas de {@code io.mohs.engine}:
- * {@link io.mohs.jdbc.JdbcJobStore} implementa
+ * Persistência JDBC interna para jobs, execuções, attempts, lotes, filas
+ * e rate limits — Data Mapper (PoEAA) sobre as portas de
+ * {@code io.mohs.engine}: {@link io.mohs.jdbc.JdbcJobStore} implementa
  * {@link io.mohs.engine.JobStore}, {@link io.mohs.jdbc.JdbcExecutionStore}
  * implementa {@link io.mohs.engine.ExecutionStore} (payload serializado
- * via Jackson, nunca campo de {@code Execution}), e
+ * via Jackson, nunca campo de {@code Execution}),
  * {@link io.mohs.jdbc.JdbcBatchStore} implementa
- * {@link io.mohs.engine.BatchStore}. {@link io.mohs.jdbc.DatabaseClock}
+ * {@link io.mohs.engine.BatchStore}, e {@link io.mohs.jdbc.JdbcQueueStore}/
+ * {@link io.mohs.jdbc.JdbcRateLimitStore} implementam
+ * {@link io.mohs.engine.QueueStore}/{@link io.mohs.engine.RateLimitStore}.
+ * {@link io.mohs.jdbc.DatabaseClock}
  * também mora aqui — implementa {@code Clock} +
  * {@link io.mohs.engine.SyncableClock}, a implementação "database" da
  * ADR-0008; é a única classe do projeto onde ler o relógio de verdade é
