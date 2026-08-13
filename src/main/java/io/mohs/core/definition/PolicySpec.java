@@ -20,8 +20,20 @@ public sealed interface PolicySpec permits JobSpecImpl {
 
     PolicySpec misfire(Misfire policy);
 
-    /** Permite mais de uma execução do mesmo job simultaneamente. Default: exclusão mútua (uma por vez). */
-    PolicySpec allowConcurrentExecutions();
+    /**
+     * Impede que mais de uma execução deste job fique {@code RUNNING} ao
+     * mesmo tempo. Default: concorrência permitida — a maioria dos jobs é
+     * invocada várias vezes com payloads independentes (ex.: um job de
+     * e-mail, uma invocação por destinatário), e essas invocações não têm
+     * por que serializar entre si só por compartilhar o mesmo {@code
+     * job_key}. Use isto pro caso mais estreito: um job cron/interval cujo
+     * próprio disparo seguinte pode ocorrer antes do anterior terminar
+     * (ex.: sincronização que às vezes demora mais que o intervalo) — aí as
+     * duas "execuções" são a mesma tarefa se sobrepondo, não trabalho
+     * independente. Mesmo default do {@code @DisallowConcurrentExecution}
+     * do Quartz — lá também é opt-in, não opt-out.
+     */
+    PolicySpec preventOverlap();
 
     PolicySpec retries(int max);
 

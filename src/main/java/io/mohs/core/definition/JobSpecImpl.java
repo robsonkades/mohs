@@ -26,7 +26,7 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     private @Nullable String queue;
     private @Nullable String window;
     private Misfire misfire = Misfire.IGNORE;
-    private boolean allowConcurrentExecutions;
+    private boolean allowConcurrentExecutions = true;
     private int retries;
     private @Nullable Duration timeout;
     private @Nullable String retryPolicy;
@@ -99,8 +99,8 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     }
 
     @Override
-    public PolicySpec allowConcurrentExecutions() {
-        this.allowConcurrentExecutions = true;
+    public PolicySpec preventOverlap() {
+        this.allowConcurrentExecutions = false;
         return this;
     }
 

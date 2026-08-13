@@ -129,7 +129,8 @@ class JdbcClaimerTest {
 
     @Test
     void claimRespectsBatchSize() {
-        seedJob("bulk", PolicySpec::allowConcurrentExecutions);
+        seedJob("bulk", policy -> {
+        });
         seedExecution("exec-1", "bulk", NOW.minusSeconds(3));
         seedExecution("exec-2", "bulk", NOW.minusSeconds(2));
         seedExecution("exec-3", "bulk", NOW.minusSeconds(1));
@@ -142,7 +143,8 @@ class JdbcClaimerTest {
 
     @Test
     void claimOrdersHigherPriorityFirst() {
-        seedJob("alerts", PolicySpec::allowConcurrentExecutions);
+        seedJob("alerts", policy -> {
+        });
         seedExecution("exec-low", "alerts", NOW.minusSeconds(10), "LOW");
         seedExecution("exec-critical", "alerts", NOW.minusSeconds(1), "CRITICAL");
         seedExecution("exec-normal", "alerts", NOW.minusSeconds(5), "NORMAL");
@@ -161,7 +163,8 @@ class JdbcClaimerTest {
      */
     @Test
     void claimOrdersAllFivePrioritiesPlusNullAsNormal() {
-        seedJob("alerts", PolicySpec::allowConcurrentExecutions);
+        seedJob("alerts", policy -> {
+        });
         seedExecution("exec-background", "alerts", NOW.minusSeconds(6), "BACKGROUND");
         seedExecution("exec-low", "alerts", NOW.minusSeconds(5), "LOW");
         seedExecution("exec-null", "alerts", NOW.minusSeconds(4), null);
@@ -178,7 +181,7 @@ class JdbcClaimerTest {
     @Test
     void claimStopsClaimingOnceQueueIsFull() {
         queueStore.upsert(JobQueue.named("emails").maxConcurrent(1).build());
-        seedJob("welcome-email", policy -> policy.queue("emails").allowConcurrentExecutions());
+        seedJob("welcome-email", policy -> policy.queue("emails"));
         seedExecution("exec-1", "welcome-email", NOW.minusSeconds(2));
         seedExecution("exec-2", "welcome-email", NOW.minusSeconds(1));
 
@@ -190,9 +193,8 @@ class JdbcClaimerTest {
     }
 
     @Test
-    void claimNeverClaimsTwoSiblingsOfTheSameJobInOneBatchWithoutOptIn() {
-        seedJob("welcome-email", policy -> {
-        });
+    void claimNeverClaimsTwoSiblingsOfTheSameJobInOneBatchWhenOverlapIsPrevented() {
+        seedJob("welcome-email", PolicySpec::preventOverlap);
         seedExecution("exec-1", "welcome-email", NOW.minusSeconds(2));
         seedExecution("exec-2", "welcome-email", NOW.minusSeconds(1));
 
@@ -204,8 +206,7 @@ class JdbcClaimerTest {
 
     @Test
     void claimSkipsAJobThatAlreadyHasARunningExecution() {
-        seedJob("welcome-email", policy -> {
-        });
+        seedJob("welcome-email", PolicySpec::preventOverlap);
         seedExecution("exec-1", "welcome-email", NOW.minusSeconds(5));
         claimer.claim("node-a", 10);
         seedExecution("exec-2", "welcome-email", NOW.minusSeconds(1));
@@ -217,8 +218,9 @@ class JdbcClaimerTest {
     }
 
     @Test
-    void claimAllowsMultipleRunningExecutionsWhenOptedIn() {
-        seedJob("bulk", PolicySpec::allowConcurrentExecutions);
+    void claimAllowsMultipleRunningExecutionsByDefault() {
+        seedJob("bulk", policy -> {
+        });
         seedExecution("exec-1", "bulk", NOW.minusSeconds(2));
         seedExecution("exec-2", "bulk", NOW.minusSeconds(1));
 
@@ -231,7 +233,7 @@ class JdbcClaimerTest {
     void claimReleasesTheJobMutexWhenQueueAdmissionFailsAfterAcquiringIt() {
         queueStore.upsert(JobQueue.named("emails").maxConcurrent(1).build());
         queueStore.tryIncrementRunning("emails"); // pre-fill the only slot so this claim's admission fails
-        seedJob("welcome-email", policy -> policy.queue("emails"));
+        seedJob("welcome-email", policy -> policy.queue("emails").preventOverlap());
         seedExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
 
         List<Execution> claimed = claimer.claim("node-a", 10);
@@ -250,15 +252,14 @@ class JdbcClaimerTest {
 
     /**
      * O teste mais importante desta etapa: duas transações concorrentes
-     * disputando siblings do mesmo job com mutex ligado (default). O lock
-     * de {@code mohs_job_definitions} + {@code SKIP LOCKED} garante que, seja
+     * disputando siblings do mesmo job com {@code preventOverlap()} ligado.
+     * O CAS em {@code running_execution_id} (ADR-0018) garante que, seja
      * qual for o entrelaçamento, exatamente uma sobrevive — nunca duas
      * {@code RUNNING} ao mesmo tempo, nunca as duas ficam de fora.
      */
     @Test
     void claimIsMutuallyExclusiveAcrossConcurrentNodes() throws Exception {
-        seedJob("welcome-email", policy -> {
-        });
+        seedJob("welcome-email", PolicySpec::preventOverlap);
         for (int i = 0; i < 5; i++) {
             seedExecution("exec-" + i, "welcome-email", NOW.minusSeconds(5 - i));
         }

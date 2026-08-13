@@ -132,11 +132,16 @@ reaper de execuções órfãs, com Watchdog Bound cluster-wide opcional (§5,
 seção Watchdog Bound) contra Attempt que ignora interrupt.
 
 **Quatro eixos independentes de controle** (o diferencial da taxonomia):
-exclusão mútua por job no próprio SQL de claim (`allowConcurrentExecutions`
-default false); Runner node-local por natureza de workload (virtual cap 64 /
-cpu = cores); Queue cluster-wide (enforcement a definir por benchmark —
-seção 5.8); Rate Limiter cluster-wide de janela fixa (eixo de vazão,
-distinto de concorrência); Priority em 5 níveis.
+exclusão mútua por job no próprio SQL de claim (`allowConcurrentExecutions`,
+default `true` — a maioria dos jobs é invocada com payloads independentes
+e não tem por que serializar entre si; `preventOverlap()` opta pela
+exclusividade, pro caso mais estreito de um job cron/interval que não pode
+se sobrepor ao próprio disparo anterior — mesmo default do
+`@DisallowConcurrentExecution` do Quartz, que também é opt-in); Runner
+node-local por natureza de workload (virtual cap 64 / cpu = cores); Queue
+cluster-wide (enforcement a definir por benchmark — seção 5.8); Rate
+Limiter cluster-wide de janela fixa (eixo de vazão, distinto de
+concorrência); Priority em 5 níveis.
 
 **Riscos e lacunas já identificados no design (a resolver em M3/M4):**
 graceful shutdown (resolvido em design, seção 5.4); rate limiter de janela
@@ -583,6 +588,7 @@ definida.
 | 0016 | Claim e transição para `RUNNING` são atômicos | decidido |
 | 0017 | Mutex por job e admissão de queue no claim | superseded pela ADR-0018 |
 | 0018 | Mutex por job via CAS guardado, não dependente de lock especializado | decidido |
+| 0019 | Execuções concorrentes do mesmo job são permitidas por padrão | decidido |
 
 **Etapas geradas pelo design** (entram no PLAN.md, sequenciadas em
 milestones em §9): esqueleto de módulo + ArchUnit; contratos do core

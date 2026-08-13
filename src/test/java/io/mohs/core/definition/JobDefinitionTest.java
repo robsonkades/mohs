@@ -85,18 +85,18 @@ class JobDefinitionTest {
     }
 
     @Test
-    void allowConcurrentExecutionsDefaultsToFalse() {
+    void allowConcurrentExecutionsDefaultsToTrue() {
         JobDefinition definition = JobDefinition.of("import-file", Handler.class, spec -> spec.onDemand());
 
-        assertThat(definition.allowConcurrentExecutions()).isFalse();
+        assertThat(definition.allowConcurrentExecutions()).isTrue();
     }
 
     @Test
-    void allowConcurrentExecutionsCanBeOptedIn() {
+    void preventOverlapOptsOutOfConcurrentExecutions() {
         JobDefinition definition = JobDefinition.of("import-file", Handler.class,
-                spec -> spec.onDemand().allowConcurrentExecutions());
+                spec -> spec.onDemand().preventOverlap());
 
-        assertThat(definition.allowConcurrentExecutions()).isTrue();
+        assertThat(definition.allowConcurrentExecutions()).isFalse();
     }
 
     @Test
