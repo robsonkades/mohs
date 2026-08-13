@@ -2,6 +2,8 @@ package io.mohs.resource;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -17,14 +19,6 @@ class MohsRunnerTest {
     }
 
     @Test
-    void cpuDefaultsToAvailableProcessors() {
-        MohsRunner runner = MohsRunner.cpu("crunch").build();
-
-        assertThat(runner.mode()).isEqualTo(RunnerMode.CPU);
-        assertThat(runner.maxConcurrent()).isEqualTo(Runtime.getRuntime().availableProcessors());
-    }
-
-    @Test
     void maxConcurrentOverridesTheDefault() {
         MohsRunner runner = MohsRunner.io("s3").maxConcurrent(32).build();
 
@@ -34,6 +28,68 @@ class MohsRunnerTest {
     @Test
     void rejectsNonPositiveMaxConcurrent() {
         assertThatThrownBy(() -> MohsRunner.io("s3").maxConcurrent(0).build())
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void cpuDefaultsCoreAndMaxSizeToAvailableProcessors() {
+        MohsRunner runner = MohsRunner.cpu("crunch").build();
+
+        assertThat(runner.mode()).isEqualTo(RunnerMode.CPU);
+        assertThat(runner.coreSize()).isEqualTo(Runtime.getRuntime().availableProcessors());
+        assertThat(runner.maxSize()).isEqualTo(Runtime.getRuntime().availableProcessors());
+    }
+
+    @Test
+    void cpuQueueCapacityDefaultsToZero() {
+        MohsRunner runner = MohsRunner.cpu("crunch").build();
+
+        assertThat(runner.queueCapacity()).isZero();
+    }
+
+    @Test
+    void cpuKeepAliveDefaultsToSixtySeconds() {
+        MohsRunner runner = MohsRunner.cpu("crunch").build();
+
+        assertThat(runner.keepAlive()).isEqualTo(Duration.ofSeconds(60));
+    }
+
+    @Test
+    void cpuPropertiesOverrideTheDefaults() {
+        MohsRunner runner = MohsRunner.cpu("crunch")
+                .coreSize(4)
+                .maxSize(8)
+                .queueCapacity(100)
+                .keepAlive(Duration.ofSeconds(30))
+                .build();
+
+        assertThat(runner.coreSize()).isEqualTo(4);
+        assertThat(runner.maxSize()).isEqualTo(8);
+        assertThat(runner.queueCapacity()).isEqualTo(100);
+        assertThat(runner.keepAlive()).isEqualTo(Duration.ofSeconds(30));
+    }
+
+    @Test
+    void rejectsCpuCoreSizeBelowOne() {
+        assertThatThrownBy(() -> MohsRunner.cpu("crunch").coreSize(0).build())
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsCpuMaxSizeBelowCoreSize() {
+        assertThatThrownBy(() -> MohsRunner.cpu("crunch").coreSize(4).maxSize(2).build())
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsCpuNegativeQueueCapacity() {
+        assertThatThrownBy(() -> MohsRunner.cpu("crunch").queueCapacity(-1).build())
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsCpuNegativeKeepAlive() {
+        assertThatThrownBy(() -> MohsRunner.cpu("crunch").keepAlive(Duration.ofSeconds(-1)).build())
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }
