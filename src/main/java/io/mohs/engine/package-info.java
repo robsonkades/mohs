@@ -12,6 +12,9 @@
  * {@code Clock}: a porta mora aqui, {@code DatabaseClock}
  * (io.mohs.jdbc) implementa — o motor nunca importa
  * {@code NamedParameterJdbcTemplate}/{@code DataSource}.
+ * {@link io.mohs.engine.ExecutionStore} e {@link io.mohs.engine.BatchStore}
+ * seguem o mesmo padrão pra {@link io.mohs.core.execution.Execution} e
+ * contadores de lote ({@link io.mohs.engine.BatchCounters}).
  */
 @NullMarked
 package io.mohs.engine;
