@@ -38,8 +38,7 @@ public final class DatabaseSyncedClock extends Clock implements AutoCloseable {
     private final Duration skewWarnThreshold;
     private final ZoneId zone;
     private final Clock systemClock;
-    private final AtomicReference<Duration> offset;
-    private final AtomicReference<Instant> lastReturnedInstant;
+    private final AtomicReference<Duration> offset = new AtomicReference<>(Duration.ZERO);
 
     private volatile boolean running;
     private @Nullable Thread samplerThread;
@@ -50,23 +49,11 @@ public final class DatabaseSyncedClock extends Clock implements AutoCloseable {
 
     DatabaseSyncedClock(DataSource dataSource, Duration syncInterval, Duration skewWarnThreshold,
             ZoneId zone, Clock systemClock) {
-        this(dataSource, syncInterval, skewWarnThreshold, zone, systemClock,
-                new AtomicReference<>(Duration.ZERO), new AtomicReference<>(systemClock.instant()));
-    }
-
-    /**
-     * Construtor de view (ver {@link #withZone}) — compartilha o offset e
-     * o relógio monotônico já amostrados em vez de congelar um snapshot.
-     */
-    private DatabaseSyncedClock(DataSource dataSource, Duration syncInterval, Duration skewWarnThreshold,
-            ZoneId zone, Clock systemClock, AtomicReference<Duration> offset, AtomicReference<Instant> lastReturnedInstant) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.syncInterval = Objects.requireNonNull(syncInterval, "syncInterval");
         this.skewWarnThreshold = Objects.requireNonNull(skewWarnThreshold, "skewWarnThreshold");
         this.zone = Objects.requireNonNull(zone, "zone");
         this.systemClock = Objects.requireNonNull(systemClock, "systemClock");
-        this.offset = offset;
-        this.lastReturnedInstant = lastReturnedInstant;
     }
 
     /** Sobe a virtual thread de amostragem em background. Idempotente. */
@@ -92,21 +79,31 @@ public final class DatabaseSyncedClock extends Clock implements AutoCloseable {
         return zone;
     }
 
-    /**
-     * View com outro zone, compartilhando o offset e o relógio monotônico
-     * já amostrados — não sobe uma segunda virtual thread de amostragem;
-     * {@link #close()} nesta view não afeta a original.
-     */
+    /** View com outro zone, delegando {@link #instant()} pra este mesmo relógio — não sobe uma segunda amostragem. */
     @Override
     public Clock withZone(ZoneId zone) {
         Objects.requireNonNull(zone, "zone");
-        return new DatabaseSyncedClock(dataSource, syncInterval, skewWarnThreshold, zone, systemClock, offset, lastReturnedInstant);
+        return new Clock() {
+            @Override
+            public ZoneId getZone() {
+                return zone;
+            }
+
+            @Override
+            public Clock withZone(ZoneId newZone) {
+                return DatabaseSyncedClock.this.withZone(newZone);
+            }
+
+            @Override
+            public Instant instant() {
+                return DatabaseSyncedClock.this.instant();
+            }
+        };
     }
 
     @Override
     public Instant instant() {
-        Instant candidate = systemClock.instant().plus(offset.get());
-        return lastReturnedInstant.updateAndGet(previous -> candidate.isAfter(previous) ? candidate : previous);
+        return systemClock.instant().plus(offset.get());
     }
 
     /** Offset atual (banco − app), exposto pra quando a infra de métricas existir. */
@@ -142,19 +139,23 @@ public final class DatabaseSyncedClock extends Clock implements AutoCloseable {
                 log.warn("clock skew {} exceeds threshold {}", sampledOffset, skewWarnThreshold);
             }
 
-            applyClamped(sampledOffset);
+            applyIfMonotonic(sampledOffset);
         } catch (SQLException e) {
             log.warn("failed to sync clock with database, keeping last known offset {}", offset.get(), e);
         }
     }
 
-    private void applyClamped(Duration sampledOffset) {
-        Instant previous = lastReturnedInstant.get();
-        Instant candidateInstant = systemClock.instant().plus(sampledOffset);
-        if (!candidateInstant.isAfter(previous)) {
-            // reamostragem não anda pra trás (ADR-0008): mantém o offset mínimo que
-            // preserva instant() estritamente crescente em vez do offset amostrado cru.
-            offset.set(Duration.between(systemClock.instant(), previous.plusNanos(1)));
+    /**
+     * Escritor único (só a thread de amostragem chama isto), por isso o
+     * clamp não precisa de um segundo campo atômico: só compara o que o
+     * offset novo daria agora contra o que o offset atual daria agora.
+     * Reamostragem que voltaria no tempo (ADR-0008) é descartada — não
+     * ajustada pra um valor mínimo seguro — e tenta de novo no próximo
+     * ciclo, quando o tempo real já terá avançado o bastante.
+     */
+    private void applyIfMonotonic(Duration sampledOffset) {
+        Instant now = systemClock.instant();
+        if (now.plus(sampledOffset).isBefore(now.plus(offset.get()))) {
             return;
         }
         offset.set(sampledOffset);
