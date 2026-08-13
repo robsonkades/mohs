@@ -4,9 +4,9 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import javax.sql.DataSource;
 
@@ -133,9 +133,9 @@ class JdbcJobStoreTest {
         store.upsert(definition("a", new OnDemandSpec()));
         store.upsert(definition("b", new OnDemandSpec()));
 
-        List<StoredJob> all = store.findAll();
-
-        assertThat(all).extracting(job -> job.definition().key()).containsExactlyInAnyOrder(JobKey.of("a"), JobKey.of("b"));
+        try (Stream<StoredJob> all = store.findAll()) {
+            assertThat(all).extracting(job -> job.definition().key()).containsExactlyInAnyOrder(JobKey.of("a"), JobKey.of("b"));
+        }
     }
 
     @Test
@@ -177,14 +177,14 @@ class JdbcJobStoreTest {
         Timestamp now = Timestamp.from(clock.instant());
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         rawJdbcTemplate.update("""
-                INSERT INTO job_definitions (
+                INSERT INTO mohs_job_definitions (
                     job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
                 VALUES ('ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', TRUE, FALSE, ?, ?)
                 """, now, now);
         store.upsert(definition("still-here", new OnDemandSpec()));
 
-        List<StoredJob> all = store.findAll();
-
-        assertThat(all).extracting(job -> job.definition().key()).containsExactly(JobKey.of("still-here"));
+        try (Stream<StoredJob> all = store.findAll()) {
+            assertThat(all).extracting(job -> job.definition().key()).containsExactly(JobKey.of("still-here"));
+        }
     }
 }

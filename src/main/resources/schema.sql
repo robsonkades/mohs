@@ -1,11 +1,13 @@
--- Schema JDBC do Mohs (io.mohs.jdbc). Durations viram VARCHAR via
--- Duration.toString()/Duration.parse() (ISO-8601, ex. "PT30S") — mais
--- legível pra debug manual que millis, nenhuma delas precisa de range
--- query. Sem execution_windows/runners: os dois são bean-resolved
+-- Schema JDBC do Mohs (io.mohs.jdbc). Prefixo mohs_ em toda tabela —
+-- Mohs é biblioteca embarcada, compartilha banco/schema com a aplicação
+-- hospedeira, não pode colidir com tabela dela. Durations viram VARCHAR
+-- via Duration.toString()/Duration.parse() (ISO-8601, ex. "PT30S") —
+-- mais legível pra debug manual que millis, nenhuma delas precisa de
+-- range query. Sem execution_windows/runners: os dois são bean-resolved
 -- ("predicados só existem em código", §5.8 do documento mestre), não
 -- dado persistido.
 
-CREATE TABLE IF NOT EXISTS job_definitions (
+CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     job_key         VARCHAR(255) PRIMARY KEY,
     name            VARCHAR(255),
     handler_type    VARCHAR(500) NOT NULL,
@@ -28,7 +30,7 @@ CREATE TABLE IF NOT EXISTS job_definitions (
     updated_at      TIMESTAMP    NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS batches (
+CREATE TABLE IF NOT EXISTS mohs_batches (
     id         VARCHAR(255) PRIMARY KEY,
     total      INT NOT NULL DEFAULT 0,
     succeeded  INT NOT NULL DEFAULT 0,
@@ -38,9 +40,9 @@ CREATE TABLE IF NOT EXISTS batches (
 
 -- id é UUIDv7 (io.github.robsonkades:uuidv7) — time-ordered, mantém
 -- inserts localizados no fim do índice da tabela mais quente do sistema.
-CREATE TABLE IF NOT EXISTS executions (
+CREATE TABLE IF NOT EXISTS mohs_executions (
     id               VARCHAR(255) PRIMARY KEY,
-    job_key          VARCHAR(255) NOT NULL REFERENCES job_definitions(job_key),
+    job_key          VARCHAR(255) NOT NULL REFERENCES mohs_job_definitions(job_key),
     state            VARCHAR(20)  NOT NULL,
     scheduled_at     TIMESTAMP    NOT NULL,
     fired_at         TIMESTAMP,
@@ -49,18 +51,18 @@ CREATE TABLE IF NOT EXISTS executions (
     priority         VARCHAR(20),
     node_id          VARCHAR(255),  -- claim, etapa 3 (ADR-0016)
     lease_expires_at TIMESTAMP,     -- claim, etapa 3 (ADR-0012/0016)
-    batch_id         VARCHAR(255) REFERENCES batches(id),
+    batch_id         VARCHAR(255) REFERENCES mohs_batches(id),
     payload          CLOB         NOT NULL,
     payload_type     VARCHAR(500) NOT NULL,
     created_at       TIMESTAMP    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_executions_claim ON executions (state, scheduled_at);
-CREATE INDEX IF NOT EXISTS idx_executions_job_key ON executions (job_key);
-CREATE INDEX IF NOT EXISTS idx_executions_idempotency_key ON executions (idempotency_key);
-CREATE INDEX IF NOT EXISTS idx_executions_batch_id ON executions (batch_id);
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (state, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_job_key ON mohs_executions (job_key);
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_batch_id ON mohs_executions (batch_id);
 
-CREATE TABLE IF NOT EXISTS attempts (
-    execution_id VARCHAR(255) NOT NULL REFERENCES executions(id),
+CREATE TABLE IF NOT EXISTS mohs_attempts (
+    execution_id VARCHAR(255) NOT NULL REFERENCES mohs_executions(id),
     number       INT          NOT NULL,
     started_at   TIMESTAMP    NOT NULL,
     finished_at  TIMESTAMP,
@@ -71,13 +73,13 @@ CREATE TABLE IF NOT EXISTS attempts (
 
 -- running_count: contador ADR-0009 (ainda Proposed, não Decided) — esta
 -- etapa só cria a coluna; etapa 3 (claim) é quem escreve nela.
-CREATE TABLE IF NOT EXISTS job_queues (
+CREATE TABLE IF NOT EXISTS mohs_job_queues (
     name           VARCHAR(255) PRIMARY KEY,
     max_concurrent INT NOT NULL,
     running_count  INT NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS rate_limits (
+CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     name            VARCHAR(255) PRIMARY KEY,
     max_count       INT NOT NULL,
     window_duration VARCHAR(50) NOT NULL

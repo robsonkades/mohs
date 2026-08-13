@@ -9,6 +9,7 @@ import java.time.ZoneId;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import javax.sql.DataSource;
 
@@ -29,7 +30,7 @@ import io.mohs.engine.JobStore;
 import io.mohs.engine.StoredJob;
 
 /**
- * {@link JobStore} sobre {@code job_definitions} (Data Mapper, PoEAA).
+ * {@link JobStore} sobre {@code mohs_job_definitions} (Data Mapper, PoEAA).
  * {@code updated_at}/{@code created_at} vêm do {@link Clock} injetado —
  * nunca leitura direta (regra ArchUnit de {@code io.mohs.engine}/
  * {@code io.mohs.jdbc}).
@@ -52,8 +53,7 @@ public final class JdbcJobStore implements JobStore {
         String key = definition.key().value();
         Timestamp now = Timestamp.from(clock.instant());
 
-        Integer existing = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM job_definitions WHERE job_key = ?", Integer.class, key);
+        Integer existing = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_job_definitions WHERE job_key = ?", Integer.class, key);
 
         String scheduleType = scheduleType(definition.schedule());
         String cronExpression = definition.schedule() instanceof CronSpec cron ? cron.expression() : null;
@@ -64,7 +64,7 @@ public final class JdbcJobStore implements JobStore {
 
         if (existing != null && existing > 0) {
             jdbcTemplate.update("""
-                    UPDATE job_definitions SET
+                    UPDATE mohs_job_definitions SET
                         name = ?, handler_type = ?, schedule_type = ?, cron_expression = ?, cron_zone = ?,
                         interval_duration = ?, interval_after_finish = ?, runner = ?, queue_name = ?,
                         window_name = ?, misfire = ?, retries = ?, timeout = ?, retry_policy = ?,
@@ -77,7 +77,7 @@ public final class JdbcJobStore implements JobStore {
                     definition.source().name(), now, key);
         } else {
             jdbcTemplate.update("""
-                    INSERT INTO job_definitions (
+                    INSERT INTO mohs_job_definitions (
                         job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
                         interval_duration, interval_after_finish, runner, queue_name, window_name,
                         misfire, retries, timeout, retry_policy, source, orphaned, paused, created_at, updated_at)
@@ -94,35 +94,34 @@ public final class JdbcJobStore implements JobStore {
     @Override
     public Optional<StoredJob> find(JobKey key) {
         Objects.requireNonNull(key, "key");
-        List<@Nullable StoredJob> rows = jdbcTemplate.query(
-                "SELECT * FROM job_definitions WHERE job_key = ?", JdbcJobStore::mapRowOrNull, key.value());
+        List<@Nullable StoredJob> rows = jdbcTemplate.query("SELECT * FROM mohs_job_definitions WHERE job_key = ?", JdbcJobStore::mapRowOrNull, key.value());
         return rows.stream().filter(Objects::nonNull).findFirst();
     }
 
     @Override
-    public List<StoredJob> findAll() {
-        return jdbcTemplate.query("SELECT * FROM job_definitions", JdbcJobStore::mapRowOrNull)
-                .stream().filter(Objects::nonNull).toList();
+    public Stream<StoredJob> findAll() {
+        return jdbcTemplate.queryForStream("SELECT * FROM mohs_job_definitions", JdbcJobStore::mapRowOrNull)
+                .filter(Objects::nonNull);
     }
 
     @Override
     public void markOrphaned(JobKey key) {
-        jdbcTemplate.update("UPDATE job_definitions SET orphaned = TRUE WHERE job_key = ?", key.value());
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET orphaned = TRUE WHERE job_key = ?", key.value());
     }
 
     @Override
     public void pause(JobKey key) {
-        jdbcTemplate.update("UPDATE job_definitions SET paused = TRUE WHERE job_key = ?", key.value());
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = TRUE WHERE job_key = ?", key.value());
     }
 
     @Override
     public void resume(JobKey key) {
-        jdbcTemplate.update("UPDATE job_definitions SET paused = FALSE WHERE job_key = ?", key.value());
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = FALSE WHERE job_key = ?", key.value());
     }
 
     @Override
     public void remove(JobKey key) {
-        jdbcTemplate.update("DELETE FROM job_definitions WHERE job_key = ?", key.value());
+        jdbcTemplate.update("DELETE FROM mohs_job_definitions WHERE job_key = ?", key.value());
     }
 
     private static String scheduleType(Schedule schedule) {

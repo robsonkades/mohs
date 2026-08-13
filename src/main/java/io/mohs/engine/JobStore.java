@@ -1,7 +1,7 @@
 package io.mohs.engine;
 
-import java.util.List;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.job.JobKey;
@@ -19,7 +19,12 @@ public interface JobStore {
 
     Optional<StoredJob> find(JobKey key);
 
-    List<StoredJob> findAll();
+    /**
+     * Stream sobre um cursor aberto — não materializa a tabela inteira em
+     * memória de uma vez. Quem chama é dono do ciclo de vida
+     * (try-with-resources); fechar o stream libera a conexão por trás.
+     */
+    Stream<StoredJob> findAll();
 
     /** {@code ANNOTATION} presente no store, ausente do código (ADR-0006) — não dispara, não apaga histórico. */
     void markOrphaned(JobKey key);
