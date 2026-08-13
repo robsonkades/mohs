@@ -109,4 +109,23 @@ class JdbcQueueStoreTest {
         assertThat(accepted.get()).isEqualTo(10);
         assertThat(store.find("emails")).map(StoredQueue::runningCount).contains(10);
     }
+
+    @Test
+    void decrementRunningReleasesAReservedSlot() {
+        store.upsert(JobQueue.named("emails").maxConcurrent(2).build());
+        store.tryIncrementRunning("emails");
+
+        store.decrementRunning("emails");
+
+        assertThat(store.find("emails")).map(StoredQueue::runningCount).contains(0);
+    }
+
+    @Test
+    void decrementRunningNeverGoesBelowZero() {
+        store.upsert(JobQueue.named("emails").maxConcurrent(2).build());
+
+        store.decrementRunning("emails");
+
+        assertThat(store.find("emails")).map(StoredQueue::runningCount).contains(0);
+    }
 }

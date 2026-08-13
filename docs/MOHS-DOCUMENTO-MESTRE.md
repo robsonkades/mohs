@@ -581,6 +581,8 @@ definida.
 | 0014 | Properties de pool estilo Spring para o runner CPU | decidido |
 | 0015 | Consolidar a API pública sob `io.mohs.core` (revisa ADR-0013) | decidido |
 | 0016 | Claim e transição para `RUNNING` são atômicos | decidido |
+| 0017 | Mutex por job e admissão de queue no claim | superseded pela ADR-0018 |
+| 0018 | Mutex por job via CAS guardado, não dependente de lock especializado | decidido |
 
 **Etapas geradas pelo design** (entram no PLAN.md, sequenciadas em
 milestones em §9): esqueleto de módulo + ArchUnit; contratos do core

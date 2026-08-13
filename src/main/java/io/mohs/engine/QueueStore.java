@@ -33,4 +33,14 @@ public interface QueueStore {
      *         está no limite (candidato fica de fora deste batch de claim).
      */
     boolean tryIncrementRunning(String name);
+
+    /**
+     * Devolve uma vaga reservada por engano — usado dentro da própria
+     * transação de claim quando um candidato reserva a vaga mas não chega
+     * a ser efetivamente reivindicado (perdeu a corrida final por outro
+     * motivo). Guardado contra {@code running_count} negativo; não é o
+     * decremento de conclusão de execução (isso é a etapa de dispatch,
+     * ainda não implementada).
+     */
+    void decrementRunning(String name);
 }

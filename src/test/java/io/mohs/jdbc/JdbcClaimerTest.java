@@ -206,6 +206,22 @@ class JdbcClaimerTest {
     }
 
     @Test
+    void claimReleasesTheJobMutexWhenQueueAdmissionFailsAfterAcquiringIt() {
+        queueStore.upsert(JobQueue.named("emails").maxConcurrent(1).build());
+        queueStore.tryIncrementRunning("emails"); // pre-fill the only slot so this claim's admission fails
+        seedJob("welcome-email", policy -> policy.queue("emails"));
+        seedExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+
+        List<Execution> claimed = claimer.claim("node-a", 10);
+
+        assertThat(claimed).isEmpty();
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.ENQUEUED);
+        String runningExecutionId = rawJdbcTemplate.queryForObject(
+                "SELECT running_execution_id FROM mohs_job_definitions WHERE job_key = ?", String.class, "welcome-email");
+        assertThat(runningExecutionId).isNull();
+    }
+
+    @Test
     void claimRejectsNonPositiveBatchSize() {
         assertThatThrownBy(() -> claimer.claim("node-a", 0)).isInstanceOf(IllegalArgumentException.class);
     }

@@ -23,7 +23,7 @@
  * <p>{@link io.mohs.engine.Claimer} é a etapa 3a: aquisição sem contenção
  * (claim), diferente dos {@code *Store} acima porque cruza três tabelas
  * numa transação só — mutex por job e admissão de queue decididos dentro
- * dela (ADR-0016, ADR-0017), não uma porta de uma entidade só.
+ * dela via CAS guardado, não lock especializado (ADR-0016, ADR-0018).
  */
 @NullMarked
 package io.mohs.engine;

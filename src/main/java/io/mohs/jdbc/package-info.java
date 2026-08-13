@@ -16,11 +16,14 @@
  * o propósito, não uma violação (exceção nomeada em
  * {@code ArchitectureTest}). {@link io.mohs.jdbc.JdbcClaimer} implementa
  * {@link io.mohs.engine.Claimer} — claim e transição pra
- * {@code RUNNING} num único {@code UPDATE} (ADR-0016), mutex por job e
- * admissão de queue via {@code FOR UPDATE OF ... SKIP LOCKED} e
- * {@link io.mohs.engine.QueueStore#tryIncrementRunning} dentro da mesma
- * transação (ADR-0017). Não faz parte da API pública — ver
- * {@code io.mohs.core} para os contratos públicos.
+ * {@code RUNNING} num único {@code UPDATE} (ADR-0016), mutex por job via
+ * CAS guardado em {@code running_execution_id} e admissão de queue via
+ * {@link io.mohs.engine.QueueStore#tryIncrementRunning} — o
+ * {@code SELECT ... FOR UPDATE OF e SKIP LOCKED} é só otimização, nunca
+ * a garantia de corretude (ADR-0018, que substitui a ADR-0017: lock
+ * especializado sozinho não é confiável sob concorrência real). Não faz
+ * parte da API pública — ver {@code io.mohs.core} para os contratos
+ * públicos.
  */
 @NullMarked
 package io.mohs.jdbc;
