@@ -8,7 +8,7 @@
         <version>4.1.0</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
-    <groupId>io.github.robsonkades</groupId>
+    <groupId>io.mohs</groupId>
     <artifactId>mohs</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>mohs</name>
