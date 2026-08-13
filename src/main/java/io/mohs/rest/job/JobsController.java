@@ -4,7 +4,6 @@ import java.util.List;
 
 import jakarta.servlet.http.HttpServletRequest;
 
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -13,10 +12,10 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.mohs.rest.AcceptedExecutionResponse;
+import io.mohs.rest.ApiPaths;
 import io.mohs.rest.CursorPage;
 import io.mohs.rest.execution.ExecutionResponse;
 
@@ -26,7 +25,7 @@ import io.mohs.rest.execution.ExecutionResponse;
  * aqui, só leitura e invocação sobre definição existente.
  */
 @RestController
-@RequestMapping("/api/mohs/v1/jobs")
+@RequestMapping(ApiPaths.V1 + "/jobs")
 public class JobsController {
 
     @GetMapping
@@ -39,8 +38,8 @@ public class JobsController {
         throw new UnsupportedOperationException("M3: ainda não implementado");
     }
 
+    /** Status 202 vem de {@link ResponseEntity#getStatusCode()} no corpo do método — {@code @ResponseStatus} não tem efeito sobre {@code ResponseEntity} (REST-1). */
     @PostMapping("/{jobKey}/schedule")
-    @ResponseStatus(HttpStatus.ACCEPTED)
     public ResponseEntity<AcceptedExecutionResponse> schedule(@PathVariable String jobKey, @RequestBody ScheduleJobRequest body, @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey, HttpServletRequest request) {
         throw new UnsupportedOperationException("M3: ainda não implementado");
     }

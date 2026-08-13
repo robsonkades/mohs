@@ -1,5 +1,7 @@
 package io.mohs.rest.error;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -25,6 +27,8 @@ import io.mohs.core.job.JobKey;
 @RestControllerAdvice
 public class RestExceptionHandler extends ResponseEntityExceptionHandler {
 
+    private static final Logger log = LoggerFactory.getLogger(RestExceptionHandler.class);
+
     @ExceptionHandler(JobNotFoundException.class)
     public ProblemDetail handleJobNotFound(JobNotFoundException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
@@ -48,5 +52,18 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
         problem.setTitle("Payload validation failed");
         problem.setProperty("field", ex.field());
         return problem;
+    }
+
+    /**
+     * Rede de segurança pra qualquer exceção não prevista (falha de
+     * infraestrutura, bug) — sem isso, ela cai no {@code /error} padrão do
+     * Boot, com corpo estruturalmente diferente de RFC 7807 (REST-2). A
+     * causa real vai só pro log do servidor — nunca {@code ex.getMessage()}
+     * no corpo, pra não vazar detalhe interno pra um chamador não confiável.
+     */
+    @ExceptionHandler(Exception.class)
+    public ProblemDetail handleUnexpected(Exception ex) {
+        log.error("unhandled exception reaching the REST layer", ex);
+        return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred");
     }
 }

@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.mohs.rest.ApiPaths;
 import io.mohs.rest.RuntimePatchResponse;
 
 /**
@@ -19,7 +20,7 @@ import io.mohs.rest.RuntimePatchResponse;
  * {@code docs/REST-API-DESIGN.md}, "PATCH runtime × configuração de boot").
  */
 @RestController
-@RequestMapping("/api/mohs/v1/queues")
+@RequestMapping(ApiPaths.V1 + "/queues")
 public class QueuesController {
 
     @GetMapping

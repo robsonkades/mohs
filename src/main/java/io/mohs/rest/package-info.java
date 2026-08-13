@@ -9,8 +9,9 @@
  * {@link io.mohs.rest.ActorResolver} (SPI) e sua implementação padrão
  * {@link io.mohs.rest.HeaderActorResolver}, o envelope de paginação
  * {@link io.mohs.rest.CursorPage}, o recibo de invocação
- * {@link io.mohs.rest.AcceptedExecutionResponse} e o envelope de ajuste
- * runtime {@link io.mohs.rest.RuntimePatchResponse}. Não tem controller
+ * {@link io.mohs.rest.AcceptedExecutionResponse}, o envelope de ajuste
+ * runtime {@link io.mohs.rest.RuntimePatchResponse} e o prefixo
+ * compartilhado {@link io.mohs.rest.ApiPaths#V1}. Não tem controller
  * próprio — cada área de recurso da tabela de
  * {@code docs/REST-API-DESIGN.md} tem um subpacote 1:1 com seu controller:
  * {@code io.mohs.rest.error} (tradução de exceção pra

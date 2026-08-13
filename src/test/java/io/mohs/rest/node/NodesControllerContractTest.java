@@ -5,9 +5,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.test.web.servlet.MockMvc;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import io.mohs.rest.ApiPaths;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+/** Ver Javadoc de {@link io.mohs.rest.job.JobsControllerContractTest} — mesmo padrão de contrato. */
 @WebMvcTest(NodesController.class)
 class NodesControllerContractTest {
 
@@ -15,8 +18,7 @@ class NodesControllerContractTest {
     private MockMvc mockMvc;
 
     @Test
-    void listRoutes() {
-        assertThatThrownBy(() -> mockMvc.perform(get("/api/mohs/v1/nodes")))
-                .hasCauseInstanceOf(UnsupportedOperationException.class);
+    void listRoutes() throws Exception {
+        mockMvc.perform(get(ApiPaths.V1 + "/nodes")).andExpect(status().isInternalServerError());
     }
 }

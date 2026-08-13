@@ -55,4 +55,14 @@ class RestExceptionHandlerTest {
         assertThat(problem.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_CONTENT.value());
         assertThat(problem.getProperties()).containsEntry("field", "age");
     }
+
+    @Test
+    void unexpectedExceptionBecomes500WithoutLeakingItsMessage() {
+        RuntimeException ex = new RuntimeException("connection string: postgres://user:secret@host/db");
+
+        ProblemDetail problem = handler.handleUnexpected(ex);
+
+        assertThat(problem.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
+        assertThat(problem.getDetail()).doesNotContain("secret");
+    }
 }

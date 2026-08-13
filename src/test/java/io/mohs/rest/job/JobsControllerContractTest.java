@@ -6,14 +6,17 @@ import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.mohs.rest.ApiPaths;
+
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * Contrato de rota (path/verbo/binding), não comportamento — M2 não tem
- * lógica real ainda, então o assert é a causa {@link UnsupportedOperationException}
- * do corpo stub, prova de que a rota bateu e chegou lá.
+ * lógica real ainda, então o corpo stub lança {@link UnsupportedOperationException},
+ * que o catch-all de {@code RestExceptionHandler} (REST-2) converte em 500;
+ * o assert nesse status é a prova de que a rota bateu e chegou lá.
  */
 @WebMvcTest(JobsController.class)
 class JobsControllerContractTest {
@@ -22,40 +25,35 @@ class JobsControllerContractTest {
     private MockMvc mockMvc;
 
     @Test
-    void listRoutes() {
-        assertThatThrownBy(() -> mockMvc.perform(get("/api/mohs/v1/jobs")))
-                .hasCauseInstanceOf(UnsupportedOperationException.class);
+    void listRoutes() throws Exception {
+        mockMvc.perform(get(ApiPaths.V1 + "/jobs")).andExpect(status().isInternalServerError());
     }
 
     @Test
-    void getRoutes() {
-        assertThatThrownBy(() -> mockMvc.perform(get("/api/mohs/v1/jobs/welcome-email")))
-                .hasCauseInstanceOf(UnsupportedOperationException.class);
+    void getRoutes() throws Exception {
+        mockMvc.perform(get(ApiPaths.V1 + "/jobs/welcome-email")).andExpect(status().isInternalServerError());
     }
 
     @Test
-    void scheduleRoutes() {
-        assertThatThrownBy(() -> mockMvc.perform(post("/api/mohs/v1/jobs/welcome-email/schedule")
+    void scheduleRoutes() throws Exception {
+        mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"payload\":{}}")))
-                .hasCauseInstanceOf(UnsupportedOperationException.class);
+                        .content("{\"payload\":{}}"))
+                .andExpect(status().isInternalServerError());
     }
 
     @Test
-    void pauseRoutes() {
-        assertThatThrownBy(() -> mockMvc.perform(post("/api/mohs/v1/jobs/welcome-email/pause")))
-                .hasCauseInstanceOf(UnsupportedOperationException.class);
+    void pauseRoutes() throws Exception {
+        mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/pause")).andExpect(status().isInternalServerError());
     }
 
     @Test
-    void resumeRoutes() {
-        assertThatThrownBy(() -> mockMvc.perform(post("/api/mohs/v1/jobs/welcome-email/resume")))
-                .hasCauseInstanceOf(UnsupportedOperationException.class);
+    void resumeRoutes() throws Exception {
+        mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/resume")).andExpect(status().isInternalServerError());
     }
 
     @Test
-    void executionsRoutes() {
-        assertThatThrownBy(() -> mockMvc.perform(get("/api/mohs/v1/jobs/welcome-email/executions")))
-                .hasCauseInstanceOf(UnsupportedOperationException.class);
+    void executionsRoutes() throws Exception {
+        mockMvc.perform(get(ApiPaths.V1 + "/jobs/welcome-email/executions")).andExpect(status().isInternalServerError());
     }
 }

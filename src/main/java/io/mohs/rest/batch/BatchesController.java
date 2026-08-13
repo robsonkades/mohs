@@ -5,9 +5,11 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.mohs.rest.ApiPaths;
+
 /** {@code GET /batches/{id}} — contadores agregados e estado do lote. */
 @RestController
-@RequestMapping("/api/mohs/v1/batches")
+@RequestMapping(ApiPaths.V1 + "/batches")
 public class BatchesController {
 
     @GetMapping("/{id}")

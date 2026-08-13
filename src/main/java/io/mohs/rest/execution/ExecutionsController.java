@@ -16,6 +16,7 @@ import java.time.Instant;
 
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.rest.AcceptedExecutionResponse;
+import io.mohs.rest.ApiPaths;
 import io.mohs.rest.CursorPage;
 
 /**
@@ -23,7 +24,7 @@ import io.mohs.rest.CursorPage;
  * global (cursor), detalhe, cancelamento cooperativo e retry manual.
  */
 @RestController
-@RequestMapping("/api/mohs/v1/executions")
+@RequestMapping(ApiPaths.V1 + "/executions")
 public class ExecutionsController {
 
     @GetMapping
@@ -48,9 +49,13 @@ public class ExecutionsController {
         throw new UnsupportedOperationException("M3: ainda não implementado");
     }
 
-    /** Retry manual bypassa política de retry exaurida — mesmo contrato de aceite de {@code schedule}. */
+    /**
+     * Retry manual bypassa política de retry exaurida — mesmo contrato de
+     * aceite de {@code schedule}. Status 202 vem de
+     * {@link ResponseEntity#getStatusCode()} no corpo do método —
+     * {@code @ResponseStatus} não tem efeito sobre {@code ResponseEntity} (REST-1).
+     */
     @PostMapping("/{id}/retry")
-    @ResponseStatus(HttpStatus.ACCEPTED)
     public ResponseEntity<AcceptedExecutionResponse> retry(@PathVariable String id, HttpServletRequest request) {
         throw new UnsupportedOperationException("M3: ainda não implementado");
     }

@@ -6,9 +6,11 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.mohs.rest.ApiPaths;
+
 /** {@code GET /nodes} — visão de cluster: nodes com heartbeat recente, last-seen. */
 @RestController
-@RequestMapping("/api/mohs/v1/nodes")
+@RequestMapping(ApiPaths.V1 + "/nodes")
 public class NodesController {
 
     @GetMapping
