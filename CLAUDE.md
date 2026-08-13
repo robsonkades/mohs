@@ -79,7 +79,7 @@ API pública (contratos, M1 — ver `docs/adr/0013-public-api-subpackaging.md`):
 - `io.mohs.schedule` — agenda: `Schedule` selado (`CronSpec`/`IntervalSpec`/
   `OnDemandSpec`), `Misfire`
 - `io.mohs.definition` — `JobDefinition`, `@MohsJob`, builder staged
-  `JobSpec`/`Configured`
+  `JobSpec`/`PolicySpec`
 - `io.mohs.execution` — `Execution`, `Attempt`, `ExecutionState`,
   `JobContext`, `Priority`
 - `io.mohs.event` — `ExecutionEvent` selado, `ExecutionListener`,

@@ -12,12 +12,12 @@ import io.mohs.schedule.OnDemandSpec;
 import io.mohs.schedule.Schedule;
 
 /**
- * Única implementação de {@link JobSpec}/{@link Configured} — acumulador
+ * Única implementação de {@link JobSpec}/{@link PolicySpec} — acumulador
  * mutável por trás do builder staged, package-private porque nada fora de
  * {@link JobDefinition#of} precisa vê-la (Effective Java Item 15: minimize
  * acessibilidade).
  */
-final class JobSpecImpl implements JobSpec, Configured {
+final class JobSpecImpl implements JobSpec, PolicySpec {
 
     private Schedule schedule;
     private String runner;
@@ -28,61 +28,61 @@ final class JobSpecImpl implements JobSpec, Configured {
     private Duration timeout;
 
     @Override
-    public Configured cron(String expression, ZoneId zone) {
+    public PolicySpec cron(String expression, ZoneId zone) {
         this.schedule = new CronSpec(expression, zone);
         return this;
     }
 
     @Override
-    public Configured every(Duration interval) {
+    public PolicySpec every(Duration interval) {
         this.schedule = new IntervalSpec(interval, false);
         return this;
     }
 
     @Override
-    public Configured everyAfterFinish(Duration interval) {
+    public PolicySpec everyAfterFinish(Duration interval) {
         this.schedule = new IntervalSpec(interval, true);
         return this;
     }
 
     @Override
-    public Configured onDemand() {
+    public PolicySpec onDemand() {
         this.schedule = new OnDemandSpec();
         return this;
     }
 
     @Override
-    public Configured runner(String name) {
+    public PolicySpec runner(String name) {
         this.runner = name;
         return this;
     }
 
     @Override
-    public Configured queue(String name) {
+    public PolicySpec queue(String name) {
         this.queue = name;
         return this;
     }
 
     @Override
-    public Configured window(String name) {
+    public PolicySpec window(String name) {
         this.window = name;
         return this;
     }
 
     @Override
-    public Configured misfire(Misfire policy) {
+    public PolicySpec misfire(Misfire policy) {
         this.misfire = Objects.requireNonNull(policy, "policy");
         return this;
     }
 
     @Override
-    public Configured retries(int max) {
+    public PolicySpec retries(int max) {
         this.retries = max;
         return this;
     }
 
     @Override
-    public Configured timeout(Duration timeout) {
+    public PolicySpec timeout(Duration timeout) {
         this.timeout = timeout;
         return this;
     }

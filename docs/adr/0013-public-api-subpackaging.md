@@ -26,7 +26,7 @@ ingênua, porque `io.mohs.engine`/`io.mohs.jdbc` (internos) também
 `io.mohs` público se divide em subpacotes coesos por concern:
 `io.mohs.schedule` (agenda: `Schedule` selado, `Misfire`),
 `io.mohs.definition` (`JobDefinition`, `@MohsJob`, builder staged
-`JobSpec`/`Configured`), `io.mohs.execution` (`Execution`, `Attempt`,
+`JobSpec`/`PolicySpec`), `io.mohs.execution` (`Execution`, `Attempt`,
 `ExecutionState`, `JobContext`, `Priority`), `io.mohs.event`
 (`ExecutionEvent` selado, `ExecutionListener`, `ExecutionInterceptor`,
 `@OnExecution`) e `io.mohs.resource` (`MohsRunner`, `JobQueue`,

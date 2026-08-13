@@ -10,17 +10,17 @@ import io.mohs.schedule.Misfire;
  * runner, queue, window, misfire, retries, timeout — cada uma opcional e
  * ajustável em qualquer ordem.
  */
-public sealed interface Configured permits JobSpecImpl {
+public sealed interface PolicySpec permits JobSpecImpl {
 
-    Configured runner(String name);
+    PolicySpec runner(String name);
 
-    Configured queue(String name);
+    PolicySpec queue(String name);
 
-    Configured window(String name);
+    PolicySpec window(String name);
 
-    Configured misfire(Misfire policy);
+    PolicySpec misfire(Misfire policy);
 
-    Configured retries(int max);
+    PolicySpec retries(int max);
 
-    Configured timeout(Duration timeout);
+    PolicySpec timeout(Duration timeout);
 }
