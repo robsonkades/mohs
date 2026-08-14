@@ -74,7 +74,11 @@ Expectativas que definem "pronto" neste projeto:
 - Um teste só: `./mvnw test -Dtest=NomeDaClasseTest`
 - Benchmarks JMH: [preencher: comando do módulo de benchmark]
 - Harness de carga: [preencher: como rodar o cenário macro do BASELINE.md]
-- Flags úteis: `-Djdk.tracePinnedThreads=short` para diagnosticar pinning
+- Flags úteis: `-Djdk.tracePinnedThreads` foi **removida no JDK 24** (JEP 491) — é
+  no-op silencioso no JDK 25 que o projeto usa. Diagnóstico de pinning hoje é via
+  JFR (`-XX:StartFlightRecording=filename=rec.jfr`, depois `jfr print --events
+  jdk.VirtualThreadPinned rec.jfr`) ou `jcmd <pid> Thread.dump_to_file
+  -format=json <file>` pra inspeção ad-hoc dos carriers.
 
 ## Arquitetura (mapa, não enciclopédia)
 API pública (contratos, M1 — ver `docs/adr/0015-consolidate-public-api-under-core.md`,
@@ -240,9 +244,21 @@ obras — não é leitura de fundo, é critério de revisão:
       `Executors.newVirtualThreadPerTaskExecutor()`. Nunca fixed/cached pool
       para virtual threads.
     - CPU-bound → platform threads com pool limitado (`ForkJoinPool` ou fixed pool).
-- Proibido `synchronized` em caminho que bloqueia (I/O, sleep, lock): causa
-  pinning do carrier. Use `ReentrantLock`; `Object.wait()` → `Condition.await()`.
-- Fan-out estruturado com `StructuredTaskScope`, não chains de `CompletableFuture`.
+- Prefira `ReentrantLock` a `synchronized`/`wait` em caminho concorrencial —
+  não é mais questão de pinning (JEP 491, JDK 24, eliminou o pinning do carrier
+  por `synchronized`/`Object.wait()`; os casos remanescentes são frame nativo/JNI
+  e inicializador de classe), é sobre capacidades que só o lock explícito dá
+  (JCIP cap. 13): `tryLock` com timeout, aquisição interruptível, fairness
+  opcional, múltiplas `Condition`. `Object.wait()` → `Condition.await()`.
+- Fan-out estruturado com `StructuredTaskScope`, não chains de `CompletableFuture`
+  — **quando finalizar** (JEP 505 é preview no JDK 25; class file compilado com
+  `--enable-preview` trava a aplicação hospedeira no JDK exato, inaceitável pra
+  biblioteca embarcada). Até lá, `ExecutorService` + `Future.get(timeout)` +
+  latch/barrier é o padrão aceito — já usado assim em todos os testes de
+  concorrência. Desenhe o poll/dispatch loop de M3 já no formato estruturado
+  (um escopo lógico por ciclo, cancelamento cooperativo descendo pela árvore de
+  subtarefas via `JobContext.cancellationRequested()`) pra migração ser mecânica
+  quando a API finalizar.
 - Limite de concorrência com `Semaphore`, nunca via tamanho de pool.
 - Virtual threads sempre nomeadas: `Thread.ofVirtual().name("mohs-job-", n).factory()`.
 - HikariCP dimensionado para virtual threads: `maximumPoolSize` alto (100+),

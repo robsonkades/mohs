@@ -42,7 +42,7 @@ public final class NextFireCalculator {
         return switch (schedule) {
             case CronSpec cron -> Optional.of(nextCronFire(cron, reference));
             case IntervalSpec interval -> Optional.of(reference.plus(interval.interval()));
-            case OnDemandSpec onDemand -> Optional.empty();
+            case OnDemandSpec _ -> Optional.empty();
         };
     }
 

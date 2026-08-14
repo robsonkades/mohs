@@ -76,8 +76,11 @@ class ArchitectureTest {
             .orShould().callMethod(System.class, "currentTimeMillis");
 
     /**
-     * "Proibido synchronized em caminho que bloqueia... use ReentrantLock"
-     * (CLAUDE.md) — pinning do carrier em virtual threads. Só pega o
+     * "Prefira ReentrantLock a synchronized/wait" (CLAUDE.md) — não é mais
+     * questão de pinning do carrier (JEP 491, JDK 24, eliminou o pinning por
+     * {@code synchronized}/{@code Object.wait()}), é sobre as capacidades que
+     * só o lock explícito dá (JCIP cap. 13: {@code tryLock} com timeout,
+     * aquisição interruptível, {@code Condition} múltiplas). Só pega o
      * modificador {@code synchronized} de método; bloco {@code
      * synchronized(lock) { ... }} não é modelado por ArchUnit (não há
      * inspeção de bytecode ao nível de instrução na API pública) — mesma

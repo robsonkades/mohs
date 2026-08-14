@@ -25,7 +25,7 @@ public final class InMemoryJobStore implements JobStore {
     @Override
     public JobDefinition upsert(JobDefinition definition) {
         Objects.requireNonNull(definition, "definition");
-        jobs.compute(definition.key(), (key, existing) -> {
+        jobs.compute(definition.key(), (_, existing) -> {
             boolean orphaned = existing != null && existing.orphaned();
             boolean paused = existing != null && existing.paused();
             int runningExecutionCount = existing != null ? existing.runningExecutionCount() : 0;
@@ -47,17 +47,17 @@ public final class InMemoryJobStore implements JobStore {
 
     @Override
     public void markOrphaned(JobKey key) {
-        jobs.computeIfPresent(key, (k, stored) -> new StoredJob(stored.definition(), true, stored.paused(), stored.runningExecutionCount()));
+        jobs.computeIfPresent(key, (_, stored) -> new StoredJob(stored.definition(), true, stored.paused(), stored.runningExecutionCount()));
     }
 
     @Override
     public void pause(JobKey key) {
-        jobs.computeIfPresent(key, (k, stored) -> new StoredJob(stored.definition(), stored.orphaned(), true, stored.runningExecutionCount()));
+        jobs.computeIfPresent(key, (_, stored) -> new StoredJob(stored.definition(), stored.orphaned(), true, stored.runningExecutionCount()));
     }
 
     @Override
     public void resume(JobKey key) {
-        jobs.computeIfPresent(key, (k, stored) -> new StoredJob(stored.definition(), stored.orphaned(), false, stored.runningExecutionCount()));
+        jobs.computeIfPresent(key, (_, stored) -> new StoredJob(stored.definition(), stored.orphaned(), false, stored.runningExecutionCount()));
     }
 
     @Override
@@ -69,7 +69,7 @@ public final class InMemoryJobStore implements JobStore {
     public boolean tryIncrementRunningExecutions(JobKey key) {
         Objects.requireNonNull(key, "key");
         boolean[] acquired = {false};
-        jobs.computeIfPresent(key, (k, stored) -> {
+        jobs.computeIfPresent(key, (_, stored) -> {
             if (stored.runningExecutionCount() >= stored.definition().maxConcurrentExecutions()) {
                 return stored;
             }
@@ -82,7 +82,7 @@ public final class InMemoryJobStore implements JobStore {
     @Override
     public void decrementRunningExecutions(JobKey key) {
         Objects.requireNonNull(key, "key");
-        jobs.computeIfPresent(key, (k, stored) -> stored.runningExecutionCount() <= 0
+        jobs.computeIfPresent(key, (_, stored) -> stored.runningExecutionCount() <= 0
                 ? stored
                 : new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), stored.runningExecutionCount() - 1));
     }

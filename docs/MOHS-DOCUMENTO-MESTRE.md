@@ -62,7 +62,12 @@ proibido `synchronized` segurando bloqueio (usar `ReentrantLock`;
 `Object.wait` → `Condition.await`); fan-out com `StructuredTaskScope`;
 threads sempre nomeadas (`mohs-job-N`); HikariCP dimensionado para virtual
 threads (`maximumPoolSize` alto, `connectionTimeout` baixo); validação de
-pinning com `-Djdk.tracePinnedThreads`.
+pinning via JFR (`jdk.VirtualThreadPinned`) — `-Djdk.tracePinnedThreads` foi
+removida no JDK 24 (JEP 491), que também eliminou o pinning por `synchronized`/
+`Object.wait` (os casos remanescentes são frame nativo/JNI e inicializador de
+classe); `ReentrantLock` continua preferível por capacidades de lock explícito
+(JCIP cap. 13: `tryLock` com timeout, interrupção, `Condition` múltiplas), não
+mais por pinning.
 
 Disciplinas de código: testes verdes após cada etapa; trecho sem teste →
 teste primeiro; testes de concorrência determinísticos (latches/Awaitility,
@@ -80,7 +85,9 @@ primeira linha. As 4 fases rodam sobre o que este próprio design produz
 **Fase 0 — Baseline:** roda depois que M3 (§9) entrega uma implementação
 para medir. Suíte completa; benchmark reproduzível (throughput jobs/s com
 I/O simulado; latência trigger→início p50/p99; 10k+ jobs concorrentes; JMH
-micro + harness macro); execução com `-Djdk.tracePinnedThreads=full`; tudo
+micro + harness macro); execução com JFR ligado (`-XX:StartFlightRecording`)
+pra capturar `jdk.VirtualThreadPinned` — `-Djdk.tracePinnedThreads` não existe
+mais no JDK 24+ (JEP 491); tudo
 em `BASELINE.md` — a referência que toda etapa de performance (M4) terá que
 bater.
 

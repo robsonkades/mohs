@@ -36,6 +36,7 @@ import io.mohs.engine.StoredJob;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class JdbcJobStoreTest {
 
@@ -316,6 +317,23 @@ class JdbcJobStoreTest {
         try (Stream<StoredJob> all = store.findAll()) {
             assertThat(all).extracting(job -> job.definition().key()).containsExactly(JobKey.of("still-here"));
         }
+    }
+
+    /** JAVA-4: schedule_type corrompido não pode virar ON_DEMAND em silêncio — mesmo espírito do DUP-3, um valor de lixo tem que ser barulhento, não uma variante válida por acidente. */
+    @Test
+    void findFailsFastOnUnknownScheduleType() {
+        Timestamp now = Timestamp.from(clock.instant());
+        JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_job_definitions (
+                    id, job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
+                VALUES ('corrupt-id', 'corrupt-schedule', ?, 'GARBAGE', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
+                """, Handler.class.getName(), now, now);
+
+        assertThatThrownBy(() -> store.find(JobKey.of("corrupt-schedule")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("GARBAGE")
+                .hasMessageContaining("corrupt-schedule");
     }
 
     /** DUP-3: uma linha com handler não resolvido se torna visível como ORPHANED em vez de simplesmente sumir dos dois lados (find/findAll). */

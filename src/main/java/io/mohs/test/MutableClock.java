@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * {@link Clock} de teste — a implementação "test" das três da ADR-0008.
@@ -16,10 +17,10 @@ import java.util.Objects;
 public final class MutableClock extends Clock {
 
     private final ZoneId zone;
-    private volatile Instant now;
+    private final AtomicReference<Instant> now;
 
     public MutableClock(Instant initial, ZoneId zone) {
-        this.now = Objects.requireNonNull(initial, "initial");
+        this.now = new AtomicReference<>(Objects.requireNonNull(initial, "initial"));
         this.zone = Objects.requireNonNull(zone, "zone");
     }
 
@@ -28,12 +29,13 @@ public final class MutableClock extends Clock {
     }
 
     public void setTo(Instant instant) {
-        this.now = Objects.requireNonNull(instant, "instant");
+        now.set(Objects.requireNonNull(instant, "instant"));
     }
 
+    /** JAVA-9: {@code updateAndGet} torna o avanço atômico — dois {@code advance} concorrentes não perdem incremento (JCIP §2.2, mesma correção do CONC-3 no {@code DatabaseClock}). */
     public void advance(Duration duration) {
         Objects.requireNonNull(duration, "duration");
-        this.now = this.now.plus(duration);
+        now.updateAndGet(current -> current.plus(duration));
     }
 
     @Override
@@ -44,11 +46,11 @@ public final class MutableClock extends Clock {
     @Override
     public Clock withZone(ZoneId zone) {
         Objects.requireNonNull(zone, "zone");
-        return new MutableClock(now, zone);
+        return new MutableClock(now.get(), zone);
     }
 
     @Override
     public Instant instant() {
-        return now;
+        return now.get();
     }
 }

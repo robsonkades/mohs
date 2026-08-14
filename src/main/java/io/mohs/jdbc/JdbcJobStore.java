@@ -55,24 +55,25 @@ public final class JdbcJobStore implements JobStore {
     private final Clock clock;
 
     public JdbcJobStore(DataSource dataSource, Clock clock) {
-        this.jdbcTemplate = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
+        this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     @Override
     public JobDefinition upsert(JobDefinition definition) {
         Objects.requireNonNull(definition, "definition");
-        Timestamp now = Timestamp.from(clock.instant());
+        Timestamp now = JdbcTimestamps.toUtcTimestamp(clock.instant());
 
+        ScheduleColumns scheduleColumns = ScheduleColumns.of(definition.schedule());
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("jobKey", definition.key().value())
                 .addValue("name", definition.name())
                 .addValue("handlerType", definition.handlerType().getName())
                 .addValue("scheduleType", scheduleType(definition.schedule()))
-                .addValue("cronExpression", definition.schedule() instanceof CronSpec cron ? cron.expression() : null)
-                .addValue("cronZone", definition.schedule() instanceof CronSpec cron ? cron.zone().getId() : null)
-                .addValue("intervalDuration", definition.schedule() instanceof IntervalSpec interval ? interval.interval().toString() : null)
-                .addValue("intervalAfterFinish", definition.schedule() instanceof IntervalSpec interval ? interval.afterFinish() : null)
+                .addValue("cronExpression", scheduleColumns.cronExpression())
+                .addValue("cronZone", scheduleColumns.cronZone())
+                .addValue("intervalDuration", scheduleColumns.intervalDuration())
+                .addValue("intervalAfterFinish", scheduleColumns.intervalAfterFinish())
                 .addValue("runner", definition.runner())
                 .addValue("windowName", definition.window())
                 .addValue("misfire", definition.misfire().name())
@@ -127,7 +128,7 @@ public final class JdbcJobStore implements JobStore {
                             :orphaned, :paused, :runningExecutionCount, :createdAt, :updatedAt)
                         """, params.addValue("id", id).addValue("createdAt", now)
                                 .addValue("orphaned", false).addValue("paused", false).addValue("runningExecutionCount", 0));
-            } catch (DuplicateKeyException e) {
+            } catch (DuplicateKeyException _) {
                 jdbcTemplate.update(updateSql, params);
             }
         }
@@ -217,10 +218,29 @@ public final class JdbcJobStore implements JobStore {
 
     private static String scheduleType(Schedule schedule) {
         return switch (schedule) {
-            case CronSpec cron -> "CRON";
-            case IntervalSpec interval -> "INTERVAL";
-            case OnDemandSpec onDemand -> "ON_DEMAND";
+            case CronSpec _ -> "CRON";
+            case IntervalSpec _ -> "INTERVAL";
+            case OnDemandSpec _ -> "ON_DEMAND";
         };
+    }
+
+    /**
+     * As quatro colunas de agenda de {@code upsert} extraídas num switch
+     * exaustivo único (JAVA-7) em vez de quatro testes {@code instanceof}
+     * independentes — uma variante nova de {@link Schedule} quebra a
+     * compilação aqui, igual já acontecia em {@link #scheduleType}, em vez
+     * de virar quatro colunas {@code null} em silêncio.
+     */
+    private record ScheduleColumns(@Nullable String cronExpression, @Nullable String cronZone,
+                                    @Nullable String intervalDuration, @Nullable Boolean intervalAfterFinish) {
+
+        static ScheduleColumns of(Schedule schedule) {
+            return switch (schedule) {
+                case CronSpec cron -> new ScheduleColumns(cron.expression(), cron.zone().getId(), null, null);
+                case IntervalSpec interval -> new ScheduleColumns(null, null, interval.interval().toString(), interval.afterFinish());
+                case OnDemandSpec _ -> new ScheduleColumns(null, null, null, null);
+            };
+        }
     }
 
     /**
@@ -241,10 +261,12 @@ public final class JdbcJobStore implements JobStore {
             return null;
         }
 
-        Schedule schedule = switch (rs.getString("schedule_type")) {
+        String scheduleType = rs.getString("schedule_type");
+        Schedule schedule = switch (scheduleType) {
             case "CRON" -> new CronSpec(rs.getString("cron_expression"), ZoneId.of(rs.getString("cron_zone")));
             case "INTERVAL" -> new IntervalSpec(Duration.parse(rs.getString("interval_duration")), rs.getBoolean("interval_after_finish"));
-            default -> new OnDemandSpec();
+            case "ON_DEMAND" -> new OnDemandSpec();
+            default -> throw new IllegalStateException("unknown schedule_type '" + scheduleType + "' for job '" + jobKey + "'");
         };
 
         String timeoutValue = rs.getString("timeout");
