@@ -20,6 +20,19 @@
  * {@code io.mohs.rest.execution}, {@code io.mohs.rest.batch},
  * {@code io.mohs.rest.ratelimit}, {@code io.mohs.rest.runner},
  * {@code io.mohs.rest.node}.
+ *
+ * <p>Convenção de sufixo de DTO — {@code *Response} é o default, usado tanto
+ * para o corpo direto de um endpoint quanto para um DTO aninhado dentro de
+ * outro (ex. {@link io.mohs.rest.execution.AttemptResponse}, aninhado em
+ * {@code ExecutionResponse.attempts()} — aninhamento não é o critério que
+ * decide o sufixo). {@code *View} fica reservado para dois casos: a
+ * wire-adaptação de um tipo {@code sealed} do domínio, espelhando suas
+ * variantes 1:1 (ex. {@link io.mohs.rest.job.ScheduleView}, que espelha
+ * {@link io.mohs.core.schedule.Schedule}), ou uma projeção computada sem
+ * entidade correspondente em {@code io.mohs.core} (ex.
+ * {@link io.mohs.rest.overview.ThroughputView} — não existe um tipo
+ * {@code Throughput} no domínio). Fora desses dois casos, todo DTO novo usa
+ * {@code *Response}.
  */
 @NullMarked
 package io.mohs.rest;
