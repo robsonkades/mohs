@@ -90,6 +90,27 @@ public final class JdbcExecutionStore implements ExecutionStore {
     }
 
     @Override
+    public Optional<Object> findPayload(ExecutionId id) {
+        Objects.requireNonNull(id, "id");
+        return JdbcSupport.findOne(jdbcTemplate,
+                "SELECT payload, payload_type FROM mohs_executions WHERE id = :id",
+                new MapSqlParameterSource("id", id.value()),
+                this::mapPayloadRow);
+    }
+
+    private Object mapPayloadRow(ResultSet rs) throws SQLException {
+        String payloadJson = rs.getString("payload");
+        String payloadType = rs.getString("payload_type");
+        Class<?> type;
+        try {
+            type = Class.forName(payloadType);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalStateException("payload type '" + payloadType + "' not found on classpath", e);
+        }
+        return objectMapper.readValue(payloadJson, type);
+    }
+
+    @Override
     public void markFired(ExecutionId id, Instant firedAt) {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(firedAt, "firedAt");

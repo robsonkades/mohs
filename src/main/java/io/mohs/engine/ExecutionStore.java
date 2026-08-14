@@ -27,8 +27,9 @@ import io.mohs.core.job.JobKey;
  * entidade só (ADR-0016/ADR-0018/ADR-0020). {@link #complete} é a
  * transição de conclusão (ADR-0024): toca só {@code mohs_executions} +
  * {@code mohs_attempts}, dono natural é esta porta. Payload não é campo
- * de {@link Execution} (não é parte do contrato M1); carregá-lo de volta
- * pra dispatch é decisão de quem consome, não desta porta.
+ * de {@link Execution} (não é parte do contrato M1) — {@link #insert}
+ * grava, {@link #findPayload} lê de volta; nenhum outro método desta
+ * porta o expõe.
  */
 public interface ExecutionStore {
 
@@ -36,6 +37,16 @@ public interface ExecutionStore {
     Execution insert(Execution execution, Object payload);
 
     Optional<Execution> find(ExecutionId id);
+
+    /**
+     * Reconstitui o payload gravado por {@link #insert} — o único jeito de
+     * {@link Engine} obter o que passar pra {@link Dispatcher#dispatch}.
+     * Vazio se a execução não existir; lança se a classe do payload
+     * (coluna {@code payload_type}) sumiu do classpath — {@link Engine}
+     * trata isso como falha terminal da execução, não deixa o ciclo
+     * inteiro cair por causa de uma execução com payload corrompido.
+     */
+    Optional<Object> findPayload(ExecutionId id);
 
     /**
      * Grava {@code fired_at} — metadado, não transição de estado (sem CAS
