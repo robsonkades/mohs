@@ -76,7 +76,7 @@ public final class JdbcReaper implements Reaper {
 
     private List<Execution> reclaimWithinTransaction() {
         Instant now = clock.instant();
-        List<Candidate> candidates = selectExpiredCandidates(now);
+        List<ExpiredCandidate> candidates = selectExpiredCandidates(now);
         if (candidates.isEmpty()) {
             return List.of();
         }
@@ -86,7 +86,7 @@ public final class JdbcReaper implements Reaper {
 
         Map<String, Attempt> synthesizedAttemptById = new HashMap<>();
         List<ExecutionStore.CompletionRequest> requests = new ArrayList<>(candidates.size());
-        for (Candidate candidate : candidates) {
+        for (ExpiredCandidate candidate : candidates) {
             Execution execution = executionsById.get(candidate.id());
             if (execution == null) {
                 throw new IllegalStateException("candidate " + candidate.id() + " vanished during reclaim — should be unreachable");
@@ -107,10 +107,10 @@ public final class JdbcReaper implements Reaper {
     }
 
     /** Reconstrói o resultado localmente (sem consulta extra) — {@link ExecutionStore#completeAll} só confirma quais ids venceram o CAS. */
-    private static List<Execution> buildReclaimedList(List<Candidate> candidates, Map<String, Execution> executionsById,
+    private static List<Execution> buildReclaimedList(List<ExpiredCandidate> candidates, Map<String, Execution> executionsById,
             Map<String, Attempt> synthesizedAttemptById, Set<ExecutionId> completedIds) {
         List<Execution> reclaimed = new ArrayList<>(completedIds.size());
-        for (Candidate candidate : candidates) {
+        for (ExpiredCandidate candidate : candidates) {
             ExecutionId id = ExecutionId.of(candidate.id());
             if (!completedIds.contains(id)) {
                 continue;
@@ -124,13 +124,13 @@ public final class JdbcReaper implements Reaper {
         return reclaimed;
     }
 
-    private List<Candidate> selectExpiredCandidates(Instant now) {
+    private List<ExpiredCandidate> selectExpiredCandidates(Instant now) {
         return jdbcTemplate.query(
                 "SELECT id, job_key FROM mohs_executions WHERE state = 'RUNNING' AND lease_expires_at < :now",
                 new MapSqlParameterSource("now", JdbcTimestamps.toUtcTimestamp(now)),
-                (rs, _) -> new Candidate(rs.getString("id"), rs.getString("job_key")));
+                (rs, _) -> new ExpiredCandidate(rs.getString("id"), rs.getString("job_key")));
     }
 
-    private record Candidate(String id, String jobKey) {
+    private record ExpiredCandidate(String id, String jobKey) {
     }
 }
