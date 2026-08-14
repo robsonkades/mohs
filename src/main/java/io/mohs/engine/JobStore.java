@@ -35,4 +35,26 @@ public interface JobStore {
 
     /** Aposentadoria explícita ({@code Mohs#remove}) — só pra definições {@code PROGRAMMATIC}. */
     void remove(JobKey key);
+
+    /**
+     * Reserva uma vaga de execução concorrente se {@code
+     * runningExecutionCount < maxConcurrentExecutions} — incremento atômico
+     * guardado, mesma disciplina de {@link QueueStore#tryIncrementRunning}
+     * (ADR-0018/0020). Chamado pelo claim, candidato a candidato, dentro da
+     * mesma transação.
+     *
+     * @return {@code true} se reservou a vaga; {@code false} se o job já
+     *         está no teto (candidato fica de fora deste batch de claim).
+     */
+    boolean tryIncrementRunningExecutions(JobKey key);
+
+    /**
+     * Devolve uma vaga reservada por engano — usado dentro da própria
+     * transação de claim quando um candidato reserva a vaga mas não chega a
+     * ser efetivamente reivindicado. Guardado contra contagem negativa;
+     * mesma disciplina de {@link QueueStore#decrementRunning}. Não é o
+     * decremento de conclusão de execução (etapa de dispatch, ainda não
+     * implementada).
+     */
+    void decrementRunningExecutions(JobKey key);
 }

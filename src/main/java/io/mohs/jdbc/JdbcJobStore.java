@@ -76,6 +76,7 @@ public final class JdbcJobStore implements JobStore {
                 .addValue("windowName", definition.window())
                 .addValue("misfire", definition.misfire().name())
                 .addValue("allowConcurrentExecutions", definition.allowConcurrentExecutions())
+                .addValue("maxConcurrentExecutions", definition.maxConcurrentExecutions())
                 .addValue("retries", definition.retries())
                 .addValue("timeout", definition.timeout() == null ? null : definition.timeout().toString())
                 .addValue("retryPolicy", definition.retryPolicy())
@@ -96,6 +97,7 @@ public final class JdbcJobStore implements JobStore {
                     interval_duration = :intervalDuration, interval_after_finish = :intervalAfterFinish,
                     runner = :runner, queue_name = :queueName, window_name = :windowName,
                     misfire = :misfire, allow_concurrent_executions = :allowConcurrentExecutions,
+                    max_concurrent_executions = :maxConcurrentExecutions,
                     retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
                     source = :source, updated_at = :updatedAt
                 WHERE job_key = :jobKey
@@ -108,13 +110,15 @@ public final class JdbcJobStore implements JobStore {
                         INSERT INTO mohs_job_definitions (
                             job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
                             interval_duration, interval_after_finish, runner, queue_name, window_name,
-                            misfire, allow_concurrent_executions, retries, timeout, retry_policy, source,
-                            orphaned, paused, created_at, updated_at)
+                            misfire, allow_concurrent_executions, max_concurrent_executions, retries,
+                            timeout, retry_policy, source,
+                            orphaned, paused, running_execution_count, created_at, updated_at)
                         VALUES (
                             :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
                             :intervalDuration, :intervalAfterFinish, :runner, :queueName, :windowName,
-                            :misfire, :allowConcurrentExecutions, :retries, :timeout, :retryPolicy, :source,
-                            FALSE, FALSE, :createdAt, :updatedAt)
+                            :misfire, :allowConcurrentExecutions, :maxConcurrentExecutions, :retries,
+                            :timeout, :retryPolicy, :source,
+                            FALSE, FALSE, 0, :createdAt, :updatedAt)
                         """, params.addValue("createdAt", now));
             } catch (DuplicateKeyException e) {
                 jdbcTemplate.update(updateSql, params);
@@ -185,6 +189,25 @@ public final class JdbcJobStore implements JobStore {
                 new MapSqlParameterSource("jobKey", key.value()));
     }
 
+    @Override
+    public boolean tryIncrementRunningExecutions(JobKey key) {
+        Objects.requireNonNull(key, "key");
+        int updated = jdbcTemplate.update(
+                "UPDATE mohs_job_definitions SET running_execution_count = running_execution_count + 1 "
+                      + "WHERE job_key = :jobKey AND running_execution_count < max_concurrent_executions",
+                new MapSqlParameterSource("jobKey", key.value()));
+        return updated == 1;
+    }
+
+    @Override
+    public void decrementRunningExecutions(JobKey key) {
+        Objects.requireNonNull(key, "key");
+        jdbcTemplate.update(
+                "UPDATE mohs_job_definitions SET running_execution_count = running_execution_count - 1 "
+                      + "WHERE job_key = :jobKey AND running_execution_count > 0",
+                new MapSqlParameterSource("jobKey", key.value()));
+    }
+
     private static String scheduleType(Schedule schedule) {
         return switch (schedule) {
             case CronSpec cron -> "CRON";
@@ -220,17 +243,14 @@ public final class JdbcJobStore implements JobStore {
         String timeoutValue = rs.getString("timeout");
         Duration timeout = timeoutValue == null ? null : Duration.parse(timeoutValue);
 
-        boolean allowConcurrentExecutions = rs.getBoolean("allow_concurrent_executions");
-        // derivado, não persistido ainda — max_concurrent_executions chega numa
-        // etapa seguinte; até lá, allow=false sempre significou mutex de N=1.
-        int maxConcurrentExecutions = allowConcurrentExecutions ? 0 : 1;
         JobDefinition definition = new JobDefinition(
                 JobKey.of(jobKey), rs.getString("name"), handlerType, schedule,
                 rs.getString("runner"), rs.getString("queue_name"), rs.getString("window_name"),
-                Misfire.valueOf(rs.getString("misfire")), allowConcurrentExecutions, maxConcurrentExecutions,
+                Misfire.valueOf(rs.getString("misfire")), rs.getBoolean("allow_concurrent_executions"),
+                rs.getInt("max_concurrent_executions"),
                 rs.getInt("retries"), timeout, rs.getString("retry_policy"),
                 DefinitionSource.valueOf(rs.getString("source")));
 
-        return new StoredJob(definition, rs.getBoolean("orphaned"), rs.getBoolean("paused"));
+        return new StoredJob(definition, rs.getBoolean("orphaned"), rs.getBoolean("paused"), rs.getInt("running_execution_count"));
     }
 }

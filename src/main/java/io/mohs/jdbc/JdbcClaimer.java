@@ -23,8 +23,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.job.JobKey;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.ExecutionStore;
+import io.mohs.engine.JobStore;
 import io.mohs.engine.QueueStore;
 
 /**
@@ -43,15 +45,20 @@ import io.mohs.engine.QueueStore;
  * SKIP LOCKED} continua existindo, mas só como otimização (reduz quantos
  * candidatos perdedores fazem trabalho à toa) — a garantia de corretude
  * real vem inteiramente de uma cadeia de {@code UPDATE} guardados
- * ({@link #tryAcquireJobMutex}, {@link QueueStore#tryIncrementRunning},
- * {@link #tryTransitionToRunning}), cada um atômico por construção porque
- * é uma escrita simples, não uma leitura com lock especializado. Motivo:
- * {@code SELECT ... FOR UPDATE SKIP LOCKED} do H2 2.4.240 tem uma corrida
- * real sob contenção genuína — confirmado empiricamente (duas conexões
- * JDBC cruas, sem nenhum código Spring, disputando a MESMA linha via
- * barrier: ~33% das vezes as duas obtêm o lock). Travar só {@code e}
- * (não mais {@code j}) também resolve o custo que jobs com
- * {@code allowConcurrentExecutions = true} pagavam à toa na ADR-0017.
+ * ({@link JobStore#tryIncrementRunningExecutions}, {@link
+ * QueueStore#tryIncrementRunning}, {@link #tryTransitionToRunning}), cada
+ * um atômico por construção porque é uma escrita simples, não uma leitura
+ * com lock especializado. Motivo: {@code SELECT ... FOR UPDATE SKIP
+ * LOCKED} do H2 2.4.240 tem uma corrida real sob contenção genuína —
+ * confirmado empiricamente (duas conexões JDBC cruas, sem nenhum código
+ * Spring, disputando a MESMA linha via barrier: ~33% das vezes as duas
+ * obtêm o lock). Travar só {@code e} (não mais {@code j}) também resolve o
+ * custo que jobs com {@code allowConcurrentExecutions = true} pagavam à
+ * toa na ADR-0017. A ADR-0020 generaliza o mutex de "um dono" pra um
+ * contador com teto ({@link JobStore#tryIncrementRunningExecutions}/
+ * {@link JobStore#decrementRunningExecutions}) — mesmo mecanismo, mesma
+ * disciplina de CAS guardado, agora reaproveitando {@link JobStore} em vez
+ * de SQL cru local (mesma forma que {@link QueueStore} já tinha).
  */
 public final class JdbcClaimer implements Claimer {
 
@@ -59,15 +66,17 @@ public final class JdbcClaimer implements Claimer {
     private final TransactionTemplate transactionTemplate;
     private final Clock clock;
     private final ExecutionStore executionStore;
+    private final JobStore jobStore;
     private final QueueStore queueStore;
     private final Duration leaseTtl;
 
-    public JdbcClaimer(DataSource dataSource, Clock clock, ExecutionStore executionStore, QueueStore queueStore, Duration leaseTtl) {
+    public JdbcClaimer(DataSource dataSource, Clock clock, ExecutionStore executionStore, JobStore jobStore, QueueStore queueStore, Duration leaseTtl) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         this.clock = Objects.requireNonNull(clock, "clock");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
+        this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.queueStore = Objects.requireNonNull(queueStore, "queueStore");
         this.leaseTtl = Objects.requireNonNull(leaseTtl, "leaseTtl");
     }
@@ -122,19 +131,19 @@ public final class JdbcClaimer implements Claimer {
      * candidato que no fim não foi reivindicado.
      */
     private boolean tryClaimCandidate(Candidate candidate, String nodeId, Instant leaseExpiresAt) {
-        boolean acquiredJobMutex = false;
+        boolean acquiredJobSlot = false;
         if (!candidate.allowConcurrentExecutions()) {
-            if (!tryAcquireJobMutex(candidate.jobKey(), candidate.id())) {
+            if (!jobStore.tryIncrementRunningExecutions(JobKey.of(candidate.jobKey()))) {
                 return false;
             }
-            acquiredJobMutex = true;
+            acquiredJobSlot = true;
         }
 
         boolean acquiredQueueSlot = false;
         if (candidate.queueName() != null) {
             if (!queueStore.tryIncrementRunning(candidate.queueName())) {
-                if (acquiredJobMutex) {
-                    releaseJobMutex(candidate.jobKey(), candidate.id());
+                if (acquiredJobSlot) {
+                    jobStore.decrementRunningExecutions(JobKey.of(candidate.jobKey()));
                 }
                 return false;
             }
@@ -143,30 +152,14 @@ public final class JdbcClaimer implements Claimer {
 
         boolean claimed = tryTransitionToRunning(candidate.id(), nodeId, leaseExpiresAt);
         if (!claimed) {
-            if (acquiredJobMutex) {
-                releaseJobMutex(candidate.jobKey(), candidate.id());
+            if (acquiredJobSlot) {
+                jobStore.decrementRunningExecutions(JobKey.of(candidate.jobKey()));
             }
             if (acquiredQueueSlot) {
                 queueStore.decrementRunning(candidate.queueName());
             }
         }
         return claimed;
-    }
-
-    /** CAS de mutex por job (ADR-0018) — 0 linhas afetadas = outra execução deste job já segura a vaga. */
-    private boolean tryAcquireJobMutex(String jobKey, String executionId) {
-        int updated = jdbcTemplate.update(
-                "UPDATE mohs_job_definitions SET running_execution_id = :executionId "
-                      + "WHERE job_key = :jobKey AND running_execution_id IS NULL",
-                new MapSqlParameterSource().addValue("executionId", executionId).addValue("jobKey", jobKey));
-        return updated == 1;
-    }
-
-    private void releaseJobMutex(String jobKey, String executionId) {
-        jdbcTemplate.update(
-                "UPDATE mohs_job_definitions SET running_execution_id = NULL "
-                      + "WHERE job_key = :jobKey AND running_execution_id = :executionId",
-                new MapSqlParameterSource().addValue("jobKey", jobKey).addValue("executionId", executionId));
     }
 
     /** CAS final pra RUNNING — a garantia real contra double-claim, independente do lock do SELECT. */
@@ -193,7 +186,7 @@ public final class JdbcClaimer implements Claimer {
                 JOIN mohs_job_definitions j ON j.job_key = e.job_key
                 WHERE e.state = 'ENQUEUED'
                   AND e.scheduled_at <= :now
-                  AND (j.allow_concurrent_executions = TRUE OR j.running_execution_id IS NULL)
+                  AND (j.allow_concurrent_executions = TRUE OR j.running_execution_count < j.max_concurrent_executions)
                 ORDER BY
                   CASE e.priority
                     WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4 WHEN 'NORMAL' THEN 3

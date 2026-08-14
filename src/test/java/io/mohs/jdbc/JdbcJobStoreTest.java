@@ -12,6 +12,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import javax.sql.DataSource;
@@ -71,6 +73,10 @@ class JdbcJobStoreTest {
             };
             policySpec.runner("io").queue("emails").retries(3);
         });
+    }
+
+    private static JobDefinition definitionWithCap(String id, int max) {
+        return JobDefinition.of(id, Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(max));
     }
 
     @Test
@@ -195,6 +201,77 @@ class JdbcJobStoreTest {
         assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
 
         assertThat(store.find(JobKey.of("welcome-email"))).map(StoredJob::definition).contains(definitionToRegister);
+    }
+
+    @Test
+    void upsertRoundTripsMaxConcurrentExecutionsAndStartsWithZeroRunning() {
+        store.upsert(definitionWithCap("report-summary", 10));
+
+        StoredJob stored = store.find(JobKey.of("report-summary")).orElseThrow();
+
+        assertThat(stored.definition().maxConcurrentExecutions()).isEqualTo(10);
+        assertThat(stored.runningExecutionCount()).isZero();
+    }
+
+    @Test
+    void tryIncrementRunningExecutionsReservesASlotWhenBelowLimit() {
+        store.upsert(definitionWithCap("report-summary", 2));
+        JobKey key = JobKey.of("report-summary");
+
+        assertThat(store.tryIncrementRunningExecutions(key)).isTrue();
+
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(1);
+    }
+
+    @Test
+    void tryIncrementRunningExecutionsFailsWhenAtLimit() {
+        store.upsert(definitionWithCap("report-summary", 1));
+        JobKey key = JobKey.of("report-summary");
+        assertThat(store.tryIncrementRunningExecutions(key)).isTrue();
+
+        assertThat(store.tryIncrementRunningExecutions(key)).isFalse();
+
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(1);
+    }
+
+    @Test
+    void tryIncrementRunningExecutionsIsAtomicUnderConcurrentContention() throws InterruptedException {
+        store.upsert(definitionWithCap("report-summary", 10));
+        JobKey key = JobKey.of("report-summary");
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        AtomicInteger accepted = new AtomicInteger();
+
+        IntStream.range(0, 100).forEach(i -> executor.submit(() -> {
+            if (store.tryIncrementRunningExecutions(key)) {
+                accepted.incrementAndGet();
+            }
+        }));
+        executor.shutdown();
+        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(accepted.get()).isEqualTo(10);
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(10);
+    }
+
+    @Test
+    void decrementRunningExecutionsReleasesAReservedSlot() {
+        store.upsert(definitionWithCap("report-summary", 2));
+        JobKey key = JobKey.of("report-summary");
+        store.tryIncrementRunningExecutions(key);
+
+        store.decrementRunningExecutions(key);
+
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(0);
+    }
+
+    @Test
+    void decrementRunningExecutionsNeverGoesBelowZero() {
+        store.upsert(definitionWithCap("report-summary", 2));
+        JobKey key = JobKey.of("report-summary");
+
+        store.decrementRunningExecutions(key);
+
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(0);
     }
 
     @Test

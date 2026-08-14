@@ -24,6 +24,10 @@ class InMemoryJobStoreTest {
         return JobDefinition.of(id, Handler.class, spec -> spec.onDemand().runner("io"));
     }
 
+    private static JobDefinition definitionWithCap(String id, int max) {
+        return JobDefinition.of(id, Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(max));
+    }
+
     private final InMemoryJobStore store = new InMemoryJobStore();
 
     @Test
@@ -116,5 +120,52 @@ class InMemoryJobStoreTest {
         store.markOrphaned(JobKey.of("ghost"));
 
         assertThat(store.find(JobKey.of("ghost"))).isEmpty();
+    }
+
+    @Test
+    void tryIncrementRunningExecutionsReservesASlotWhenBelowLimit() {
+        store.upsert(definitionWithCap("report-summary", 2));
+        JobKey key = JobKey.of("report-summary");
+
+        assertThat(store.tryIncrementRunningExecutions(key)).isTrue();
+
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(1);
+    }
+
+    @Test
+    void tryIncrementRunningExecutionsFailsWhenAtLimit() {
+        store.upsert(definitionWithCap("report-summary", 1));
+        JobKey key = JobKey.of("report-summary");
+        assertThat(store.tryIncrementRunningExecutions(key)).isTrue();
+
+        assertThat(store.tryIncrementRunningExecutions(key)).isFalse();
+
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(1);
+    }
+
+    @Test
+    void tryIncrementRunningExecutionsOnUnknownKeyIsANoOp() {
+        assertThat(store.tryIncrementRunningExecutions(JobKey.of("ghost"))).isFalse();
+    }
+
+    @Test
+    void decrementRunningExecutionsReleasesAReservedSlot() {
+        store.upsert(definitionWithCap("report-summary", 2));
+        JobKey key = JobKey.of("report-summary");
+        store.tryIncrementRunningExecutions(key);
+
+        store.decrementRunningExecutions(key);
+
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(0);
+    }
+
+    @Test
+    void decrementRunningExecutionsNeverGoesBelowZero() {
+        store.upsert(definitionWithCap("report-summary", 2));
+        JobKey key = JobKey.of("report-summary");
+
+        store.decrementRunningExecutions(key);
+
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(0);
     }
 }

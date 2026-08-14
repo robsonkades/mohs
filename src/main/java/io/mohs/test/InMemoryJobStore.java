@@ -28,7 +28,8 @@ public final class InMemoryJobStore implements JobStore {
         jobs.compute(definition.key(), (key, existing) -> {
             boolean orphaned = existing != null && existing.orphaned();
             boolean paused = existing != null && existing.paused();
-            return new StoredJob(definition, orphaned, paused);
+            int runningExecutionCount = existing != null ? existing.runningExecutionCount() : 0;
+            return new StoredJob(definition, orphaned, paused, runningExecutionCount);
         });
         return definition;
     }
@@ -46,21 +47,43 @@ public final class InMemoryJobStore implements JobStore {
 
     @Override
     public void markOrphaned(JobKey key) {
-        jobs.computeIfPresent(key, (k, stored) -> new StoredJob(stored.definition(), true, stored.paused()));
+        jobs.computeIfPresent(key, (k, stored) -> new StoredJob(stored.definition(), true, stored.paused(), stored.runningExecutionCount()));
     }
 
     @Override
     public void pause(JobKey key) {
-        jobs.computeIfPresent(key, (k, stored) -> new StoredJob(stored.definition(), stored.orphaned(), true));
+        jobs.computeIfPresent(key, (k, stored) -> new StoredJob(stored.definition(), stored.orphaned(), true, stored.runningExecutionCount()));
     }
 
     @Override
     public void resume(JobKey key) {
-        jobs.computeIfPresent(key, (k, stored) -> new StoredJob(stored.definition(), stored.orphaned(), false));
+        jobs.computeIfPresent(key, (k, stored) -> new StoredJob(stored.definition(), stored.orphaned(), false, stored.runningExecutionCount()));
     }
 
     @Override
     public void remove(JobKey key) {
         jobs.remove(key);
+    }
+
+    @Override
+    public boolean tryIncrementRunningExecutions(JobKey key) {
+        Objects.requireNonNull(key, "key");
+        boolean[] acquired = {false};
+        jobs.computeIfPresent(key, (k, stored) -> {
+            if (stored.runningExecutionCount() >= stored.definition().maxConcurrentExecutions()) {
+                return stored;
+            }
+            acquired[0] = true;
+            return new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), stored.runningExecutionCount() + 1);
+        });
+        return acquired[0];
+    }
+
+    @Override
+    public void decrementRunningExecutions(JobKey key) {
+        Objects.requireNonNull(key, "key");
+        jobs.computeIfPresent(key, (k, stored) -> stored.runningExecutionCount() <= 0
+                ? stored
+                : new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), stored.runningExecutionCount() - 1));
     }
 }

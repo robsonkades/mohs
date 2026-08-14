@@ -31,7 +31,9 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.job.JobKey;
 import io.mohs.core.resource.JobQueue;
+import io.mohs.engine.StoredJob;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -49,6 +51,7 @@ class JdbcClaimerTest {
     private MutableClock clock;
     private JdbcTemplate rawJdbcTemplate;
     private JdbcExecutionStore executionStore;
+    private JdbcJobStore jobStore;
     private JdbcQueueStore queueStore;
     private JdbcClaimer claimer;
 
@@ -58,12 +61,13 @@ class JdbcClaimerTest {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+        jobStore = new JdbcJobStore(dataSource, clock);
         queueStore = new JdbcQueueStore(dataSource);
         claimer = newClaimer();
     }
 
     private JdbcClaimer newClaimer() {
-        return new JdbcClaimer(dataSource, clock, executionStore, queueStore, LEASE_TTL);
+        return new JdbcClaimer(dataSource, clock, executionStore, jobStore, queueStore, LEASE_TTL);
     }
 
     private static DataSource freshH2DataSource() {
@@ -76,8 +80,7 @@ class JdbcClaimerTest {
     }
 
     private void seedJob(String jobKey, Consumer<PolicySpec> policyConfigurer) {
-        new JdbcJobStore(dataSource, clock).upsert(
-                JobDefinition.of(jobKey, Handler.class, spec -> policyConfigurer.accept(spec.onDemand())));
+        jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> policyConfigurer.accept(spec.onDemand())));
     }
 
     private void seedExecution(String id, String jobKey, Instant scheduledAt) {
@@ -240,9 +243,28 @@ class JdbcClaimerTest {
 
         assertThat(claimed).isEmpty();
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.ENQUEUED);
-        String runningExecutionId = rawJdbcTemplate.queryForObject(
-                "SELECT running_execution_id FROM mohs_job_definitions WHERE job_key = ?", String.class, "welcome-email");
-        assertThat(runningExecutionId).isNull();
+        assertThat(jobStore.find(JobKey.of("welcome-email"))).map(StoredJob::runningExecutionCount).contains(0);
+    }
+
+    @Test
+    void claimStopsAtMaxConcurrentExecutionsButAllowsMoreAfterOneIsReleased() {
+        seedJob("report-summary", policy -> policy.maxConcurrentExecutions(3));
+        for (int i = 0; i < 5; i++) {
+            seedExecution("exec-" + i, "report-summary", NOW.minusSeconds(5 - i));
+        }
+
+        List<Execution> claimed = claimer.claim("node-a", 10);
+
+        assertThat(claimed).hasSize(3);
+        assertThat(claimed).extracting(e -> e.id().value()).containsExactly("exec-0", "exec-1", "exec-2");
+        assertThat(stateOf("exec-3")).isEqualTo(ExecutionState.ENQUEUED);
+        assertThat(stateOf("exec-4")).isEqualTo(ExecutionState.ENQUEUED);
+
+        assertThat(claimer.claim("node-a", 10)).isEmpty();
+
+        jobStore.decrementRunningExecutions(JobKey.of("report-summary"));
+        List<Execution> claimedAfterRelease = claimer.claim("node-a", 10);
+        assertThat(claimedAfterRelease).extracting(e -> e.id().value()).containsExactly("exec-3");
     }
 
     @Test
@@ -253,8 +275,8 @@ class JdbcClaimerTest {
     /**
      * O teste mais importante desta etapa: duas transações concorrentes
      * disputando siblings do mesmo job com {@code preventOverlap()} ligado.
-     * O CAS em {@code running_execution_id} (ADR-0018) garante que, seja
-     * qual for o entrelaçamento, exatamente uma sobrevive — nunca duas
+     * O CAS em {@code running_execution_count} (ADR-0018/0020) garante que,
+     * seja qual for o entrelaçamento, exatamente uma sobrevive — nunca duas
      * {@code RUNNING} ao mesmo tempo, nunca as duas ficam de fora.
      */
     @Test

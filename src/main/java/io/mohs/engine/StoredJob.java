@@ -9,10 +9,15 @@ import io.mohs.core.definition.JobDefinition;
  * distingue do definicional — {@code orphaned}/{@code paused} não são
  * campos de {@link JobDefinition} de propósito (upsert nunca os toca);
  * este tipo só existe pra leitura combinada em {@link JobStore}.
+ * {@code runningExecutionCount} é o mesmo tratamento que {@link StoredQueue}
+ * já dá a {@code runningCount} (ADR-0018/0020).
  */
-public record StoredJob(JobDefinition definition, boolean orphaned, boolean paused) {
+public record StoredJob(JobDefinition definition, boolean orphaned, boolean paused, int runningExecutionCount) {
 
     public StoredJob {
         Objects.requireNonNull(definition, "definition");
+        if (runningExecutionCount < 0) {
+            throw new IllegalArgumentException("runningExecutionCount must not be negative");
+        }
     }
 }

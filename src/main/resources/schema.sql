@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     window_name     VARCHAR(255),
     misfire         VARCHAR(20)  NOT NULL,
     allow_concurrent_executions BOOLEAN NOT NULL DEFAULT TRUE,
-    running_execution_id VARCHAR(255), -- lease de mutex por job (ADR-0018) — sem FK, referência circular com mohs_executions
+    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE (ADR-0020)
+    running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job (ADR-0018/0020)
     retries         INT          NOT NULL DEFAULT 0,
     timeout         VARCHAR(50),
     retry_policy    VARCHAR(255),
