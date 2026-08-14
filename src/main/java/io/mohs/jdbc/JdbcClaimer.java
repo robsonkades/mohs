@@ -158,6 +158,8 @@ public final class JdbcClaimer implements Claimer {
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("now", Timestamp.from(now))
                 .addValue("batchSize", batchSize);
+        // e.priority já é Priority.value() (menor reivindica primeiro) —
+        // NOT NULL DEFAULT 20 no schema, então ordena direto, sem CASE.
         return jdbcTemplate.query("""
                 SELECT e.id AS id, e.job_key AS job_key,
                        j.allow_concurrent_executions AS allow_concurrent_executions
@@ -166,12 +168,7 @@ public final class JdbcClaimer implements Claimer {
                 WHERE e.state = 'ENQUEUED'
                   AND e.scheduled_at <= :now
                   AND (j.allow_concurrent_executions = TRUE OR j.running_execution_count < j.max_concurrent_executions)
-                ORDER BY
-                  CASE e.priority
-                    WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4 WHEN 'NORMAL' THEN 3
-                    WHEN 'LOW' THEN 2 WHEN 'BACKGROUND' THEN 1 ELSE 3
-                  END DESC,
-                  e.scheduled_at ASC
+                ORDER BY e.priority ASC, e.scheduled_at ASC
                 LIMIT :batchSize
                 FOR UPDATE OF e SKIP LOCKED
                 """, params, JdbcClaimer::mapCandidate);

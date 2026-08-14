@@ -31,6 +31,7 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
 import io.mohs.test.MutableClock;
 
@@ -80,15 +81,24 @@ class JdbcClaimerTest {
     }
 
     private void seedExecution(String id, String jobKey, Instant scheduledAt) {
-        seedExecution(id, jobKey, scheduledAt, null);
+        seedExecution(id, jobKey, scheduledAt, Priority.NORMAL);
     }
 
-    private void seedExecution(String id, String jobKey, Instant scheduledAt, String priority) {
+    private void seedExecution(String id, String jobKey, Instant scheduledAt, Priority priority) {
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_executions (
                     id, job_key, state, scheduled_at, actor, priority, payload, payload_type, created_at)
                 VALUES (?, ?, 'ENQUEUED', ?, 'test', ?, '{}', 'java.lang.Object', ?)
-                """, id, jobKey, Timestamp.from(scheduledAt), priority, Timestamp.from(NOW));
+                """, id, jobKey, Timestamp.from(scheduledAt), priority.value(), Timestamp.from(NOW));
+    }
+
+    /** Omite a coluna {@code priority} pra exercitar o DEFAULT do schema (20 = NORMAL), não um valor explícito. */
+    private void seedExecutionWithDefaultPriority(String id, String jobKey, Instant scheduledAt) {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_executions (
+                    id, job_key, state, scheduled_at, actor, payload, payload_type, created_at)
+                VALUES (?, ?, 'ENQUEUED', ?, 'test', '{}', 'java.lang.Object', ?)
+                """, id, jobKey, Timestamp.from(scheduledAt), Timestamp.from(NOW));
     }
 
     private ExecutionState stateOf(String id) {
@@ -144,9 +154,9 @@ class JdbcClaimerTest {
     void claimOrdersHigherPriorityFirst() {
         seedJob("alerts", policy -> {
         });
-        seedExecution("exec-low", "alerts", NOW.minusSeconds(10), "LOW");
-        seedExecution("exec-critical", "alerts", NOW.minusSeconds(1), "CRITICAL");
-        seedExecution("exec-normal", "alerts", NOW.minusSeconds(5), "NORMAL");
+        seedExecution("exec-low", "alerts", NOW.minusSeconds(10), Priority.LOW);
+        seedExecution("exec-critical", "alerts", NOW.minusSeconds(1), Priority.CRITICAL);
+        seedExecution("exec-normal", "alerts", NOW.minusSeconds(5), Priority.NORMAL);
 
         List<Execution> claimed = claimer.claim("node-a", 2);
 
@@ -156,25 +166,26 @@ class JdbcClaimerTest {
 
     /**
      * TEST-4: cobre as 5 prioridades explícitas (o teste irmão só exercita
-     * LOW/NORMAL/CRITICAL) mais uma execução com prioridade nula no mesmo
-     * lote, provando de uma vez a ordem inteira do CASE do claim e que null
-     * ordena como NORMAL (o ELSE 3 pretendido).
+     * LOW/NORMAL/CRITICAL) mais uma execução sem prioridade especificada no
+     * mesmo lote, provando de uma vez a ordem inteira por {@code
+     * Priority.value()} e que o DEFAULT do schema (20 = NORMAL) intercala
+     * corretamente com as explícitas.
      */
     @Test
-    void claimOrdersAllFivePrioritiesPlusNullAsNormal() {
+    void claimOrdersAllFivePrioritiesPlusDefaultAsNormal() {
         seedJob("alerts", policy -> {
         });
-        seedExecution("exec-background", "alerts", NOW.minusSeconds(6), "BACKGROUND");
-        seedExecution("exec-low", "alerts", NOW.minusSeconds(5), "LOW");
-        seedExecution("exec-null", "alerts", NOW.minusSeconds(4), null);
-        seedExecution("exec-high", "alerts", NOW.minusSeconds(3), "HIGH");
-        seedExecution("exec-critical", "alerts", NOW.minusSeconds(2), "CRITICAL");
-        seedExecution("exec-normal", "alerts", NOW.minusSeconds(1), "NORMAL");
+        seedExecution("exec-background", "alerts", NOW.minusSeconds(6), Priority.BACKGROUND);
+        seedExecution("exec-low", "alerts", NOW.minusSeconds(5), Priority.LOW);
+        seedExecutionWithDefaultPriority("exec-default", "alerts", NOW.minusSeconds(4));
+        seedExecution("exec-high", "alerts", NOW.minusSeconds(3), Priority.HIGH);
+        seedExecution("exec-critical", "alerts", NOW.minusSeconds(2), Priority.CRITICAL);
+        seedExecution("exec-normal", "alerts", NOW.minusSeconds(1), Priority.NORMAL);
 
         List<Execution> claimed = claimer.claim("node-a", 10);
 
         assertThat(claimed).extracting(e -> e.id().value()).containsExactly(
-                "exec-critical", "exec-high", "exec-null", "exec-normal", "exec-low", "exec-background");
+                "exec-critical", "exec-high", "exec-default", "exec-normal", "exec-low", "exec-background");
     }
 
     @Test

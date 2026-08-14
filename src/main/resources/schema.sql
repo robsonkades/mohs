@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     fired_at         TIMESTAMP,
     actor            VARCHAR(255) NOT NULL,
     idempotency_key  VARCHAR(255),
-    priority         VARCHAR(20),
+    priority         INT          NOT NULL DEFAULT 20, -- Priority.value(); 20 = NORMAL
     node_id          VARCHAR(255),  -- claim, etapa 3 (ADR-0016)
     lease_expires_at TIMESTAMP,     -- claim, etapa 3 (ADR-0012/0016)
     batch_id         VARCHAR(255) REFERENCES mohs_batches(id),
