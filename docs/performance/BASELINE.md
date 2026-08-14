@@ -210,11 +210,54 @@ chamada (não só throughput) importar.
   `explain-sqlserver.txt`, `explain-mysql-lock-investigation.txt` —
   nomes sem sufixo de data = estado atual (mais recente).
 
+## Índice parcial/filtrado (`WHERE state = 'ENQUEUED'`) — 2026-08-14
+
+DBTUNE-5 (`docs/codereview-tuning.md`): `idx_mohs_executions_claim` full
+(`state, priority, scheduled_at`) carrega toda a tabela, inclusive
+execuções terminais que nunca mais são candidatas a claim — peso morto
+que só cresce. Postgres e SQL Server suportam índice parcial/filtrado
+(`state` sai das colunas, vira predicado do `WHERE`); MySQL e H2 não
+têm esse recurso, ficam com a composta cheia.
+
+Harness dedicado: `src/test/java/io/mohs/jdbc/ClaimIndexTuningHarness.java`
+— dois métodos de teste (`postgres`, `sqlServer`), cada um seedando
+20.000 execuções terminais de histórico + 300 jobs/3.000 execuções
+`ENQUEUED` de backlog, medindo tamanho do índice e throughput do mesmo
+cenário de 8 nós concorrentes do `ClaimQueryLoadHarness`, antes e depois
+de trocar o índice no mesmo container. Mesma máquina/imagens desta
+rodada.
+
+```
+mvn test -Dtest=ClaimIndexTuningHarness#postgres
+mvn test -Dtest=ClaimIndexTuningHarness#sqlServer
+```
+
+### Resultados
+
+| Dialeto    | índice antes (KB) | índice depois (KB) | redução | throughput antes (rows/s) | throughput depois (rows/s) |
+|------------|-------------------:|---------------------:|--------:|----------------------------:|------------------------------:|
+| PostgreSQL |               840.0 |                  40.0 |   95.2% |                     11602.3 |                        9731.3 |
+| SQL Server |              3232.0 |                 512.0 |   84.2% |                      4511.8 |                        5058.8 |
+
+Redução de tamanho é o ganho real e esperado — 20.000 linhas de
+histórico saem do índice, sobra só o backlog vivo. Throughput não muda
+de forma consistente (Postgres cai ~16%, SQL Server sobe ~12%) — dentro
+do ruído de uma amostra curta (~3.000 claims), nem esperado subir: a
+claim query já filtra por `state` como primeira coluna do índice full,
+então o índice parcial não muda o plano de execução, só o volume de
+páginas que o índice ocupa (menos WAL/manutenção por insere/completa,
+melhor cache locality — não latência de claim).
+
+Aplicado em `schema-postgresql.sql` e `schema-sqlserver.sql`. MySQL/H2
+mantêm a composta cheia — sem suporte a índice parcial.
+
 ## Como reproduzir
 
 ```
 mvn test -Dtest=ClaimQueryLoadHarness
 mvn test -Dtest=ClaimQueryExplainHarness
+mvn test -Dtest=ClaimIndexTuningHarness#postgres
+mvn test -Dtest=ClaimIndexTuningHarness#sqlServer
 ```
 
 Requer Docker local (Testcontainers sobe Postgres/MySQL/SQL Server).

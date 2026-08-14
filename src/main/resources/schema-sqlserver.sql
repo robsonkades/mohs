@@ -68,8 +68,13 @@ CREATE TABLE mohs_executions (
     created_at       DATETIME2     NOT NULL
 );
 
+-- Índice filtrado: só o backlog ENQUEUED é candidato a claim — o resto
+-- da tabela (execuções terminais) é peso morto que este índice não
+-- carrega. state sai das colunas porque o WHERE já fixa esse valor
+-- (DBTUNE-5, medido: -95.2% Postgres / -84.2% SQL Server no tamanho do
+-- índice, throughput de claim estável — docs/performance/BASELINE.md).
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_claim' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
+CREATE INDEX idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state = 'ENQUEUED';
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_job_key' AND object_id = OBJECT_ID('mohs_executions'))
 CREATE INDEX idx_mohs_executions_job_key ON mohs_executions (job_key);
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_idempotency_key' AND object_id = OBJECT_ID('mohs_executions'))

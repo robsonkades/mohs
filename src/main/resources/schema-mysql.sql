@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     payload_type     VARCHAR(500) NOT NULL,
     created_at       DATETIME(6)  NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
+-- MySQL não tem índice parcial/filtrado — Postgres e SQL Server usam
+-- WHERE state = 'ENQUEUED' aqui (DBTUNE-5); MySQL fica com a composta cheia.
 CREATE INDEX idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
 CREATE INDEX idx_mohs_executions_job_key ON mohs_executions (job_key);
 CREATE INDEX idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);

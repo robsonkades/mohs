@@ -55,7 +55,12 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     payload_type     VARCHAR(500) NOT NULL,
     created_at       TIMESTAMP    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
+-- Índice parcial: só o backlog ENQUEUED é candidato a claim — o resto da
+-- tabela (execuções terminais) é peso morto que este índice não carrega.
+-- state sai das colunas porque o WHERE já fixa esse valor (DBTUNE-5,
+-- medido: -95.2% Postgres / -84.2% SQL Server no tamanho do índice,
+-- throughput de claim estável — docs/performance/BASELINE.md).
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state = 'ENQUEUED';
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_job_key ON mohs_executions (job_key);
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_batch_id ON mohs_executions (batch_id);

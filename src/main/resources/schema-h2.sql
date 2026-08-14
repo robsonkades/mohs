@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     payload_type     VARCHAR(500) NOT NULL,
     created_at       TIMESTAMP    NOT NULL
 );
+-- H2 não tem índice parcial/filtrado — Postgres e SQL Server usam
+-- WHERE state = 'ENQUEUED' aqui (DBTUNE-5); H2 fica com a composta cheia.
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_job_key ON mohs_executions (job_key);
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);
