@@ -8,6 +8,11 @@
 -- dado persistido. ADR-0023: um arquivo por dialeto — H2/Postgres eram
 -- idênticos até agora, mas MySQL/SQL Server divergem o bastante pra não
 -- fazer mais sentido um "schema.sql" genérico.
+-- DBTUNE-1: toda coluna temporal guarda wall-clock em UTC — nenhuma tem
+-- fuso (TIMESTAMP aqui é "without time zone"). Gravado/lido só via
+-- io.mohs.jdbc.JdbcTimestamps (nunca java.sql.Timestamp.from(instant)/
+-- Timestamp.toInstant() direto), que normaliza pra UTC independente do
+-- fuso default da JVM de cada nó.
 
 -- id é UUIDv7 (io.github.robsonkades:uuidv7), mesma geração de mohs_executions.id
 -- — surrogate key estável; job_key continua sendo a chave de negócio (única).

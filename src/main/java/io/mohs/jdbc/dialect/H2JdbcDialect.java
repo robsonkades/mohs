@@ -2,12 +2,13 @@ package io.mohs.jdbc.dialect;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+
+import io.mohs.jdbc.JdbcTimestamps;
 
 /** H2 (embarcado/teste) — {@code LIMIT} no fim, {@code SKIP LOCKED} nativo (ADR-0023). */
 public final class H2JdbcDialect implements JdbcDialect {
@@ -15,7 +16,7 @@ public final class H2JdbcDialect implements JdbcDialect {
     @Override
     public List<Candidate> selectCandidates(NamedParameterJdbcTemplate jdbcTemplate, Instant now, int batchSize) {
         MapSqlParameterSource params = new MapSqlParameterSource()
-                .addValue("now", Timestamp.from(now))
+                .addValue("now", JdbcTimestamps.toUtcTimestamp(now))
                 .addValue("batchSize", batchSize);
         // e.priority já é Priority.value() (menor reivindica primeiro) —
         // NOT NULL DEFAULT 20 no schema, então ordena direto, sem CASE.

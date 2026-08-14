@@ -9,6 +9,8 @@
 -- data/hora) — usa DATETIME2. Sem CLOB — usa NVARCHAR(MAX). Sem
 -- BOOLEAN nativo — usa BIT + 1/0. VARCHAR não é Unicode por padrão —
 -- usa NVARCHAR em tudo.
+-- DBTUNE-1: toda coluna DATETIME2 guarda wall-clock em UTC, gravado/lido
+-- só via io.mohs.jdbc.JdbcTimestamps — ver schema-h2.sql para o porquê.
 
 IF OBJECT_ID('mohs_job_definitions', 'U') IS NULL
 CREATE TABLE mohs_job_definitions (

@@ -1,6 +1,5 @@
 package io.mohs.jdbc;
 
-import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -76,7 +75,7 @@ class JdbcClaimerMySqlTest {
                 INSERT INTO mohs_executions (
                     id, job_key, state, scheduled_at, actor, payload, payload_type, created_at)
                 VALUES (?, ?, 'ENQUEUED', ?, 'test', '{}', 'java.lang.Object', ?)
-                """, id, jobKey, Timestamp.from(scheduledAt), Timestamp.from(NOW));
+                """, id, jobKey, JdbcTimestamps.toUtcTimestamp(scheduledAt), JdbcTimestamps.toUtcTimestamp(NOW));
     }
 
     private ExecutionState stateOf(String id) {

@@ -19,6 +19,11 @@ public interface RateLimitStore {
 
     Optional<RateLimit> find(String name);
 
-    /** Stream sobre um cursor aberto — quem chama é dono do ciclo de vida (try-with-resources). */
+    /**
+     * Stream sobre um cursor aberto — quem chama é dono do ciclo de vida
+     * (try-with-resources). DBTUNE-7: no Postgres, isso só é verdade dentro
+     * de uma transação (autocommit desligado) — fora dela, o driver
+     * materializa o resultado inteiro antes de devolver o primeiro item.
+     */
     Stream<RateLimit> findAll();
 }

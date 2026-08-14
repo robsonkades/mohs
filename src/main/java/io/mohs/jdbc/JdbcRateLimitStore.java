@@ -22,7 +22,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     private final NamedParameterJdbcTemplate jdbcTemplate;
 
     public JdbcRateLimitStore(DataSource dataSource) {
-        this.jdbcTemplate = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
+        this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
     }
 
     @Override
@@ -38,7 +38,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
         if (updated == 0) {
             try {
                 jdbcTemplate.update("INSERT INTO mohs_rate_limits (name, max_count, window_duration) VALUES (:name, :maxCount, :windowDuration)", params);
-            } catch (DuplicateKeyException e) {
+            } catch (DuplicateKeyException _) {
                 jdbcTemplate.update("UPDATE mohs_rate_limits SET max_count = :maxCount, window_duration = :windowDuration WHERE name = :name", params);
             }
         }
@@ -56,7 +56,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
 
     @Override
     public Stream<RateLimit> findAll() {
-        return jdbcTemplate.queryForStream("SELECT * FROM mohs_rate_limits", new MapSqlParameterSource(), (rs, rowNum) -> mapRow(rs));
+        return jdbcTemplate.queryForStream("SELECT * FROM mohs_rate_limits", new MapSqlParameterSource(), (rs, _) -> mapRow(rs));
     }
 
     private static RateLimit mapRow(ResultSet rs) throws SQLException {

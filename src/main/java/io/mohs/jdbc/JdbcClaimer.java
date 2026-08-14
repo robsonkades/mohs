@@ -1,6 +1,5 @@
 package io.mohs.jdbc;
 
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -8,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -17,6 +17,7 @@ import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.core.execution.Execution;
@@ -77,6 +78,16 @@ public final class JdbcClaimer implements Claimer {
      */
     private static final int MAX_DEADLOCK_RETRIES = 3;
 
+    /**
+     * Duas transações que deadlockam e retentam no mesmo instante têm alta
+     * chance de deadlockar de novo — dezenas de ms de espera é a
+     * recomendação da própria Microsoft pro deadlock victim de SQL Server
+     * (DBTUNE-13). {@code Thread.sleep} aqui é espera deliberada de
+     * operação, não sincronização de teste — desmonta o carrier.
+     */
+    private static final Duration DEADLOCK_RETRY_BASE_DELAY = Duration.ofMillis(20);
+    private static final long DEADLOCK_RETRY_JITTER_MILLIS = 30;
+
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
     private final JdbcDialect dialect;
@@ -89,6 +100,12 @@ public final class JdbcClaimer implements Claimer {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        // DBTUNE-4: sem isto, o isolamento herdava o default do banco —
+        // REPEATABLE READ no MySQL/InnoDB, diferente dos outros 3 dialetos,
+        // sem nenhuma linha de código declarando a divergência. A ADR-0018
+        // raciocina o CAS guardado em termos de "última escrita vence", que
+        // é semântica READ COMMITTED.
+        this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.dialect = Objects.requireNonNull(dialect, "dialect");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
@@ -129,12 +146,26 @@ public final class JdbcClaimer implements Claimer {
         PessimisticLockingFailureException lastFailure = null;
         for (int attempt = 0; attempt < MAX_DEADLOCK_RETRIES; attempt++) {
             try {
-                return transactionTemplate.execute(status -> claimWithinTransaction(nodeId, batchSize));
+                // TransactionCallback aqui nunca devolve null (claimWithinTransaction
+                // sempre retorna uma lista) — requireNonNull só documenta esse invariante
+                // pro @NullMarked, já que o contrato de execute() em si é @Nullable (JAVA-8).
+                return Objects.requireNonNull(transactionTemplate.execute(status -> claimWithinTransaction(nodeId, batchSize)));
             } catch (PessimisticLockingFailureException e) {
                 lastFailure = e;
+                if (attempt < MAX_DEADLOCK_RETRIES - 1) {
+                    backoffBeforeDeadlockRetry();
+                }
             }
         }
         throw lastFailure;
+    }
+
+    private static void backoffBeforeDeadlockRetry() {
+        try {
+            Thread.sleep(DEADLOCK_RETRY_BASE_DELAY.plusMillis(ThreadLocalRandom.current().nextLong(DEADLOCK_RETRY_JITTER_MILLIS)));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private List<String> claimWithinTransaction(String nodeId, int batchSize) {
@@ -180,7 +211,7 @@ public final class JdbcClaimer implements Claimer {
                 SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId
                 WHERE id = :id AND state = 'ENQUEUED'
                 """, new MapSqlParameterSource()
-                .addValue("leaseExpiresAt", Timestamp.from(leaseExpiresAt))
+                .addValue("leaseExpiresAt", JdbcTimestamps.toUtcTimestamp(leaseExpiresAt))
                 .addValue("nodeId", nodeId)
                 .addValue("id", executionId));
         return updated == 1;

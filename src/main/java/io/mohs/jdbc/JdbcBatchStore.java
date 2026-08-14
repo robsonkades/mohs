@@ -2,7 +2,6 @@ package io.mohs.jdbc;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.util.Objects;
 import java.util.Optional;
@@ -35,7 +34,7 @@ public final class JdbcBatchStore implements BatchStore {
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("id", batchId)
                 .addValue("total", total)
-                .addValue("createdAt", Timestamp.from(clock.instant()));
+                .addValue("createdAt", JdbcTimestamps.toUtcTimestamp(clock.instant()));
         jdbcTemplate.update("""
                 INSERT INTO mohs_batches (id, total, succeeded, failed, created_at)
                 VALUES (:id, :total, 0, 0, :createdAt)

@@ -2,7 +2,9 @@ package io.mohs.jdbc;
 
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -95,6 +97,25 @@ class JdbcExecutionStoreTest {
         assertThat(payloadType).isEqualTo(WelcomeEmail.class.getName());
     }
 
+    /**
+     * DBTUNE-1: prova o contrato "toda coluna temporal guarda UTC" olhando
+     * o valor cru gravado (não o round-trip via {@link #store}, que fecha
+     * consigo mesmo em qualquer fuso — só provaria que escrita e leitura
+     * são simétricas, não que o valor é UTC de verdade). Compara o
+     * wall-clock bruto da coluna contra o wall-clock UTC do instante,
+     * calculado à parte — passa em qualquer fuso default de JVM.
+     */
+    @Test
+    void scheduledAtIsStoredAsUtcWallClockRegardlessOfJvmDefaultTimeZone() {
+        Instant scheduledAt = Instant.parse("2026-08-13T00:00:00Z");
+        store.insert(execution("019abc-3", "welcome-email"), new WelcomeEmail("ana", 31));
+
+        Timestamp raw = new JdbcTemplate(dataSource).queryForObject(
+                "SELECT scheduled_at FROM mohs_executions WHERE id = ?", Timestamp.class, "019abc-3");
+
+        assertThat(raw.toLocalDateTime()).isEqualTo(LocalDateTime.ofInstant(scheduledAt, ZoneOffset.UTC));
+    }
+
     @Test
     void insertRejectsAnExecutionWithNonEmptyAttempts() {
         Execution withAttempt = new Execution(
@@ -118,7 +139,7 @@ class JdbcExecutionStoreTest {
         // simula um attempt já ocorrido: insere direto, sem passar pela
         // store (que ainda não escreve em mohs_attempts nesta etapa —
         // isso é claim/dispatch, etapa 3).
-        Timestamp startedAt = Timestamp.from(Instant.parse("2026-08-13T00:00:01Z"));
+        Timestamp startedAt = JdbcTimestamps.toUtcTimestamp(Instant.parse("2026-08-13T00:00:01Z"));
         new JdbcTemplate(dataSource).update("""
                 INSERT INTO mohs_attempts (execution_id, number, started_at, outcome)
                 VALUES (?, 1, ?, 'RUNNING')

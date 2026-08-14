@@ -77,6 +77,23 @@ class SchemaMySqlRoundTripTest {
         assertThat(found).contains(execution);
     }
 
+    /** DBTUNE-2: DATETIME puro (sem fração) arredondaria isto pro segundo — prova que DATETIME(6) preserva microssegundo. */
+    @Test
+    void executionStoreRoundTripsSubSecondPrecision() {
+        new JdbcJobStore(dataSource, clock).upsert(
+                JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
+        JdbcExecutionStore store = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+        Instant scheduledAt = Instant.parse("2026-08-13T00:00:00.123456Z");
+        Execution execution = new Execution(
+                ExecutionId.of("019abc-2"), JobKey.of("welcome-email"), ExecutionState.ENQUEUED,
+                scheduledAt, null, List.of(), "application");
+
+        store.insert(execution, new WelcomeEmail("ana", 31));
+        Optional<Execution> found = store.find(ExecutionId.of("019abc-2"));
+
+        assertThat(found).map(Execution::scheduledAt).contains(scheduledAt);
+    }
+
     @Test
     void batchStoreRoundTripsAgainstMySql() {
         JdbcBatchStore store = new JdbcBatchStore(dataSource, clock);

@@ -90,7 +90,7 @@ class JdbcClaimerTest {
                 INSERT INTO mohs_executions (
                     id, job_key, state, scheduled_at, actor, priority, payload, payload_type, created_at)
                 VALUES (?, ?, 'ENQUEUED', ?, 'test', ?, '{}', 'java.lang.Object', ?)
-                """, id, jobKey, Timestamp.from(scheduledAt), priority.value(), Timestamp.from(NOW));
+                """, id, jobKey, JdbcTimestamps.toUtcTimestamp(scheduledAt), priority.value(), JdbcTimestamps.toUtcTimestamp(NOW));
     }
 
     /** Omite a coluna {@code priority} pra exercitar o DEFAULT do schema (20 = NORMAL), não um valor explícito. */
@@ -99,7 +99,7 @@ class JdbcClaimerTest {
                 INSERT INTO mohs_executions (
                     id, job_key, state, scheduled_at, actor, payload, payload_type, created_at)
                 VALUES (?, ?, 'ENQUEUED', ?, 'test', '{}', 'java.lang.Object', ?)
-                """, id, jobKey, Timestamp.from(scheduledAt), Timestamp.from(NOW));
+                """, id, jobKey, JdbcTimestamps.toUtcTimestamp(scheduledAt), JdbcTimestamps.toUtcTimestamp(NOW));
     }
 
     private ExecutionState stateOf(String id) {
@@ -122,7 +122,7 @@ class JdbcClaimerTest {
                 .isEqualTo("node-a");
         Timestamp leaseExpiresAt = rawJdbcTemplate.queryForObject(
                 "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", Timestamp.class, "exec-1");
-        assertThat(leaseExpiresAt.toInstant()).isEqualTo(NOW.plus(LEASE_TTL));
+        assertThat(JdbcTimestamps.fromUtcTimestamp(leaseExpiresAt)).isEqualTo(NOW.plus(LEASE_TTL));
     }
 
     @Test

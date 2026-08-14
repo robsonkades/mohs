@@ -7,7 +7,6 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -273,8 +272,8 @@ class ClaimQueryExplainHarness {
             jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
             for (int e = 0; e < EXECUTIONS_PER_JOB; e++) {
                 batchArgs.add(new Object[] {
-                        UUID.randomUUID().toString(), jobKey, Timestamp.from(NOW.minusSeconds(1)),
-                        Priority.NORMAL.value(), Timestamp.from(NOW)
+                        UUID.randomUUID().toString(), jobKey, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)),
+                        Priority.NORMAL.value(), JdbcTimestamps.toUtcTimestamp(NOW)
                 });
             }
         }

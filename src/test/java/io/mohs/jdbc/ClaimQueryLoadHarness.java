@@ -1,6 +1,5 @@
 package io.mohs.jdbc;
 
-import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -184,8 +183,8 @@ class ClaimQueryLoadHarness {
             jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
             for (int e = 0; e < executionsPerJob; e++) {
                 batchArgs.add(new Object[] {
-                        UUID.randomUUID().toString(), jobKey, Timestamp.from(NOW.minusSeconds(1)),
-                        Priority.NORMAL.value(), Timestamp.from(NOW)
+                        UUID.randomUUID().toString(), jobKey, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)),
+                        Priority.NORMAL.value(), JdbcTimestamps.toUtcTimestamp(NOW)
                 });
             }
         }

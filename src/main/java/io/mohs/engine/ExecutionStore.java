@@ -41,6 +41,10 @@ public interface ExecutionStore {
     /**
      * Stream sobre um cursor aberto — não materializa em memória de uma
      * vez. Quem chama é dono do ciclo de vida (try-with-resources).
+     * DBTUNE-7: no Postgres, isso só é verdade se a chamada rodar dentro de
+     * uma transação (autocommit desligado) — fora dela, o driver
+     * materializa o resultado inteiro antes de devolver o primeiro item,
+     * apesar do {@code fetchSize} configurado do lado do template.
      */
     Stream<Execution> findByJobKey(JobKey jobKey);
 
