@@ -1,5 +1,6 @@
 package io.mohs.engine;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -35,6 +36,15 @@ public interface ExecutionStore {
     Execution insert(Execution execution, Object payload);
 
     Optional<Execution> find(ExecutionId id);
+
+    /**
+     * Grava {@code fired_at} — metadado, não transição de estado (sem CAS
+     * guardado, ao contrário de {@link #complete}). {@link Execution#firedAt}
+     * fica {@code null} enquanto a execução não disparou de verdade
+     * (claim/lease não conta); {@link Dispatcher} chama isto no início do
+     * dispatch, antes de invocar o handler.
+     */
+    void markFired(ExecutionId id, Instant firedAt);
 
     /**
      * Transiciona uma {@code Execution RUNNING} para um estado terminal

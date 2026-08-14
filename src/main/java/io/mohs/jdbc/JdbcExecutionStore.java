@@ -89,6 +89,16 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return execution;
     }
 
+    @Override
+    public void markFired(ExecutionId id, Instant firedAt) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(firedAt, "firedAt");
+        jdbcTemplate.update("UPDATE mohs_executions SET fired_at = :firedAt WHERE id = :id",
+                new MapSqlParameterSource()
+                        .addValue("firedAt", JdbcTimestamps.toUtcTimestamp(firedAt))
+                        .addValue("id", id.value()));
+    }
+
     /**
      * CAS primeiro (ADR-0024): só grava o {@link Attempt} e libera a vaga de
      * concorrência (ADR-0025) se a transição de estado realmente ocorreu —
