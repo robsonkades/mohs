@@ -1,7 +1,5 @@
 package io.mohs.jdbc.dialect;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
 
@@ -36,10 +34,6 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
                   AND e.scheduled_at <= :now
                   AND (j.allow_concurrent_executions = 1 OR j.running_execution_count < j.max_concurrent_executions)
                 ORDER BY e.priority ASC, e.scheduled_at ASC
-                """, params, SqlServerJdbcDialect::mapCandidate);
-    }
-
-    private static Candidate mapCandidate(ResultSet rs, int rowNum) throws SQLException {
-        return new Candidate(rs.getString("id"), rs.getString("job_key"), rs.getBoolean("allow_concurrent_executions"));
+                """, params, Candidate::fromResultSet);
     }
 }

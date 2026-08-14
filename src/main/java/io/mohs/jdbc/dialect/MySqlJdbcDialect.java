@@ -1,7 +1,5 @@
 package io.mohs.jdbc.dialect;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
 
@@ -31,10 +29,6 @@ public final class MySqlJdbcDialect implements JdbcDialect {
                 ORDER BY e.priority ASC, e.scheduled_at ASC
                 LIMIT :batchSize
                 FOR UPDATE OF e SKIP LOCKED
-                """, params, MySqlJdbcDialect::mapCandidate);
-    }
-
-    private static Candidate mapCandidate(ResultSet rs, int rowNum) throws SQLException {
-        return new Candidate(rs.getString("id"), rs.getString("job_key"), rs.getBoolean("allow_concurrent_executions"));
+                """, params, Candidate::fromResultSet);
     }
 }
