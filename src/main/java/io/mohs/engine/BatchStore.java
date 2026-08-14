@@ -11,7 +11,7 @@ import java.util.Optional;
  */
 public interface BatchStore {
 
-    void create(String batchId, int total);
+    void insert(String batchId, int total);
 
     Optional<BatchCounters> find(String batchId);
 

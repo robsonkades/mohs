@@ -98,7 +98,7 @@ class SchemaMySqlRoundTripTest {
     void batchStoreRoundTripsAgainstMySql() {
         JdbcBatchStore store = new JdbcBatchStore(dataSource, clock);
 
-        store.create("batch-1", 10);
+        store.insert("batch-1", 10);
         BatchCounters counters = store.find("batch-1").orElseThrow();
 
         assertThat(counters.total()).isEqualTo(10);

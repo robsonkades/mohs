@@ -26,7 +26,7 @@ public final class JdbcBatchStore implements BatchStore {
     }
 
     @Override
-    public void create(String batchId, int total) {
+    public void insert(String batchId, int total) {
         Objects.requireNonNull(batchId, "batchId");
         if (total < 0) {
             throw new IllegalArgumentException("total must not be negative");

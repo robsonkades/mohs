@@ -44,8 +44,8 @@ class JdbcBatchStoreTest {
     }
 
     @Test
-    void createStartsAllCountersAtZeroExceptTotal() {
-        store.create("batch-1", 10);
+    void insertStartsAllCountersAtZeroExceptTotal() {
+        store.insert("batch-1", 10);
 
         BatchCounters counters = store.find("batch-1").orElseThrow();
 
@@ -56,8 +56,8 @@ class JdbcBatchStoreTest {
     }
 
     @Test
-    void createRejectsNegativeTotal() {
-        assertThatThrownBy(() -> store.create("batch-1", -1)).isInstanceOf(IllegalArgumentException.class);
+    void insertRejectsNegativeTotal() {
+        assertThatThrownBy(() -> store.insert("batch-1", -1)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -67,7 +67,7 @@ class JdbcBatchStoreTest {
 
     @Test
     void incrementSucceededAndFailedUpdateTheCounters() {
-        store.create("batch-1", 10);
+        store.insert("batch-1", 10);
 
         store.incrementSucceeded("batch-1");
         store.incrementSucceeded("batch-1");
@@ -81,7 +81,7 @@ class JdbcBatchStoreTest {
 
     @Test
     void incrementsAreAtomicUnderConcurrentCompletion() throws InterruptedException {
-        store.create("batch-1", 100);
+        store.insert("batch-1", 100);
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
             IntStream.range(0, 100).forEach(i -> executor.submit(() -> store.incrementSucceeded("batch-1")));
             executor.shutdown();
