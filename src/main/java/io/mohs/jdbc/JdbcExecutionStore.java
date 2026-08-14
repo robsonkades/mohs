@@ -6,10 +6,12 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -27,6 +29,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.ExecutionStore;
+import io.mohs.engine.JobStore;
 
 /**
  * {@link ExecutionStore} sobre {@code mohs_executions}/{@code mohs_attempts}
@@ -84,6 +87,110 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 """, params);
 
         return execution;
+    }
+
+    /**
+     * CAS primeiro (ADR-0024): só grava o {@link Attempt} e libera a vaga de
+     * concorrência (ADR-0025) se a transição de estado realmente ocorreu —
+     * uma conclusão concorrente (ex.: dispatch normal terminou entre o
+     * reaper selecionar o candidato e chamar isto) não deixa Attempt órfão
+     * de uma execução que já tinha terminado de outro jeito.
+     */
+    @Override
+    public boolean complete(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, JobStore jobStore) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(jobKey, "jobKey");
+        Objects.requireNonNull(attempt, "attempt");
+        Objects.requireNonNull(newState, "newState");
+        Objects.requireNonNull(jobStore, "jobStore");
+
+        int updated = jdbcTemplate.update(
+                "UPDATE mohs_executions SET state = :newState WHERE id = :id AND state = 'RUNNING'",
+                new MapSqlParameterSource()
+                        .addValue("newState", newState.name())
+                        .addValue("id", id.value()));
+        if (updated == 0) {
+            return false;
+        }
+
+        jdbcTemplate.update("""
+                INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
+                VALUES (:executionId, :number, :startedAt, :finishedAt, :outcome, :error)
+                """, attemptParams(id, attempt));
+        jobStore.decrementRunningExecutions(jobKey);
+        return true;
+    }
+
+    /**
+     * DBTUNE-14: {@link #complete} em lote — um {@code UPDATE} guardado por
+     * {@code newState} (agrupa, não assume lote uniforme), uma consulta pra
+     * confirmar quais ids realmente transicionaram (o {@code UPDATE} não
+     * diz quais linhas casaram, só quantas) e um {@code INSERT} em lote só
+     * dos {@link Attempt} confirmados — {@code jobStore.decrementRunningExecutions}
+     * continua uma chamada por execução (guardada, barata, sem API de lote
+     * em {@link JobStore} — não vale o acoplamento novo pra isto).
+     */
+    @Override
+    public Set<ExecutionId> completeAll(List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
+        Objects.requireNonNull(requests, "requests");
+        Objects.requireNonNull(jobStore, "jobStore");
+        if (requests.isEmpty()) {
+            return Set.of();
+        }
+
+        Map<String, ExecutionStore.CompletionRequest> byId = requests.stream()
+                .collect(Collectors.toMap(r -> r.id().value(), r -> r));
+        Set<ExecutionId> completedIds = new LinkedHashSet<>();
+        for (Map.Entry<ExecutionState, List<ExecutionStore.CompletionRequest>> group :
+                requests.stream().collect(Collectors.groupingBy(ExecutionStore.CompletionRequest::newState)).entrySet()) {
+            completedIds.addAll(transitionGroup(group.getKey(), group.getValue()));
+        }
+        if (completedIds.isEmpty()) {
+            return completedIds;
+        }
+
+        MapSqlParameterSource[] attemptParams = completedIds.stream()
+                .map(id -> attemptParams(id, byId.get(id.value()).attempt()))
+                .toArray(MapSqlParameterSource[]::new);
+        jdbcTemplate.batchUpdate("""
+                INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
+                VALUES (:executionId, :number, :startedAt, :finishedAt, :outcome, :error)
+                """, attemptParams);
+
+        for (ExecutionId id : completedIds) {
+            jobStore.decrementRunningExecutions(byId.get(id.value()).jobKey());
+        }
+        return completedIds;
+    }
+
+    /** CAS por {@code WHERE id IN (:ids) AND state = 'RUNNING'}, em lotes de {@link #MAX_IDS_PER_QUERY} (DB-11). */
+    private Set<ExecutionId> transitionGroup(ExecutionState newState, List<ExecutionStore.CompletionRequest> group) {
+        Set<ExecutionId> confirmed = new LinkedHashSet<>();
+        List<String> ids = group.stream().map(r -> r.id().value()).toList();
+        for (int start = 0; start < ids.size(); start += MAX_IDS_PER_QUERY) {
+            List<String> chunk = ids.subList(start, Math.min(start + MAX_IDS_PER_QUERY, ids.size()));
+            jdbcTemplate.update(
+                    "UPDATE mohs_executions SET state = :newState WHERE id IN (:ids) AND state = 'RUNNING'",
+                    new MapSqlParameterSource().addValue("newState", newState.name()).addValue("ids", chunk));
+            // o UPDATE não diz quais ids casaram, só quantos — confirma via SELECT
+            // (o mesmo state que acabamos de gravar só pode ter vindo desta transição:
+            // os ids do lote eram todos RUNNING momentos atrás, nesta mesma transação).
+            confirmed.addAll(jdbcTemplate.query(
+                    "SELECT id FROM mohs_executions WHERE id IN (:ids) AND state = :newState",
+                    new MapSqlParameterSource().addValue("ids", chunk).addValue("newState", newState.name()),
+                    (rs, _) -> ExecutionId.of(rs.getString("id"))));
+        }
+        return confirmed;
+    }
+
+    private static MapSqlParameterSource attemptParams(ExecutionId id, Attempt attempt) {
+        return new MapSqlParameterSource()
+                .addValue("executionId", id.value())
+                .addValue("number", attempt.number())
+                .addValue("startedAt", JdbcTimestamps.toUtcTimestamp(attempt.startedAt()))
+                .addValue("finishedAt", attempt.finishedAt() == null ? null : JdbcTimestamps.toUtcTimestamp(attempt.finishedAt()))
+                .addValue("outcome", attempt.outcome().name())
+                .addValue("error", attempt.error());
     }
 
     @Override

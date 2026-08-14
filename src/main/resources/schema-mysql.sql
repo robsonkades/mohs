@@ -74,6 +74,9 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
 -- MySQL não tem índice parcial/filtrado — Postgres e SQL Server usam
 -- WHERE state = 'ENQUEUED' aqui (DBTUNE-5); MySQL fica com a composta cheia.
 CREATE INDEX idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
+-- Sem índice parcial (ver comentário acima) — composta cheia pro reaper
+-- também (DBTUNE-10): state líder, igual à do claim.
+CREATE INDEX idx_mohs_executions_reaper ON mohs_executions (state, lease_expires_at);
 CREATE INDEX idx_mohs_executions_job_key ON mohs_executions (job_key);
 CREATE INDEX idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);
 CREATE INDEX idx_mohs_executions_batch_id ON mohs_executions (batch_id);

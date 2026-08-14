@@ -27,6 +27,9 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.engine.ExecutionStore;
+import io.mohs.engine.JobStore;
+import io.mohs.engine.StoredJob;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,6 +74,12 @@ class JdbcExecutionStoreTest {
         return new Execution(
                 ExecutionId.of(id), JobKey.of(jobKey), ExecutionState.ENQUEUED,
                 Instant.parse("2026-08-13T00:00:00Z"), null, List.of(), "application");
+    }
+
+    /** Insere ENQUEUED e transiciona pra RUNNING via SQL cru — {@link #complete} assume que já chegou lá. */
+    private void seedRunningExecution(String id, String jobKey) {
+        store.insert(execution(id, jobKey), new WelcomeEmail("a", 1));
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET state = 'RUNNING' WHERE id = ?", id);
     }
 
     @Test
@@ -201,5 +210,126 @@ class JdbcExecutionStoreTest {
         List<Execution> found = store.findByIds(ids);
 
         assertThat(found).extracting(Execution::id).containsExactlyInAnyOrderElementsOf(ids);
+    }
+
+    @Test
+    void completeTransitionsRunningExecutionAndRecordsTheAttempt() {
+        seedRunningExecution("019abc-complete-1", "welcome-email");
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+
+        boolean completed = store.complete(ExecutionId.of("019abc-complete-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, jobStore);
+
+        assertThat(completed).isTrue();
+        Optional<Execution> found = store.find(ExecutionId.of("019abc-complete-1"));
+        assertThat(found).isPresent();
+        assertThat(found.get().state()).isEqualTo(ExecutionState.FAILED);
+        assertThat(found.get().attempts()).containsExactly(attempt);
+    }
+
+    @Test
+    void completeReturnsFalseAndWritesNothingWhenExecutionIsNotRunning() {
+        Execution execution = execution("019abc-complete-2", "welcome-email"); // ENQUEUED, nunca chegou a RUNNING
+        store.insert(execution, new WelcomeEmail("a", 1));
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+
+        boolean completed = store.complete(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED, jobStore);
+
+        assertThat(completed).isFalse();
+        assertThat(store.find(execution.id())).contains(execution);
+    }
+
+    /** ADR-0024: CAS primeiro — uma segunda conclusão da mesma execução não sobrescreve nem duplica Attempt. */
+    @Test
+    void completeIsSafeUnderConcurrentConclusionOfTheSameExecution() {
+        seedRunningExecution("019abc-complete-3", "welcome-email");
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Attempt firstAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.SUCCEEDED, null);
+        Attempt secondAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+
+        boolean first = store.complete(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), firstAttempt, ExecutionState.SUCCEEDED, jobStore);
+        boolean second = store.complete(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), secondAttempt, ExecutionState.FAILED, jobStore);
+
+        assertThat(first).isTrue();
+        assertThat(second).isFalse();
+        Optional<Execution> found = store.find(ExecutionId.of("019abc-complete-3"));
+        assertThat(found.get().state()).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(found.get().attempts()).containsExactly(firstAttempt);
+    }
+
+    /** ADR-0025: liberar a vaga de concorrência é parte da mesma operação, não um passo separado que o chamador pode esquecer. */
+    @Test
+    void completeReleasesTheJobConcurrencySlot() {
+        JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
+        jobStore.upsert(JobDefinition.of("report-summary", Handler.class, spec -> spec.onDemand().preventOverlap()));
+        jobStore.tryIncrementRunningExecutions(JobKey.of("report-summary"));
+        seedRunningExecution("019abc-complete-4", "report-summary");
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+
+        store.complete(ExecutionId.of("019abc-complete-4"), JobKey.of("report-summary"), attempt, ExecutionState.FAILED, jobStore);
+
+        assertThat(jobStore.find(JobKey.of("report-summary"))).map(StoredJob::runningExecutionCount).contains(0);
+    }
+
+    /** DBTUNE-14: mesma garantia de {@link #completeTransitionsRunningExecutionAndRecordsTheAttempt}, para várias execuções na mesma chamada. */
+    @Test
+    void completeAllTransitionsMultipleRunningExecutionsAndRecordsTheAttempts() {
+        seedRunningExecution("019abc-completeall-1", "welcome-email");
+        seedRunningExecution("019abc-completeall-2", "welcome-email");
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Attempt attempt1 = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom-1");
+        Attempt attempt2 = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom-2");
+        List<ExecutionStore.CompletionRequest> requests = List.of(
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-1"), JobKey.of("welcome-email"), attempt1, ExecutionState.FAILED),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-2"), JobKey.of("welcome-email"), attempt2, ExecutionState.FAILED));
+
+        var completedIds = store.completeAll(requests, jobStore);
+
+        assertThat(completedIds).containsExactlyInAnyOrder(ExecutionId.of("019abc-completeall-1"), ExecutionId.of("019abc-completeall-2"));
+        assertThat(store.find(ExecutionId.of("019abc-completeall-1")).map(Execution::attempts)).contains(List.of(attempt1));
+        assertThat(store.find(ExecutionId.of("019abc-completeall-2")).map(Execution::attempts)).contains(List.of(attempt2));
+    }
+
+    /** ADR-0024: mesma disciplina de CAS do {@link #complete} — no lote, cada request é independente. */
+    @Test
+    void completeAllExcludesRequestsForExecutionsThatAreNotRunning() {
+        seedRunningExecution("019abc-completeall-3", "welcome-email");
+        Execution stillEnqueued = execution("019abc-completeall-4", "welcome-email");
+        store.insert(stillEnqueued, new WelcomeEmail("a", 1));
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Attempt attempt3 = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom-3");
+        Attempt attempt4 = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom-4");
+        List<ExecutionStore.CompletionRequest> requests = List.of(
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-3"), JobKey.of("welcome-email"), attempt3, ExecutionState.FAILED),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-4"), JobKey.of("welcome-email"), attempt4, ExecutionState.FAILED));
+
+        var completedIds = store.completeAll(requests, jobStore);
+
+        assertThat(completedIds).containsExactly(ExecutionId.of("019abc-completeall-3"));
+        assertThat(store.find(ExecutionId.of("019abc-completeall-4"))).contains(stillEnqueued);
+    }
+
+    @Test
+    void completeAllReleasesTheJobConcurrencySlotForEachCompletedExecution() {
+        JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
+        jobStore.upsert(JobDefinition.of("report-summary", Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(2)));
+        jobStore.tryIncrementRunningExecutions(JobKey.of("report-summary"));
+        jobStore.tryIncrementRunningExecutions(JobKey.of("report-summary"));
+        seedRunningExecution("019abc-completeall-5", "report-summary");
+        seedRunningExecution("019abc-completeall-6", "report-summary");
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+        List<ExecutionStore.CompletionRequest> requests = List.of(
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-5"), JobKey.of("report-summary"), attempt, ExecutionState.FAILED),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-6"), JobKey.of("report-summary"), attempt, ExecutionState.FAILED));
+
+        store.completeAll(requests, jobStore);
+
+        assertThat(jobStore.find(JobKey.of("report-summary"))).map(StoredJob::runningExecutionCount).contains(0);
+    }
+
+    @Test
+    void completeAllReturnsEmptySetForEmptyRequests() {
+        assertThat(store.completeAll(List.of(), new JdbcJobStore(dataSource, clock))).isEmpty();
     }
 }

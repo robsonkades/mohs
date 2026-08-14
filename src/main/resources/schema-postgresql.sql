@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
 -- medido: -95.2% Postgres / -84.2% SQL Server no tamanho do índice,
 -- throughput de claim estável — docs/performance/BASELINE.md).
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state = 'ENQUEUED';
+-- Índice parcial pro reaper (DBTUNE-10): só a execução RUNNING é
+-- candidata a reclaim — mesmo raciocínio da DBTUNE-5, WHERE em vez de
+-- coluna porque o predicado já fixa o state.
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_reaper ON mohs_executions (lease_expires_at) WHERE state = 'RUNNING';
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_job_key ON mohs_executions (job_key);
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_batch_id ON mohs_executions (batch_id);
