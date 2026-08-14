@@ -513,7 +513,7 @@ Registrado no estilo do DB-12 do review anterior, para que ninguém "descubra" i
   candidato natural), todo o resto do tuning só adia o problema. Vale mini-ADR própria.
   DBTUNE-5 reduz o lado índice-de-claim disso; este item é o resto da tabela.
 
-### DBTUNE-10 — Índice do reaper: decidir junto com o schema por dialeto, antes de nascer com scan — recomendação (ADRs 0012/0025 já decididas)
+### DBTUNE-10 — Índice do reaper: decidir junto com o schema por dialeto, antes de nascer com scan — ALTO, aplicado e medido
 
 - **Onde:** `lease_expires_at` existe nos 4 schemas e nenhuma query o lê ainda (CONC-5 do
   review anterior); as ADRs 0024/0025 acabaram de fixar que o reaper reusa a conclusão do
@@ -522,11 +522,15 @@ Registrado no estilo do DB-12 do review anterior, para que ninguém "descubra" i
   `state` mas ordena por `priority, scheduled_at`; o reaper varreria todas as `RUNNING` (ok)
   **depois de** achar `RUNNING` no meio de um índice dominado por linhas terminais (não ok,
   mesmo argumento do DBTUNE-5).
-- **Correção:** no mesmo movimento do DBTUNE-5 — Postgres/SQL Server:
+- **Correção aplicada:** no mesmo movimento do DBTUNE-5 — Postgres/SQL Server:
   `(lease_expires_at) WHERE state = 'RUNNING'` (parcial/filtrado, minúsculo por natureza:
-  só o que está rodando agora); MySQL/H2: composto `(state, lease_expires_at)`. Registrar
-  na ADR do reaper para o índice nascer junto com a query, não depois do primeiro incidente
-  de recovery lento.
+  só o que está rodando agora); MySQL/H2: composto `(state, lease_expires_at)`.
+  `idx_mohs_executions_reaper` nos 4 schemas, junto com a implementação do reaper (ADR-0012),
+  não depois de um incidente de recovery lento.
+- **Medido** (`LivenessLoadHarness`, H2 + Postgres, 20k linhas de histórico): Postgres —
+  `SELECT` de candidatos foi de `Seq Scan` (actual time 1.111ms) para `Bitmap Heap Scan`
+  (0.026ms, ~42x). Isso por si só quase não mexeu no throughput fim-a-fim do reclaim —
+  revelou que o gargalo real era outro (ver DBTUNE-14).
 
 ### DBTUNE-11 — Tuning de driver por dialeto: o que o autoconfigure (M3) deve fixar — recomendação consolidada
 
@@ -594,6 +598,42 @@ Registrado no estilo do DB-12 do review anterior, para que ninguém "descubra" i
   "nada de sleep" do CLAUDE.md é sobre testes). Alternativa sem sleep: devolver lista
   vazia e deixar o próximo tick do poll tentar — mais simples ainda; decidir quando o poll
   loop existir.
+
+### DBTUNE-14 — Reclaim do reaper fazia round-trip por candidato — ALTO, aplicado e medido
+
+- **Onde:** `src/main/java/io/mohs/jdbc/JdbcReaper.java` (implementado nesta rodada,
+  ADR-0012/0025), consumindo `ExecutionStore.complete` uma vez por candidato.
+- **Problema:** `find()` (2 queries) + `complete()` (até 3 queries) por execução órfã —
+  para 100 candidatos, ~500 round-trips. Medido com `LivenessLoadHarness` (H2 + Postgres,
+  20k linhas de histórico): o índice `idx_mohs_executions_reaper` (DBTUNE-10) deixou a
+  query de seleção ~42x mais rápida no Postgres (`Seq Scan` 1.111ms → `Bitmap Heap Scan`
+  0.026ms), mas o throughput fim-a-fim quase não mudeu (709.5 → 778.0 rows/s) — o gargalo
+  tinha migrado pro loop, não estava mais na query.
+- **Correção aplicada:** `ExecutionStore.completeAll` (lê via `findByIds` já existente,
+  `UPDATE`/`SELECT` de confirmação em lote por grupo de `newState`, `INSERT` de `Attempt`
+  em `batchUpdate`) — `jobStore.decrementRunningExecutions` continua uma chamada por
+  execução (guardada, barata, sem API de lote em `JobStore`). Medido depois: Postgres
+  709.5→2131.8 rows/s sem índice (+200%), 778.0→2222.1 rows/s com índice (+186%).
+
+### DBTUNE-15 — `IN (:ids)` vs. `JOIN` contra `VALUES` derivada — investigado, não aplicado
+
+- **Onde:** os 4 pontos que usam `IN (:...)` em `src/main/java/io/mohs/jdbc/JdbcExecutionStore.java`
+  (`findByIds`, `fetchAttemptsByExecutionIds`, e os dois `UPDATE`/`SELECT` de
+  `transitionGroup` dentro de `completeAll`) — busca confirmada, nenhum outro store usa `IN`.
+- **Investigado:** `findByIds` (único hot path dos 4 — `JdbcClaimer.claim` chama a cada
+  vez), harness dedicado (`src/test/java/io/mohs/jdbc/InVsJoinTuningHarness.java`), 4
+  dialetos, lote de 20 ids (tamanho real do claim), 20k linhas de histórico, `EXPLAIN`
+  antes/depois (`docs/performance/explain-invsjoin-*-{in,join}.txt`).
+- **Resultado:** ganho real nos 3 bancos de produção (Postgres -12%/-9% p50/p99, MySQL
+  -11%/-14%, SQL Server -20%/-33%), mas sub-milissegundo em termos absolutos (0.35ms →
+  0.30ms no Postgres) — e regressão no H2 (+2.3x/5x). Plano de execução mostra o mesmo
+  tipo de acesso por índice de PK nos dois casos (bitmap/nested loop/index range scan),
+  não um plano qualitativamente melhor.
+- **Decisão: não aplicar.** O ganho não se compara ao gargalo já conhecido e ainda aberto
+  do `claim()` (loop de `UPDATE` sequencial em `tryClaimCandidate`, até 21 round-trips por
+  chamada — ver `docs/performance/BASELINE.md`), custaria SQL por dialeto novo (`ROW()` no
+  MySQL) e regride o H2, que a suíte de testes usa pesado. Não estendido aos outros 3
+  pontos — nenhum é hot path, ganho esperado da mesma ordem ou menor.
 
 ---
 
@@ -703,10 +743,12 @@ surefire; `pom.xml` define só `<java.version>25</java.version>`).
 | DBTUNE-7 | Médio | Real em M3 | engine/ExecutionStore.java:41-48 + stores | Contrato de Stream promete cursor; pgjdbc/Connector/J materializam tudo sem fetchSize |
 | DBTUNE-8 | Médio | Decidir p/ M3 | schema-*.sql (idx idempotency_key) | Dedupe exige UNIQUE parcial/filtrado, grafia diverge por dialeto (SQL Server: obrigatório) |
 | DBTUNE-9 | Médio | Produção | schema-postgresql.sql | Updates nunca-HOT em mohs_executions: fillfactor + autovacuum + decisão de retenção (ADR) |
-| DBTUNE-10 | Médio | Decidir p/ reaper | schema-*.sql | Índice do reaper `(lease_expires_at) WHERE state='RUNNING'` nascer junto com a query |
+| DBTUNE-10 | Alto | Aplicado, medido | schema-*.sql | Índice do reaper `(lease_expires_at) WHERE state='RUNNING'` — SELECT ~42x mais rápido no Postgres (medido) |
 | DBTUNE-11 | Baixo | Produção (M3) | futuro autoconfigure | Props de driver por dialeto (prepStmt cache MySQL, rewriteBatched, unicode mssql, fetch size) |
 | DBTUNE-12 | Médio | Decidir pré-GA | 4 schemas (colunas de UUID) | `uuid` nativo PG / `BINARY(16)` MySQL; nunca `UNIQUEIDENTIFIER` (quebra ordem v7) |
 | DBTUNE-13 | Baixo | Real (menor) | JdbcClaimer.java:128-138 | Retry de deadlock sem backoff/jitter |
+| DBTUNE-14 | Alto | Aplicado, medido | JdbcExecutionStore.java (completeAll), JdbcReaper.java | Reclaim em lote (não candidato a candidato) — Postgres +200%/+186% (sem/com índice) |
+| DBTUNE-15 | — | Investigado, não aplicado | JdbcExecutionStore.java (IN), InVsJoinTuningHarness.java | IN vs JOIN: ganho real nos 3 bancos reais mas sub-ms, não vale a complexidade — decisão registrada, não código |
 | JVM-1 | Alto | Real (docs) | CLAUDE.md, MOHS-DOCUMENTO-MESTRE.md:65,83 | `-Djdk.tracePinnedThreads` removida no JDK 24 — no-op silencioso; usar JFR `jdk.VirtualThreadPinned` |
 | JVM-2 | Médio | Produção | (documento inexistente) | Guidance de GC (G1 vs ZGC gen.), heap p/ VT stacks, scheduler knobs, eventos JFR — escrever com M3 |
 | JVM-3 | Baixo | Hipótese (medir) | — | Compact Object Headers (JEP 519) como variação do harness na Fase 0 |

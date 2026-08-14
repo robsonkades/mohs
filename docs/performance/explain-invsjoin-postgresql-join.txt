@@ -1,0 +1,10 @@
+Nested Loop  (cost=0.40..164.62 rows=20 width=1622) (actual time=0.021..0.089 rows=20 loops=1)
+  Buffers: shared hit=80
+  ->  Values Scan on "*VALUES*"  (cost=0.00..0.25 rows=20 width=32) (actual time=0.001..0.003 rows=20 loops=1)
+  ->  Index Scan using mohs_executions_pkey on mohs_executions e  (cost=0.40..8.22 rows=1 width=1622) (actual time=0.004..0.004 rows=1 loops=20)
+        Index Cond: ((id)::text = ("*VALUES*".column1)::text)
+        Buffers: shared hit=80
+Planning:
+  Buffers: shared hit=278
+Planning Time: 1.002 ms
+Execution Time: 0.149 ms

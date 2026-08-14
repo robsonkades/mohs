@@ -1,0 +1,13 @@
+SELECT
+    "E"."ID",
+    "E"."JOB_KEY",
+    "E"."STATE",
+    "E"."SCHEDULED_AT",
+    "E"."FIRED_AT",
+    "E"."ACTOR"
+FROM (VALUES (?1), (?2), (?3), (?4), (?5), (?6), (?7), (?8), (?9), (?10), (?11), (?12), (?13), (?14), (?15), (?16), (?17), (?18), (?19), (?20)) "LOOKUP_IDS"("ID")
+    /* table scan */
+INNER JOIN "PUBLIC"."MOHS_EXECUTIONS" "E"
+    /* PUBLIC.PRIMARY_KEY_C: ID = LOOKUP_IDS.ID */
+    ON 1=1
+WHERE "E"."ID" = "LOOKUP_IDS"."ID"
