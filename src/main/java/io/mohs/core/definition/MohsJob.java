@@ -69,6 +69,15 @@ public @interface MohsJob {
      */
     boolean allowConcurrentExecutions() default true;
 
+    /**
+     * Teto de execuções concorrentes deste job — só lido quando {@link
+     * #allowConcurrentExecutions()} é {@code false} (ver {@link
+     * PolicySpec#maxConcurrentExecutions(int)}); nesse caso é obrigatório
+     * ser pelo menos 1 (o default {@code 0} falha o boot com uma mensagem
+     * clara em vez de assumir um valor).
+     */
+    int maxConcurrentExecutions() default 0;
+
     /** Número máximo de tentativas de retry. */
     int retries() default 0;
 

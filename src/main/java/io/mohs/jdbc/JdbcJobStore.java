@@ -220,10 +220,14 @@ public final class JdbcJobStore implements JobStore {
         String timeoutValue = rs.getString("timeout");
         Duration timeout = timeoutValue == null ? null : Duration.parse(timeoutValue);
 
+        boolean allowConcurrentExecutions = rs.getBoolean("allow_concurrent_executions");
+        // derivado, não persistido ainda — max_concurrent_executions chega numa
+        // etapa seguinte; até lá, allow=false sempre significou mutex de N=1.
+        int maxConcurrentExecutions = allowConcurrentExecutions ? 0 : 1;
         JobDefinition definition = new JobDefinition(
                 JobKey.of(jobKey), rs.getString("name"), handlerType, schedule,
                 rs.getString("runner"), rs.getString("queue_name"), rs.getString("window_name"),
-                Misfire.valueOf(rs.getString("misfire")), rs.getBoolean("allow_concurrent_executions"),
+                Misfire.valueOf(rs.getString("misfire")), allowConcurrentExecutions, maxConcurrentExecutions,
                 rs.getInt("retries"), timeout, rs.getString("retry_policy"),
                 DefinitionSource.valueOf(rs.getString("source")));
 

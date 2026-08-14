@@ -80,8 +80,41 @@ class JobDefinitionTest {
     void rejectsNegativeRetries() {
         assertThatThrownBy(() -> new JobDefinition(
                 JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
-                null, null, null, Misfire.IGNORE, false, -1, null, null, DefinitionSource.PROGRAMMATIC))
+                null, null, null, Misfire.IGNORE, true, 0, -1, null, null, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsMaxConcurrentExecutionsSetWhenConcurrencyIsAllowed() {
+        assertThatThrownBy(() -> new JobDefinition(
+                JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
+                null, null, null, Misfire.IGNORE, true, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsNonPositiveMaxConcurrentExecutionsWhenConcurrencyIsNotAllowed() {
+        assertThatThrownBy(() -> new JobDefinition(
+                JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
+                null, null, null, Misfire.IGNORE, false, 0, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void maxConcurrentExecutionsOptsOutOfConcurrentExecutionsWithAnExplicitCap() {
+        JobDefinition definition = JobDefinition.of("report-summary", Handler.class,
+                spec -> spec.onDemand().maxConcurrentExecutions(10));
+
+        assertThat(definition.allowConcurrentExecutions()).isFalse();
+        assertThat(definition.maxConcurrentExecutions()).isEqualTo(10);
+    }
+
+    @Test
+    void preventOverlapCapsAtExactlyOne() {
+        JobDefinition definition = JobDefinition.of("import-file", Handler.class,
+                spec -> spec.onDemand().preventOverlap());
+
+        assertThat(definition.maxConcurrentExecutions()).isEqualTo(1);
     }
 
     @Test
@@ -121,19 +154,19 @@ class JobDefinitionTest {
     @Test
     void rejectsNullKeyHandlerTypeScheduleMisfireSource() {
         assertThatThrownBy(() -> new JobDefinition(
-                null, null, Handler.class, new OnDemandSpec(), null, null, null, Misfire.IGNORE, false, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                null, null, Handler.class, new OnDemandSpec(), null, null, null, Misfire.IGNORE, false, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, null, new OnDemandSpec(), null, null, null, Misfire.IGNORE, false, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                JobKey.of("id"), null, null, new OnDemandSpec(), null, null, null, Misfire.IGNORE, false, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, Handler.class, null, null, null, null, Misfire.IGNORE, false, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                JobKey.of("id"), null, Handler.class, null, null, null, null, Misfire.IGNORE, false, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, Handler.class, new OnDemandSpec(), null, null, null, null, false, 0, null, null, DefinitionSource.PROGRAMMATIC))
+                JobKey.of("id"), null, Handler.class, new OnDemandSpec(), null, null, null, null, false, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, Handler.class, new OnDemandSpec(), null, null, null, Misfire.IGNORE, false, 0, null, null, null))
+                JobKey.of("id"), null, Handler.class, new OnDemandSpec(), null, null, null, Misfire.IGNORE, false, 1, 0, null, null, null))
                 .isInstanceOf(NullPointerException.class);
     }
 

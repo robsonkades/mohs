@@ -33,6 +33,7 @@ public record JobDefinition(
         @Nullable String window,
         Misfire misfire,
         boolean allowConcurrentExecutions,
+        int maxConcurrentExecutions,
         int retries,
         @Nullable Duration timeout,
         @Nullable String retryPolicy,
@@ -44,6 +45,13 @@ public record JobDefinition(
         Objects.requireNonNull(schedule, "schedule");
         Objects.requireNonNull(misfire, "misfire");
         Objects.requireNonNull(source, "source");
+        if (allowConcurrentExecutions) {
+            if (maxConcurrentExecutions != 0) {
+                throw new IllegalArgumentException("maxConcurrentExecutions must be 0 when allowConcurrentExecutions is true");
+            }
+        } else if (maxConcurrentExecutions < 1) {
+            throw new IllegalArgumentException("maxConcurrentExecutions must be at least 1 when allowConcurrentExecutions is false");
+        }
         if (retries < 0) {
             throw new IllegalArgumentException("retries must not be negative");
         }

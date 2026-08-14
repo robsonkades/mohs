@@ -2,6 +2,7 @@ package io.mohs.core.definition;
 
 import java.time.Duration;
 
+import io.mohs.core.resource.JobQueue;
 import io.mohs.core.schedule.Misfire;
 
 /**
@@ -34,6 +35,15 @@ public sealed interface PolicySpec permits JobSpecImpl {
      * do Quartz — lá também é opt-in, não opt-out.
      */
     PolicySpec preventOverlap();
+
+    /**
+     * Como {@link #preventOverlap()}, mas com um teto explícito maior que 1
+     * em vez de exclusão mútua total — ex.: um job cujo handler compartilha
+     * um recurso externo com capacidade própria por {@code job_key} (não
+     * entre jobs diferentes; para isso é {@link JobQueue}), como um relatório
+     * que pode rodar até N instâncias ao mesmo tempo, nunca N+1.
+     */
+    PolicySpec maxConcurrentExecutions(int max);
 
     PolicySpec retries(int max);
 

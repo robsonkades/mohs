@@ -27,6 +27,7 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     private @Nullable String window;
     private Misfire misfire = Misfire.IGNORE;
     private boolean allowConcurrentExecutions = true;
+    private int maxConcurrentExecutions;
     private int retries;
     private @Nullable Duration timeout;
     private @Nullable String retryPolicy;
@@ -101,6 +102,14 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     @Override
     public PolicySpec preventOverlap() {
         this.allowConcurrentExecutions = false;
+        this.maxConcurrentExecutions = 1;
+        return this;
+    }
+
+    @Override
+    public PolicySpec maxConcurrentExecutions(int max) {
+        this.allowConcurrentExecutions = false;
+        this.maxConcurrentExecutions = max;
         return this;
     }
 
@@ -129,6 +138,6 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
                             + "or onDemand() before JobDefinition.of returns");
         }
         return new JobDefinition(key, null, handlerType, schedule, runner, queue, window,
-                misfire, allowConcurrentExecutions, retries, timeout, retryPolicy, DefinitionSource.PROGRAMMATIC);
+                misfire, allowConcurrentExecutions, maxConcurrentExecutions, retries, timeout, retryPolicy, DefinitionSource.PROGRAMMATIC);
     }
 }
