@@ -21,6 +21,8 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
+import io.github.robsonkades.uuidv7.UUIDv7;
+
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.job.JobKey;
@@ -39,7 +41,7 @@ import io.mohs.engine.StoredJob;
  * {@code io.mohs.jdbc}).
  *
  * <p>{@link NamedParameterJdbcTemplate} em vez de {@code JdbcTemplate}
- * cru: {@link #upsert} sozinho tem 15 colunas — contar {@code ?}
+ * cru: {@link #upsert} sozinho tem 16 colunas — contar {@code ?}
  * posicional contra uma lista de argumentos nessa largura é risco real de
  * bug silencioso (troca de posição não quebra a compilação nem sempre
  * falha em runtime); parâmetro nomeado (`:coluna`) elimina essa classe de
@@ -81,6 +83,11 @@ public final class JdbcJobStore implements JobStore {
                 .addValue("retryPolicy", definition.retryPolicy())
                 .addValue("source", definition.source().name())
                 .addValue("updatedAt", now);
+        // id é gerado aqui mas só entra no INSERT — se cair no UPDATE, o
+        // valor gerado fica sem uso; a linha existente mantém o id que já
+        // tinha (PK estável pro ciclo de vida do job_key, nunca reescrita).
+        // UUIDv7 (io.github.robsonkades:uuidv7) — mesma geração de mohs_executions.id.
+        String id = UUIDv7.randomUUIDString();
 
         // tenta UPDATE primeiro; 0 linhas afetadas = chave nova, faz INSERT.
         // Evita o round-trip extra (e a corrida TOCTOU) de um SELECT COUNT
@@ -107,18 +114,18 @@ public final class JdbcJobStore implements JobStore {
             try {
                 jdbcTemplate.update("""
                         INSERT INTO mohs_job_definitions (
-                            job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
+                            id, job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
                             interval_duration, interval_after_finish, runner, window_name,
                             misfire, allow_concurrent_executions, max_concurrent_executions, retries,
                             timeout, retry_policy, source,
                             orphaned, paused, running_execution_count, created_at, updated_at)
                         VALUES (
-                            :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
+                            :id, :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
                             :intervalDuration, :intervalAfterFinish, :runner, :windowName,
                             :misfire, :allowConcurrentExecutions, :maxConcurrentExecutions, :retries,
                             :timeout, :retryPolicy, :source,
                             FALSE, FALSE, 0, :createdAt, :updatedAt)
-                        """, params.addValue("createdAt", now));
+                        """, params.addValue("id", id).addValue("createdAt", now));
             } catch (DuplicateKeyException e) {
                 jdbcTemplate.update(updateSql, params);
             }

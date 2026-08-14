@@ -7,8 +7,11 @@
 -- ("predicados só existem em código", §5.8 do documento mestre), não
 -- dado persistido.
 
+-- id é UUIDv7 (io.github.robsonkades:uuidv7), mesma geração de mohs_executions.id
+-- — surrogate key estável; job_key continua sendo a chave de negócio (única).
 CREATE TABLE IF NOT EXISTS mohs_job_definitions (
-    job_key         VARCHAR(255) PRIMARY KEY,
+    id              VARCHAR(255) PRIMARY KEY,
+    job_key         VARCHAR(255) NOT NULL UNIQUE,
     name            VARCHAR(255),
     handler_type    VARCHAR(500) NOT NULL,
     schedule_type   VARCHAR(20)  NOT NULL, -- CRON | INTERVAL | ON_DEMAND

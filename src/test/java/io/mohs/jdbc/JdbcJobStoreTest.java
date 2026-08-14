@@ -111,6 +111,32 @@ class JdbcJobStoreTest {
     }
 
     @Test
+    void upsertGeneratesAnIdDistinctPerJobKey() {
+        store.upsert(definition("welcome-email", new OnDemandSpec()));
+        store.upsert(definition("import-file", new OnDemandSpec()));
+
+        JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
+        String idA = rawJdbcTemplate.queryForObject("SELECT id FROM mohs_job_definitions WHERE job_key = ?", String.class, "welcome-email");
+        String idB = rawJdbcTemplate.queryForObject("SELECT id FROM mohs_job_definitions WHERE job_key = ?", String.class, "import-file");
+
+        assertThat(idA).isNotBlank();
+        assertThat(idB).isNotBlank();
+        assertThat(idA).isNotEqualTo(idB);
+    }
+
+    @Test
+    void upsertKeepsTheSameIdAcrossReupsertOfTheSameJobKey() {
+        store.upsert(definition("welcome-email", new OnDemandSpec()));
+        JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
+        String idBeforeReupsert = rawJdbcTemplate.queryForObject("SELECT id FROM mohs_job_definitions WHERE job_key = ?", String.class, "welcome-email");
+
+        store.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(9)));
+
+        String idAfterReupsert = rawJdbcTemplate.queryForObject("SELECT id FROM mohs_job_definitions WHERE job_key = ?", String.class, "welcome-email");
+        assertThat(idAfterReupsert).isEqualTo(idBeforeReupsert);
+    }
+
+    @Test
     void upsertOnExistingKeyAppliesDefinitionalChanges() {
         store.upsert(definition("welcome-email", new CronSpec("0 0 2 * * *", ZoneId.of("UTC"))));
 
@@ -282,8 +308,8 @@ class JdbcJobStoreTest {
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_job_definitions (
-                    job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
-                VALUES ('ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', TRUE, FALSE, ?, ?)
+                    id, job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
+                VALUES ('ghost-id', 'ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', TRUE, FALSE, ?, ?)
                 """, now, now);
         store.upsert(definition("still-here", new OnDemandSpec()));
 
@@ -299,8 +325,8 @@ class JdbcJobStoreTest {
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_job_definitions (
-                    job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
-                VALUES ('ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
+                    id, job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
+                VALUES ('ghost-id', 'ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
                 """, now, now);
 
         try (Stream<StoredJob> all = store.findAll()) {
@@ -318,8 +344,8 @@ class JdbcJobStoreTest {
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_job_definitions (
-                    job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
-                VALUES ('ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
+                    id, job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
+                VALUES ('ghost-id', 'ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
                 """, now, now);
 
         assertThat(store.find(JobKey.of("ghost-handler"))).isEmpty();
