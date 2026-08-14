@@ -10,7 +10,7 @@ import io.mohs.core.execution.JobContext;
  * assume que, quando chamada, essa resolução já aconteceu.
  */
 @FunctionalInterface
-public interface HandlerInvocation {
+public interface JobHandler {
 
     void invoke(Object payload, JobContext ctx) throws Exception;
 }

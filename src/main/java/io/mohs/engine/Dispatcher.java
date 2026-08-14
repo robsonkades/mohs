@@ -68,7 +68,7 @@ public final class Dispatcher {
         JobContext ctx = new DefaultJobContext(execution.jobKey(), execution.id(), attemptNumber, execution.scheduledAt(), firedAt);
         events.publish(new Started(execution.id(), execution.jobKey(), attemptNumber, firedAt));
 
-        Optional<HandlerInvocation> invocation = handlerRegistry.find(execution.jobKey());
+        Optional<JobHandler> invocation = handlerRegistry.find(execution.jobKey());
         if (invocation.isEmpty()) {
             fail(execution, attemptNumber, firedAt, new IllegalStateException(NO_HANDLER_ERROR + execution.jobKey().value()));
             return;
@@ -90,7 +90,7 @@ public final class Dispatcher {
      * interceptor É falha de attempt, mesmo tratamento que exceção do
      * handler.
      */
-    private void runInterceptorChain(HandlerInvocation invocation, Object payload, JobContext ctx) throws Exception {
+    private void runInterceptorChain(JobHandler invocation, Object payload, JobContext ctx) throws Exception {
         ExecutionInterceptor.Chain chain = () -> invocation.invoke(payload, ctx);
         for (int i = interceptors.size() - 1; i >= 0; i--) {
             ExecutionInterceptor interceptor = interceptors.get(i);

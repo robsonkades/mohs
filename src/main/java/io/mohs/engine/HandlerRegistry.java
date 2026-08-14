@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import io.mohs.core.job.JobKey;
 
 /**
- * Registro em memória de {@code JobKey → HandlerInvocation} — a costura
+ * Registro em memória de {@code JobKey → JobHandler} — a costura
  * manual que {@link Dispatcher} consulta pra saber o que chamar.
  * {@code io.mohs.autoconfigure} (fora de escopo ainda) povoa isto
  * escaneando {@code @MohsJob} no boot; até lá, quem já tem a referência em
@@ -18,15 +18,15 @@ import io.mohs.core.job.JobKey;
  */
 public final class HandlerRegistry {
 
-    private final Map<JobKey, HandlerInvocation> invocations = new ConcurrentHashMap<>();
+    private final Map<JobKey, JobHandler> invocations = new ConcurrentHashMap<>();
 
-    public void register(JobKey key, HandlerInvocation invocation) {
+    public void register(JobKey key, JobHandler invocation) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(invocation, "invocation");
         invocations.put(key, invocation);
     }
 
-    public Optional<HandlerInvocation> find(JobKey key) {
+    public Optional<JobHandler> find(JobKey key) {
         Objects.requireNonNull(key, "key");
         return Optional.ofNullable(invocations.get(key));
     }
