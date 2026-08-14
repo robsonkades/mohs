@@ -15,6 +15,7 @@ import com.tngtech.archunit.lang.ArchCondition;
 import com.tngtech.archunit.lang.ArchRule;
 import com.tngtech.archunit.lang.ConditionEvents;
 import com.tngtech.archunit.lang.SimpleConditionEvent;
+import com.tngtech.archunit.library.dependencies.SlicesRuleDefinition;
 import org.jspecify.annotations.NullMarked;
 
 import io.mohs.jdbc.DatabaseClock;
@@ -122,4 +123,26 @@ class ArchitectureTest {
         Set<String> allPackages = classes.stream().map(JavaClass::getPackageName).collect(Collectors.toSet());
         assertThat(nullMarkedPackages).containsAll(allPackages);
     }
+
+    /**
+     * "O grafo de dependência resultante é acíclico por construção" — ADR-0013
+     * já declara essa propriedade para os subpacotes de {@code io.mohs.core}
+     * (job/schedule/definition/execution/event/resource); esta regra é o que
+     * a torna executável em vez de só prosa em {@code package-info.java}. Não
+     * prescreve a direção exata de cada aresta (isso muda pouco a pouco
+     * conforme o vocabulário cresce) — só proíbe que ela feche um ciclo, que
+     * é a garantia que a ADR de fato promete.
+     */
+    @ArchTest
+    static final ArchRule core_subpackages_are_free_of_cycles =
+        SlicesRuleDefinition.slices().matching("io.mohs.core.(*)..").should().beFreeOfCycles();
+
+    /**
+     * Mesmo raciocínio de {@link #core_subpackages_are_free_of_cycles}, para
+     * os subpacotes de recurso de {@code io.mohs.rest} (um por controller,
+     * ver {@code io.mohs.rest}'s {@code package-info.java}).
+     */
+    @ArchTest
+    static final ArchRule rest_subpackages_are_free_of_cycles =
+        SlicesRuleDefinition.slices().matching("io.mohs.rest.(*)..").should().beFreeOfCycles();
 }
