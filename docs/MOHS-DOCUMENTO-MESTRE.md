@@ -1,6 +1,6 @@
 # Mohs — Documento Mestre do Projeto
 Consolidação de todas as decisões · 12/08/2026
-Fontes vivas: CLAUDE.md · API-DESIGN.md (v0.13) · REST-API-DESIGN.md (v0.3)
+Fontes vivas: CLAUDE.md · API-DESIGN.md (v0.16) · REST-API-DESIGN.md (v0.5)
 
 ---
 
@@ -131,20 +131,20 @@ como obrigação do handler); liveness — lease com heartbeat por node e
 reaper de execuções órfãs, com Watchdog Bound cluster-wide opcional (§5,
 seção Watchdog Bound) contra Attempt que ignora interrupt.
 
-**Quatro eixos independentes de controle** (o diferencial da taxonomia):
-exclusão mútua por job no próprio SQL de claim (`allowConcurrentExecutions`,
-default `true` — a maioria dos jobs é invocada com payloads independentes
-e não tem por que serializar entre si; `preventOverlap()` opta pela
-exclusividade, pro caso mais estreito de um job cron/interval que não pode
-se sobrepor ao próprio disparo anterior — mesmo default do
-`@DisallowConcurrentExecution` do Quartz, que também é opt-in;
-`maxConcurrentExecutions(int)` generaliza pra um teto explícito maior que
-1, pro caso de um job cujo handler compartilha um recurso externo com
-capacidade própria — ADR-0020); Runner
-node-local por natureza de workload (virtual cap 64 / cpu = cores); Queue
-cluster-wide (enforcement a definir por benchmark — seção 5.8); Rate
-Limiter cluster-wide de janela fixa (eixo de vazão, distinto de
-concorrência); Priority em 5 níveis.
+**Três eixos independentes de controle** (o diferencial da taxonomia):
+exclusão mútua por job no próprio SQL de claim (`allowConcurrentExecutions`/
+`maxConcurrentExecutions`, default concorrência permitida — a maioria dos
+jobs é invocada com payloads independentes e não tem por que serializar
+entre si; `preventOverlap()` opta pela exclusividade total, pro caso mais
+estreito de um job cron/interval que não pode se sobrepor ao próprio
+disparo anterior — mesmo default do `@DisallowConcurrentExecution` do
+Quartz, que também é opt-in; `maxConcurrentExecutions(int)` generaliza
+pra um teto explícito maior que 1, pro caso de um job cujo handler
+compartilha um recurso externo com capacidade própria — ADR-0020);
+Runner node-local por natureza de workload (virtual cap 64 / cpu =
+cores); Rate Limiter cluster-wide de janela fixa (eixo de vazão,
+distinto de concorrência); Priority em 5 níveis. (`JobQueue` — cap
+cluster-wide entre `job_key`s diferentes — foi removida: ADR-0021.)
 
 **Riscos e lacunas já identificados no design (a resolver em M3/M4):**
 graceful shutdown (resolvido em design, seção 5.4); rate limiter de janela
@@ -183,7 +183,7 @@ O que substitui a disciplina do multi-módulo:
    (agenda) · `io.mohs.core.definition` (`JobDefinition`, `@MohsJob`) ·
    `io.mohs.core.execution` (`Execution`, `JobContext`) · `io.mohs.core.event`
    (eventos, listeners, interceptors) · `io.mohs.core.resource` (runners,
-   queues, windows). `io.mohs` (raiz) fica só com o bootstrap Spring Boot
+   windows). `io.mohs` (raiz) fica só com o bootstrap Spring Boot
    deste módulo (`MohsApplication`), não API. `io.mohs.cron` é utilitário à
    parte (não é vocabulário de job, não migrou pra `core`) · `io.mohs.engine`
    e `io.mohs.jdbc` (internos, `@Internal`) · `io.mohs.autoconfigure` ·
@@ -210,7 +210,7 @@ public class EmailJobs {
     // Definição recorrente
     @MohsJob(id = "welcome-email", name = "E-mail de boas-vindas",
              cron = "0 0 2 * * *", zone = "America/Sao_Paulo",
-             runner = "smtp", queue = "emails", window = "business-days",
+             runner = "smtp", window = "business-days",
              misfire = Misfire.FIRE_NOW, retries = 8, timeout = "PT5M")
     public void send(WelcomeEmail payload, JobContext ctx) { ... }
 
@@ -238,7 +238,7 @@ mohs.batch("import-2026-08", b ->
 
 // Definição dinâmica (multi-tenant) — o mecanismo por baixo da annotation
 mohs.define(JobDefinition.of("tenant-" + t.id() + "-sync", TenantSyncHandler.class,
-    spec -> spec.cron(t.syncCron(), t.zone()).runner("io").queue("tenant-sync")));
+    spec -> spec.cron(t.syncCron(), t.zone()).runner("io")));
 mohs.remove(jobKey);  // aposentadoria: cancela fires futuros, preserva histórico
 ```
 
@@ -267,7 +267,6 @@ mohs.remove(jobKey);  // aposentadoria: cancela fires futuros, preserva históri
 | Agenda | `Schedule` | `cron` · `every` (rate) · `everyAfterFinish` (delay) · `onDemand` |
 | Instância | `Execution` / `Attempt` | retry incrementa attempt, id permanece |
 | Capacidade node-local | `MohsRunner` (`mode: io\|cpu`) | built-ins `io`/`cpu`; customs = bulkheads |
-| Cap cluster-wide | `JobQueue` | **[DECIDIDO]** rename de `Queue` (colisão JDK) |
 | Janelas de exclusão | `ExecutionWindow` | **[DECIDIDO]** rename de `Calendar` (colisão JDK) |
 | Misfire / Retry / RateLimit / Priority | — | espelham o motor |
 
@@ -292,7 +291,7 @@ erro fatal de boot apontando os dois lugares.
 (SmartLifecycle, fase tardia) — **nenhum claim antes de todas as definições
 anotadas registradas** → app ready (`define`/`remove` dinâmicos liberados).
 
-Upsert preciso: **estado definicional** (agenda, políticas, runner, queue,
+Upsert preciso: **estado definicional** (agenda, políticas, runner,
 window, name, handler) pertence ao código → upsert aplica; **estado
 operacional** (paused/resumed, histórico, contadores) pertence ao runtime →
 upsert **preserva** (job pausado às 3h continua pausado após o deploy das 9h).
@@ -341,7 +340,7 @@ election externa, canário, test kit. Transições como `ApplicationEvent`
 Um verbo, sempre sobre definição existente: `schedule(ref, payload)` com
 terminais `now() / at(Instant) / after(Duration)`; pré-terminais da
 instância: `priority`, `as(actor)`, `idempotencyKey`. Política (retry,
-runner, queue) pertence à definição — invocação não sobrescreve. Overload
+runner) pertence à definição — invocação não sobrescreve. Overload
 por string com checagem de tipo em runtime (erro claro); `JobRef` sem
 definição → falha imediata com sugestões; `JobRef`s em beans checados no
 boot. Batch: flat, `b.add(ref, payload)`, `onCompletion` (continuação).
@@ -359,7 +358,7 @@ boot. Batch: flat, `b.add(ref, payload)`, `onCompletion` (continuação).
 4. **Transacional por participação** — dentro de transação ativa (mesmo
    DataSource), o insert entra na transação do chamador: commit publica,
    rollback apaga — *transactional outbox* nativo, sem broker.
-5. **Admissão nunca espera capacidade** — queue/rate/runner limitam a
+5. **Admissão nunca espera capacidade** — rate/runner limitam a
    execução (no claim), não o aceite; p99 do terminal ≈ custo do insert
    (metrificado no BASELINE.md).
 
@@ -390,30 +389,18 @@ diferentes dos do Spring, deliberadamente (ver ADR-0014): pool fixo
 (`max-size` = núcleos por padrão) e fila sem capacidade (`queue-capacity: 0`,
 direct handoff), não ilimitados.
 
-### 5.8 Queues, windows e o enforcement em revisão
+### 5.8 Windows
 
-Bean define a estrutura, property ajusta o número
-(`mohs.queues.emails.max-concurrent: 10`); windows precisam de bean
-(predicados só existem em código: `excludeWeekends().excludeDates(...)
-.excludeDaily(...).exclude(pred)`). Semântica cluster-wide: definição no
-boot é upsert; rolling deploy converge para o último nó (sob `override`).
+Windows precisam de bean (predicados só existem em código:
+`excludeWeekends().excludeDates(...).excludeDaily(...).exclude(pred)`).
 
-**Papéis que nunca se fundem:** runner protege *este nó*; queue protege um
-*recurso compartilhado* (SMTP, API parceira) — escalar nós não pode escalar
-a pressão; runner não substitui queue.
-
-**Enforcement [EM REVISÃO → ADR com gate de benchmark]:** o contador atual
-(`UPDATE ... WHERE running_count < max`) tem três modos de falha — hot row,
-bloat de tuplas no Postgres, drift do contador em crash (vaga vaza para
-sempre, sem reconciliação). Proposta: **contagem derivada** no claim
-(`(SELECT count(*) WHERE queue=? AND status='RUNNING') < max`, índice
-parcial; conjunto RUNNING ≤ max → contagem O(max); claims batelados no
-poll). Sem estado mantido: sem hot row, sem bloat, sem drift. Semântica
-resultante: **soft cap** (overshoot transitório ≤ nós−1) — adequada a
-proteção de recurso e documentada. Dependência: execuções de nó morto
-seguram vaga até o **reaper** devolvê-las ao retry (auto-cura; o contador
-vazava permanentemente). Gate: Fase 0/1 mede o contador sob carga-alvo; a
-API é agnóstica ao enforcement.
+`JobQueue` (cap cluster-wide sobre um recurso compartilhado entre
+`job_key`s diferentes, com enforcement por contador guardado —
+`UPDATE ... WHERE running_count < max`) foi removida — ADR-0021.
+`allowConcurrentExecutions`/`maxConcurrentExecutions` (§3, ADR-0018/0020)
+cobrem os casos observados até agora (teto de um job sobre si mesmo); o
+desenho original fica preservado no histórico do git se um caso real de
+recurso compartilhado entre jobs aparecer.
 
 ### 5.9 JobContext
 
@@ -476,7 +463,7 @@ subtração de wall clock).
 ### 5.13 Validações de boot (fatais, ensinam)
 
 1. cron válido com próxima ocorrência; `zone` válida; `every` > 0;
-2. `runner`/`queue`/`window`/`rateLimit`/`retryPolicy` existem (sugestão por
+2. `runner`/`window`/`rateLimit`/`retryPolicy` existem (sugestão por
    distância de edição: "não encontrei o runner 'smpt'; quis dizer 'smtp'?");
 3. `id` duplicado (annotation × annotation, annotation × programático);
 4. payload serializável (round-trip no boot);
@@ -517,13 +504,13 @@ pluga só o resolver — zero mudança de contrato).
 
 | Endpoint | Efeito |
 |---|---|
-| `GET /overview` | âncora de polling do dashboard (contagens, filas, throughput) |
+| `GET /overview` | âncora de polling do dashboard (contagens, throughput) |
 | `GET /jobs` · `/jobs/{key}` | definições, estado, próximo fire |
 | `POST /jobs/{key}/schedule` | invoca — body `{payload, at?}`; `Idempotency-Key` (~24h) → 202 |
 | `POST /jobs/{key}/pause` · `/resume` | cluster-wide; schedule manual segue permitido |
 | `GET /executions` (+filtros) · `/{id}` | busca global · detalhe (attempts, erro, actor) |
 | `POST /executions/{id}/cancel` · `/retry` | cooperativo · retry manual de ops |
-| `GET/PATCH /queues` · `/rate-limits` | estado + ajuste runtime cluster-wide |
+| `GET/PATCH /rate-limits` | estado + ajuste runtime cluster-wide |
 | `GET /runners` | visão node-local |
 | `GET /nodes` | visão de cluster — nodes com heartbeat recente |
 | `GET /batches/{id}` | contadores do lote |
@@ -556,12 +543,13 @@ precisa construir); autorização fina.
    round-trip de boot (validação 4), não migração de Executions persistidas.
 3. **Reaper de execuções órfãs** (lease/heartbeat) — especificado como
    capacidade obrigatória de M3 (liveness: lease com heartbeat + reaper +
-   Watchdog Bound). Sustenta quatro capacidades — recuperação at-least-once
-   real, `GET /nodes`, auto-cura do soft cap da queue, honestidade do
-   contrato de execução — por isso entra em M3 e não fica pra depois.
+   Watchdog Bound). Sustenta três capacidades — recuperação at-least-once
+   real, `GET /nodes`, honestidade do contrato de execução — por isso
+   entra em M3 e não fica pra depois.
 
-**Em revisão com gate:** enforcement da queue (contador vs contagem
-derivada) — decidido por benchmark na Fase 0/1 (seção 5.8).
+**Em revisão com gate:** nenhuma pendência aberta — o enforcement de
+queue (contador vs contagem derivada) deixou de ser relevante com a
+remoção de `JobQueue` (ADR-0021).
 
 **Em aberto, não bloqueante:** nome e valor de `node-heartbeat-interval`
 (ver API-DESIGN.md) — intervalo do heartbeat de node ainda sem property
@@ -581,7 +569,7 @@ definida.
 | 0006 | Ciclo de registro e `on-conflict` | decidido |
 | 0007 | Lifecycle do engine | decidido |
 | 0008 | Fonte de tempo configurável | decidido |
-| 0009 | Enforcement de queue | em revisão (gate de benchmark) |
+| 0009 | Enforcement de queue | superseded pela ADR-0021 |
 | 0010 | API REST v1 | decidido |
 | 0011 | Serialização e versionamento de payload | decidido |
 | 0012 | Liveness: heartbeat, lease e reaper (Watchdog Bound) | decidido |
@@ -593,6 +581,7 @@ definida.
 | 0018 | Mutex por job via CAS guardado, não dependente de lock especializado | decidido |
 | 0019 | Execuções concorrentes do mesmo job são permitidas por padrão | decidido |
 | 0020 | Teto de concorrência por job (maxConcurrentExecutions) | decidido |
+| 0021 | Remoção de JobQueue/QueueStore | decidido |
 
 **Etapas geradas pelo design** (entram no PLAN.md, sequenciadas em
 milestones em §9): esqueleto de módulo + ArchUnit; contratos do core
@@ -600,8 +589,8 @@ milestones em §9): esqueleto de módulo + ArchUnit; contratos do core
 unificado `schedule` + terminais; teste de integração do rollback
 transacional; SPIs de listener/interceptor + Micrometer/OTel; lifecycle do
 engine + shutdown gracioso; `DatabaseSyncedClock`; validações de boot; test
-kit; REST v1 + `/overview`; gate de benchmark do enforcement de queue;
-Watchdog Bound (`watchdogTimeout`); endpoint `GET /nodes`.
+kit; REST v1 + `/overview`; Watchdog Bound (`watchdogTimeout`); endpoint
+`GET /nodes`.
 
 ---
 
@@ -631,7 +620,7 @@ zero lógica de motor por trás ainda:
 - `Execution` / `Attempt`, `ExecutionState`, `JobContext` (interface plana)
 - `ExecutionListener` + eventos `sealed` (`Enqueued`…`BatchCompleted`);
   `ExecutionInterceptor`
-- `MohsRunner`, `JobQueue`, `ExecutionWindow` — specs, nunca `Executor`
+- `MohsRunner`, `ExecutionWindow` — specs, nunca `Executor`
 - Fachada `Mohs` (`schedule().now/at/after`, `batch`, `define`, `remove`,
   `lifecycle()`) com `@CheckReturnValue` nos terminais; corpo ainda não
   ligado ao motor
@@ -659,12 +648,10 @@ Construção do zero, atrás dos contratos M1/M2 já congelados:
 - Aquisição sem contenção (claim), lease com heartbeat por node + reaper de
   execuções órfãs, Watchdog Bound (`watchdogTimeout`) — liveness completa
   (§3, aposta #1)
-- Dispatch, persistência, enforcement de queue (contador; contagem
-  derivada se o gate de benchmark confirmar — §5.8), fonte de tempo via
-  `Clock` (§5.12)
+- Dispatch, persistência, fonte de tempo via `Clock` (§5.12)
 - Ligar fachada `Mohs` (M1) ao motor real
 - Controllers M2 ligados aos stores reais (`ExecutionStore`, `JobStore`,
-  `QueueStore`, store de heartbeat de node)
+  store de heartbeat de node)
 - `GET /nodes` — leitura sobre o registro de heartbeat construído acima
 - Auto-configuração Spring Boot (`io.mohs.autoconfigure`),
   `mohs.api.enabled`, `mohs.registration.on-conflict`, validações de boot
@@ -677,6 +664,5 @@ Prioridade confirmada (§2, Fase 2): 1º performance/concorrência (bate
 contra BASELINE.md) · 2º legibilidade/design · 3º Java 25 (records, sealed,
 `ScopedValue`). Cada etapa isolada; decisão de arquitetura → mini-ADR antes.
 
-**Dependente de M1-M4 mas fora da sequência linear:** gate de benchmark do
-enforcement de queue (§5.8, mede o contador atual sob carga antes de
-trocar); test kit; dashboard (consome a API de M2/M3, dogfooding).
+**Dependente de M1-M4 mas fora da sequência linear:** test kit; dashboard
+(consome a API de M2/M3, dogfooding).

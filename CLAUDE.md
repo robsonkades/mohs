@@ -62,7 +62,7 @@ Expectativas que definem "pronto" neste projeto:
   execution/event/resource) · io.mohs (raiz, só bootstrap Spring Boot deste
   módulo) · io.mohs.cron (utilitário) · io.mohs.engine/jdbc (internos) ·
   io.mohs.autoconfigure · io.mohs.rest (raiz + subpacotes error/overview/
-  job/execution/batch/queue/ratelimit/runner/node, um por controller, M2) ·
+  job/execution/batch/ratelimit/runner/node, um por controller, M2) ·
   io.mohs.test — fronteiras ArchUnit
 - Pacotes Java: io.mohs.* — nenhum código novo usa o pacote antigo (cadrix)
 
@@ -92,8 +92,7 @@ que revisa `docs/adr/0013-public-api-subpackaging.md`), toda sob `io.mohs.core`:
   `ExecutionId`, `ExecutionState`, `JobContext`, `Priority`
 - `io.mohs.core.event` — `ExecutionEvent` selado, `ExecutionListener`,
   `ExecutionInterceptor`, `@OnExecution`
-- `io.mohs.core.resource` — `MohsRunner`, `JobQueue`, `RateLimit`,
-  `ExecutionWindow`
+- `io.mohs.core.resource` — `MohsRunner`, `RateLimit`, `ExecutionWindow`
 
 Fora de `core` (não é vocabulário de job):
 - `io.mohs` (raiz) — só o bootstrap Spring Boot deste módulo
@@ -107,7 +106,7 @@ Fora de `core` (não é vocabulário de job):
 Internos e infraestrutura (esqueleto de M0, implementação ainda vazia —
 M3, exceto `io.mohs.rest` que é M2, já implementado como contrato):
 - `io.mohs.engine` — motor: claim, runners, misfire, retry, `NextFireCalculator`
-- `io.mohs.jdbc` — persistência JDBC de jobs, execuções e filas
+- `io.mohs.jdbc` — persistência JDBC de jobs e execuções
 - `io.mohs.autoconfigure` — auto-config, properties, validações de boot
 - `io.mohs.rest` — API REST operacional (M2, contrato sem implementação —
   `ProblemDetail`/lógica real ficam pra M3). Um subpacote por controller
@@ -121,7 +120,6 @@ M3, exceto `io.mohs.rest` que é M2, já implementado como contrato):
   - `io.mohs.rest.job` — `JobsController`, `ScheduleView` selado
   - `io.mohs.rest.execution` — `ExecutionsController`
   - `io.mohs.rest.batch` — `BatchesController`
-  - `io.mohs.rest.queue` — `QueuesController`
   - `io.mohs.rest.ratelimit` — `RateLimitsController`
   - `io.mohs.rest.runner` — `RunnersController`
   - `io.mohs.rest.node` — `NodesController`

@@ -8,10 +8,10 @@ import io.mohs.core.resource.RateLimit;
 /**
  * Persistência de {@link RateLimit} — Repository (PoEAA), porta que
  * {@code io.mohs.jdbc} implementa. Sem estado operacional a preservar em
- * {@link #upsert} — diferente de {@link JobStore}/{@link QueueStore},
- * nenhuma ADR ainda define um mecanismo de enforcement (contador,
- * sliding window) pra {@code RateLimit}, então não há coluna
- * operacional a proteger aqui ainda.
+ * {@link #upsert} — diferente de {@link JobStore}, nenhuma ADR ainda
+ * define um mecanismo de enforcement (contador, sliding window) pra
+ * {@code RateLimit}, então não há coluna operacional a proteger aqui
+ * ainda.
  */
 public interface RateLimitStore {
 

@@ -1,4 +1,4 @@
-# Mohs — Design da API Java · draft v0.13
+# Mohs — Design da API Java · draft v0.16
 
 Fonte de contrato do **M1** do Plano de Desenvolvimento (MOHS-DOCUMENTO-MESTRE.md §9):
 todo tipo abaixo vira interface/record/sealed compilável antes de qualquer implementação de motor.
@@ -18,6 +18,7 @@ v0.12: controle fino de lifecycle do engine — estados, drain, start manual, in
 v0.13: enforcement da queue em revisão — proposta contador → contagem derivada, com gate de benchmark [EM REVISÃO].
 v0.14: liveness (lease/heartbeat/reaper) especificada como capacidade obrigatória do motor; Watchdog Bound documentado como conceito público, cluster-wide [DECIDIDO]; versionamento de payload decidido — compatibilidade é obrigação do handler [DECIDIDO].
 v0.15: renames `JobQueue`/`ExecutionWindow` aprovados pelo PO [DECIDIDO] — nenhum item aberto restante neste documento.
+v0.16: `JobQueue` removida por completo — `allowConcurrentExecutions`/`maxConcurrentExecutions` cobrem os casos reais observados (ADR-0021) [DECIDIDO].
 
 ## Princípios de design
 

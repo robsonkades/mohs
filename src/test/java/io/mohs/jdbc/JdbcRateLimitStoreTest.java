@@ -72,7 +72,7 @@ class JdbcRateLimitStoreTest {
         }
     }
 
-    /** CONC-2 — ver JdbcQueueStoreTest.upsertHandlesConcurrentFirstTimeInsertWithoutThrowing. */
+    /** CONC-2 — ver JdbcJobStoreTest.upsertHandlesConcurrentFirstTimeInsertWithoutThrowing. */
     @Test
     void upsertHandlesConcurrentFirstTimeInsertWithoutThrowing() throws Exception {
         RateLimit rateLimit = new RateLimit("smtp", 100, Duration.ofMinutes(1));

@@ -1,7 +1,9 @@
 # ADR-0009: Enforcement de queue
 
 ## Status
-Proposed — gated on benchmark (see Consequences)
+Superseded pela ADR-0021 — 2026-08-13. `JobQueue` foi removida; o
+problema que esta ADR descrevia (enforcement de admissão de queue)
+deixou de existir. Mantida por histórico.
 
 ## Context
 `JobQueue` impõe um cap de concorrência cluster-wide sobre um recurso

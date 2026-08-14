@@ -9,8 +9,8 @@ import io.mohs.core.definition.JobDefinition;
  * distingue do definicional — {@code orphaned}/{@code paused} não são
  * campos de {@link JobDefinition} de propósito (upsert nunca os toca);
  * este tipo só existe pra leitura combinada em {@link JobStore}.
- * {@code runningExecutionCount} é o mesmo tratamento que {@link StoredQueue}
- * já dá a {@code runningCount} (ADR-0018/0020).
+ * {@code runningExecutionCount} é o contador de mutex por job
+ * (ADR-0018/0020).
  */
 public record StoredJob(JobDefinition definition, boolean orphaned, boolean paused, int runningExecutionCount) {
 

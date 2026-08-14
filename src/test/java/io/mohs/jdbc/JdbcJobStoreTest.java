@@ -182,7 +182,7 @@ class JdbcJobStoreTest {
         assertThat(store.find(key)).isEmpty();
     }
 
-    /** CONC-2 — ver JdbcQueueStoreTest.upsertHandlesConcurrentFirstTimeInsertWithoutThrowing. */
+    /** CONC-2 — dois nós vendo 0 linhas no UPDATE e disputando o INSERT de primeira vez. */
     @Test
     void upsertHandlesConcurrentFirstTimeInsertWithoutThrowing() throws Exception {
         JobDefinition definitionToRegister = definition("welcome-email", new OnDemandSpec());

@@ -7,8 +7,9 @@ confiável sob concorrência real no H2 2.4.240 (código review + spike
 empírico com JDBC cru, ~33% de violação numa única linha disputada, sem
 join nenhum) — a ADR-0018 substitui o mecanismo por um CAS guardado, sem
 depender de lock especializado. A admissão de queue (segunda metade
-desta ADR) permanece válida e inalterada. Mantida por histórico —
-explica o raciocínio original e por que ele não se sustentou.
+desta ADR) também foi removida, pela ADR-0021 — 2026-08-13 (`JobQueue`
+removida por completo). Mantida por histórico — explica o raciocínio
+original e por que ele não se sustentou.
 
 ## Context
 O doc mestre nomeia exclusão mútua por job (`allowConcurrentExecutions`,

@@ -33,7 +33,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
                 .addValue("maxCount", rateLimit.max())
                 .addValue("windowDuration", rateLimit.window().toString());
 
-        // ver CONC-2 em JdbcQueueStore.upsert — mesma corrida, mesma correção.
+        // ver CONC-2 em JdbcJobStore.upsert — mesma corrida, mesma correção.
         int updated = jdbcTemplate.update("UPDATE mohs_rate_limits SET max_count = :maxCount, window_duration = :windowDuration WHERE name = :name", params);
         if (updated == 0) {
             try {

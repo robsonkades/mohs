@@ -1,4 +1,4 @@
-# Mohs — Design da API REST · draft v0.3
+# Mohs — Design da API REST · draft v0.5
 
 Fonte de contrato do **M2** do Plano de Desenvolvimento (MOHS-DOCUMENTO-MESTRE.md §9):
 DTOs e assinatura dos endpoints antes da implementação real (M3).
@@ -13,6 +13,7 @@ v0.4: `GET /nodes` promovido de roadmap pra v1 — registro de heartbeat por
 node já é parte obrigatória do design de liveness (M3); endpoint é leitura
 fina por cima, não infraestrutura nova; Idempotency-Key com durabilidade
 explícita [DECIDIDO].
+v0.5: `GET/PATCH /queues` removido — `JobQueue` foi removida por completo (ADR-0021) [DECIDIDO].
 
 ## Princípios
 
@@ -36,7 +37,7 @@ explícita [DECIDIDO].
 
 | Método e caminho | Efeito |
 |---|---|
-| `GET /overview` | Âncora de polling do dashboard: contagens por status, profundidade por queue, throughput da janela recente — barato por construção |
+| `GET /overview` | Âncora de polling do dashboard: contagens por status, throughput da janela recente — barato por construção |
 | `GET /jobs` · `GET /jobs/{jobKey}` | Definições registradas: agenda, políticas, estado, próximo fire |
 | `POST /jobs/{jobKey}/schedule` | Invoca. Body: `{ "payload": {...}, "at": "..."? }` — `at` ausente = agora. → 202 |
 | `POST /jobs/{jobKey}/pause` · `/resume` | Suspende/retoma disparos automáticos (schedule manual segue permitido) |
@@ -45,8 +46,7 @@ explícita [DECIDIDO].
 | `GET /executions/{id}` | Detalhe: attempts, timestamps, erro, actor |
 | `POST /executions/{id}/cancel` | Cancelamento cooperativo |
 | `POST /executions/{id}/retry` | Retry manual de ops (bypassa política exaurida) |
-| `GET /queues` · `PATCH /queues/{name}` | Estado e ajuste runtime de `maxConcurrent` (cluster-wide) |
-| `GET /rate-limits` · `PATCH /rate-limits/{name}` | Idem para vazão |
+| `GET /rate-limits` · `PATCH /rate-limits/{name}` | Estado e ajuste runtime de vazão (cluster-wide) |
 | `GET /runners` | Visão por nó: modo, max, em execução (node-local por natureza) |
 | `GET /nodes` | Visão de cluster: nodes com heartbeat recente, last-seen |
 | `GET /batches/{id}` | Contadores agregados e estado do lote |
@@ -85,7 +85,7 @@ Content-Type: application/json
 
 ## PATCH runtime × configuração de boot [DECIDIDO]
 
-`PATCH /queues/{name}` altera o valor cluster-wide imediatamente e de forma
+`PATCH /rate-limits/{name}` altera o valor cluster-wide imediatamente e de forma
 durável — **até o próximo boot**, quando a configuração do código/properties
 reaplica (boot vence — comportamento do default `mohs.registration.on-conflict:
 override`; sob `preserve`, o PATCH sobrevive a deploys). A resposta do PATCH inclui o aviso: mudança de
