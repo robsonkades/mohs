@@ -4,6 +4,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -35,6 +36,9 @@ import io.mohs.engine.ExecutionStore;
  * já ativa quando existe uma — nenhuma transação própria é aberta aqui.
  */
 public final class JdbcExecutionStore implements ExecutionStore {
+
+    /** Bem abaixo do teto de 2100 parâmetros do SQL Server pro `IN (:ids)` de {@link #findByIds} (DB-11). Package-private pro teste de fronteira. */
+    static final int MAX_IDS_PER_QUERY = 1000;
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final Clock clock;
@@ -79,13 +83,10 @@ public final class JdbcExecutionStore implements ExecutionStore {
     @Override
     public Optional<Execution> find(ExecutionId id) {
         Objects.requireNonNull(id, "id");
-        // id é PK — no máximo uma linha; ResultSetExtractor lê essa linha
-        // única direto, sem passar por List/stream/findFirst.
-        Execution result = jdbcTemplate.query(
+        return JdbcSupport.findOne(jdbcTemplate,
                 "SELECT * FROM mohs_executions WHERE id = :id",
                 new MapSqlParameterSource("id", id.value()),
-                rs -> rs.next() ? mapRow(rs) : null);
-        return Optional.ofNullable(result);
+                this::mapRow);
     }
 
     @Override
@@ -95,10 +96,15 @@ public final class JdbcExecutionStore implements ExecutionStore {
             return List.of();
         }
         List<String> rawIds = ids.stream().map(ExecutionId::value).toList();
-        return jdbcTemplate.query(
-                "SELECT * FROM mohs_executions WHERE id IN (:ids)",
-                new MapSqlParameterSource("ids", rawIds),
-                (rs, rowNum) -> mapRow(rs));
+        List<Execution> results = new ArrayList<>(rawIds.size());
+        for (int start = 0; start < rawIds.size(); start += MAX_IDS_PER_QUERY) {
+            List<String> chunk = rawIds.subList(start, Math.min(start + MAX_IDS_PER_QUERY, rawIds.size()));
+            results.addAll(jdbcTemplate.query(
+                    "SELECT * FROM mohs_executions WHERE id IN (:ids)",
+                    new MapSqlParameterSource("ids", chunk),
+                    (rs, rowNum) -> mapRow(rs)));
+        }
+        return results;
     }
 
     @Override

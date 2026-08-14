@@ -1,7 +1,5 @@
 package io.mohs.jdbc;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
@@ -15,6 +13,7 @@ import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -26,6 +25,9 @@ import io.mohs.core.job.JobKey;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.JobStore;
+import io.mohs.jdbc.dialect.Candidate;
+import io.mohs.jdbc.dialect.JdbcDialect;
+import io.mohs.jdbc.dialect.SqlServerJdbcDialect;
 
 /**
  * {@link Claimer} sobre {@code mohs_executions}/{@code mohs_job_definitions}
@@ -39,37 +41,55 @@ import io.mohs.engine.JobStore;
  * mesma transação (participação por {@code DataSource}, não por instância
  * de template).
  *
- * <p>A ADR-0018 substitui a ADR-0017: o {@code SELECT ... FOR UPDATE OF e
- * SKIP LOCKED} continua existindo, mas só como otimização (reduz quantos
- * candidatos perdedores fazem trabalho à toa) — a garantia de corretude
- * real vem inteiramente de uma cadeia de {@code UPDATE} guardados
- * ({@link JobStore#tryIncrementRunningExecutions}, {@link
- * #tryTransitionToRunning}), cada um atômico por construção porque é uma
- * escrita simples, não uma leitura com lock especializado. Motivo:
- * {@code SELECT ... FOR UPDATE SKIP LOCKED} do H2 2.4.240 tem uma corrida
- * real sob contenção genuína — confirmado empiricamente (duas conexões
- * JDBC cruas, sem nenhum código Spring, disputando a MESMA linha via
- * barrier: ~33% das vezes as duas obtêm o lock). Travar só {@code e} (não
- * mais {@code j}) também resolve o custo que jobs com {@code
- * allowConcurrentExecutions = true} pagavam à toa na ADR-0017. A ADR-0020
- * generaliza o mutex de "um dono" pra um contador com teto ({@link
- * JobStore#tryIncrementRunningExecutions}/{@link
+ * <p>A ADR-0018 substitui a ADR-0017: o lock otimista da consulta de
+ * candidatos (ver {@link JdbcDialect}) continua existindo, mas só como
+ * otimização (reduz quantos candidatos perdedores fazem trabalho à toa)
+ * — a garantia de corretude real vem inteiramente de uma cadeia de
+ * {@code UPDATE} guardados ({@link JobStore#tryIncrementRunningExecutions},
+ * {@link #tryTransitionToRunning}), cada um atômico por construção
+ * porque é uma escrita simples, não uma leitura com lock especializado.
+ * Motivo: {@code SELECT ... FOR UPDATE SKIP LOCKED} do H2 2.4.240 tem
+ * uma corrida real sob contenção genuína — confirmado empiricamente
+ * (duas conexões JDBC cruas, sem nenhum código Spring, disputando a
+ * MESMA linha via barrier: ~33% das vezes as duas obtêm o lock). Travar
+ * só {@code e} (não mais {@code j}) também resolve o custo que jobs com
+ * {@code allowConcurrentExecutions = true} pagavam à toa na ADR-0017. A
+ * ADR-0020 generaliza o mutex de "um dono" pra um contador com teto
+ * ({@link JobStore#tryIncrementRunningExecutions}/{@link
  * JobStore#decrementRunningExecutions}); a ADR-0021 remove a admissão de
- * queue que cruzava uma terceira tabela aqui.
+ * queue que cruzava uma terceira tabela aqui. A ADR-0023 extrai a
+ * consulta de candidatos (o único ponto sensível a dialeto: {@code
+ * LIMIT}/{@code TOP}, {@code SKIP LOCKED}/hint de tabela) pra {@link
+ * JdbcDialect} — a garantia de corretude acima vale igual em qualquer
+ * dialeto, já que nunca dependeu do lock.
  */
 public final class JdbcClaimer implements Claimer {
 
+    /**
+     * SQL Server (sem {@code SKIP LOCKED} de verdade — {@link
+     * SqlServerJdbcDialect} usa hints pessimistas) escolhe uma
+     * transação "vítima" e a mata sob deadlock genuíno entre dois nós
+     * disputando o mesmo mutex de job — comportamento normal e
+     * documentado do motor, não um bug daqui (Postgres/MySQL/H2 não
+     * precisam disto na prática, mas o retry é inofensivo pra eles —
+     * nunca dispara). Reexecuta o claim inteiro do zero (SELECT de novo
+     * — a transação abortada não deixa candidatos válidos pra reusar).
+     */
+    private static final int MAX_DEADLOCK_RETRIES = 3;
+
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
+    private final JdbcDialect dialect;
     private final Clock clock;
     private final ExecutionStore executionStore;
     private final JobStore jobStore;
     private final Duration leaseTtl;
 
-    public JdbcClaimer(DataSource dataSource, Clock clock, ExecutionStore executionStore, JobStore jobStore, Duration leaseTtl) {
+    public JdbcClaimer(DataSource dataSource, JdbcDialect dialect, Clock clock, ExecutionStore executionStore, JobStore jobStore, Duration leaseTtl) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        this.dialect = Objects.requireNonNull(dialect, "dialect");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
@@ -83,7 +103,7 @@ public final class JdbcClaimer implements Claimer {
             throw new IllegalArgumentException("batchSize must be positive");
         }
 
-        List<String> claimedIds = transactionTemplate.execute(status -> claimWithinTransaction(nodeId, batchSize));
+        List<String> claimedIds = claimIdsWithDeadlockRetry(nodeId, batchSize);
         if (claimedIds.isEmpty()) {
             return List.of();
         }
@@ -105,12 +125,24 @@ public final class JdbcClaimer implements Claimer {
                 .toList();
     }
 
+    private List<String> claimIdsWithDeadlockRetry(String nodeId, int batchSize) {
+        PessimisticLockingFailureException lastFailure = null;
+        for (int attempt = 0; attempt < MAX_DEADLOCK_RETRIES; attempt++) {
+            try {
+                return transactionTemplate.execute(status -> claimWithinTransaction(nodeId, batchSize));
+            } catch (PessimisticLockingFailureException e) {
+                lastFailure = e;
+            }
+        }
+        throw lastFailure;
+    }
+
     private List<String> claimWithinTransaction(String nodeId, int batchSize) {
         Instant now = clock.instant();
         Instant leaseExpiresAt = now.plus(leaseTtl);
         List<Candidate> candidates = selectCandidates(now, batchSize);
 
-        List<String> claimedIds = new ArrayList<>();
+        List<String> claimedIds = new ArrayList<>(candidates.size());
         for (Candidate candidate : candidates) {
             if (tryClaimCandidate(candidate, nodeId, leaseExpiresAt)) {
                 claimedIds.add(candidate.id());
@@ -155,29 +187,6 @@ public final class JdbcClaimer implements Claimer {
     }
 
     private List<Candidate> selectCandidates(Instant now, int batchSize) {
-        MapSqlParameterSource params = new MapSqlParameterSource()
-                .addValue("now", Timestamp.from(now))
-                .addValue("batchSize", batchSize);
-        // e.priority já é Priority.value() (menor reivindica primeiro) —
-        // NOT NULL DEFAULT 20 no schema, então ordena direto, sem CASE.
-        return jdbcTemplate.query("""
-                SELECT e.id AS id, e.job_key AS job_key,
-                       j.allow_concurrent_executions AS allow_concurrent_executions
-                FROM mohs_executions e
-                JOIN mohs_job_definitions j ON j.job_key = e.job_key
-                WHERE e.state = 'ENQUEUED'
-                  AND e.scheduled_at <= :now
-                  AND (j.allow_concurrent_executions = TRUE OR j.running_execution_count < j.max_concurrent_executions)
-                ORDER BY e.priority ASC, e.scheduled_at ASC
-                LIMIT :batchSize
-                FOR UPDATE OF e SKIP LOCKED
-                """, params, JdbcClaimer::mapCandidate);
-    }
-
-    private static Candidate mapCandidate(ResultSet rs, int rowNum) throws SQLException {
-        return new Candidate(rs.getString("id"), rs.getString("job_key"), rs.getBoolean("allow_concurrent_executions"));
-    }
-
-    private record Candidate(String id, String jobKey, boolean allowConcurrentExecutions) {
+        return dialect.selectCandidates(jdbcTemplate, now, batchSize);
     }
 }

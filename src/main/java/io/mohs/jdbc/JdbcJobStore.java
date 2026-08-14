@@ -124,8 +124,9 @@ public final class JdbcJobStore implements JobStore {
                             :intervalDuration, :intervalAfterFinish, :runner, :windowName,
                             :misfire, :allowConcurrentExecutions, :maxConcurrentExecutions, :retries,
                             :timeout, :retryPolicy, :source,
-                            FALSE, FALSE, 0, :createdAt, :updatedAt)
-                        """, params.addValue("id", id).addValue("createdAt", now));
+                            :orphaned, :paused, :runningExecutionCount, :createdAt, :updatedAt)
+                        """, params.addValue("id", id).addValue("createdAt", now)
+                                .addValue("orphaned", false).addValue("paused", false).addValue("runningExecutionCount", 0));
             } catch (DuplicateKeyException e) {
                 jdbcTemplate.update(updateSql, params);
             }
@@ -137,14 +138,13 @@ public final class JdbcJobStore implements JobStore {
     public Optional<StoredJob> find(JobKey key) {
         Objects.requireNonNull(key, "key");
         List<String> unresolvedHandlerJobKeys = new ArrayList<>();
-        // job_key é PK — no máximo uma linha; ResultSetExtractor lê essa
-        // linha única direto, sem passar por List/stream/findFirst.
-        StoredJob result = jdbcTemplate.query(
+        // job_key é UNIQUE — no máximo uma linha.
+        Optional<StoredJob> result = JdbcSupport.findOne(jdbcTemplate,
                 "SELECT * FROM mohs_job_definitions WHERE job_key = :jobKey",
                 new MapSqlParameterSource("jobKey", key.value()),
-                rs -> rs.next() ? mapRowOrNull(rs, 1, unresolvedHandlerJobKeys) : null);
+                rs -> mapRowOrNull(rs, 1, unresolvedHandlerJobKeys));
         markOrphanedForUnresolvedHandlers(unresolvedHandlerJobKeys);
-        return Optional.ofNullable(result);
+        return result;
     }
 
     @Override
@@ -174,19 +174,20 @@ public final class JdbcJobStore implements JobStore {
 
     @Override
     public void markOrphaned(JobKey key) {
-        jdbcTemplate.update("UPDATE mohs_job_definitions SET orphaned = TRUE WHERE job_key = :jobKey", new MapSqlParameterSource("jobKey", key.value()));
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET orphaned = :orphaned WHERE job_key = :jobKey",
+                new MapSqlParameterSource("jobKey", key.value()).addValue("orphaned", true));
     }
 
     @Override
     public void pause(JobKey key) {
-        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = TRUE WHERE job_key = :jobKey",
-                new MapSqlParameterSource("jobKey", key.value()));
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = :paused WHERE job_key = :jobKey",
+                new MapSqlParameterSource("jobKey", key.value()).addValue("paused", true));
     }
 
     @Override
     public void resume(JobKey key) {
-        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = FALSE WHERE job_key = :jobKey",
-                new MapSqlParameterSource("jobKey", key.value()));
+        jdbcTemplate.update("UPDATE mohs_job_definitions SET paused = :paused WHERE job_key = :jobKey",
+                new MapSqlParameterSource("jobKey", key.value()).addValue("paused", false));
     }
 
     @Override

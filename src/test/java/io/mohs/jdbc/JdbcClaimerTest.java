@@ -33,6 +33,7 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
+import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -64,7 +65,7 @@ class JdbcClaimerTest {
     }
 
     private JdbcClaimer newClaimer() {
-        return new JdbcClaimer(dataSource, clock, executionStore, jobStore, LEASE_TTL);
+        return new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
     }
 
     private static DataSource freshH2DataSource() {
@@ -72,7 +73,7 @@ class JdbcClaimerTest {
         h2.setURL("jdbc:h2:mem:claimer-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
         h2.setUser("sa");
         h2.setPassword("");
-        new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(h2);
+        new ResourceDatabasePopulator(new ClassPathResource("schema-h2.sql")).execute(h2);
         return h2;
     }
 
@@ -267,21 +268,24 @@ class JdbcClaimerTest {
         JdbcClaimer claimerA = newClaimer();
         JdbcClaimer claimerB = newClaimer();
         CyclicBarrier barrier = new CyclicBarrier(2);
-        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
-        Future<List<Execution>> futureA = executor.submit(() -> {
-            barrier.await();
-            return claimerA.claim("node-a", 5);
-        });
-        Future<List<Execution>> futureB = executor.submit(() -> {
-            barrier.await();
-            return claimerB.claim("node-b", 5);
-        });
+        List<Execution> claimedA;
+        List<Execution> claimedB;
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<List<Execution>> futureA = executor.submit(() -> {
+                barrier.await();
+                return claimerA.claim("node-a", 5);
+            });
+            Future<List<Execution>> futureB = executor.submit(() -> {
+                barrier.await();
+                return claimerB.claim("node-b", 5);
+            });
 
-        List<Execution> claimedA = futureA.get(10, TimeUnit.SECONDS);
-        List<Execution> claimedB = futureB.get(10, TimeUnit.SECONDS);
-        executor.shutdown();
-        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+            claimedA = futureA.get(10, TimeUnit.SECONDS);
+            claimedB = futureB.get(10, TimeUnit.SECONDS);
+            executor.shutdown();
+            assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
 
         assertThat(claimedA.size() + claimedB.size()).isEqualTo(1);
     }
@@ -295,21 +299,24 @@ class JdbcClaimerTest {
         seedExecution("exec-a", "job-a", NOW.minusSeconds(1));
         seedExecution("exec-b", "job-b", NOW.minusSeconds(1));
         CyclicBarrier barrier = new CyclicBarrier(2);
-        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
-        Future<List<Execution>> futureA = executor.submit(() -> {
-            barrier.await();
-            return claimer.claim("node-a", 5);
-        });
-        Future<List<Execution>> futureB = executor.submit(() -> {
-            barrier.await();
-            return claimer.claim("node-b", 5);
-        });
+        List<Execution> claimedA;
+        List<Execution> claimedB;
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<List<Execution>> futureA = executor.submit(() -> {
+                barrier.await();
+                return claimer.claim("node-a", 5);
+            });
+            Future<List<Execution>> futureB = executor.submit(() -> {
+                barrier.await();
+                return claimer.claim("node-b", 5);
+            });
 
-        List<Execution> claimedA = futureA.get(10, TimeUnit.SECONDS);
-        List<Execution> claimedB = futureB.get(10, TimeUnit.SECONDS);
-        executor.shutdown();
-        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+            claimedA = futureA.get(10, TimeUnit.SECONDS);
+            claimedB = futureB.get(10, TimeUnit.SECONDS);
+            executor.shutdown();
+            assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
 
         Set<String> allClaimedIds = Stream.concat(claimedA.stream(), claimedB.stream())
                 .map(e -> e.id().value())

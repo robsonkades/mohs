@@ -1,14 +1,8 @@
--- Schema JDBC do Mohs (io.mohs.jdbc). Prefixo mohs_ em toda tabela —
--- Mohs é biblioteca embarcada, compartilha banco/schema com a aplicação
--- hospedeira, não pode colidir com tabela dela. Durations viram VARCHAR
--- via Duration.toString()/Duration.parse() (ISO-8601, ex. "PT30S") —
--- mais legível pra debug manual que millis, nenhuma delas precisa de
--- range query. Sem execution_windows/runners: os dois são bean-resolved
--- ("predicados só existem em código", §5.8 do documento mestre), não
--- dado persistido.
+-- Schema JDBC do Mohs (io.mohs.jdbc) para PostgreSQL — idêntico ao
+-- dialeto H2 (ver schema-h2.sql para o raciocínio de cada coluna;
+-- ADR-0022/0023). Prefixo mohs_ em toda tabela — Mohs é biblioteca
+-- embarcada, compartilha banco/schema com a aplicação hospedeira.
 
--- id é UUIDv7 (io.github.robsonkades:uuidv7), mesma geração de mohs_executions.id
--- — surrogate key estável; job_key continua sendo a chave de negócio (única).
 CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     id              VARCHAR(255) PRIMARY KEY,
     job_key         VARCHAR(255) NOT NULL UNIQUE,
@@ -57,11 +51,11 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     node_id          VARCHAR(255),  -- claim, etapa 3 (ADR-0016)
     lease_expires_at TIMESTAMP,     -- claim, etapa 3 (ADR-0012/0016)
     batch_id         VARCHAR(255) REFERENCES mohs_batches(id),
-    payload          CLOB         NOT NULL,
+    payload          TEXT         NOT NULL, -- não CLOB: não existe em Postgres (DB-3)
     payload_type     VARCHAR(500) NOT NULL,
     created_at       TIMESTAMP    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (state, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_job_key ON mohs_executions (job_key);
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_batch_id ON mohs_executions (batch_id);
@@ -72,7 +66,7 @@ CREATE TABLE IF NOT EXISTS mohs_attempts (
     started_at   TIMESTAMP    NOT NULL,
     finished_at  TIMESTAMP,
     outcome      VARCHAR(20)  NOT NULL,
-    error        CLOB,
+    error        TEXT, -- não CLOB: não existe em Postgres (DB-3)
     PRIMARY KEY (execution_id, number)
 );
 

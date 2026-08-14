@@ -6,6 +6,7 @@ import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.IntStream;
 
 import javax.sql.DataSource;
 
@@ -54,7 +55,7 @@ class JdbcExecutionStoreTest {
         h2.setURL("jdbc:h2:mem:execution-store-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
         h2.setUser("sa");
         h2.setPassword("");
-        new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(h2);
+        new ResourceDatabasePopulator(new ClassPathResource("schema-h2.sql")).execute(h2);
         return h2;
     }
 
@@ -166,5 +167,18 @@ class JdbcExecutionStoreTest {
     @Test
     void findByIdsReturnsEmptyForAnEmptyList() {
         assertThat(store.findByIds(List.of())).isEmpty();
+    }
+
+    /** DB-11: SQL Server rejeita mais de 2100 parâmetros num `IN (:ids)` — findByIds particiona em lotes. */
+    @Test
+    void findByIdsHandlesMoreIdsThanFitInASingleInClause() {
+        List<ExecutionId> ids = IntStream.range(0, JdbcExecutionStore.MAX_IDS_PER_QUERY + 5)
+                .mapToObj(i -> ExecutionId.of("boundary-" + i))
+                .toList();
+        ids.forEach(id -> store.insert(execution(id.value(), "welcome-email"), new WelcomeEmail("a", 1)));
+
+        List<Execution> found = store.findByIds(ids);
+
+        assertThat(found).extracting(Execution::id).containsExactlyInAnyOrderElementsOf(ids);
     }
 }

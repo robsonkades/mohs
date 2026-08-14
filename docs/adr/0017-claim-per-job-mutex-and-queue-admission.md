@@ -8,8 +8,11 @@ empírico com JDBC cru, ~33% de violação numa única linha disputada, sem
 join nenhum) — a ADR-0018 substitui o mecanismo por um CAS guardado, sem
 depender de lock especializado. A admissão de queue (segunda metade
 desta ADR) também foi removida, pela ADR-0021 — 2026-08-13 (`JobQueue`
-removida por completo). Mantida por histórico — explica o raciocínio
-original e por que ele não se sustentou.
+removida por completo). A alegação de portabilidade desta ADR (DB-10)
+nunca tinha sido testada contra um segundo banco de verdade — fechada
+formalmente pela ADR-0022 (validação contra Postgres real). Mantida por
+histórico — explica o raciocínio original e por que ele não se
+sustentou.
 
 ## Context
 O doc mestre nomeia exclusão mútua por job (`allowConcurrentExecutions`,

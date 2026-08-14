@@ -39,7 +39,7 @@ class JdbcBatchStoreTest {
         h2.setURL("jdbc:h2:mem:batch-store-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
         h2.setUser("sa");
         h2.setPassword("");
-        new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(h2);
+        new ResourceDatabasePopulator(new ClassPathResource("schema-h2.sql")).execute(h2);
         return h2;
     }
 
@@ -82,11 +82,11 @@ class JdbcBatchStoreTest {
     @Test
     void incrementsAreAtomicUnderConcurrentCompletion() throws InterruptedException {
         store.create("batch-1", 100);
-        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-
-        IntStream.range(0, 100).forEach(i -> executor.submit(() -> store.incrementSucceeded("batch-1")));
-        executor.shutdown();
-        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            IntStream.range(0, 100).forEach(i -> executor.submit(() -> store.incrementSucceeded("batch-1")));
+            executor.shutdown();
+            assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
 
         Optional<BatchCounters> counters = store.find("batch-1");
         assertThat(counters).map(BatchCounters::succeeded).contains(100);

@@ -1,0 +1,6 @@
+-> Limit: 20 row(s)  (cost=352 rows=20) (actual time=0.0709..0.131 rows=20 loops=1)
+    -> Nested loop inner join  (cost=352 rows=610) (actual time=0.0704..0.13 rows=20 loops=1)
+        -> Index lookup on e using idx_mohs_executions_claim (state='ENQUEUED'), with index condition: (e.scheduled_at <= TIMESTAMP'2026-08-14 12:00:00')  (cost=72.6 rows=1526) (actual time=0.0594..0.0617 rows=20 loops=1)
+        -> Filter: ((j.allow_concurrent_executions = true) or (j.running_execution_count < j.max_concurrent_executions))  (cost=0.25 rows=0.4) (actual time=0.00323..0.00327 rows=1 loops=20)
+            -> Single-row index lookup on j using job_key (job_key=e.job_key)  (cost=0.25 rows=1) (actual time=0.0031..0.00311 rows=1 loops=20)
+

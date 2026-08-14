@@ -58,7 +58,7 @@ class JdbcJobStoreTest {
         h2.setURL("jdbc:h2:mem:job-store-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
         h2.setUser("sa");
         h2.setPassword("");
-        new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(h2);
+        new ResourceDatabasePopulator(new ClassPathResource("schema-h2.sql")).execute(h2);
         return h2;
     }
 
