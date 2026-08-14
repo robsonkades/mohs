@@ -46,6 +46,7 @@ final class SqlServerTestSupport {
         jdbcTemplate.execute("DELETE FROM mohs_job_definitions");
         jdbcTemplate.execute("DELETE FROM mohs_batches");
         jdbcTemplate.execute("DELETE FROM mohs_rate_limits");
+        jdbcTemplate.execute("DELETE FROM mohs_nodes");
         return dataSource;
     }
 }

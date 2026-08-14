@@ -99,3 +99,12 @@ CREATE TABLE mohs_rate_limits (
     max_count       INT NOT NULL,
     window_duration NVARCHAR(50) NOT NULL
 );
+
+-- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma
+-- lógica de claim/reclaim consulta esta tabela.
+IF OBJECT_ID('mohs_nodes', 'U') IS NULL
+CREATE TABLE mohs_nodes (
+    node_id           NVARCHAR(255) PRIMARY KEY,
+    state             NVARCHAR(20) NOT NULL,
+    last_heartbeat_at DATETIME2    NOT NULL
+);
