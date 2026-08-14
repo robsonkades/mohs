@@ -5,11 +5,8 @@ import java.util.Objects;
 
 /**
  * Vazão máxima permitida sobre um recurso compartilhado numa janela de
- * tempo — mesma família de {@link JobQueue} (cap cluster-wide), mas
- * limitando taxa em vez de concorrência simultânea; os dois papéis
- * coexistem sobre o mesmo recurso quando fizer sentido (ex.: SMTP com
- * {@code maxConcurrent} e {@code max}/{@code window} ao mesmo tempo). Bean
- * define a estrutura, property ajusta os números
+ * tempo — cap cluster-wide, mas limitando taxa em vez de concorrência
+ * simultânea. Bean define a estrutura, property ajusta os números
  * ({@code mohs.rate-limits.<nome>.max}/{@code .window}). Spec, nunca
  * limitador de fato — quem aplica é o motor (M3).
  */

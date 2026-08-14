@@ -39,7 +39,7 @@ import io.mohs.engine.StoredJob;
  * {@code io.mohs.jdbc}).
  *
  * <p>{@link NamedParameterJdbcTemplate} em vez de {@code JdbcTemplate}
- * cru: {@link #upsert} sozinho tem 16 colunas — contar {@code ?}
+ * cru: {@link #upsert} sozinho tem 15 colunas — contar {@code ?}
  * posicional contra uma lista de argumentos nessa largura é risco real de
  * bug silencioso (troca de posição não quebra a compilação nem sempre
  * falha em runtime); parâmetro nomeado (`:coluna`) elimina essa classe de
@@ -72,7 +72,6 @@ public final class JdbcJobStore implements JobStore {
                 .addValue("intervalDuration", definition.schedule() instanceof IntervalSpec interval ? interval.interval().toString() : null)
                 .addValue("intervalAfterFinish", definition.schedule() instanceof IntervalSpec interval ? interval.afterFinish() : null)
                 .addValue("runner", definition.runner())
-                .addValue("queueName", definition.queue())
                 .addValue("windowName", definition.window())
                 .addValue("misfire", definition.misfire().name())
                 .addValue("allowConcurrentExecutions", definition.allowConcurrentExecutions())
@@ -95,7 +94,7 @@ public final class JdbcJobStore implements JobStore {
                     name = :name, handler_type = :handlerType, schedule_type = :scheduleType,
                     cron_expression = :cronExpression, cron_zone = :cronZone,
                     interval_duration = :intervalDuration, interval_after_finish = :intervalAfterFinish,
-                    runner = :runner, queue_name = :queueName, window_name = :windowName,
+                    runner = :runner, window_name = :windowName,
                     misfire = :misfire, allow_concurrent_executions = :allowConcurrentExecutions,
                     max_concurrent_executions = :maxConcurrentExecutions,
                     retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
@@ -109,13 +108,13 @@ public final class JdbcJobStore implements JobStore {
                 jdbcTemplate.update("""
                         INSERT INTO mohs_job_definitions (
                             job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
-                            interval_duration, interval_after_finish, runner, queue_name, window_name,
+                            interval_duration, interval_after_finish, runner, window_name,
                             misfire, allow_concurrent_executions, max_concurrent_executions, retries,
                             timeout, retry_policy, source,
                             orphaned, paused, running_execution_count, created_at, updated_at)
                         VALUES (
                             :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
-                            :intervalDuration, :intervalAfterFinish, :runner, :queueName, :windowName,
+                            :intervalDuration, :intervalAfterFinish, :runner, :windowName,
                             :misfire, :allowConcurrentExecutions, :maxConcurrentExecutions, :retries,
                             :timeout, :retryPolicy, :source,
                             FALSE, FALSE, 0, :createdAt, :updatedAt)
@@ -245,7 +244,7 @@ public final class JdbcJobStore implements JobStore {
 
         JobDefinition definition = new JobDefinition(
                 JobKey.of(jobKey), rs.getString("name"), handlerType, schedule,
-                rs.getString("runner"), rs.getString("queue_name"), rs.getString("window_name"),
+                rs.getString("runner"), rs.getString("window_name"),
                 Misfire.valueOf(rs.getString("misfire")), rs.getBoolean("allow_concurrent_executions"),
                 rs.getInt("max_concurrent_executions"),
                 rs.getInt("retries"), timeout, rs.getString("retry_policy"),

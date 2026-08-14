@@ -9,7 +9,6 @@ import io.mohs.core.job.JobKey;
 import io.mohs.core.Mohs;
 import io.mohs.core.execution.JobContext;
 import io.mohs.core.resource.ExecutionWindow;
-import io.mohs.core.resource.JobQueue;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.schedule.Misfire;
 
@@ -50,9 +49,6 @@ public @interface MohsJob {
 
     /** {@link MohsRunner} nomeado em que este job executa. */
     String runner() default "";
-
-    /** {@link JobQueue} nomeada que limita a concorrência deste job. */
-    String queue() default "";
 
     /** {@link ExecutionWindow} nomeada que exclui horários de disparo. */
     String window() default "";

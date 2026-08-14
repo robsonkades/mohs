@@ -15,8 +15,7 @@ import java.util.function.Predicate;
 /**
  * Janela de exclusão de disparo: um job cujo horário cai em alguma exclusão
  * configurada não dispara. Predicados só existem em código — não há
- * equivalente em properties, ao contrário de {@link MohsRunner}/
- * {@link JobQueue}.
+ * equivalente em properties, ao contrário de {@link MohsRunner}.
  *
  * <p>Os predicados desta primeira versão avaliam o {@link Instant} em UTC.
  * Se a exclusão precisar respeitar o zone do próprio job, isso é decisão do

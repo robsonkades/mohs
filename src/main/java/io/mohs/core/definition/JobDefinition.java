@@ -29,7 +29,6 @@ public record JobDefinition(
         Class<?> handlerType,
         Schedule schedule,
         @Nullable String runner,
-        @Nullable String queue,
         @Nullable String window,
         Misfire misfire,
         boolean allowConcurrentExecutions,
@@ -59,7 +58,6 @@ public record JobDefinition(
             throw new IllegalArgumentException("timeout must be positive");
         }
         requireNotBlankIfPresent(runner, "runner");
-        requireNotBlankIfPresent(queue, "queue");
         requireNotBlankIfPresent(window, "window");
         requireNotBlankIfPresent(retryPolicy, "retryPolicy");
     }
@@ -73,7 +71,7 @@ public record JobDefinition(
     /**
      * Monta uma definição {@code PROGRAMMATIC} via o builder staged
      * {@link JobSpec}, ex. {@code JobDefinition.of("id", Handler.class, spec ->
-     * spec.cron(expr, zone).runner("io").queue("tenant-sync"))}.
+     * spec.cron(expr, zone).runner("io"))}.
      */
     public static JobDefinition of(String id, Class<?> handlerType, Consumer<JobSpec> configurer) {
         Objects.requireNonNull(id, "id");

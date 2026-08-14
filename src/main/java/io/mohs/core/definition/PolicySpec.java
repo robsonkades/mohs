@@ -2,20 +2,17 @@ package io.mohs.core.definition;
 
 import java.time.Duration;
 
-import io.mohs.core.resource.JobQueue;
 import io.mohs.core.schedule.Misfire;
 
 /**
  * O estágio de {@link JobSpec} alcançado depois que um gatilho foi
  * escolhido. Carrega toda política do job que não é o gatilho em si —
- * runner, queue, window, misfire, retries, timeout — cada uma opcional e
+ * runner, window, misfire, retries, timeout — cada uma opcional e
  * ajustável em qualquer ordem.
  */
 public sealed interface PolicySpec permits JobSpecImpl {
 
     PolicySpec runner(String name);
-
-    PolicySpec queue(String name);
 
     PolicySpec window(String name);
 
@@ -38,10 +35,9 @@ public sealed interface PolicySpec permits JobSpecImpl {
 
     /**
      * Como {@link #preventOverlap()}, mas com um teto explícito maior que 1
-     * em vez de exclusão mútua total — ex.: um job cujo handler compartilha
-     * um recurso externo com capacidade própria por {@code job_key} (não
-     * entre jobs diferentes; para isso é {@link JobQueue}), como um relatório
-     * que pode rodar até N instâncias ao mesmo tempo, nunca N+1.
+     * em vez de exclusão mútua total — ex.: um relatório cujo handler
+     * compartilha um recurso externo com capacidade própria por {@code
+     * job_key}, e pode rodar até N instâncias ao mesmo tempo, nunca N+1.
      */
     PolicySpec maxConcurrentExecutions(int max);
 

@@ -17,7 +17,6 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     interval_duration      VARCHAR(50),
     interval_after_finish  BOOLEAN,
     runner          VARCHAR(255),
-    queue_name      VARCHAR(255),
     window_name     VARCHAR(255),
     misfire         VARCHAR(20)  NOT NULL,
     allow_concurrent_executions BOOLEAN NOT NULL DEFAULT TRUE,
@@ -72,14 +71,6 @@ CREATE TABLE IF NOT EXISTS mohs_attempts (
     outcome      VARCHAR(20)  NOT NULL,
     error        CLOB,
     PRIMARY KEY (execution_id, number)
-);
-
--- running_count: contador ADR-0009 (ainda Proposed, não Decided) — esta
--- etapa só cria a coluna; etapa 3 (claim) é quem escreve nela.
-CREATE TABLE IF NOT EXISTS mohs_job_queues (
-    name           VARCHAR(255) PRIMARY KEY,
-    max_concurrent INT NOT NULL,
-    running_count  INT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS mohs_rate_limits (

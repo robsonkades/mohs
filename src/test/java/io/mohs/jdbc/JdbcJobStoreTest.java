@@ -71,7 +71,7 @@ class JdbcJobStoreTest {
                         : spec.every(interval.interval());
                 case OnDemandSpec onDemand -> spec.onDemand();
             };
-            policySpec.runner("io").queue("emails").retries(3);
+            policySpec.runner("io").retries(3);
         });
     }
 

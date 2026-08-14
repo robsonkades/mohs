@@ -9,8 +9,8 @@ import io.mohs.core.definition.JobSpec;
  * adicionar um quarto tipo de agenda é erro de compilação em todo ponto de
  * uso até ser tratado, não um {@code default} silencioso.
  *
- * <p>Este tipo carrega só o gatilho. Políticas do job (runner, queue,
- * window, misfire, retries, timeout) vivem em {@link JobDefinition}; ver
+ * <p>Este tipo carrega só o gatilho. Políticas do job (runner, window,
+ * misfire, retries, timeout) vivem em {@link JobDefinition}; ver
  * {@link JobSpec} para o builder staged que monta os dois.
  */
 public sealed interface Schedule permits CronSpec, IntervalSpec, OnDemandSpec {

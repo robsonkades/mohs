@@ -32,8 +32,6 @@ import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
-import io.mohs.core.resource.JobQueue;
-import io.mohs.engine.StoredJob;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -52,7 +50,6 @@ class JdbcClaimerTest {
     private JdbcTemplate rawJdbcTemplate;
     private JdbcExecutionStore executionStore;
     private JdbcJobStore jobStore;
-    private JdbcQueueStore queueStore;
     private JdbcClaimer claimer;
 
     @BeforeEach
@@ -62,12 +59,11 @@ class JdbcClaimerTest {
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
         jobStore = new JdbcJobStore(dataSource, clock);
-        queueStore = new JdbcQueueStore(dataSource);
         claimer = newClaimer();
     }
 
     private JdbcClaimer newClaimer() {
-        return new JdbcClaimer(dataSource, clock, executionStore, jobStore, queueStore, LEASE_TTL);
+        return new JdbcClaimer(dataSource, clock, executionStore, jobStore, LEASE_TTL);
     }
 
     private static DataSource freshH2DataSource() {
@@ -182,20 +178,6 @@ class JdbcClaimerTest {
     }
 
     @Test
-    void claimStopsClaimingOnceQueueIsFull() {
-        queueStore.upsert(JobQueue.named("emails").maxConcurrent(1).build());
-        seedJob("welcome-email", policy -> policy.queue("emails"));
-        seedExecution("exec-1", "welcome-email", NOW.minusSeconds(2));
-        seedExecution("exec-2", "welcome-email", NOW.minusSeconds(1));
-
-        List<Execution> claimed = claimer.claim("node-a", 10);
-
-        assertThat(claimed).extracting(e -> e.id().value()).containsExactly("exec-1");
-        assertThat(stateOf("exec-2")).isEqualTo(ExecutionState.ENQUEUED);
-        assertThat(queueStore.find("emails")).map(sq -> sq.runningCount()).contains(1);
-    }
-
-    @Test
     void claimNeverClaimsTwoSiblingsOfTheSameJobInOneBatchWhenOverlapIsPrevented() {
         seedJob("welcome-email", PolicySpec::preventOverlap);
         seedExecution("exec-1", "welcome-email", NOW.minusSeconds(2));
@@ -230,20 +212,6 @@ class JdbcClaimerTest {
         List<Execution> claimed = claimer.claim("node-a", 10);
 
         assertThat(claimed).extracting(e -> e.id().value()).containsExactlyInAnyOrder("exec-1", "exec-2");
-    }
-
-    @Test
-    void claimReleasesTheJobMutexWhenQueueAdmissionFailsAfterAcquiringIt() {
-        queueStore.upsert(JobQueue.named("emails").maxConcurrent(1).build());
-        queueStore.tryIncrementRunning("emails"); // pre-fill the only slot so this claim's admission fails
-        seedJob("welcome-email", policy -> policy.queue("emails").preventOverlap());
-        seedExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
-
-        List<Execution> claimed = claimer.claim("node-a", 10);
-
-        assertThat(claimed).isEmpty();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.ENQUEUED);
-        assertThat(jobStore.find(JobKey.of("welcome-email"))).map(StoredJob::runningExecutionCount).contains(0);
     }
 
     @Test

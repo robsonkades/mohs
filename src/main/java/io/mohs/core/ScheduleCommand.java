@@ -12,7 +12,7 @@ import io.mohs.core.execution.Priority;
 /**
  * Cadeia fluente sobre uma definição já existente. Pré-terminais ajustam só
  * a instância — {@code priority}, {@code as}, {@code idempotencyKey}; a
- * política (retry, runner, queue) pertence à {@link JobDefinition} e não é
+ * política (retry, runner) pertence à {@link JobDefinition} e não é
  * sobrescrita aqui. Terminais ({@code now/at/after}) fecham a cadeia e
  * persistem a execução — {@link CheckReturnValue} torna uma cadeia
  * abandonada antes do terminal um warning de compilação, não silêncio em
