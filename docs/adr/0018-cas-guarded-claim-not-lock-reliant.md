@@ -1,7 +1,11 @@
 # ADR-0018: Mutex por job via CAS guardado, não dependente de lock especializado
 
 ## Status
-Decided — 2026-08-13
+Decided — 2026-08-13. Estendida pela ADR-0020 (2026-08-13), que
+generaliza o mutex de "um dono" (`running_execution_id`) pra um contador
+com teto (`running_execution_count < max_concurrent_executions`) — a
+disciplina de CAS guardado descrita aqui continua sendo a garantia de
+corretude, só a forma do estado muda.
 
 ## Context
 Um code review completo da codebase (`docs/codereview.md`, achado

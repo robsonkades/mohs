@@ -137,7 +137,10 @@ default `true` — a maioria dos jobs é invocada com payloads independentes
 e não tem por que serializar entre si; `preventOverlap()` opta pela
 exclusividade, pro caso mais estreito de um job cron/interval que não pode
 se sobrepor ao próprio disparo anterior — mesmo default do
-`@DisallowConcurrentExecution` do Quartz, que também é opt-in); Runner
+`@DisallowConcurrentExecution` do Quartz, que também é opt-in;
+`maxConcurrentExecutions(int)` generaliza pra um teto explícito maior que
+1, pro caso de um job cujo handler compartilha um recurso externo com
+capacidade própria — ADR-0020); Runner
 node-local por natureza de workload (virtual cap 64 / cpu = cores); Queue
 cluster-wide (enforcement a definir por benchmark — seção 5.8); Rate
 Limiter cluster-wide de janela fixa (eixo de vazão, distinto de
@@ -589,6 +592,7 @@ definida.
 | 0017 | Mutex por job e admissão de queue no claim | superseded pela ADR-0018 |
 | 0018 | Mutex por job via CAS guardado, não dependente de lock especializado | decidido |
 | 0019 | Execuções concorrentes do mesmo job são permitidas por padrão | decidido |
+| 0020 | Teto de concorrência por job (maxConcurrentExecutions) | decidido |
 
 **Etapas geradas pelo design** (entram no PLAN.md, sequenciadas em
 milestones em §9): esqueleto de módulo + ArchUnit; contratos do core
