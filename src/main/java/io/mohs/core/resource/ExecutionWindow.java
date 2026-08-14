@@ -36,10 +36,7 @@ import java.util.function.Predicate;
 public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) {
 
     public ExecutionWindow {
-        Objects.requireNonNull(name, "name");
-        if (name.isBlank()) {
-            throw new IllegalArgumentException("name must not be blank");
-        }
+        Fields.requireNotBlank(name, "name");
         exclusions = List.copyOf(exclusions); // cópia defensiva (Effective Java, Item 50)
     }
 

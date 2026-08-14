@@ -620,7 +620,7 @@ O que substitui a disciplina que o multi-módulo dava de graça:
      (`MohsApplication`), não API
    - `io.mohs.cron` — utilitário à parte, não é vocabulário de job, não
      migrou pra `core`
-   - `io.mohs.engine` · `io.mohs.jdbc` — internos (`@Internal`)
+   - `io.mohs.engine` · `io.mohs.jdbc` — internos (fronteira garantida por `ArchitectureTest`, não por annotation)
    - `io.mohs.autoconfigure` — auto-config, properties, validações de boot
    - `io.mohs.rest` — API REST/dashboard
    - `io.mohs.test` — test kit

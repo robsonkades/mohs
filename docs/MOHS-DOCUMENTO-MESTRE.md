@@ -186,7 +186,7 @@ O que substitui a disciplina do multi-módulo:
    windows). `io.mohs` (raiz) fica só com o bootstrap Spring Boot
    deste módulo (`MohsApplication`), não API. `io.mohs.cron` é utilitário à
    parte (não é vocabulário de job, não migrou pra `core`) · `io.mohs.engine`
-   e `io.mohs.jdbc` (internos, `@Internal`) · `io.mohs.autoconfigure` ·
+   e `io.mohs.jdbc` (internos, fronteira garantida por `ArchitectureTest`, não annotation) · `io.mohs.autoconfigure` ·
    `io.mohs.rest` · `io.mohs.test`. Regras no build: interno não vaza para a
    API pública; `rest` só enxerga a API pública; `test` não vaza para
    produção.
@@ -582,6 +582,10 @@ definida.
 | 0019 | Execuções concorrentes do mesmo job são permitidas por padrão | decidido |
 | 0020 | Teto de concorrência por job (maxConcurrentExecutions) | decidido |
 | 0021 | Remoção de JobQueue/QueueStore | decidido |
+| 0022 | Validação contra Postgres real e escopo deliberado do dialeto | decidido |
+| 0023 | Suporte a SQL Server e MySQL — JdbcDialect por banco | decidido |
+| 0024 | Transição de conclusão de execução pertence a `ExecutionStore` | decidido |
+| 0025 | Reaper libera a vaga de concorrência por job ao reivindicar execução órfã | decidido |
 
 **Etapas geradas pelo design** (entram no PLAN.md, sequenciadas em
 milestones em §9): esqueleto de módulo + ArchUnit; contratos do core
@@ -636,8 +640,8 @@ Fonte: REST-API-DESIGN.md (superfície completa da tabela).
 - `ProblemDetail` (RFC 7807) como formato único de erro
 - `ActorResolver` como SPI (interface); resolução real fica pra M3
 
-Status: implementado — ver `io.mohs.rest` (5 pacotes: raiz + `error`/
-`job`/`execution`/`resource`). Complemento pontual ao M1 nesse meio-tempo:
+Status: implementado — ver `io.mohs.rest` (raiz + `batch`/`error`/
+`execution`/`job`/`node`/`overview`/`ratelimit`/`runner`). Complemento pontual ao M1 nesse meio-tempo:
 `Attempt.error` e `io.mohs.core.resource.RateLimit`, que o design REST
 precisava e o M1 não tinha congelado ainda.
 

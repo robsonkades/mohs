@@ -22,6 +22,20 @@ import org.jspecify.annotations.Nullable;
  * por tenant). Num app Spring típico você não chama isso diretamente: o
  * starter traduz cada método anotado com {@link MohsJob @MohsJob} em
  * exatamente uma destas no boot.
+ *
+ * @param key identidade estável do job — chave de upsert, nunca muda entre redeploys do mesmo job
+ * @param name rótulo legível opcional, sem papel na identidade nem na agenda
+ * @param handlerType classe que processa cada execução deste job
+ * @param schedule quando o job dispara — {@code CronSpec}/{@code IntervalSpec}/{@code OnDemandSpec}
+ * @param runner nome do {@code MohsRunner} que executa as invocações; {@code null} usa o runner default
+ * @param window nome da {@code ExecutionWindow} que restringe quando o job pode rodar; {@code null} = sem restrição
+ * @param misfire política aplicada quando um disparo é perdido
+ * @param allowConcurrentExecutions se {@code true}, sem teto de execuções concorrentes deste job — {@code maxConcurrentExecutions} deve ser {@code 0}
+ * @param maxConcurrentExecutions teto de execuções concorrentes quando {@code allowConcurrentExecutions} é {@code false} — pelo menos {@code 1}
+ * @param retries número de tentativas adicionais após a primeira falha
+ * @param timeout prazo máximo por tentativa; {@code null} = sem timeout próprio (o Watchdog Bound cluster-wide, se configurado, ainda se aplica)
+ * @param retryPolicy nome do bean Spring de uma política de retry customizada, para casos que {@code retries} não expressa; {@code null} usa a política default
+ * @param source {@code ANNOTATION} (via {@link MohsJob}) ou {@code PROGRAMMATIC} (via {@link #of})
  */
 public record JobDefinition(
         JobKey key,

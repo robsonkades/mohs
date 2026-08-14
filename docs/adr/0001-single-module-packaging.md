@@ -28,7 +28,7 @@ O que substitui a disciplina que o multi-módulo dava de graça:
 
 1. **Fronteira por pacote, guardada por ArchUnit:** `io.mohs` (API pública:
    annotations, `Mohs`, `JobRef`, specs, eventos) · `io.mohs.engine` e
-   `io.mohs.jdbc` (internos, `@Internal`) · `io.mohs.autoconfigure` ·
+   `io.mohs.jdbc` (internos) · `io.mohs.autoconfigure` ·
    `io.mohs.rest` · `io.mohs.test`. Regras no build: interno não vaza para
    a API pública; `rest` só enxerga a API pública; `test` não vaza para
    produção.

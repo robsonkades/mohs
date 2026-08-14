@@ -13,10 +13,7 @@ import java.util.Objects;
 public record RateLimit(String name, int max, Duration window) {
 
     public RateLimit {
-        Objects.requireNonNull(name, "name");
-        if (name.isBlank()) {
-            throw new IllegalArgumentException("name must not be blank");
-        }
+        Fields.requireNotBlank(name, "name");
         if (max < 1) {
             throw new IllegalArgumentException("max must be at least 1");
         }

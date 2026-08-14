@@ -16,7 +16,7 @@ public final class PayloadValidationException extends RuntimeException {
     private final String field;
 
     public PayloadValidationException(String field, String message) {
-        super(message);
+        super(Objects.requireNonNull(message, "message"));
         this.field = Objects.requireNonNull(field, "field");
     }
 

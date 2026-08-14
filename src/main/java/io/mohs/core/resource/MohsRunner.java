@@ -34,10 +34,7 @@ import java.util.Objects;
 public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int coreSize, int maxSize, int queueCapacity, Duration keepAlive) {
 
     public MohsRunner {
-        Objects.requireNonNull(name, "name");
-        if (name.isBlank()) {
-            throw new IllegalArgumentException("name must not be blank");
-        }
+        Fields.requireNotBlank(name, "name");
         Objects.requireNonNull(mode, "mode");
         Objects.requireNonNull(keepAlive, "keepAlive");
         if (mode == RunnerMode.IO) {

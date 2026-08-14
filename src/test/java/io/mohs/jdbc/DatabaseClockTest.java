@@ -4,6 +4,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.UUID;
 
 import javax.sql.DataSource;
 
@@ -53,7 +54,7 @@ class DatabaseClockTest {
 
     private static DataSource h2DataSource() {
         JdbcDataSource h2 = new JdbcDataSource();
-        h2.setURL("jdbc:h2:mem:clock-sync-test;DB_CLOSE_DELAY=-1");
+        h2.setURL("jdbc:h2:mem:clock-sync-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
         h2.setUser("sa");
         h2.setPassword("");
         return h2;

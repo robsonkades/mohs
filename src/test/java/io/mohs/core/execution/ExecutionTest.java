@@ -28,6 +28,16 @@ class ExecutionTest {
     }
 
     @Test
+    void attemptsIsImmutable() {
+        Execution execution = new Execution(
+                ExecutionId.of("exec-1"), JobKey.of("job-1"), ExecutionState.RUNNING,
+                Instant.now(), null, List.of(new Attempt(1, Instant.now(), null, ExecutionState.RUNNING, null)), "application");
+
+        assertThatThrownBy(() -> execution.attempts().add(new Attempt(2, Instant.now(), null, ExecutionState.RUNNING, null)))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
     void rejectsNullActor() {
         assertThatThrownBy(() -> new Execution(
                 ExecutionId.of("exec-1"), JobKey.of("job-1"), ExecutionState.RUNNING,

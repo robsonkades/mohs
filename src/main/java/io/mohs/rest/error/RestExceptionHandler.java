@@ -2,10 +2,15 @@ package io.mohs.rest.error;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 import io.mohs.core.job.JobKey;
@@ -52,6 +57,36 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
         problem.setTitle("Payload validation failed");
         problem.setProperty("field", ex.field());
         return problem;
+    }
+
+    /**
+     * {@code ResponseEntityExceptionHandler.handleHttpMessageNotReadable}
+     * base substitui a mensagem original por um {@code detail} fixo
+     * ("Failed to read request") — perde a validação bem redigida que os
+     * records de request (ex.: {@link io.mohs.rest.ratelimit.RateLimitPatchRequest})
+     * já fazem no próprio compact constructor, disparada durante a
+     * desserialização do Jackson. Quando a causa raiz é uma {@link
+     * IllegalArgumentException} (validação de domínio, não JSON malformado),
+     * devolve 422 com a mensagem original — mesmo formato de {@link
+     * #handlePayloadValidation}, sem {@code field} estruturado porque essa
+     * exceção não carrega um (a mensagem já nomeia o campo por convenção,
+     * ex.: "max must be at least 1"). JSON genuinamente malformado (sem
+     * {@link IllegalArgumentException} na cadeia de causa) continua caindo
+     * no comportamento default do Spring.
+     */
+    @Override
+    protected ResponseEntity<Object> handleHttpMessageNotReadable(
+            HttpMessageNotReadableException ex, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+        Throwable cause = ex;
+        while (cause != null && !(cause instanceof IllegalArgumentException)) {
+            cause = cause.getCause();
+        }
+        if (cause == null) {
+            return super.handleHttpMessageNotReadable(ex, headers, status, request);
+        }
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, cause.getMessage());
+        problem.setTitle("Payload validation failed");
+        return new ResponseEntity<>(problem, HttpStatus.UNPROCESSABLE_CONTENT);
     }
 
     /**

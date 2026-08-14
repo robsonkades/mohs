@@ -1,17 +1,26 @@
 package io.mohs;
 
 import java.time.Instant;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaClass;
+import com.tngtech.archunit.core.domain.JavaClasses;
+import com.tngtech.archunit.core.domain.JavaModifier;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
+import com.tngtech.archunit.lang.ArchCondition;
 import com.tngtech.archunit.lang.ArchRule;
+import com.tngtech.archunit.lang.ConditionEvents;
+import com.tngtech.archunit.lang.SimpleConditionEvent;
+import org.jspecify.annotations.NullMarked;
 
 import io.mohs.jdbc.DatabaseClock;
 
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
+import static org.assertj.core.api.Assertions.assertThat;
 
 @AnalyzeClasses(packages = "io.mohs", importOptions = ImportOption.DoNotIncludeTests.class)
 class ArchitectureTest {
@@ -65,4 +74,49 @@ class ArchitectureTest {
             .and(DescribedPredicate.not(IS_DATABASE_CLOCK))
             .should().callMethod(Instant.class, "now")
             .orShould().callMethod(System.class, "currentTimeMillis");
+
+    /**
+     * "Proibido synchronized em caminho que bloqueia... use ReentrantLock"
+     * (CLAUDE.md) — pinning do carrier em virtual threads. Só pega o
+     * modificador {@code synchronized} de método; bloco {@code
+     * synchronized(lock) { ... }} não é modelado por ArchUnit (não há
+     * inspeção de bytecode ao nível de instrução na API pública) — mesma
+     * lacuna entre regra em prosa e regra executável que já existe para
+     * outras checagens deste arquivo, registrada aqui em vez de escondida.
+     */
+    @ArchTest
+    static final ArchRule no_synchronized_methods_in_concurrency_critical_code =
+        noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..")
+            .should(new ArchCondition<JavaClass>("declare no synchronized methods") {
+                @Override
+                public void check(JavaClass javaClass, ConditionEvents events) {
+                    javaClass.getMethods().stream()
+                            .filter(method -> method.getModifiers().contains(JavaModifier.SYNCHRONIZED))
+                            .forEach(method -> events.add(SimpleConditionEvent.violated(
+                                    method, method.getFullName() + " is declared synchronized")));
+                }
+            });
+
+    /** "ScopedValue em vez de ThreadLocal" (CLAUDE.md). */
+    @ArchTest
+    static final ArchRule no_thread_local_in_concurrency_critical_code =
+        noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..")
+            .should().dependOnClassesThat().belongToAnyOf(ThreadLocal.class, InheritableThreadLocal.class);
+
+    /**
+     * Todo pacote de produção precisa do próprio {@code package-info.java}
+     * com {@code @NullMarked} — não-nulo por padrão é a convenção do
+     * projeto (CLAUDE.md), e um pacote novo sem isso degrada o sinal de
+     * análise estática de JSpecify silenciosamente, sem erro de compilação.
+     */
+    @ArchTest
+    static void all_production_packages_declare_null_marked(JavaClasses classes) {
+        Set<String> nullMarkedPackages = classes.stream()
+                .filter(javaClass -> javaClass.getSimpleName().equals("package-info"))
+                .filter(javaClass -> javaClass.isAnnotatedWith(NullMarked.class))
+                .map(JavaClass::getPackageName)
+                .collect(Collectors.toSet());
+        Set<String> allPackages = classes.stream().map(JavaClass::getPackageName).collect(Collectors.toSet());
+        assertThat(nullMarkedPackages).containsAll(allPackages);
+    }
 }

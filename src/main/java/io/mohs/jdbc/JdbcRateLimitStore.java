@@ -48,11 +48,10 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     @Override
     public Optional<RateLimit> find(String name) {
         Objects.requireNonNull(name, "name");
-        RateLimit result = jdbcTemplate.query(
+        return JdbcSupport.findOne(jdbcTemplate,
                 "SELECT * FROM mohs_rate_limits WHERE name = :name",
                 new MapSqlParameterSource("name", name),
-                rs -> rs.next() ? mapRow(rs) : null);
-        return Optional.ofNullable(result);
+                JdbcRateLimitStore::mapRow);
     }
 
     @Override

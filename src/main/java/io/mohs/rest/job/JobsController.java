@@ -54,8 +54,10 @@ public class JobsController {
         throw new UnsupportedOperationException("M3: ainda não implementado");
     }
 
+    /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. */
     @GetMapping("/{jobKey}/executions")
-    public CursorPage<ExecutionResponse> executions(@PathVariable String jobKey, @RequestParam(required = false) String cursor) {
+    public CursorPage<ExecutionResponse> executions(
+            @PathVariable String jobKey, @RequestParam(required = false) String cursor, @RequestParam(required = false) Integer size) {
         throw new UnsupportedOperationException("M3: ainda não implementado");
     }
 }

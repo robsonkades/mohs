@@ -17,5 +17,13 @@ public interface Batch {
 
     String batchId();
 
+    /**
+     * Registra um callback best-effort disparado no fim do lote (êxito ou
+     * falha) — não é a garantia de conclusão do batch, só uma notificação
+     * de conveniência. Cada chamada registra um listener independente, sem
+     * substituir os já registrados: {@code batch.onCompletion(a).onCompletion(b)}
+     * registra os dois, não só o último. O {@link Batch} retornado
+     * referencia o mesmo lote, nunca uma cópia.
+     */
     Batch onCompletion(Consumer<BatchCompleted> callback);
 }

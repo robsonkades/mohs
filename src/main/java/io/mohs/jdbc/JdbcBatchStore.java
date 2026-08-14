@@ -45,11 +45,10 @@ public final class JdbcBatchStore implements BatchStore {
     @Override
     public Optional<BatchCounters> find(String batchId) {
         Objects.requireNonNull(batchId, "batchId");
-        BatchCounters result = jdbcTemplate.query(
+        return JdbcSupport.findOne(jdbcTemplate,
                 "SELECT * FROM mohs_batches WHERE id = :id",
                 new MapSqlParameterSource("id", batchId),
-                rs -> rs.next() ? mapRow(rs) : null);
-        return Optional.ofNullable(result);
+                JdbcBatchStore::mapRow);
     }
 
     @Override
