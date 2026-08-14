@@ -18,8 +18,8 @@
  * {@code ProblemDetail}, usada por todos, também sem controller),
  * {@code io.mohs.rest.overview}, {@code io.mohs.rest.job},
  * {@code io.mohs.rest.execution}, {@code io.mohs.rest.batch},
- * {@code io.mohs.rest.queue}, {@code io.mohs.rest.ratelimit},
- * {@code io.mohs.rest.runner}, {@code io.mohs.rest.node}.
+ * {@code io.mohs.rest.ratelimit}, {@code io.mohs.rest.runner},
+ * {@code io.mohs.rest.node}.
  */
 @NullMarked
 package io.mohs.rest;

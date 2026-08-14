@@ -20,7 +20,6 @@ public record JobResponse(
         String handlerType,
         ScheduleView schedule,
         @Nullable String runner,
-        @Nullable String queue,
         @Nullable String window,
         Misfire misfire,
         int retries,
