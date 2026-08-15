@@ -233,9 +233,11 @@ public final class JdbcJobStore implements JobStore {
     public void remove(JobKey key) {
         Objects.requireNonNull(key, "key");
         transactionTemplate.executeWithoutResult(_ -> {
+            // os DOIS estados claimáveis (ADR-0033) — RETRY_SCHEDULED fora daqui
+            // ficaria preso pra sempre: claim filtra retired, reaper só vê RUNNING
             jdbcTemplate.update("""
                     UPDATE mohs_executions SET state = 'CANCELLED'
-                    WHERE job_key = :jobKey AND state = 'ENQUEUED'
+                    WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
                     """, new MapSqlParameterSource("jobKey", key.value()));
             jdbcTemplate.update("UPDATE mohs_job_definitions SET retired = :retired, updated_at = :now WHERE job_key = :jobKey",
                     new MapSqlParameterSource("jobKey", key.value())

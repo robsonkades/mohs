@@ -263,6 +263,19 @@ class JdbcJobStoreTest {
         assertThat(raw.queryForObject("SELECT state FROM mohs_executions WHERE id = ?", String.class, "exec-queued")).isEqualTo("CANCELLED");
     }
 
+    /** ADR-0033: RETRY_SCHEDULED também é claimável — fora do cancel do remove, ficaria presa pra sempre (claim filtra retired, reaper só vê RUNNING). */
+    @Test
+    void removeCancelsRetryScheduledExecutionsToo() {
+        JobKey key = JobKey.of("welcome-email");
+        store.upsert(definition("welcome-email", new OnDemandSpec()));
+        seedExecution("exec-retry", "welcome-email", "RETRY_SCHEDULED");
+
+        store.remove(key);
+
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        assertThat(raw.queryForObject("SELECT state FROM mohs_executions WHERE id = ?", String.class, "exec-retry")).isEqualTo("CANCELLED");
+    }
+
     /** Mesmo racional de {@link #upsertClearsOrphanedOnReupsert}: o upsert acontecer prova que uma fonte real quer o job de novo. */
     @Test
     void upsertAfterRemoveResurrectsTheDefinitionWithItsHistory() {

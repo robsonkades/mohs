@@ -206,22 +206,32 @@ public final class JdbcClaimer implements Claimer {
             acquiredJobSlot = true;
         }
 
-        boolean claimed = tryTransitionToRunning(candidate.id(), nodeId, leaseExpiresAt);
+        boolean claimed = tryTransitionToRunning(candidate.id(), nodeId, now, leaseExpiresAt);
         if (!claimed && acquiredJobSlot) {
             jobStore.decrementRunningExecutions(JobKey.of(candidate.jobKey()));
         }
         return claimed;
     }
 
-    /** CAS final pra RUNNING — a garantia real contra double-claim, independente do lock do SELECT. Os dois estados claimáveis, mesmo par do template de candidatos (ADR-0033). */
-    private boolean tryTransitionToRunning(String executionId, String nodeId, Instant leaseExpiresAt) {
+    /**
+     * CAS final pra RUNNING — a garantia real contra double-claim,
+     * independente do lock do SELECT. Os dois estados claimáveis, mesmo par
+     * do template de candidatos (ADR-0033). {@code scheduled_at <= :now}
+     * reverificado aqui porque o retry o tornou mutável: entre o SELECT e
+     * este CAS, outro nó pode reivindicar o candidato, falhar rápido e
+     * reagendá-lo pro futuro — sem a guarda, o backoff seria furado
+     * (ADR-0018: toda condição de elegibilidade que muda entre SELECT e
+     * CAS pertence ao CAS).
+     */
+    private boolean tryTransitionToRunning(String executionId, String nodeId, Instant now, Instant leaseExpiresAt) {
         int updated = jdbcTemplate.update("""
                 UPDATE mohs_executions
                 SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId
-                WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+                WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND scheduled_at <= :now
                 """, new MapSqlParameterSource()
                 .addValue("leaseExpiresAt", JdbcTimestamps.toUtcTimestamp(leaseExpiresAt))
                 .addValue("nodeId", nodeId)
+                .addValue("now", JdbcTimestamps.toUtcTimestamp(now))
                 .addValue("id", executionId));
         return updated == 1;
     }

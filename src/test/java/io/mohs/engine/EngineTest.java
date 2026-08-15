@@ -281,7 +281,8 @@ class EngineTest {
         // RESP-3 (docs/codereview-naming.md): payload ilegível também publica Failed, mesmo caminho de qualquer outra falha terminal.
         assertThat(failedEvent.get()).isNotNull();
         assertThat(failedEvent.get().error()).hasMessageContaining("payload could not be read");
-        assertThat(failedEvent.get().attemptsExhausted()).isTrue();
+        // terminal por natureza, não por orçamento (ADR-0033): exhausted=false em falha pré-dispatch
+        assertThat(failedEvent.get().attemptsExhausted()).isFalse();
     }
 
     @Test

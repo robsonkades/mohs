@@ -205,14 +205,14 @@ public final class Engine implements MohsLifecycle {
         while (!inFlight.isEmpty()) {
             long remainingMillis = (deadlineNanos - System.nanoTime()) / 1_000_000;
             if (remainingMillis <= 0) {
-                log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — Mohs has no interrupt mechanism yet (per-job timeout isn't enforced), they keep running in the background", grace, inFlight.size());
+                warnDrainGraceElapsed(grace);
                 return;
             }
             CompletableFuture<?>[] snapshot = inFlight.toArray(CompletableFuture[]::new);
             try {
                 CompletableFuture.allOf(snapshot).get(remainingMillis, TimeUnit.MILLISECONDS);
             } catch (TimeoutException e) {
-                log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — Mohs has no interrupt mechanism yet (per-job timeout isn't enforced), they keep running in the background", grace, inFlight.size());
+                warnDrainGraceElapsed(grace);
                 return;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -221,6 +221,10 @@ public final class Engine implements MohsLifecycle {
                 log.warn("unexpected exception waiting for in-flight dispatch during drain", e);
             }
         }
+    }
+
+    private void warnDrainGraceElapsed(Duration grace) {
+        log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — Mohs has no interrupt mechanism yet (per-job timeout isn't enforced), they keep running in the background", grace, inFlight.size());
     }
 
     /**
@@ -281,19 +285,19 @@ public final class Engine implements MohsLifecycle {
                     "job definition for " + execution.jobKey() + " was removed after this execution was claimed (e.g. Mohs.remove between claim and dispatch)"));
             return;
         }
+        JobDefinition definition = storedJob.orElseThrow().definition();
 
         AsyncTaskExecutor executor;
         try {
-            executor = runnerRegistry.resolve(storedJob.get().definition().runner());
+            executor = runnerRegistry.resolve(definition.runner());
         } catch (NoSuchElementException e) {
             failBeforeDispatchGuarded(execution, new IllegalStateException(
-                    "runner could not be resolved: " + (e.getMessage() != null ? e.getMessage() : e.toString()), e));
+                    "runner could not be resolved: " + Objects.requireNonNullElse(e.getMessage(), e.toString()), e));
             return;
         }
 
         CompletableFuture<Void> future;
         try {
-            JobDefinition definition = storedJob.get().definition();
             future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution, definition), executor);
         } catch (RuntimeException e) {
             log.warn("runner executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
@@ -301,7 +305,16 @@ public final class Engine implements MohsLifecycle {
             return;
         }
         inFlight.add(future);
-        future.whenComplete((_, _) -> inFlight.remove(future));
+        future.whenComplete((_, thrown) -> {
+            // resolvePayloadAndDispatch trata as falhas conhecidas — throwable aqui
+            // significa que a própria gravação da falha lançou (ex.: colisão de PK
+            // de attempts numa conclusão concorrente); engolir esconderia o único
+            // rastro do zumbi
+            if (thrown != null) {
+                log.error("dispatch of execution {} threw outside the normal failure paths", execution.id(), thrown);
+            }
+            inFlight.remove(future);
+        });
     }
 
     /**
@@ -359,7 +372,7 @@ public final class Engine implements MohsLifecycle {
      * tem (não é falha de handler nem de interceptor).
      */
     private void failUnreadablePayload(Execution execution, RuntimeException cause) {
-        String message = "payload could not be read: " + (cause.getMessage() != null ? cause.getMessage() : cause.toString());
+        String message = "payload could not be read: " + Objects.requireNonNullElse(cause.getMessage(), cause.toString());
         dispatcher.failBeforeDispatch(execution, new IllegalStateException(message, cause));
     }
 

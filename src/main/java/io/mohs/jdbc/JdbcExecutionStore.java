@@ -1,8 +1,8 @@
 package io.mohs.jdbc;
 
 import java.sql.ResultSet;
-import java.sql.Statement;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Clock;
@@ -165,15 +165,29 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 completeWithinTransaction(request, jobStore)));
     }
 
+    /**
+     * O CAS de conclusão (ADR-0024/0033): {@code COALESCE} grava o
+     * {@code retryAt} como novo {@code scheduled_at} na mesma transição
+     * (invariante do record: só presente em {@code RETRY_SCHEDULED}).
+     * A variante com fence acrescenta {@code lease_expires_at} ao predicado
+     * — anti-ABA do reaper (ver Javadoc de
+     * {@link ExecutionStore.CompletionRequest#expectedLeaseExpiresAt}).
+     * Dois templates em vez de {@code (:p IS NULL OR ...)}: parâmetro em
+     * predicado de nulidade tem suporte irregular entre os 4 dialetos.
+     */
+    private static final String COMPLETE_CAS = """
+            UPDATE mohs_executions SET state = :newState, scheduled_at = COALESCE(:retryAt, scheduled_at)
+            WHERE id = :id AND state = 'RUNNING'
+            """;
+
+    private static final String COMPLETE_CAS_FENCED = """
+            UPDATE mohs_executions SET state = :newState, scheduled_at = COALESCE(:retryAt, scheduled_at)
+            WHERE id = :id AND state = 'RUNNING' AND lease_expires_at = :expectedLease
+            """;
+
     private boolean completeWithinTransaction(ExecutionStore.CompletionRequest request, JobStore jobStore) {
-        // COALESCE: retryAt (só presente em RETRY_SCHEDULED — invariante do
-        // record) vira o novo scheduled_at na mesma transição; terminal mantém.
-        int updated = jdbcTemplate.update(
-                "UPDATE mohs_executions SET state = :newState, scheduled_at = COALESCE(:retryAt, scheduled_at) WHERE id = :id AND state = 'RUNNING'",
-                new MapSqlParameterSource()
-                        .addValue("newState", request.newState().name())
-                        .addValue("retryAt", request.retryAt() == null ? null : JdbcTimestamps.toUtcTimestamp(request.retryAt()), Types.TIMESTAMP)
-                        .addValue("id", request.id().value()));
+        String sql = request.expectedLeaseExpiresAt() == null ? COMPLETE_CAS : COMPLETE_CAS_FENCED;
+        int updated = jdbcTemplate.update(sql, completionParams(request));
         if (updated == 0) {
             return false;
         }
@@ -187,13 +201,13 @@ public final class JdbcExecutionStore implements ExecutionStore {
     }
 
     /**
-     * DBTUNE-14: {@link #complete} em lote — um {@code UPDATE} guardado por
-     * {@code newState} (agrupa, não assume lote uniforme), uma consulta pra
-     * confirmar quais ids realmente transicionaram (o {@code UPDATE} não
-     * diz quais linhas casaram, só quantas) e um {@code INSERT} em lote só
-     * dos {@link Attempt} confirmados — {@code jobStore.decrementRunningExecutions}
-     * continua uma chamada por execução (guardada, barata, sem API de lote
-     * em {@link JobStore} — não vale o acoplamento novo pra isto).
+     * DBTUNE-14: {@link #complete} em lote — {@code batchUpdate} com params
+     * por linha (cada request carrega seu {@code retryAt}/fence), cujo
+     * {@code int[]} é a confirmação exata do CAS linha a linha, e um
+     * {@code INSERT} em lote só dos {@link Attempt} confirmados —
+     * {@code jobStore.decrementRunningExecutions} continua uma chamada por
+     * execução (guardada, barata, sem API de lote em {@link JobStore} — não
+     * vale o acoplamento novo pra isto).
      */
     @Override
     public Set<ExecutionId> completeAll(List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
@@ -210,11 +224,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
     private Set<ExecutionId> completeAllWithinTransaction(List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
         Map<String, ExecutionStore.CompletionRequest> byId = requests.stream()
                 .collect(Collectors.toMap(r -> r.id().value(), r -> r));
-        Set<ExecutionId> completedIds = new LinkedHashSet<>();
-        for (Map.Entry<ExecutionState, List<ExecutionStore.CompletionRequest>> group :
-                requests.stream().collect(Collectors.groupingBy(ExecutionStore.CompletionRequest::newState)).entrySet()) {
-            completedIds.addAll(transitionGroup(group.getKey(), group.getValue()));
-        }
+        Set<ExecutionId> completedIds = transitionAll(requests);
         if (completedIds.isEmpty()) {
             return completedIds;
         }
@@ -233,65 +243,72 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return completedIds;
     }
 
-    /** CAS por {@code WHERE id IN (:ids) AND state = 'RUNNING'}, em lotes de {@link #MAX_IDS_PER_QUERY} (DB-11). {@code RETRY_SCHEDULED} sai do caminho {@code IN}: cada linha carrega seu próprio {@code retryAt}. */
-    private Set<ExecutionId> transitionGroup(ExecutionState newState, List<ExecutionStore.CompletionRequest> group) {
-        if (newState == ExecutionState.RETRY_SCHEDULED) {
-            return transitionRetryGroup(group);
-        }
+    /** Particiona por presença de fence — mesmo par de templates do caminho unitário; na prática o lote do reaper é uniformemente fenced. */
+    private Set<ExecutionId> transitionAll(List<ExecutionStore.CompletionRequest> requests) {
+        Map<Boolean, List<ExecutionStore.CompletionRequest>> byFence = requests.stream()
+                .collect(Collectors.partitioningBy(r -> r.expectedLeaseExpiresAt() != null));
         Set<ExecutionId> confirmed = new LinkedHashSet<>();
-        List<String> ids = group.stream().map(r -> r.id().value()).toList();
-        for (int start = 0; start < ids.size(); start += MAX_IDS_PER_QUERY) {
-            List<String> chunk = ids.subList(start, Math.min(start + MAX_IDS_PER_QUERY, ids.size()));
-            jdbcTemplate.update(
-                    "UPDATE mohs_executions SET state = :newState WHERE id IN (:ids) AND state = 'RUNNING'",
-                    new MapSqlParameterSource().addValue("newState", newState.name()).addValue("ids", chunk));
-            // o UPDATE não diz quais ids casaram, só quantos — confirma via SELECT
-            // (o mesmo state que acabamos de gravar só pode ter vindo desta transição:
-            // os ids do lote eram todos RUNNING momentos atrás, nesta mesma transação).
-            confirmed.addAll(jdbcTemplate.query(
-                    "SELECT id FROM mohs_executions WHERE id IN (:ids) AND state = :newState",
-                    new MapSqlParameterSource().addValue("ids", chunk).addValue("newState", newState.name()),
-                    (rs, _) -> ExecutionId.of(rs.getString("id"))));
+        confirmed.addAll(transitionBatch(byFence.get(Boolean.FALSE), COMPLETE_CAS));
+        confirmed.addAll(transitionBatch(byFence.get(Boolean.TRUE), COMPLETE_CAS_FENCED));
+        return confirmed;
+    }
+
+    /** O {@code int[]} do batch é a confirmação exata do CAS; {@code SUCCESS_NO_INFO} (JDBC permite) recai na confirmação por {@code SELECT}. */
+    private Set<ExecutionId> transitionBatch(List<ExecutionStore.CompletionRequest> batch, String sql) {
+        if (batch.isEmpty()) {
+            return Set.of();
+        }
+        MapSqlParameterSource[] params = batch.stream()
+                .map(JdbcExecutionStore::completionParams)
+                .toArray(MapSqlParameterSource[]::new);
+        int[] updated = jdbcTemplate.batchUpdate(sql, params);
+        Set<ExecutionId> confirmed = new LinkedHashSet<>();
+        for (int i = 0; i < updated.length; i++) {
+            if (updated[i] == Statement.SUCCESS_NO_INFO) {
+                return confirmBySelect(batch);
+            }
+            if (updated[i] > 0) {
+                confirmed.add(batch.get(i).id());
+            }
         }
         return confirmed;
     }
 
     /**
-     * {@code batchUpdate} com params por linha — cada retry tem seu
-     * {@code retryAt}. O {@code int[]} de retorno já é a confirmação do CAS
-     * linha a linha; se o driver devolver {@code SUCCESS_NO_INFO} (JDBC
-     * permite), recai na mesma confirmação por {@code SELECT} do caminho
-     * terminal em vez de chutar.
+     * Fallback raro do {@code SUCCESS_NO_INFO}: confirma por estado, em
+     * chunks (DB-11). Sob READ COMMITTED pode confirmar como nossa uma
+     * transição que outro ator commitou no meio — imprecisão aceita só
+     * neste fallback; o caminho normal usa o {@code int[]} exato.
      */
-    private Set<ExecutionId> transitionRetryGroup(List<ExecutionStore.CompletionRequest> group) {
-        MapSqlParameterSource[] params = group.stream()
-                .map(r -> new MapSqlParameterSource()
-                        .addValue("id", r.id().value())
-                        .addValue("retryAt", JdbcTimestamps.toUtcTimestamp(Objects.requireNonNull(r.retryAt()))))
-                .toArray(MapSqlParameterSource[]::new);
-        int[] updated = jdbcTemplate.batchUpdate(
-                "UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', scheduled_at = :retryAt WHERE id = :id AND state = 'RUNNING'",
-                params);
-
+    private Set<ExecutionId> confirmBySelect(List<ExecutionStore.CompletionRequest> batch) {
         Set<ExecutionId> confirmed = new LinkedHashSet<>();
-        boolean countsUnknown = false;
-        for (int i = 0; i < updated.length; i++) {
-            if (updated[i] == Statement.SUCCESS_NO_INFO) {
-                countsUnknown = true;
-                break;
-            }
-            if (updated[i] > 0) {
-                confirmed.add(group.get(i).id());
-            }
+        batch.stream().collect(Collectors.groupingBy(ExecutionStore.CompletionRequest::newState))
+                .forEach((newState, group) -> {
+                    for (List<String> chunk : chunksOf(group.stream().map(r -> r.id().value()).toList())) {
+                        confirmed.addAll(jdbcTemplate.query(
+                                "SELECT id FROM mohs_executions WHERE id IN (:ids) AND state = :newState",
+                                new MapSqlParameterSource().addValue("ids", chunk).addValue("newState", newState.name()),
+                                (rs, _) -> ExecutionId.of(rs.getString("id"))));
+                    }
+                });
+        return confirmed;
+    }
+
+    private static MapSqlParameterSource completionParams(ExecutionStore.CompletionRequest request) {
+        return new MapSqlParameterSource()
+                .addValue("newState", request.newState().name())
+                .addValue("retryAt", request.retryAt() == null ? null : JdbcTimestamps.toUtcTimestamp(request.retryAt()), Types.TIMESTAMP)
+                .addValue("expectedLease", request.expectedLeaseExpiresAt() == null ? null : JdbcTimestamps.toUtcTimestamp(request.expectedLeaseExpiresAt()), Types.TIMESTAMP)
+                .addValue("id", request.id().value());
+    }
+
+    /** Fatias de no máximo {@link #MAX_IDS_PER_QUERY} ids pro {@code IN (:ids)} (DB-11) — views de {@code subList}, sem cópia. */
+    private static List<List<String>> chunksOf(List<String> ids) {
+        List<List<String>> chunks = new ArrayList<>();
+        for (int start = 0; start < ids.size(); start += MAX_IDS_PER_QUERY) {
+            chunks.add(ids.subList(start, Math.min(start + MAX_IDS_PER_QUERY, ids.size())));
         }
-        if (!countsUnknown) {
-            return confirmed;
-        }
-        List<String> ids = group.stream().map(r -> r.id().value()).toList();
-        return new LinkedHashSet<>(jdbcTemplate.query(
-                "SELECT id FROM mohs_executions WHERE id IN (:ids) AND state = 'RETRY_SCHEDULED'",
-                new MapSqlParameterSource("ids", ids),
-                (rs, _) -> ExecutionId.of(rs.getString("id"))));
+        return chunks;
     }
 
     private static MapSqlParameterSource attemptParams(ExecutionId id, Attempt attempt) {
@@ -345,17 +362,13 @@ public final class JdbcExecutionStore implements ExecutionStore {
         }
         List<String> rawIds = ids.stream().map(ExecutionId::value).toList();
         List<ExecutionRow> rows = new ArrayList<>(rawIds.size());
-        for (int start = 0; start < rawIds.size(); start += MAX_IDS_PER_QUERY) {
-            List<String> chunk = rawIds.subList(start, Math.min(start + MAX_IDS_PER_QUERY, rawIds.size()));
+        for (List<String> chunk : chunksOf(rawIds)) {
             rows.addAll(jdbcTemplate.query(
                     "SELECT " + EXECUTION_COLUMNS + " FROM mohs_executions WHERE id IN (:ids)",
                     new MapSqlParameterSource("ids", chunk),
                     (rs, _) -> mapRow(rs)));
         }
-        Map<String, List<Attempt>> attemptsByExecutionId = fetchAttemptsByExecutionIds(rows.stream().map(r -> r.id().value()).toList());
-        return rows.stream()
-                .map(row -> hydrate(row, attemptsByExecutionId.getOrDefault(row.id().value(), List.of())))
-                .toList();
+        return hydrateAll(rows);
     }
 
     /**
@@ -421,6 +434,11 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 + " ORDER BY id DESC " + dialect.limitClause();
 
         List<ExecutionRow> rows = jdbcTemplate.query(sql, params, (rs, _) -> mapRow(rs));
+        return hydrateAll(rows);
+    }
+
+    /** DBTUNE-3: attempts de todas as linhas numa segunda consulta em lote — nunca uma query de attempts por linha (N+1). */
+    private List<Execution> hydrateAll(List<ExecutionRow> rows) {
         Map<String, List<Attempt>> attemptsByExecutionId = fetchAttemptsByExecutionIds(rows.stream().map(r -> r.id().value()).toList());
         return rows.stream()
                 .map(row -> hydrate(row, attemptsByExecutionId.getOrDefault(row.id().value(), List.of())))
@@ -461,8 +479,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
             return Map.of();
         }
         List<ExecutionIdAndAttempt> rows = new ArrayList<>();
-        for (int start = 0; start < executionIds.size(); start += MAX_IDS_PER_QUERY) {
-            List<String> chunk = executionIds.subList(start, Math.min(start + MAX_IDS_PER_QUERY, executionIds.size()));
+        for (List<String> chunk : chunksOf(executionIds)) {
             rows.addAll(jdbcTemplate.query(
                     "SELECT execution_id, number, started_at, finished_at, outcome, error FROM mohs_attempts WHERE execution_id IN (:executionIds) ORDER BY execution_id, number",
                     new MapSqlParameterSource("executionIds", chunk),

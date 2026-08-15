@@ -78,14 +78,16 @@ public final class Dispatcher {
         JobContext ctx = new DefaultJobContext(execution.jobKey(), execution.id(), attemptNumber, execution.scheduledAt(), firedAt);
         events.publish(new Started(execution.id(), execution.jobKey(), attemptNumber, firedAt));
 
-        Optional<JobHandler> invocation = handlerRegistry.find(execution.jobKey());
-        if (invocation.isEmpty()) {
+        Optional<JobHandler> handler = handlerRegistry.find(execution.jobKey());
+        if (handler.isEmpty()) {
+            // passa pelo orçamento de retry de propósito: em rolling update, outro
+            // nó (com a versão que ainda registra o handler) pode reivindicar o retry
             fail(execution, definition, attemptNumber, firedAt, new IllegalStateException(NO_HANDLER_ERROR + execution.jobKey().value()));
             return;
         }
 
         try {
-            runInterceptorChain(invocation.get(), payload, ctx);
+            runInterceptorChain(handler.orElseThrow(), payload, ctx);
             succeed(execution, attemptNumber, firedAt);
         } catch (Exception e) {
             fail(execution, definition, attemptNumber, firedAt, e);
@@ -100,8 +102,8 @@ public final class Dispatcher {
      * interceptor É falha de attempt, mesmo tratamento que exceção do
      * handler.
      */
-    private void runInterceptorChain(JobHandler invocation, Object payload, JobContext ctx) throws Exception {
-        ExecutionInterceptor.Chain chain = () -> invocation.invoke(payload, ctx);
+    private void runInterceptorChain(JobHandler handler, Object payload, JobContext ctx) throws Exception {
+        ExecutionInterceptor.Chain chain = () -> handler.invoke(payload, ctx);
         for (int i = interceptors.size() - 1; i >= 0; i--) {
             ExecutionInterceptor interceptor = interceptors.get(i);
             ExecutionInterceptor.Chain next = chain;
@@ -112,35 +114,28 @@ public final class Dispatcher {
 
     private void succeed(Execution execution, int attemptNumber, Instant firedAt) {
         Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.SUCCEEDED, null);
-        boolean completed = executionStore.complete(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED), jobStore);
-        if (completed) {
-            events.publish(new Succeeded(execution.id(), execution.jobKey(), attemptNumber));
-        } else {
-            log.warn("attempt {} of execution {} finished SUCCEEDED but the state had already moved on (reaper/concurrent completion) — result discarded",
-                    attemptNumber, execution.id().value());
-        }
+        completeOrDiscard(
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED),
+                () -> events.publish(new Succeeded(execution.id(), execution.jobKey(), attemptNumber)));
     }
 
     /** Orçamento restante ({@link RetrySchedule}) decide: reagenda com backoff ou falha terminal ({@link #failTerminally}). */
     private void fail(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt, Exception error) {
-        Optional<Instant> retryAt = RetrySchedule.nextRetryAt(attemptNumber, definition.retries(), clock.instant());
-        if (retryAt.isEmpty()) {
-            failTerminally(execution, attemptNumber, firedAt, error);
+        Optional<Instant> nextRetry = RetrySchedule.nextRetryAt(attemptNumber, definition.retries(), clock.instant());
+        if (nextRetry.isEmpty()) {
+            failTerminally(execution, attemptNumber, firedAt, error, true);
             return;
         }
+        Instant retryAt = nextRetry.orElseThrow();
         log.warn("execution {} of job '{}' failed on attempt {} — retry {} scheduled for {}", execution.id().value(),
-                execution.jobKey().value(), attemptNumber, attemptNumber + 1, retryAt.get(), error);
-        Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, errorMessage(error));
-        boolean completed = executionStore.complete(new ExecutionStore.CompletionRequest(
-                execution.id(), execution.jobKey(), attempt, ExecutionState.RETRY_SCHEDULED, retryAt.get()), jobStore);
-        if (completed) {
-            events.publish(new AttemptFailed(execution.id(), execution.jobKey(), attemptNumber, error));
-            events.publish(new RetryScheduled(execution.id(), execution.jobKey(), attemptNumber + 1, retryAt.get()));
-        } else {
-            log.warn("attempt {} of execution {} finished FAILED but the state had already moved on (reaper/concurrent completion) — result discarded",
-                    attemptNumber, execution.id().value());
-        }
+                execution.jobKey().value(), attemptNumber, attemptNumber + 1, retryAt, error);
+        Attempt attempt = failedAttempt(attemptNumber, firedAt, error);
+        completeOrDiscard(
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.RETRY_SCHEDULED, retryAt),
+                () -> {
+                    events.publish(new AttemptFailed(execution.id(), execution.jobKey(), attemptNumber, error));
+                    events.publish(new RetryScheduled(execution.id(), execution.jobKey(), attemptNumber + 1, retryAt));
+                });
     }
 
     /**
@@ -150,22 +145,41 @@ public final class Dispatcher {
      * registrado; sem este log, a causa de um job quebrado às 3h da manhã
      * não estaria em lugar nenhum.
      */
-    private void failTerminally(Execution execution, int attemptNumber, Instant firedAt, Exception error) {
+    /**
+     * {@code attemptsExhausted} responde a pergunta que o Javadoc de
+     * {@link Failed} faz: {@code true} só quando {@link RetrySchedule}
+     * disse "sem saldo"; falha terminal por natureza (pré-dispatch) publica
+     * {@code false} — orçamento intacto não é orçamento esgotado.
+     */
+    private void failTerminally(Execution execution, int attemptNumber, Instant firedAt, Exception error, boolean attemptsExhausted) {
         log.warn("execution {} of job '{}' failed on attempt {}", execution.id().value(),
                 execution.jobKey().value(), attemptNumber, error);
-        Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, errorMessage(error));
-        boolean completed = executionStore.complete(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED), jobStore);
-        if (completed) {
-            events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, true));
+        Attempt attempt = failedAttempt(attemptNumber, firedAt, error);
+        completeOrDiscard(
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED),
+                () -> events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, attemptsExhausted)));
+    }
+
+    /**
+     * Publica os eventos só se o CAS de conclusão passou — uma conclusão
+     * concorrente (reaper/outro caminho) descarta o resultado com WARN,
+     * nunca publica evento de uma transição que não ocorreu.
+     */
+    private void completeOrDiscard(ExecutionStore.CompletionRequest request, Runnable publishEvents) {
+        if (executionStore.complete(request, jobStore)) {
+            publishEvents.run();
         } else {
-            log.warn("attempt {} of execution {} finished FAILED but the state had already moved on (reaper/concurrent completion) — result discarded",
-                    attemptNumber, execution.id().value());
+            log.warn("attempt {} of execution {} finished {} but the state had already moved on (reaper/concurrent completion) — result discarded",
+                    request.attempt().number(), request.id().value(), request.attempt().outcome());
         }
     }
 
+    private Attempt failedAttempt(int attemptNumber, Instant firedAt, Exception error) {
+        return new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, errorMessage(error));
+    }
+
     private static String errorMessage(Exception error) {
-        return error.getMessage() != null ? error.getMessage() : error.toString();
+        return Objects.requireNonNullElse(error.getMessage(), error.toString());
     }
 
     /**
@@ -176,13 +190,14 @@ public final class Dispatcher {
      * que a execução falhou antes do handler sequer poder rodar. Sempre
      * terminal, sem consultar orçamento: definição removida não tem
      * {@code retries} confiável pra ler, e payload ilegível não sara
-     * repetindo a leitura do mesmo dado.
+     * repetindo a leitura do mesmo dado. {@code Failed.attemptsExhausted}
+     * sai {@code false} — terminal por natureza, não por orçamento.
      */
     void failBeforeDispatch(Execution execution, Exception cause) {
         Objects.requireNonNull(execution, "execution");
         Objects.requireNonNull(cause, "cause");
         int attemptNumber = execution.attempts().size() + 1;
-        failTerminally(execution, attemptNumber, clock.instant(), cause);
+        failTerminally(execution, attemptNumber, clock.instant(), cause, false);
     }
 
     /**

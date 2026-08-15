@@ -303,6 +303,42 @@ class JdbcExecutionStoreTest {
         assertThat(retried.scheduledAt()).isEqualTo(retryAt);
     }
 
+    /** Fence anti-ABA (ADR-0033): se a lease observada pelo reaper já não é a da linha (re-claim concorrente deu lease nova), o CAS perde — a encarnação nova saudável nunca é morta. */
+    @Test
+    void completeWithAStaleLeaseFenceLosesTheCas() {
+        seedRunningExecution("019abc-fence-1", "welcome-email");
+        Instant currentLease = clock.instant().plusSeconds(30);
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET lease_expires_at = ? WHERE id = ?",
+                JdbcTimestamps.toUtcTimestamp(currentLease), "019abc-fence-1");
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "lease expired");
+        Instant staleObservedLease = currentLease.minusSeconds(60);
+
+        boolean completed = store.complete(new ExecutionStore.CompletionRequest(
+                ExecutionId.of("019abc-fence-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null, staleObservedLease), jobStore);
+
+        assertThat(completed).isFalse();
+        Execution untouched = store.find(ExecutionId.of("019abc-fence-1")).orElseThrow();
+        assertThat(untouched.state()).isEqualTo(ExecutionState.RUNNING);
+        assertThat(untouched.attempts()).isEmpty();
+    }
+
+    @Test
+    void completeWithTheMatchingLeaseFenceWins() {
+        seedRunningExecution("019abc-fence-2", "welcome-email");
+        Instant lease = clock.instant().minusSeconds(5);
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET lease_expires_at = ? WHERE id = ?",
+                JdbcTimestamps.toUtcTimestamp(lease), "019abc-fence-2");
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "lease expired");
+
+        boolean completed = store.complete(new ExecutionStore.CompletionRequest(
+                ExecutionId.of("019abc-fence-2"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null, lease), jobStore);
+
+        assertThat(completed).isTrue();
+        assertThat(store.find(ExecutionId.of("019abc-fence-2")).orElseThrow().state()).isEqualTo(ExecutionState.FAILED);
+    }
+
     /** As duas combinações inválidas são bug do chamador — rejeitadas na construção, nunca gravadas pela metade. */
     @Test
     void completionRequestRejectsRetryAtStateMismatches() {

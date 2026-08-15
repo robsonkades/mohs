@@ -141,6 +141,20 @@ class JdbcReaperTest {
         assertThat(JdbcTimestamps.fromUtcTimestamp(retryAt)).isBetween(NOW, NOW.plusSeconds(1));
     }
 
+    /** Job aposentado nunca reagenda: RETRY_SCHEDULED de job removido ficaria preso pra sempre (claim filtra retired, o cancel do remove já passou) — mesmo com orçamento sobrando, o reclaim é terminal. */
+    @Test
+    void reclaimOfARetiredJobIsTerminalEvenWithBudgetRemaining() {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(5)));
+        seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+        jobStore.remove(JobKey.of("welcome-email")); // não alcança a RUNNING; marca retired
+
+        List<Execution> reclaimed = reaper.reclaimExpired();
+
+        assertThat(reclaimed).hasSize(1);
+        assertThat(reclaimed.get(0).state()).isEqualTo(ExecutionState.FAILED);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+    }
+
     /** O attempt sintético do reclaim conta no orçamento como qualquer outro — reclaim da última tentativa é FAILED terminal. */
     @Test
     void reclaimFailsTerminallyWhenTheBudgetIsExhausted() {

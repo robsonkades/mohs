@@ -48,6 +48,29 @@ ainda se recuperando. Constantes internas, sem propriedade de configuração at�
 **Eventos por caminho:** falha com orçamento publica `AttemptFailed` + `RetryScheduled`
 (nunca `Failed`); orçamento esgotado publica `Failed(attemptsExhausted = true)`.
 
+**Consequências estruturais de `RETRY_SCHEDULED` ser claimável** (achados do review desta
+mesma rodada, aplicados juntos):
+
+- Os índices parciais/filtrados do claim (Postgres/SQL Server) acompanham o predicado novo
+  — `IN (E, R)` não implica `= E`, e sem o par o plano degradava pra Seq Scan + Sort da
+  tabela inteira por tick (medido em Postgres 16). Re-medição de baseline pendente.
+- `Mohs.remove` cancela os **dois** estados claimáveis; o reaper lê `j.retired` no mesmo
+  SELECT e nunca reagenda job aposentado — sem isso, `RETRY_SCHEDULED` de job removido
+  ficava preso pra sempre. Janela residual documentada: dispatcher commitando
+  `RETRY_SCHEDULED` depois do remove (definição pré-remove em mãos) deixa a linha presa até
+  um futuro `upsert` ressuscitar o job; fechar exige guarda `EXISTS(retired = FALSE)` no
+  CAS de conclusão — adiada até haver caso real.
+- **Fence anti-ABA no reclaim**: `RUNNING` deixou de ser não-reentrante, então
+  `WHERE state = 'RUNNING'` não identifica mais *qual* encarnação — o reaper carrega a
+  lease que observou expirada e o CAS só vence se ela ainda for a mesma (re-claim
+  concorrente troca a lease e protege a encarnação nova). O caminho do dispatcher segue sem
+  fence (conclui a encarnação que ele mesmo executou; o zumbi é bloqueado pela PK de
+  attempts). Fencing token de verdade (`claim_epoch` incrementado no claim, carregado em
+  todo CAS — DDIA cap. 8) fica pro trabalho do watchdog, com mini-ADR próprio.
+- O CAS final do claim reverifica `scheduled_at <= now`: o retry tornou `scheduled_at`
+  mutável, e toda condição de elegibilidade que muda entre SELECT e CAS pertence ao CAS
+  (ADR-0018).
+
 ## Consequences
 - Sob falha de nó, a garantia com `retries > 0` é **at-least-once**; com o default
   `retries = 0` continua at-most-once — Javadoc do `Engine` atualizado com a nuance.

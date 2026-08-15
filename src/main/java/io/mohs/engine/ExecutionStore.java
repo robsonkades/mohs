@@ -115,8 +115,17 @@ public interface ExecutionStore {
      * imediato sem backoff, e hora de retry num estado terminal seria
      * escrita silenciosamente ignorada — as duas combinações são bug do
      * chamador, rejeitadas na construção.
+     *
+     * <p>{@code expectedLeaseExpiresAt} é o fence anti-ABA (ADR-0033, DDIA
+     * cap. 8): com {@code RETRY_SCHEDULED} re-claimável, "state = RUNNING"
+     * deixou de identificar <em>qual</em> encarnação está rodando — o
+     * reaper preenche com a lease que observou expirada, e o CAS só vence
+     * se ela ainda for a mesma (re-claim concorrente troca a lease e
+     * protege a encarnação nova). {@code null} = sem fence — o caminho do
+     * dispatcher, que conclui a própria encarnação que executou.
      */
-    record CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, @Nullable Instant retryAt) {
+    record CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
+            @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt) {
 
         public CompletionRequest {
             Objects.requireNonNull(id, "id");
@@ -131,9 +140,14 @@ public interface ExecutionStore {
             }
         }
 
-        /** Conclusão sem retry (terminal) — a forma dos chamadores que nunca reagendam. */
+        /** Conclusão sem retry (terminal) e sem fence — a forma do dispatcher pra sucesso/falha terminal. */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState) {
-            this(id, jobKey, attempt, newState, null);
+            this(id, jobKey, attempt, newState, null, null);
+        }
+
+        /** Retry sem fence — a forma do dispatcher pra falha com orçamento. */
+        public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, @Nullable Instant retryAt) {
+            this(id, jobKey, attempt, newState, retryAt, null);
         }
     }
 

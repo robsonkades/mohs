@@ -145,6 +145,18 @@ class DispatcherTest {
         assertThat(event.attemptsExhausted()).isTrue();
     }
 
+    /** Terminal por natureza, não por orçamento: falha pré-dispatch publica Failed(exhausted=false) — o campo responde a pergunta do Javadoc de Failed, não herda o valor do caminho vizinho. */
+    @Test
+    void failBeforeDispatchPublishesFailedWithoutTheExhaustedFlag() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+
+        newDispatcher(List.of()).failBeforeDispatch(execution, new IllegalStateException("payload could not be read"));
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        Failed event = listener.awaitEvent(Failed.class);
+        assertThat(event.attemptsExhausted()).isFalse();
+    }
+
     /** Segunda tentativa: um attempt FAILED já gravado — o dispatch seguinte é o attempt 2. */
     private Execution seedRunningExecutionWithPriorFailedAttempt(String id, String jobKey) {
         Execution execution = seedRunningExecution(id, jobKey);
