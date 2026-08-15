@@ -19,6 +19,7 @@ import javax.sql.DataSource;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
+import ch.qos.logback.core.read.ListAppender;
 
 import org.h2.jdbcx.JdbcDataSource;
 import org.jspecify.annotations.Nullable;
@@ -106,8 +107,8 @@ class EngineTest {
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
-        return new Engine(claimer, dispatcher, executionStore, jobStore, nodeStoreOverride, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
-                tickScheduler, runnerRegistry);
+        return new Engine(claimer, dispatcher, executionStore, jobStore, nodeStoreOverride, reaper, clock,
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), tickScheduler, runnerRegistry);
     }
 
     private static RunnerRegistry defaultRunnerRegistry() {
@@ -121,8 +122,8 @@ class EngineTest {
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
-        return new Engine(claimer, dispatcher, executionStoreOverride, jobStoreOverride, nodeStore, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
-                tickScheduler, defaultRunnerRegistry());
+        return new Engine(claimer, dispatcher, executionStoreOverride, jobStoreOverride, nodeStore, reaper, clock,
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), tickScheduler, defaultRunnerRegistry());
     }
 
     private void seedEnqueuedExecution(String id, String jobKey, Object payload) {
@@ -230,6 +231,83 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+    }
+
+    /**
+     * ADR-0012: o tick renova a lease de tudo que este node executa — um
+     * handler mais lento que a lease sobrevive enquanto os ticks rodam. O
+     * avanço do relógio é MENOR que a lease de propósito: nenhum
+     * interleaving de tick torna o reaper gatilhável, e a renovação fica
+     * observável (novo now + ttl > lease inicial).
+     */
+    @Test
+    void tickRenewsLeasesOfRunningExecutions() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            releaseHandler.await(10, TimeUnit.SECONDS);
+        });
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = newEngine(counting, List.of());
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            Instant initialLease = leaseOf("exec-1");
+            clock.advance(Duration.ofSeconds(5));
+            counting.resetLatch(new CountDownLatch(2));
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+            assertThat(leaseOf("exec-1")).isAfter(initialLease);
+        } finally {
+            releaseHandler.countDown();
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+    }
+
+    /** Posse perdida (reclaim externo) é detectada pela renovação: WARN de zumbi, e o resultado tardio do handler é descartado pelo CAS de conclusão. */
+    @Test
+    void lostLeaseIsDetectedWarnedAndTheZombieResultDiscarded() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            releaseHandler.await(10, TimeUnit.SECONDS);
+        });
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = newEngine(counting, List.of());
+        ListAppender<ILoggingEvent> warnWatcher = new ListAppender<>();
+        warnWatcher.start();
+        engineLogger.addAppender(warnWatcher);
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            // reclaim externo simulado: outro nó reagendou a execução (scheduled_at
+            // futuro impede re-claim imediato e mantém o estado observável)
+            rawJdbcTemplate.update(
+                    "UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', node_id = NULL, scheduled_at = ? WHERE id = 'exec-1'",
+                    JdbcTimestamps.toUtcTimestamp(NOW.plusSeconds(3600)));
+            counting.resetLatch(new CountDownLatch(2));
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(warnWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("lost its lease"));
+        } finally {
+            releaseHandler.countDown();
+            engine.stop(Duration.ofSeconds(5));
+            engineLogger.detachAppender(warnWatcher);
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+    }
+
+    private Instant leaseOf(String id) {
+        return JdbcTimestamps.fromUtcTimestamp(rawJdbcTemplate.queryForObject(
+                "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", java.sql.Timestamp.class, id));
     }
 
     @Test
@@ -500,7 +578,7 @@ class EngineTest {
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
         // concorrência 1 de propósito — exec-1 esgota o único slot, forçando exec-2/exec-3 a rejeitar.
         RunnerRegistry oneSlotRunnerRegistry = new RunnerRegistry(List.of(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(1).build()));
-        Engine engine = new Engine(claimer, dispatcher, executionStore, jobStore, nodeStore, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
+        Engine engine = new Engine(claimer, dispatcher, executionStore, jobStore, nodeStore, reaper, clock, new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL),
                 tickScheduler, oneSlotRunnerRegistry);
 
         engine.start();

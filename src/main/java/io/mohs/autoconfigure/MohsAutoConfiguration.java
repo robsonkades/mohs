@@ -27,6 +27,7 @@ import io.mohs.core.resource.MohsRunner;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.Dispatcher;
 import io.mohs.engine.Engine;
+import io.mohs.engine.EngineSettings;
 import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.engine.HandlerRegistry;
@@ -243,7 +244,7 @@ public class MohsAutoConfiguration {
             RunnerRegistry mohsRunnerRegistry
     ) {
         return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper, mohsClock,
-                properties.engine().pollInterval(), properties.engine().batchSize(),
+                new EngineSettings(properties.engine().pollInterval(), properties.engine().batchSize(), properties.engine().leaseTtl()),
                 mohsTickScheduler, mohsRunnerRegistry);
     }
 

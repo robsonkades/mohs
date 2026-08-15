@@ -26,6 +26,7 @@ import io.mohs.core.EngineState;
 import io.mohs.core.MohsLifecycle;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
+import io.mohs.core.execution.ExecutionId;
 
 /**
  * O motor: liga {@link Claimer}, {@link Dispatcher}, {@link NodeStore} e
@@ -78,12 +79,18 @@ public final class Engine implements MohsLifecycle {
     private final NodeStore nodeStore;
     private final Reaper reaper;
     private final Clock clock;
-    private final Duration pollInterval;
-    private final int batchSize;
+    private final EngineSettings settings;
     private final String nodeId;
 
     private final AtomicReference<EngineState> state = new AtomicReference<>(EngineState.CREATED);
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
+    /**
+     * As execuções em voo NESTE node, com o instante monotônico do
+     * despacho — a base da renovação de lease (ADR-0012) a cada tick.
+     * Entrada nasce no submit e morre na conclusão ({@code whenComplete})
+     * ou quando a renovação descobre que a posse foi perdida.
+     */
+    private final ConcurrentHashMap<ExecutionId, Long> inFlightStartedNanos = new ConcurrentHashMap<>();
     private final TaskScheduler tickScheduler;
     private final RunnerRegistry runnerRegistry;
 
@@ -98,8 +105,7 @@ public final class Engine implements MohsLifecycle {
             NodeStore nodeStore,
             Reaper reaper,
             Clock clock,
-            Duration pollInterval,
-            int batchSize,
+            EngineSettings settings,
             TaskScheduler tickScheduler,
             RunnerRegistry runnerRegistry
     ) {
@@ -110,11 +116,7 @@ public final class Engine implements MohsLifecycle {
         this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
         this.reaper = Objects.requireNonNull(reaper, "reaper");
         this.clock = Objects.requireNonNull(clock, "clock");
-        this.pollInterval = Objects.requireNonNull(pollInterval, "pollInterval");
-        if (batchSize <= 0) {
-            throw new IllegalArgumentException("batchSize must be positive");
-        }
-        this.batchSize = batchSize;
+        this.settings = Objects.requireNonNull(settings, "settings");
         this.tickScheduler = Objects.requireNonNull(tickScheduler, "tickScheduler");
         this.runnerRegistry = Objects.requireNonNull(runnerRegistry, "runnerRegistry");
         this.nodeId = UUIDv7.randomUUID().toString();
@@ -131,7 +133,7 @@ public final class Engine implements MohsLifecycle {
         if (!state.compareAndSet(EngineState.CREATED, EngineState.RUNNING)) {
             throw new IllegalStateException("start() only valid from CREATED, was " + state.get());
         }
-        ScheduledFuture<?> handle = tickScheduler.scheduleWithFixedDelay(this::tick, pollInterval);
+        ScheduledFuture<?> handle = tickScheduler.scheduleWithFixedDelay(this::tick, settings.pollInterval());
         tickHandle = handle;
         if (state.get() == EngineState.STOPPED) { // stop() venceu a corrida durante o agendamento — cancela o tick que ele não viu
             handle.cancel(false);
@@ -240,13 +242,38 @@ public final class Engine implements MohsLifecycle {
             if (current != EngineState.RUNNING) {
                 return;
             }
+            renewOwnedLeases();
             reaper.reclaimExpired();
-            List<Execution> claimed = claimer.claim(nodeId, batchSize);
+            List<Execution> claimed = claimer.claim(nodeId, settings.batchSize());
             for (Execution execution : claimed) {
                 submitDispatch(execution);
             }
         } catch (RuntimeException e) {
             log.error("engine tick failed — will retry next tick", e);
+        }
+    }
+
+    /**
+     * ADR-0012: renova em lote a lease de tudo que este node ainda executa
+     * — ANTES do reaper no mesmo tick, para as próprias execuções nunca
+     * parecerem abandonadas enquanto os ticks rodam. Id que a renovação
+     * perdeu e ainda está no mapa perdeu a posse de verdade (reclaim
+     * concorrente): o handler local virou zumbi — WARN único e sai da
+     * renovação; a escrita terminal dele será descartada pelo CAS de
+     * conclusão. (Conclusão normal entre o snapshot e o WARN já removeu a
+     * entrada — o {@code remove} nulo silencia o falso positivo.)
+     */
+    private void renewOwnedLeases() {
+        List<ExecutionId> owned = List.copyOf(inFlightStartedNanos.keySet());
+        if (owned.isEmpty()) {
+            return;
+        }
+        Set<ExecutionId> renewed = executionStore.renewLeases(nodeId, owned, clock.instant().plus(settings.leaseTtl()));
+        for (ExecutionId id : owned) {
+            if (!renewed.contains(id) && inFlightStartedNanos.remove(id) != null) {
+                log.warn("execution {} lost its lease (reclaimed by another node's reaper) — the local handler is now a zombie; "
+                        + "its eventual result will be discarded by the completion CAS", id);
+            }
         }
     }
 
@@ -296,10 +323,15 @@ public final class Engine implements MohsLifecycle {
             return;
         }
 
+        // registrado ANTES do runAsync: a execução está RUNNING no banco desde o
+        // claim — a primeira renovação precisa cobri-la mesmo que o executor a
+        // deixe na fila por um tick inteiro
+        inFlightStartedNanos.put(execution.id(), System.nanoTime());
         CompletableFuture<Void> future;
         try {
             future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution, definition), executor);
         } catch (RuntimeException e) {
+            inFlightStartedNanos.remove(execution.id());
             log.warn("runner executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
                     execution.id(), e);
             return;
@@ -313,6 +345,7 @@ public final class Engine implements MohsLifecycle {
             if (thrown != null) {
                 log.error("dispatch of execution {} threw outside the normal failure paths", execution.id(), thrown);
             }
+            inFlightStartedNanos.remove(execution.id());
             inFlight.remove(future);
         });
     }
