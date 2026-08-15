@@ -43,14 +43,3 @@ que merece registro, não um estado implícito.
 **Decidir:** confirmar que os internos não são pontos de extensão e
 registrar em mini-ADR — ou escolher quais beans viram SPI substituível e
 só então dar `@ConditionalOnMissingBean` a esses.
-
-## 6. Payload de tipo errado em `MohsJobs.adaptHandler`
-
-Estoura como `IllegalArgumentException` crua do reflection ("argument
-type mismatch"), sem dizer job nem método. Melhorar a mensagem muda o
-conteúdo de `Attempt.error()` — comportamento observável —, então
-depende de aprovação explícita, não entra como refactor.
-
-**Decidir:** aprovar (ou não) a mensagem contextualizada. Quando
-aprovada, o ponto exato é a invocação em `MohsJobs.adaptHandler`,
-nomeando job e método declarante no erro.

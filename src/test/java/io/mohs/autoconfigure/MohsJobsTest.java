@@ -257,6 +257,19 @@ class MohsJobsTest {
                 .hasMessage("boom");
     }
 
+    /** A IAE crua do reflection ("argument type mismatch") não diz método nem tipos — o embrulho dá o contexto que {@code Attempt.error()} vai carregar. */
+    @Test
+    void wrongTypedPayloadFailsNamingMethodAndTypes() {
+        MohsJobs.AdaptedHandler adapted = MohsJobs.adaptHandler(new Handlers(), method("payloadOnly", Greeting.class));
+
+        assertThatThrownBy(() -> adapted.handler().invoke("not-a-greeting", fakeContext()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("payloadOnly")
+                .hasMessageContaining(Greeting.class.getName())
+                .hasMessageContaining(String.class.getName())
+                .hasCauseInstanceOf(IllegalArgumentException.class);
+    }
+
     // ---- toDefinition ----
 
     @Test

@@ -41,7 +41,10 @@ final class MohsJobs {
      * especificado até aqui. {@link InvocationTargetException} é
      * desembrulhada: {@code Dispatcher} grava a mensagem da exceção
      * original em {@code Attempt.error()}, não o nome de
-     * "InvocationTargetException".
+     * "InvocationTargetException". A {@link IllegalArgumentException} crua
+     * do reflection (payload de tipo errado — o método nem roda) é
+     * embrulhada nomeando método e tipos: "argument type mismatch" sozinho
+     * não diz o que corrigir.
      */
     static AdaptedHandler adaptHandler(Object bean, Method method) {
         Objects.requireNonNull(bean, "bean");
@@ -73,6 +76,7 @@ final class MohsJobs {
         int finalPayloadIndex = payloadIndex;
         int finalContextIndex = contextIndex;
         int argCount = parameters.length;
+        Class<?> payloadType = payloadIndex == -1 ? null : parameters[payloadIndex].getType();
         JobHandler handler = (payload, ctx) -> {
             Object[] args = new Object[argCount];
             if (finalPayloadIndex != -1) {
@@ -83,6 +87,13 @@ final class MohsJobs {
             }
             try {
                 method.invoke(bean, args);
+            } catch (IllegalArgumentException e) {
+                // IAE direta do reflection (sem InvocationTargetException): o método
+                // nem chegou a rodar — payload de tipo que o parâmetro não aceita.
+                throw new IllegalStateException(unsupportedSignature(method,
+                        "cannot receive payload of type " + (payload == null ? "null" : payload.getClass().getName())
+                                + (payloadType == null ? "" : " — parameter expects " + payloadType.getName())
+                                + " (scheduled with the wrong type, or persisted before a deploy that changed the parameter — ADR-0011)"), e);
             } catch (InvocationTargetException e) {
                 Throwable cause = e.getCause();
                 if (cause instanceof Exception checkedCause) {
@@ -94,7 +105,6 @@ final class MohsJobs {
                 throw e;
             }
         };
-        Class<?> payloadType = payloadIndex == -1 ? null : parameters[payloadIndex].getType();
         return new AdaptedHandler(handler, payloadType);
     }
 
