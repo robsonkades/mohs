@@ -57,13 +57,11 @@ class MohsRestAutoConfigurationTest {
     }
 
     private static ApplicationContextRunner runnerWith(DataSource dataSource, String... extraProperties) {
-        String[] properties = new String[extraProperties.length + 1];
-        properties[0] = "mohs.jdbc.dialect=h2";
-        System.arraycopy(extraProperties, 0, properties, 1, extraProperties.length);
         return new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(MohsAutoConfiguration.class, MohsRestAutoConfiguration.class, JacksonAutoConfiguration.class))
                 .withBean(DataSource.class, () -> dataSource)
-                .withPropertyValues(properties);
+                .withPropertyValues("mohs.jdbc.dialect=h2")
+                .withPropertyValues(extraProperties);
     }
 
     @Test
@@ -86,6 +84,17 @@ class MohsRestAutoConfigurationTest {
             assertThat(context).hasSingleBean(ActorResolver.class);
             assertThat(logAppender.list)
                     .anyMatch(event -> event.getFormattedMessage().contains("sem autenticação"));
+        });
+    }
+
+    /** Gate mestre vence em silêncio (Javadoc de {@code mohs.enabled}: "desligar remove todos os beans do Mohs") — kill switch nunca pode virar falha de boot. */
+    @Test
+    void masterGateOffSuppressesTheRestApiEvenWhenExplicitlyEnabled() {
+        runnerWith(freshH2DataSource(), "mohs.enabled=false", "mohs.api.enabled=true").run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).doesNotHaveBean(JobsController.class);
+            assertThat(context).doesNotHaveBean(ExecutionsController.class);
+            assertThat(logAppender.list).isEmpty();
         });
     }
 

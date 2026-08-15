@@ -26,6 +26,19 @@ import io.mohs.rest.job.JobsController;
  * consumidor não trouxe {@code spring-boot-starter-webmvc} (dependência
  * {@code optional} do módulo, mesmo padrão do actuator).
  *
+ * <p>Também condicionada ao gate mestre {@code mohs.enabled}: kill switch
+ * vence em silêncio — o Javadoc do gate promete "desligar remove todos os
+ * beans do Mohs", e falha de boot aqui transformaria o botão de emergência
+ * em crash quando {@code mohs.api.enabled=true} já estiver no ambiente.
+ * Sem essa condição, a combinação caía num {@code NoSuchBeanDefinitionException}
+ * genérico ao criar {@link JobsController} (não há bean {@link Mohs}).
+ * A proteção cobre só o gate por propriedade: host que exclui
+ * {@link MohsAutoConfiguration} na mão ({@code spring.autoconfigure.exclude})
+ * com a API ligada mantém o erro de boot — exclusão manual da auto-config
+ * da própria biblioteca é cenário não suportado, de propósito (a
+ * alternativa, {@code @ConditionalOnBean(Mohs.class)}, esconderia também
+ * misconfiguração genuína que deveria estourar).
+ *
  * <p>Só {@code jobs}/{@code executions} têm {@code @Bean} aqui — os
  * demais controllers (overview, batches, rate-limits, runners, nodes)
  * continuam contrato M2 sem implementação por trás; registrá-los antes
@@ -39,6 +52,7 @@ import io.mohs.rest.job.JobsController;
  * contrato nenhum (ADR-0010, princípio 5).
  */
 @AutoConfiguration(after = MohsAutoConfiguration.class)
+@ConditionalOnProperty(prefix = "mohs", name = "enabled", matchIfMissing = true)
 @ConditionalOnProperty(prefix = "mohs.api", name = "enabled", havingValue = "true")
 @ConditionalOnClass(DispatcherServlet.class)
 public class MohsRestAutoConfiguration {

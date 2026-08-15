@@ -32,18 +32,3 @@ Javadoc da anotação declara o status.
 métodos anotados. Quando entrar, o guard do fail-fast em
 `MohsJobScanner.scanMethod` é o ponto exato a substituir pelo registro do
 listener sintetizado.
-
-## 7. `MohsRestAutoConfiguration` ignora o gate mestre `mohs.enabled`
-
-Encontrado ao resolver a pendência 3. A auto-config REST condiciona só em
-`mohs.api.enabled` — com `mohs.enabled=false` + `mohs.api.enabled=true`, a
-`MohsAutoConfiguration` inteira some (nenhum bean `Mohs`/`MohsProperties`)
-e o boot quebra com `NoSuchBeanDefinitionException` genérica ao criar
-`mohsJobsController`, em vez de recuar ou de ensinar a causa. O Javadoc do
-gate promete "desligar remove todos os beans do Mohs do contexto" — os do
-REST hoje não obedecem.
-
-**Decidir:** honrar o gate mestre também no REST (`@ConditionalOnProperty`
-de `mohs.enabled` na classe — a combinação vira no-op silencioso, como o
-Javadoc do gate promete), ou falhar o boot com mensagem que ensina que
-`mohs.api.enabled=true` exige `mohs.enabled=true`.
