@@ -25,10 +25,15 @@ public interface JobContext {
     Instant firedAt();
 
     /**
-     * Cooperativo — <b>nesta versão sempre {@code false}</b>: ainda não
-     * existe fonte de cancelamento ({@code POST /executions/{id}/cancel}
-     * responde 501). O design final usa um cache do lado do motor com ~1s
-     * de staleness.
+     * Cooperativo (ADR-0034) — vira {@code true} quando o timeout do job
+     * dispara, o shutdown escala no estouro do grace de drain, ou um
+     * {@code POST /executions/{id}/cancel} é observado pelo node dono
+     * (staleness ≤ 1 poll-interval, {@code mohs.engine.poll-interval}).
+     * O handler decide quando e como parar: sair com exceção depois de
+     * observar um cancel manual encerra a execução como {@code CANCELLED};
+     * concluir normalmente registra {@code SUCCEEDED} — trabalho terminado
+     * vale, mesmo com pedido pendente. Timeout e shutdown também entregam
+     * {@code Thread.interrupt()}; o cancel manual, não — é flag pura.
      */
     boolean cancellationRequested();
 

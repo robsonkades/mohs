@@ -1,5 +1,6 @@
 package io.mohs.rest.execution;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -64,15 +65,23 @@ public class ExecutionsController {
     }
 
     /**
-     * Cancelamento é cooperativo, não imediato — 202 com o estado atual, não
-     * necessariamente terminal. {@code ResponseEntity} (não {@code
-     * ExecutionResponse} puro) pelo mesmo motivo de {@link #retry}: é onde o
-     * header {@code Location: /executions/{id}} do princípio 1 do design REST
-     * é anexado — {@code @ResponseStatus} não teria efeito aqui (REST-1).
+     * Cancelamento é cooperativo, não imediato (ADR-0034) — 202 com o
+     * estado atual, não necessariamente terminal: pendente já volta
+     * {@code CANCELLED}, {@code RUNNING} volta como está com o pedido
+     * registrado. {@code ResponseEntity} (não {@code ExecutionResponse}
+     * puro) pelo mesmo motivo de {@link #retry}: é onde o header
+     * {@code Location: /executions/{id}} do princípio 1 do design REST é
+     * anexado — {@code @ResponseStatus} não teria efeito aqui (REST-1).
+     * O {@code Location} deriva da própria URI da requisição (o prefixo já
+     * honra {@code mohs.api.base-path}), só removendo o sufixo da ação.
      */
     @PostMapping("/{id}/cancel")
     public ResponseEntity<ExecutionResponse> cancel(@PathVariable String id, HttpServletRequest request) {
-        throw new UnsupportedOperationException("M3: ainda não implementado");
+        ExecutionId executionId = ExecutionId.of(id);
+        Execution execution = mohs.cancel(executionId)
+                .orElseThrow(() -> new ExecutionNotFoundException(executionId));
+        URI location = URI.create(request.getRequestURI().replaceFirst("/cancel$", ""));
+        return ResponseEntity.accepted().location(location).body(ExecutionResponse.from(execution));
     }
 
     /**

@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -105,11 +106,26 @@ class ExecutionsControllerContractTest {
                 .andExpect(status().isNotFound());
     }
 
+    /** ADR-0034: 202 com o estado corrente (não necessariamente terminal) e Location apontando pro detalhe — cancel é aceito, nunca garantido. */
     @Test
-    void cancelIsNotImplementedYet() throws Exception {
+    void cancelReturns202WithTheCurrentStateAndALocationHeader() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        Execution running = new Execution(ExecutionId.of("exec-1"), key, ExecutionState.RUNNING, NOW, NOW, List.of(), "tester");
+        when(mohs.cancel(ExecutionId.of("exec-1"))).thenReturn(Optional.of(running));
+
         mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/cancel"))
-                .andExpect(status().isNotImplemented())
-                .andExpect(jsonPath("$.title").value("Not implemented"));
+                .andExpect(status().isAccepted())
+                .andExpect(header().string("Location", ApiPaths.V1 + "/executions/exec-1"))
+                .andExpect(jsonPath("$.executionId").value("exec-1"))
+                .andExpect(jsonPath("$.state").value("RUNNING"));
+    }
+
+    @Test
+    void cancelOfAnUnknownExecutionReturns404() throws Exception {
+        when(mohs.cancel(ExecutionId.of("ghost"))).thenReturn(Optional.empty());
+
+        mockMvc.perform(post(ApiPaths.V1 + "/executions/ghost/cancel"))
+                .andExpect(status().isNotFound());
     }
 
     @Test
