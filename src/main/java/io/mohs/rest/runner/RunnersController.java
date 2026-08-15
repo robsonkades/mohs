@@ -10,7 +10,7 @@ import io.mohs.rest.ApiPaths;
 
 /** {@code GET /runners} — visão node-local: modo, max, em execução. Só leitura; runner é config, não runtime ajustável. */
 @RestController
-@RequestMapping(ApiPaths.V1 + "/runners")
+@RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/runners")
 public class RunnersController {
 
     @GetMapping

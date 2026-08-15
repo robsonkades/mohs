@@ -10,7 +10,7 @@ import io.mohs.rest.ApiPaths;
 
 /** {@code GET /nodes} — visão de cluster: nodes com heartbeat recente, last-seen. */
 @RestController
-@RequestMapping(ApiPaths.V1 + "/nodes")
+@RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/nodes")
 public class NodesController {
 
     @GetMapping

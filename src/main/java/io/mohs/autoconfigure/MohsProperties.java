@@ -8,6 +8,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 import io.mohs.core.resource.RunnerMode;
+import io.mohs.rest.ApiPaths;
 
 /**
  * Propriedades {@code mohs.*} — só o que {@link MohsAutoConfiguration}/
@@ -116,11 +117,11 @@ public record MohsProperties(
      * {@link MohsRestAutoConfiguration}.
      *
      * @param enabled liga a API REST operacional
-     * @param basePath prefixo de toda rota de {@code io.mohs.rest}, mesmo default hardcoded hoje em {@code io.mohs.rest.ApiPaths#V1}
+     * @param basePath prefixo de toda rota de {@code io.mohs.rest}; default é a mesma constante {@link ApiPaths#V1} usada como fallback dos placeholders {@code ${mohs.api.base-path:...}} nos {@code @RequestMapping} (anotação não lê o binding — lá o placeholder é o único mecanismo; leitura em código usa este componente)
      */
     public record Api(
             @DefaultValue("false") boolean enabled,
-            @DefaultValue("/api/mohs/v1") String basePath) {
+            @DefaultValue(ApiPaths.V1) String basePath) {
     }
 
     /**

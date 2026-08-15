@@ -9,7 +9,6 @@ import java.util.Optional;
 import jakarta.servlet.http.HttpServletRequest;
 
 import org.jspecify.annotations.Nullable;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -54,8 +53,7 @@ public class JobsController {
     private final ObjectMapper objectMapper;
     private final String basePath;
 
-    public JobsController(Mohs mohs, ActorResolver actorResolver, ObjectMapper objectMapper,
-            @Value("${mohs.api.base-path:" + ApiPaths.V1 + "}") String basePath) {
+    public JobsController(Mohs mohs, ActorResolver actorResolver, ObjectMapper objectMapper, String basePath) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
         this.actorResolver = Objects.requireNonNull(actorResolver, "actorResolver");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");

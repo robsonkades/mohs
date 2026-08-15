@@ -16,7 +16,7 @@ import io.mohs.rest.RuntimePatchResponse;
 
 /** {@code GET /rate-limits} · {@code PATCH /rate-limits/{name}} — estado e ajuste runtime de vazão, cluster-wide. */
 @RestController
-@RequestMapping(ApiPaths.V1 + "/rate-limits")
+@RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/rate-limits")
 public class RateLimitsController {
 
     @GetMapping

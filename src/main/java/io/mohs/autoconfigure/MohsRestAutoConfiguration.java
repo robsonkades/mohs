@@ -2,7 +2,6 @@ package io.mohs.autoconfigure;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -14,7 +13,6 @@ import tools.jackson.databind.ObjectMapper;
 
 import io.mohs.core.Mohs;
 import io.mohs.rest.ActorResolver;
-import io.mohs.rest.ApiPaths;
 import io.mohs.rest.HeaderActorResolver;
 import io.mohs.rest.error.RestExceptionHandler;
 import io.mohs.rest.execution.ExecutionsController;
@@ -63,9 +61,8 @@ public class MohsRestAutoConfiguration {
     }
 
     @Bean
-    public JobsController mohsJobsController(Mohs mohs, ActorResolver mohsActorResolver, ObjectMapper objectMapper,
-            @Value("${mohs.api.base-path:" + ApiPaths.V1 + "}") String basePath) {
-        return new JobsController(mohs, mohsActorResolver, objectMapper, basePath);
+    public JobsController mohsJobsController(Mohs mohs, ActorResolver mohsActorResolver, ObjectMapper objectMapper, MohsProperties properties) {
+        return new JobsController(mohs, mohsActorResolver, objectMapper, properties.api().basePath());
     }
 
     @Bean

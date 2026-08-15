@@ -18,18 +18,6 @@ no Javadoc de `ScheduleCommand.idempotencyKey`. O design
 **Decidir:** o TTL/purga entra ainda no M3, ou vira ADR própria junto com a
 política de retenção de execuções (as duas purgas compartilham mecanismo)?
 
-## 3. `mohs.api.base-path` sem leitor
-
-A propriedade existe em `MohsProperties.Api`, mas nenhum código de produção
-a lê — controllers e o header `Location` usam o placeholder
-`${mohs.api.base-path:...}` direto. Funciona (o binder valida e o metadata
-dá autocomplete), mas a fonte é duplicada: o default vive em `ApiPaths.V1`
-e em `MohsProperties.Api.basePath`.
-
-**Decidir:** manter a classe só como metadata/`@ConditionalOnProperty`
-(documentar isso nela), ou unificar a fonte (controllers passam a receber o
-valor via `MohsProperties`).
-
 ## 4. `@OnExecution` — milestone do processamento
 
 A anotação existe na API pública mas o motor não a processa. Correção

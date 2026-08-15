@@ -12,7 +12,7 @@ import io.mohs.rest.ApiPaths;
  * aqui existe ainda pra consultar (M3); corpo stub por enquanto.
  */
 @RestController
-@RequestMapping(ApiPaths.V1 + "/overview")
+@RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/overview")
 public class OverviewController {
 
     @GetMapping

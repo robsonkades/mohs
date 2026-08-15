@@ -9,7 +9,7 @@ import io.mohs.rest.ApiPaths;
 
 /** {@code GET /batches/{id}} — contadores agregados e estado do lote. */
 @RestController
-@RequestMapping(ApiPaths.V1 + "/batches")
+@RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/batches")
 public class BatchesController {
 
     @GetMapping("/{id}")
