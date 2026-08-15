@@ -94,19 +94,26 @@ public final class Dispatcher {
             return;
         }
 
-        // a janela de interrupt (ADR-0034) abre imediatamente antes da cadeia e
-        // fecha em finally, ANTES de qualquer escrita de conclusão: JDBC nunca
-        // roda interrompido e a thread de um runner CPU volta limpa ao pool
         try {
-            signal.registerHandlerThread();
-            try {
-                runInterceptorChain(handler.orElseThrow(), payload, ctx);
-            } finally {
-                signal.unregisterHandlerThreadAndClearInterrupt();
-            }
+            invokeWithinInterruptWindow(handler.orElseThrow(), payload, ctx, signal);
             succeed(execution, attemptNumber, firedAt);
         } catch (Exception e) {
             failSignalAware(execution, definition, attemptNumber, firedAt, e, signal);
+        }
+    }
+
+    /**
+     * A janela de interrupt (ADR-0034): abre imediatamente antes da cadeia e
+     * fecha em {@code finally}, ANTES de qualquer escrita de conclusão —
+     * JDBC nunca roda interrompido e a thread de um runner CPU volta limpa
+     * ao pool.
+     */
+    private void invokeWithinInterruptWindow(JobHandler handler, Object payload, JobContext ctx, CancellationSignal signal) throws Exception {
+        signal.registerHandlerThread();
+        try {
+            runInterceptorChain(handler, payload, ctx);
+        } finally {
+            signal.unregisterHandlerThreadAndClearInterrupt();
         }
     }
 

@@ -248,9 +248,13 @@ public final class Engine implements MohsLifecycle {
      * nada disso acontece: drain ≠ cancel (ADR-0007).
      */
     private void escalateAfterDrainGrace(Duration grace) {
-        log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — signalling cancellation and "
-                + "interrupting them; their attempts will fail with a node-shutdown cause and follow the retry policy (ADR-0034)",
-                grace, inFlightAttempts.size());
+        // as duas contagens de propósito: um zumbi dropado da renovação (watchdog/
+        // lease perdida) segura o future em inFlight mas já saiu do mapa — não é
+        // mais sinalizável, e esconder isso do operador mentiria a contagem
+        log.warn("drain grace period ({}) elapsed with {} dispatch(es) still in flight ({} still signallable) — "
+                + "signalling cancellation and interrupting them; their attempts will fail with a node-shutdown cause "
+                + "and follow the retry policy (ADR-0034)",
+                grace, inFlight.size(), inFlightAttempts.size());
         for (InFlightAttempt attempt : inFlightAttempts.values()) {
             attempt.signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
         }
@@ -303,15 +307,13 @@ public final class Engine implements MohsLifecycle {
      * runner não conta.
      */
     private void signalJobTimeouts() {
-        for (Map.Entry<ExecutionId, InFlightAttempt> entry : inFlightAttempts.entrySet()) {
-            InFlightAttempt attempt = entry.getValue();
-            if (attempt.timeout != null && !attempt.signal.cancellationRequested()
-                    && attempt.signal.handlerRunningLongerThan(attempt.timeout)) {
+        inFlightAttempts.forEach((id, attempt) -> {
+            if (attempt.needsTimeoutSignal()) {
                 log.warn("execution {} exceeded its job timeout {} — cancellation signalled and the handler interrupted; "
-                        + "the outcome follows when the handler stops (ADR-0034)", entry.getKey(), attempt.timeout);
+                        + "the outcome follows when the handler stops (ADR-0034)", id, attempt.timeout);
                 attempt.signal.requestCancellation(CancellationSignal.Reason.TIMEOUT, true);
             }
-        }
+        });
     }
 
     /**
@@ -578,6 +580,11 @@ public final class Engine implements MohsLifecycle {
 
         InFlightAttempt(@Nullable Duration timeout) {
             this.timeout = timeout;
+        }
+
+        /** O gatilho da varredura do tick (ADR-0034): tem timeout próprio, o handler roda há mais que ele e o sinal ainda não foi levantado. */
+        boolean needsTimeoutSignal() {
+            return timeout != null && !signal.cancellationRequested() && signal.handlerRunningLongerThan(timeout);
         }
     }
 

@@ -32,6 +32,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -100,6 +101,19 @@ class MohsImplTest {
 
         assertThat(mohs.cancel(id)).contains(running);
         verify(executionStore).requestCancellation(id);
+    }
+
+    /** TOCTOU fechado (review do ciclo ADR-0034): RUNNING vira RETRY_SCHEDULED entre o CAS e a flag — a segunda passada pega a transição e a ordem do operador não cai no vazio. */
+    @Test
+    void cancelRetriesThePairWhenAnAttemptCompletionRacesInBetween() {
+        ExecutionId id = ExecutionId.of("exec-1");
+        Execution cancelled = new Execution(id, JobKey.of("welcome-email"), ExecutionState.CANCELLED, NOW, null, List.of(), "test");
+        when(executionStore.cancelIfPending(id)).thenReturn(false, true);
+        when(executionStore.requestCancellation(id)).thenReturn(false);
+        when(executionStore.find(id)).thenReturn(Optional.of(cancelled));
+
+        assertThat(mohs.cancel(id)).contains(cancelled);
+        verify(executionStore, times(2)).cancelIfPending(id);
     }
 
     @Test

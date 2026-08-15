@@ -64,7 +64,13 @@ class CancellationSignalTest {
         signal.unregisterHandlerThreadAndClearInterrupt();
 
         assertThat(Thread.currentThread().isInterrupted()).isFalse();
-        signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
+        // sinal NOVO: no mesmo objeto, a segunda requestCancellation pararia no
+        // first-reason-wins antes de chegar ao interrupt — provaria o
+        // short-circuit, não a janela fechada
+        CancellationSignal reopened = new CancellationSignal();
+        reopened.registerHandlerThread();
+        reopened.unregisterHandlerThreadAndClearInterrupt();
+        reopened.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
         assertThat(Thread.currentThread().isInterrupted()).isFalse();
     }
 

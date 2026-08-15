@@ -130,13 +130,21 @@ public final class MohsImpl implements Mohs {
     /**
      * ADR-0034 — a orquestração das duas metades do cancel: primeiro o CAS
      * de pendente; perdeu (a linha já roda, ou já terminou), tenta a flag
-     * cooperativa de {@code RUNNING}. Ambas no-op em terminal — cancelar o
-     * que já decidiu não muda nada, e o retorno mostra o estado que valeu.
+     * cooperativa de {@code RUNNING}. Os dois predicados particionam o
+     * espaço de estados, mas o estado pode migrar ENTRE as checagens
+     * (TOCTOU — DDIA cap. 7: um CAS cobre um predicado, não uma sequência):
+     * uma conclusão de attempt que leva {@code RUNNING → RETRY_SCHEDULED}
+     * no meio do par faria a ordem do operador cair no vazio. A segunda
+     * passada fecha a janela — outra migração exigiria um ciclo de attempt
+     * inteiro dentro de microssegundos. Em terminal ambas continuam no-op:
+     * cancelar o que já decidiu não muda nada, e o retorno mostra o estado
+     * que valeu.
      */
     @Override
     public Optional<Execution> cancel(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
-        if (!executionStore.cancelIfPending(executionId)) {
+        if (!executionStore.cancelIfPending(executionId) && !executionStore.requestCancellation(executionId)
+                && !executionStore.cancelIfPending(executionId)) {
             executionStore.requestCancellation(executionId);
         }
         return executionStore.find(executionId);
