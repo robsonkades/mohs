@@ -69,13 +69,15 @@ public interface ExecutionStore {
     void markFired(ExecutionId id, Instant firedAt);
 
     /**
-     * Transiciona uma {@code Execution RUNNING} para um estado terminal
-     * (ou, quando a claim query reconhecer o estado como candidato de
-     * novo — ainda não, ADR-0026 — {@code RETRY_SCHEDULED}), grava o
-     * {@link Attempt} e libera a vaga de concorrência do job na mesma
-     * operação ({@code JobStore.decrementRunningExecutions}, ADR-0025) —
-     * único caminho de conclusão, usado tanto pelo reclaim do reaper
-     * (ADR-0012) quanto pelo dispatch normal quando existir.
+     * Transiciona uma {@code Execution RUNNING} para um estado terminal ou
+     * para {@code RETRY_SCHEDULED} (ADR-0033), grava o {@link Attempt} e
+     * libera a vaga de concorrência do job na mesma operação
+     * ({@code JobStore.decrementRunningExecutions}, ADR-0025) — único
+     * caminho de conclusão, usado tanto pelo reclaim do reaper (ADR-0012)
+     * quanto pelo dispatch normal. Quando o destino é
+     * {@code RETRY_SCHEDULED}, {@link CompletionRequest#retryAt} vira o
+     * novo {@code scheduled_at} na mesma transição: o backoff aterrissa
+     * junto do CAS, nunca numa escrita separada que poderia se perder.
      *
      * <p>CAS por {@code WHERE state = 'RUNNING'}, sempre — não existe
      * chamador legítimo concluindo a partir de outro estado, por isso
@@ -86,7 +88,7 @@ public interface ExecutionStore {
      * @return {@code true} se a transição ocorreu; {@code false} se a
      *         execução já não estava mais {@code RUNNING}.
      */
-    boolean complete(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, JobStore jobStore);
+    boolean complete(CompletionRequest request, JobStore jobStore);
 
     /**
      * Como {@link #complete}, para muitas execuções de uma vez — o
@@ -106,14 +108,32 @@ public interface ExecutionStore {
      */
     Set<ExecutionId> completeAll(List<CompletionRequest> requests, JobStore jobStore);
 
-    /** Um pedido de conclusão dentro de {@link #completeAll} — mesmos campos de {@link #complete}, menos o id (chave do lote). */
-    record CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState) {
+    /**
+     * Um pedido de conclusão — a forma única de {@link #complete} e
+     * {@link #completeAll}. {@code retryAt} anda junto do estado que o
+     * exige: {@code RETRY_SCHEDULED} sem hora de retry seria re-claim
+     * imediato sem backoff, e hora de retry num estado terminal seria
+     * escrita silenciosamente ignorada — as duas combinações são bug do
+     * chamador, rejeitadas na construção.
+     */
+    record CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, @Nullable Instant retryAt) {
 
         public CompletionRequest {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(jobKey, "jobKey");
             Objects.requireNonNull(attempt, "attempt");
             Objects.requireNonNull(newState, "newState");
+            if (newState == ExecutionState.RETRY_SCHEDULED && retryAt == null) {
+                throw new IllegalArgumentException("RETRY_SCHEDULED requires retryAt — the rescheduled scheduled_at is the backoff");
+            }
+            if (newState != ExecutionState.RETRY_SCHEDULED && retryAt != null) {
+                throw new IllegalArgumentException("retryAt only applies to RETRY_SCHEDULED, got " + newState);
+            }
+        }
+
+        /** Conclusão sem retry (terminal) — a forma dos chamadores que nunca reagendam. */
+        public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState) {
+            this(id, jobKey, attempt, newState, null);
         }
     }
 

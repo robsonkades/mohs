@@ -577,11 +577,11 @@ class EngineTest {
         }
 
         @Override
-        public boolean complete(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, JobStore jobStore) {
-            if (id.equals(failingId)) {
-                throw new RuntimeException("simulated database error completing " + id);
+        public boolean complete(CompletionRequest request, JobStore jobStore) {
+            if (request.id().equals(failingId)) {
+                throw new RuntimeException("simulated database error completing " + request.id());
             }
-            return delegate.complete(id, jobKey, attempt, newState, jobStore);
+            return delegate.complete(request, jobStore);
         }
 
         @Override

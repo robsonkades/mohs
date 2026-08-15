@@ -7,6 +7,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.IntStream;
 
@@ -222,7 +223,7 @@ class JdbcExecutionStoreTest {
         JobStore jobStore = new JdbcJobStore(dataSource, clock);
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
-        boolean completed = store.complete(ExecutionId.of("019abc-complete-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, jobStore);
+        boolean completed = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED), jobStore);
 
         assertThat(completed).isTrue();
         Optional<Execution> found = store.find(ExecutionId.of("019abc-complete-1"));
@@ -238,7 +239,7 @@ class JdbcExecutionStoreTest {
         JobStore jobStore = new JdbcJobStore(dataSource, clock);
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
-        boolean completed = store.complete(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED, jobStore);
+        boolean completed = store.complete(new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED), jobStore);
 
         assertThat(completed).isFalse();
         assertThat(store.find(execution.id())).contains(execution);
@@ -252,14 +253,69 @@ class JdbcExecutionStoreTest {
         Attempt firstAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.SUCCEEDED, null);
         Attempt secondAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
-        boolean first = store.complete(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), firstAttempt, ExecutionState.SUCCEEDED, jobStore);
-        boolean second = store.complete(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), secondAttempt, ExecutionState.FAILED, jobStore);
+        boolean first = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), firstAttempt, ExecutionState.SUCCEEDED), jobStore);
+        boolean second = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), secondAttempt, ExecutionState.FAILED), jobStore);
 
         assertThat(first).isTrue();
         assertThat(second).isFalse();
         Optional<Execution> found = store.find(ExecutionId.of("019abc-complete-3"));
         assertThat(found.get().state()).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(found.get().attempts()).containsExactly(firstAttempt);
+    }
+
+    /** ADR-0033: o backoff aterrissa junto do CAS — RETRY_SCHEDULED reescreve scheduled_at pra hora do retry na mesma transição. */
+    @Test
+    void completeToRetryScheduledRewritesScheduledAtToTheRetryTime() {
+        seedRunningExecution("019abc-retry-1", "welcome-email");
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Instant retryAt = clock.instant().plusSeconds(30);
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+
+        boolean completed = store.complete(new ExecutionStore.CompletionRequest(
+                ExecutionId.of("019abc-retry-1"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_SCHEDULED, retryAt), jobStore);
+
+        assertThat(completed).isTrue();
+        Execution found = store.find(ExecutionId.of("019abc-retry-1")).orElseThrow();
+        assertThat(found.state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(found.scheduledAt()).isEqualTo(retryAt);
+        assertThat(found.attempts()).containsExactly(attempt);
+    }
+
+    /** Lote misto do reaper: exauridos viram FAILED, os com orçamento viram RETRY_SCHEDULED cada um com seu retryAt. */
+    @Test
+    void completeAllHandlesMixedTerminalAndRetryRequests() {
+        seedRunningExecution("019abc-retry-2", "welcome-email");
+        seedRunningExecution("019abc-retry-3", "welcome-email");
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Instant retryAt = clock.instant().plusSeconds(45);
+        Attempt failedAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "exhausted");
+        Attempt retryAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "will retry");
+
+        Set<ExecutionId> completed = store.completeAll(List.of(
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-retry-2"), JobKey.of("welcome-email"), failedAttempt, ExecutionState.FAILED),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-retry-3"), JobKey.of("welcome-email"), retryAttempt, ExecutionState.RETRY_SCHEDULED, retryAt)),
+                jobStore);
+
+        assertThat(completed).containsExactlyInAnyOrder(ExecutionId.of("019abc-retry-2"), ExecutionId.of("019abc-retry-3"));
+        assertThat(store.find(ExecutionId.of("019abc-retry-2")).orElseThrow().state()).isEqualTo(ExecutionState.FAILED);
+        Execution retried = store.find(ExecutionId.of("019abc-retry-3")).orElseThrow();
+        assertThat(retried.state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(retried.scheduledAt()).isEqualTo(retryAt);
+    }
+
+    /** As duas combinações inválidas são bug do chamador — rejeitadas na construção, nunca gravadas pela metade. */
+    @Test
+    void completionRequestRejectsRetryAtStateMismatches() {
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+
+        assertThatThrownBy(() -> new ExecutionStore.CompletionRequest(
+                ExecutionId.of("x"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_SCHEDULED, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("requires retryAt");
+        assertThatThrownBy(() -> new ExecutionStore.CompletionRequest(
+                ExecutionId.of("x"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, clock.instant()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("only applies to RETRY_SCHEDULED");
     }
 
     /** ADR-0025: liberar a vaga de concorrência é parte da mesma operação, não um passo separado que o chamador pode esquecer. */
@@ -271,7 +327,7 @@ class JdbcExecutionStoreTest {
         seedRunningExecution("019abc-complete-4", "report-summary");
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
-        store.complete(ExecutionId.of("019abc-complete-4"), JobKey.of("report-summary"), attempt, ExecutionState.FAILED, jobStore);
+        store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-4"), JobKey.of("report-summary"), attempt, ExecutionState.FAILED), jobStore);
 
         assertThat(jobStore.find(JobKey.of("report-summary"))).map(StoredJob::runningExecutionCount).contains(0);
     }
@@ -290,7 +346,7 @@ class JdbcExecutionStoreTest {
         doThrow(new RuntimeException("simulated failure releasing the slot")).when(failingJobStore).decrementRunningExecutions(any());
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
-        assertThatThrownBy(() -> store.complete(ExecutionId.of("019abc-atomic-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, failingJobStore))
+        assertThatThrownBy(() -> store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-atomic-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED), failingJobStore))
                 .hasMessageContaining("simulated failure");
 
         Execution stillRunning = store.find(ExecutionId.of("019abc-atomic-1")).orElseThrow();

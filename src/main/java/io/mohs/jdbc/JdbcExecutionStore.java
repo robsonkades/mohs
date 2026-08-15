@@ -1,8 +1,10 @@
 package io.mohs.jdbc;
 
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -156,22 +158,22 @@ public final class JdbcExecutionStore implements ExecutionStore {
      * de uma execução que já tinha terminado de outro jeito.
      */
     @Override
-    public boolean complete(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, JobStore jobStore) {
-        Objects.requireNonNull(id, "id");
-        Objects.requireNonNull(jobKey, "jobKey");
-        Objects.requireNonNull(attempt, "attempt");
-        Objects.requireNonNull(newState, "newState");
+    public boolean complete(ExecutionStore.CompletionRequest request, JobStore jobStore) {
+        Objects.requireNonNull(request, "request");
         Objects.requireNonNull(jobStore, "jobStore");
         return Boolean.TRUE.equals(transactionTemplate.execute(_ ->
-                completeWithinTransaction(id, jobKey, attempt, newState, jobStore)));
+                completeWithinTransaction(request, jobStore)));
     }
 
-    private boolean completeWithinTransaction(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, JobStore jobStore) {
+    private boolean completeWithinTransaction(ExecutionStore.CompletionRequest request, JobStore jobStore) {
+        // COALESCE: retryAt (só presente em RETRY_SCHEDULED — invariante do
+        // record) vira o novo scheduled_at na mesma transição; terminal mantém.
         int updated = jdbcTemplate.update(
-                "UPDATE mohs_executions SET state = :newState WHERE id = :id AND state = 'RUNNING'",
+                "UPDATE mohs_executions SET state = :newState, scheduled_at = COALESCE(:retryAt, scheduled_at) WHERE id = :id AND state = 'RUNNING'",
                 new MapSqlParameterSource()
-                        .addValue("newState", newState.name())
-                        .addValue("id", id.value()));
+                        .addValue("newState", request.newState().name())
+                        .addValue("retryAt", request.retryAt() == null ? null : JdbcTimestamps.toUtcTimestamp(request.retryAt()), Types.TIMESTAMP)
+                        .addValue("id", request.id().value()));
         if (updated == 0) {
             return false;
         }
@@ -179,8 +181,8 @@ public final class JdbcExecutionStore implements ExecutionStore {
         jdbcTemplate.update("""
                 INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
                 VALUES (:executionId, :number, :startedAt, :finishedAt, :outcome, :error)
-                """, attemptParams(id, attempt));
-        jobStore.decrementRunningExecutions(jobKey);
+                """, attemptParams(request.id(), request.attempt()));
+        jobStore.decrementRunningExecutions(request.jobKey());
         return true;
     }
 
@@ -231,8 +233,11 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return completedIds;
     }
 
-    /** CAS por {@code WHERE id IN (:ids) AND state = 'RUNNING'}, em lotes de {@link #MAX_IDS_PER_QUERY} (DB-11). */
+    /** CAS por {@code WHERE id IN (:ids) AND state = 'RUNNING'}, em lotes de {@link #MAX_IDS_PER_QUERY} (DB-11). {@code RETRY_SCHEDULED} sai do caminho {@code IN}: cada linha carrega seu próprio {@code retryAt}. */
     private Set<ExecutionId> transitionGroup(ExecutionState newState, List<ExecutionStore.CompletionRequest> group) {
+        if (newState == ExecutionState.RETRY_SCHEDULED) {
+            return transitionRetryGroup(group);
+        }
         Set<ExecutionId> confirmed = new LinkedHashSet<>();
         List<String> ids = group.stream().map(r -> r.id().value()).toList();
         for (int start = 0; start < ids.size(); start += MAX_IDS_PER_QUERY) {
@@ -249,6 +254,44 @@ public final class JdbcExecutionStore implements ExecutionStore {
                     (rs, _) -> ExecutionId.of(rs.getString("id"))));
         }
         return confirmed;
+    }
+
+    /**
+     * {@code batchUpdate} com params por linha — cada retry tem seu
+     * {@code retryAt}. O {@code int[]} de retorno já é a confirmação do CAS
+     * linha a linha; se o driver devolver {@code SUCCESS_NO_INFO} (JDBC
+     * permite), recai na mesma confirmação por {@code SELECT} do caminho
+     * terminal em vez de chutar.
+     */
+    private Set<ExecutionId> transitionRetryGroup(List<ExecutionStore.CompletionRequest> group) {
+        MapSqlParameterSource[] params = group.stream()
+                .map(r -> new MapSqlParameterSource()
+                        .addValue("id", r.id().value())
+                        .addValue("retryAt", JdbcTimestamps.toUtcTimestamp(Objects.requireNonNull(r.retryAt()))))
+                .toArray(MapSqlParameterSource[]::new);
+        int[] updated = jdbcTemplate.batchUpdate(
+                "UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', scheduled_at = :retryAt WHERE id = :id AND state = 'RUNNING'",
+                params);
+
+        Set<ExecutionId> confirmed = new LinkedHashSet<>();
+        boolean countsUnknown = false;
+        for (int i = 0; i < updated.length; i++) {
+            if (updated[i] == Statement.SUCCESS_NO_INFO) {
+                countsUnknown = true;
+                break;
+            }
+            if (updated[i] > 0) {
+                confirmed.add(group.get(i).id());
+            }
+        }
+        if (!countsUnknown) {
+            return confirmed;
+        }
+        List<String> ids = group.stream().map(r -> r.id().value()).toList();
+        return new LinkedHashSet<>(jdbcTemplate.query(
+                "SELECT id FROM mohs_executions WHERE id IN (:ids) AND state = 'RETRY_SCHEDULED'",
+                new MapSqlParameterSource("ids", ids),
+                (rs, _) -> ExecutionId.of(rs.getString("id"))));
     }
 
     private static MapSqlParameterSource attemptParams(ExecutionId id, Attempt attempt) {

@@ -108,7 +108,8 @@ public final class Dispatcher {
 
     private void succeed(Execution execution, int attemptNumber, Instant firedAt) {
         Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.SUCCEEDED, null);
-        boolean completed = executionStore.complete(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED, jobStore);
+        boolean completed = executionStore.complete(
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED), jobStore);
         if (completed) {
             events.publish(new Succeeded(execution.id(), execution.jobKey(), attemptNumber));
         } else {
@@ -129,7 +130,8 @@ public final class Dispatcher {
         log.warn("execution {} of job '{}' failed on attempt {}", execution.id().value(),
                 execution.jobKey().value(), attemptNumber, error);
         Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, message);
-        boolean completed = executionStore.complete(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED, jobStore);
+        boolean completed = executionStore.complete(
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED), jobStore);
         if (completed) {
             // sempre esgotado nesta rodada — nunca agenda RETRY_SCHEDULED (ADR-0026)
             events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, true));
