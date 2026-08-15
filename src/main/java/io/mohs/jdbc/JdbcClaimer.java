@@ -213,12 +213,12 @@ public final class JdbcClaimer implements Claimer {
         return claimed;
     }
 
-    /** CAS final pra RUNNING — a garantia real contra double-claim, independente do lock do SELECT. */
+    /** CAS final pra RUNNING — a garantia real contra double-claim, independente do lock do SELECT. Os dois estados claimáveis, mesmo par do template de candidatos (ADR-0033). */
     private boolean tryTransitionToRunning(String executionId, String nodeId, Instant leaseExpiresAt) {
         int updated = jdbcTemplate.update("""
                 UPDATE mohs_executions
                 SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId
-                WHERE id = :id AND state = 'ENQUEUED'
+                WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
                 """, new MapSqlParameterSource()
                 .addValue("leaseExpiresAt", JdbcTimestamps.toUtcTimestamp(leaseExpiresAt))
                 .addValue("nodeId", nodeId)

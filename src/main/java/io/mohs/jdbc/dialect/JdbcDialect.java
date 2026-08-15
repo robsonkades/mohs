@@ -49,7 +49,7 @@ public interface JdbcDialect {
                    j.window_name AS window_name
             FROM mohs_executions e
             JOIN mohs_job_definitions j ON j.job_key = e.job_key
-            WHERE e.state = 'ENQUEUED'
+            WHERE e.state IN ('ENQUEUED', 'RETRY_SCHEDULED')
               AND e.scheduled_at <= :now
               AND j.retired = FALSE
               AND (j.allow_concurrent_executions = TRUE OR j.running_execution_count < j.max_concurrent_executions)

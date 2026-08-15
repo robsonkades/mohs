@@ -84,6 +84,23 @@ class JdbcClaimerSqlServerTest {
                 "SELECT state FROM mohs_executions WHERE id = ?", String.class, id));
     }
 
+    /** ADR-0033: sensível a dialeto de verdade — o SQL Server tem template de candidatos próprio (TOP/UPDLOCK), o filtro de estado não vem do template ANSI compartilhado. */
+    @Test
+    void claimsRetryScheduledExecutionWhoseTimeHasCome() {
+        seedJob("report", policy -> {
+        });
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_executions (
+                    id, job_key, state, scheduled_at, actor, payload, payload_type, created_at)
+                VALUES (?, ?, 'RETRY_SCHEDULED', ?, 'test', '{}', 'java.lang.Object', ?)
+                """, "exec-retry", "report", JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(5)), JdbcTimestamps.toUtcTimestamp(NOW));
+
+        List<Execution> claimed = newClaimer().claim("node-a", 10);
+
+        assertThat(claimed).extracting(e -> e.id().value()).containsExactly("exec-retry");
+        assertThat(stateOf("exec-retry")).isEqualTo(ExecutionState.RUNNING);
+    }
+
     /** Ver javadoc do teste homônimo em {@link JdbcClaimerTest} — mesma garantia, banco diferente. */
     @Test
     void claimIsMutuallyExclusiveAcrossConcurrentNodes() throws Exception {
