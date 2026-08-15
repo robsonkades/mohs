@@ -8,4 +8,8 @@ as decisões que ficaram com o autor. Ao resolver um item, registrar a
 decisão (ADR ou Javadoc, conforme o caso) e removê-lo daqui — a numeração
 dos demais não muda.
 
-*(nenhuma decisão em aberto no momento)*
+10. **Evolução de schema antes do primeiro release** — os quatro
+    `schema-*.sql` usam `CREATE TABLE IF NOT EXISTS`: base criada antes de
+    uma coluna nova (ex.: `cancel_requested`, ADR-0034) não a ganha e quebra
+    no boot. Decisão de 2026-08-15: pré-GA vale drop-and-recreate; formalizar
+    expand/contract (ADR próprio) antes do primeiro usuário externo.

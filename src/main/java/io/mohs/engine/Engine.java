@@ -103,7 +103,10 @@ public final class Engine implements MohsLifecycle {
      * removê-la — o zumbi continua alcançável pela escalada de drain e
      * pelo poll de cancel; removê-lo o deixaria fora do alcance de
      * qualquer sinal exatamente no cenário pra que a escalada existe
-     * (review ADR-0034).
+     * (review ADR-0034). Exceção única: um re-claim DESTE node pro mesmo
+     * id substitui a entrada marcada no {@code put} do submit — o zumbi
+     * antigo volta a ficar inalcançável (mesma lacuna de antes da marca;
+     * o mapa comporta uma encarnação por id de propósito).
      */
     private final ConcurrentHashMap<ExecutionId, InFlightAttempt> inFlightAttempts = new ConcurrentHashMap<>();
     private final TaskScheduler tickScheduler;

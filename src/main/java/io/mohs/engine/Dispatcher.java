@@ -134,6 +134,9 @@ public final class Dispatcher {
                     "node shutdown: drain grace elapsed before attempt " + attemptNumber + " started"));
             case TIMEOUT -> fail(execution, definition, attemptNumber, firedAt, timeoutError(definition, attemptNumber,
                     new IllegalStateException("timeout signalled before the handler started — should be unreachable")));
+            // statement switch sobre enum não impõe exaustividade — razão nova
+            // sem case cai aqui, nunca no silêncio (a promessa do Javadoc)
+            default -> throw new IllegalStateException("unmapped cancellation reason: " + reason);
         }
     }
 

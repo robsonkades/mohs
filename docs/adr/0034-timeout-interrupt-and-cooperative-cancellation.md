@@ -73,7 +73,9 @@ configurável (YAGNI). Durante o grace, nada muda: drain ≠ cancel (ADR-0007).
 - (Revisão do ciclo) Drop de renovação **marca** a encarnação (`renewalStopped`) em vez de
   removê-la do mapa de in-flight — remoção só na conclusão. O zumbi continua alcançável
   pela escalada de drain e pelo poll de cancel: pra job sem timeout, o interrupt do
-  shutdown é a única chance de pará-lo. Complementos do mesmo review: checagem pré-start
+  shutdown é a única chance de pará-lo. Exceção única: re-claim do próprio node pro mesmo
+  id substitui a entrada marcada (o mapa comporta uma encarnação por id) — o zumbi antigo
+  volta a ficar inalcançável, mesma lacuna de antes da marca. Complementos do mesmo review: checagem pré-start
   do sinal no dispatch (task enfileirada com MANUAL/SHUTDOWN nem roda o handler) e
   `succeed()` fora do try do mapeamento — falha da escrita de sucesso propaga (RUNNING até
   o reaper, indistinguível de crash) em vez de ser reclassificada pelo sinal.
