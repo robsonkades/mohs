@@ -217,14 +217,14 @@ public final class Engine implements MohsLifecycle {
         while (!inFlight.isEmpty()) {
             long remainingMillis = (deadlineNanos - System.nanoTime()) / 1_000_000;
             if (remainingMillis <= 0) {
-                warnDrainGraceElapsed(grace);
+                escalateAfterDrainGrace(grace);
                 return;
             }
             CompletableFuture<?>[] snapshot = inFlight.toArray(CompletableFuture[]::new);
             try {
                 CompletableFuture.allOf(snapshot).get(remainingMillis, TimeUnit.MILLISECONDS);
             } catch (TimeoutException e) {
-                warnDrainGraceElapsed(grace);
+                escalateAfterDrainGrace(grace);
                 return;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -235,8 +235,24 @@ public final class Engine implements MohsLifecycle {
         }
     }
 
-    private void warnDrainGraceElapsed(Duration grace) {
-        log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — Mohs has no interrupt mechanism yet (per-job timeout isn't enforced), they keep running in the background", grace, inFlight.size());
+    /**
+     * API-DESIGN (shutdown gracioso, passo 3) / ADR-0034: grace estourado
+     * escala pela maquinaria de cancelamento — flag + interrupt em tudo que
+     * sobrou; os attempts falham assincronamente com causa NodeShutdown e
+     * seguem o retry normal pelo caminho de conclusão de sempre, na própria
+     * thread do handler (independe do tick, que {@link #stop} cancela em
+     * seguida). Sem segunda janela de espera configurável (YAGNI, ADR-0034);
+     * handler surdo ao interrupt perde a renovação com o fim dos ticks e o
+     * reaper de outro node o reclama na expiração da lease. Durante o grace
+     * nada disso acontece: drain ≠ cancel (ADR-0007).
+     */
+    private void escalateAfterDrainGrace(Duration grace) {
+        log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — signalling cancellation and "
+                + "interrupting them; their attempts will fail with a node-shutdown cause and follow the retry policy (ADR-0034)",
+                grace, inFlightAttempts.size());
+        for (InFlightAttempt attempt : inFlightAttempts.values()) {
+            attempt.signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
+        }
     }
 
     /**

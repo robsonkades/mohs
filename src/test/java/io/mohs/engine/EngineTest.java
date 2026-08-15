@@ -414,6 +414,40 @@ class EngineTest {
         assertThat(failed.get().error().getMessage()).contains("exceeded job timeout");
     }
 
+    /**
+     * API-DESIGN (shutdown gracioso, passo 3) / ADR-0034: grace estourado
+     * escala pela maquinaria de cancelamento — flag + interrupt; o attempt
+     * falha com causa NodeShutdown e segue o retry normal (aqui retries=0 →
+     * FAILED). Durante o grace nada disso acontece: drain ≠ cancel.
+     */
+    @Test
+    void drainGraceOverflowInterruptsInFlightWorkAndItFailsWithNodeShutdown() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch never = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            never.await(10, TimeUnit.SECONDS);
+        });
+        CountDownLatch failedPublished = new CountDownLatch(1);
+        AtomicReference<Failed> failed = new AtomicReference<>();
+        ExecutionListener listener = event -> {
+            if (event instanceof Failed f) {
+                failed.set(f);
+                failedPublished.countDown();
+            }
+        };
+        Engine engine = newEngine(nodeStore, List.of(listener));
+
+        engine.start();
+        assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+        engine.stop(Duration.ofMillis(50));
+
+        assertThat(failedPublished.await(5, TimeUnit.SECONDS)).as("escalation interrupts and the attempt fails").isTrue();
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(failed.get().error().getMessage()).contains("node shutdown");
+    }
+
     private Instant leaseOf(String id) {
         return JdbcTimestamps.fromUtcTimestamp(rawJdbcTemplate.queryForObject(
                 "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", Timestamp.class, id));
