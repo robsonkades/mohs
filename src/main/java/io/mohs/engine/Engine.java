@@ -24,6 +24,7 @@ import org.springframework.scheduling.TaskScheduler;
 
 import io.mohs.core.EngineState;
 import io.mohs.core.MohsLifecycle;
+import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
 
 /**
@@ -287,7 +288,8 @@ public final class Engine implements MohsLifecycle {
 
         CompletableFuture<Void> future;
         try {
-            future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution), executor);
+            JobDefinition definition = storedJob.get().definition();
+            future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution, definition), executor);
         } catch (RuntimeException e) {
             log.warn("runner executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
                     execution.id(), e);
@@ -327,7 +329,7 @@ public final class Engine implements MohsLifecycle {
      * {@link Dispatcher#dispatch}. Payload ilegível vira falha terminal via
      * {@link #failUnreadablePayload}, nunca propaga.
      */
-    private void resolvePayloadAndDispatch(Execution execution) {
+    private void resolvePayloadAndDispatch(Execution execution, JobDefinition definition) {
         Object payload;
         try {
             payload = executionStore
@@ -337,7 +339,7 @@ public final class Engine implements MohsLifecycle {
             failUnreadablePayload(execution, e);
             return;
         }
-        dispatcher.dispatch(execution, payload);
+        dispatcher.dispatch(execution, definition, payload);
     }
 
     /**

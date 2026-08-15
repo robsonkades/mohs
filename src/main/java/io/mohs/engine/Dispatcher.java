@@ -10,9 +10,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.task.AsyncTaskExecutor;
 
+import io.mohs.core.definition.JobDefinition;
+import io.mohs.core.event.AttemptFailed;
 import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Failed;
+import io.mohs.core.event.RetryScheduled;
 import io.mohs.core.event.Started;
 import io.mohs.core.event.Succeeded;
 import io.mohs.core.execution.Attempt;
@@ -29,11 +32,11 @@ import io.mohs.core.job.JobKey;
  * de {@link Claimer}/{@link ExecutionStore}, não tem SQL próprio nenhum —
  * só orquestra portas que já existem.
  *
- * <p>Sempre termina em {@code SUCCEEDED} ou {@code FAILED}, nunca {@code
- * RETRY_SCHEDULED} — mesma restrição da ADR-0026 (a claim query não
- * reconhece esse estado como candidato em nenhum dos 4 dialetos ainda;
- * agendar um retry hoje prenderia a execução pra sempre). {@code retries}/
- * {@code retryPolicy} continuam sem efeito, consistente com o reaper.
+ * <p>Falha de attempt com orçamento ({@code JobDefinition.retries})
+ * transiciona pra {@code RETRY_SCHEDULED} com backoff ({@link RetrySchedule},
+ * ADR-0033 — que destravou a restrição da ADR-0026); orçamento esgotado é
+ * {@code FAILED} terminal. {@code retryPolicy} (bean customizado) segue
+ * sem efeito — SPI futura.
  *
  * <p>Síncrono e sem pool próprio: não gerencia {@code MohsRunner} nenhum —
  * quem decide quantos {@code dispatch} ficam em voo, e em que tipo de
@@ -63,8 +66,9 @@ public final class Dispatcher {
         this.events = new ExecutionEventPublisher(Objects.requireNonNull(listeners, "listeners"), Objects.requireNonNull(eventExecutor, "eventExecutor"));
     }
 
-    public void dispatch(Execution execution, Object payload) {
+    public void dispatch(Execution execution, JobDefinition definition, Object payload) {
         Objects.requireNonNull(execution, "execution");
+        Objects.requireNonNull(definition, "definition");
         Objects.requireNonNull(payload, "payload");
 
         Instant firedAt = clock.instant();
@@ -76,7 +80,7 @@ public final class Dispatcher {
 
         Optional<JobHandler> invocation = handlerRegistry.find(execution.jobKey());
         if (invocation.isEmpty()) {
-            fail(execution, attemptNumber, firedAt, new IllegalStateException(NO_HANDLER_ERROR + execution.jobKey().value()));
+            fail(execution, definition, attemptNumber, firedAt, new IllegalStateException(NO_HANDLER_ERROR + execution.jobKey().value()));
             return;
         }
 
@@ -84,7 +88,7 @@ public final class Dispatcher {
             runInterceptorChain(invocation.get(), payload, ctx);
             succeed(execution, attemptNumber, firedAt);
         } catch (Exception e) {
-            fail(execution, attemptNumber, firedAt, e);
+            fail(execution, definition, attemptNumber, firedAt, e);
         }
     }
 
@@ -118,23 +122,21 @@ public final class Dispatcher {
         }
     }
 
-    /**
-     * O WARN com a exceção completa é o único lugar onde o stack trace da
-     * falha aparece por padrão — {@code Attempt.error} guarda só a mensagem
-     * e o evento {@code Failed} depende de um {@code ExecutionListener}
-     * registrado; sem este log, a causa de um job quebrado às 3h da manhã
-     * não estaria em lugar nenhum.
-     */
-    private void fail(Execution execution, int attemptNumber, Instant firedAt, Exception error) {
-        String message = error.getMessage() != null ? error.getMessage() : error.toString();
-        log.warn("execution {} of job '{}' failed on attempt {}", execution.id().value(),
-                execution.jobKey().value(), attemptNumber, error);
-        Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, message);
-        boolean completed = executionStore.complete(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED), jobStore);
+    /** Orçamento restante ({@link RetrySchedule}) decide: reagenda com backoff ou falha terminal ({@link #failTerminally}). */
+    private void fail(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt, Exception error) {
+        Optional<Instant> retryAt = RetrySchedule.nextRetryAt(attemptNumber, definition.retries(), clock.instant());
+        if (retryAt.isEmpty()) {
+            failTerminally(execution, attemptNumber, firedAt, error);
+            return;
+        }
+        log.warn("execution {} of job '{}' failed on attempt {} — retry {} scheduled for {}", execution.id().value(),
+                execution.jobKey().value(), attemptNumber, attemptNumber + 1, retryAt.get(), error);
+        Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, errorMessage(error));
+        boolean completed = executionStore.complete(new ExecutionStore.CompletionRequest(
+                execution.id(), execution.jobKey(), attempt, ExecutionState.RETRY_SCHEDULED, retryAt.get()), jobStore);
         if (completed) {
-            // sempre esgotado nesta rodada — nunca agenda RETRY_SCHEDULED (ADR-0026)
-            events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, true));
+            events.publish(new AttemptFailed(execution.id(), execution.jobKey(), attemptNumber, error));
+            events.publish(new RetryScheduled(execution.id(), execution.jobKey(), attemptNumber + 1, retryAt.get()));
         } else {
             log.warn("attempt {} of execution {} finished FAILED but the state had already moved on (reaper/concurrent completion) — result discarded",
                     attemptNumber, execution.id().value());
@@ -142,17 +144,45 @@ public final class Dispatcher {
     }
 
     /**
+     * O WARN com a exceção completa é o único lugar onde o stack trace da
+     * falha aparece por padrão — {@code Attempt.error} guarda só a mensagem
+     * e o evento {@code Failed} depende de um {@code ExecutionListener}
+     * registrado; sem este log, a causa de um job quebrado às 3h da manhã
+     * não estaria em lugar nenhum.
+     */
+    private void failTerminally(Execution execution, int attemptNumber, Instant firedAt, Exception error) {
+        log.warn("execution {} of job '{}' failed on attempt {}", execution.id().value(),
+                execution.jobKey().value(), attemptNumber, error);
+        Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, errorMessage(error));
+        boolean completed = executionStore.complete(
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED), jobStore);
+        if (completed) {
+            events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, true));
+        } else {
+            log.warn("attempt {} of execution {} finished FAILED but the state had already moved on (reaper/concurrent completion) — result discarded",
+                    attemptNumber, execution.id().value());
+        }
+    }
+
+    private static String errorMessage(Exception error) {
+        return error.getMessage() != null ? error.getMessage() : error.toString();
+    }
+
+    /**
      * Falha uma execução terminalmente sem ter passado por {@link #dispatch}
      * — mesma síntese de {@link Attempt} e publicação de {@link Failed} que
-     * {@link #fail} já usa, pra quando o chamador (ex.: {@link Engine},
-     * quando o payload não pôde ser lido de volta) já sabe que a execução
-     * falhou antes do handler sequer poder rodar.
+     * {@link #failTerminally} já usa, pra quando o chamador (ex.:
+     * {@link Engine}, quando o payload não pôde ser lido de volta) já sabe
+     * que a execução falhou antes do handler sequer poder rodar. Sempre
+     * terminal, sem consultar orçamento: definição removida não tem
+     * {@code retries} confiável pra ler, e payload ilegível não sara
+     * repetindo a leitura do mesmo dado.
      */
     void failBeforeDispatch(Execution execution, Exception cause) {
         Objects.requireNonNull(execution, "execution");
         Objects.requireNonNull(cause, "cause");
         int attemptNumber = execution.attempts().size() + 1;
-        fail(execution, attemptNumber, clock.instant(), cause);
+        failTerminally(execution, attemptNumber, clock.instant(), cause);
     }
 
     /**

@@ -22,10 +22,12 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.definition.JobDefinition;
+import io.mohs.core.event.AttemptFailed;
 import io.mohs.core.event.ExecutionEvent;
 import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Failed;
+import io.mohs.core.event.RetryScheduled;
 import io.mohs.core.event.Started;
 import io.mohs.core.event.Succeeded;
 import io.mohs.core.execution.Execution;
@@ -97,13 +99,69 @@ class DispatcherTest {
                 "SELECT state FROM mohs_executions WHERE id = ?", String.class, id));
     }
 
+    /** retries default 0 — primeira falha esgota o orçamento, o comportamento terminal de sempre. */
+    private static JobDefinition onDemand(String jobKey) {
+        return JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand());
+    }
+
+    /** ADR-0033: falha com orçamento vira RETRY_SCHEDULED com backoff dentro do bound (1s pra 1ª falha), e publica AttemptFailed + RetryScheduled — nunca Failed. */
+    @Test
+    void failureWithRemainingBudgetSchedulesARetryWithBackoff() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(2));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            throw new IllegalStateException("boom");
+        });
+
+        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
+        assertThat(found.attempts()).hasSize(1);
+        assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.FAILED);
+        assertThat(found.scheduledAt()).isBetween(NOW, NOW.plusSeconds(1));
+
+        RetryScheduled retryScheduled = listener.awaitEvent(RetryScheduled.class);
+        assertThat(retryScheduled.nextAttempt()).isEqualTo(2);
+        assertThat(retryScheduled.retryAt()).isEqualTo(found.scheduledAt());
+        assertThat(listener.events().stream().filter(AttemptFailed.class::isInstance)).hasSize(1);
+        assertThat(listener.events().stream().filter(Failed.class::isInstance)).isEmpty();
+    }
+
+    /** A última tentativa do orçamento falhando é FAILED terminal com Failed(exhausted=true) — o attemptNumber conta os attempts já gravados. */
+    @Test
+    void failureOnTheLastBudgetedAttemptFailsTerminally() throws Exception {
+        Execution execution = seedRunningExecutionWithPriorFailedAttempt("exec-1", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            throw new IllegalStateException("boom again");
+        });
+
+        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        Failed event = listener.awaitEvent(Failed.class);
+        assertThat(event.attempt()).isEqualTo(2);
+        assertThat(event.attemptsExhausted()).isTrue();
+    }
+
+    /** Segunda tentativa: um attempt FAILED já gravado — o dispatch seguinte é o attempt 2. */
+    private Execution seedRunningExecutionWithPriorFailedAttempt(String id, String jobKey) {
+        Execution execution = seedRunningExecution(id, jobKey);
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
+                VALUES (?, 1, ?, ?, 'FAILED', 'boom')
+                """, id, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(10)), JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(9)));
+        return executionStore.find(ExecutionId.of(id)).orElseThrow();
+    }
+
     @Test
     void dispatchInvokesTheHandlerAndRecordsSuccess() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
         List<Object> received = new CopyOnWriteArrayList<>();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> received.add(payload));
 
-        newDispatcher(List.of()).dispatch(execution, "hello");
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello");
 
         assertThat(received).containsExactly("hello");
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
@@ -121,7 +179,7 @@ class DispatcherTest {
             throw new IllegalStateException("boom");
         });
 
-        newDispatcher(List.of()).dispatch(execution, "hello");
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello");
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
@@ -136,7 +194,7 @@ class DispatcherTest {
     void dispatchFailsTerminallyWhenNoHandlerIsRegistered() {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
 
-        newDispatcher(List.of()).dispatch(execution, "hello");
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello");
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
@@ -153,7 +211,7 @@ class DispatcherTest {
             throw new RuntimeException("interceptor blew up");
         };
 
-        newDispatcher(List.of(failingInterceptor)).dispatch(execution, "hello");
+        newDispatcher(List.of(failingInterceptor)).dispatch(execution, onDemand("welcome-email"), "hello");
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
@@ -176,7 +234,7 @@ class DispatcherTest {
             order.add("second-after");
         };
 
-        newDispatcher(List.of(first, second)).dispatch(execution, "hello");
+        newDispatcher(List.of(first, second)).dispatch(execution, onDemand("welcome-email"), "hello");
 
         assertThat(order).containsExactly("first-before", "second-before", "handler", "second-after", "first-after");
     }
@@ -192,7 +250,7 @@ class DispatcherTest {
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(),
                 List.of(throwingListener, listener), eventExecutor);
 
-        dispatcher.dispatch(execution, "hello");
+        dispatcher.dispatch(execution, onDemand("welcome-email"), "hello");
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
@@ -214,6 +272,10 @@ class DispatcherTest {
             assertThat(latch.await(5, TimeUnit.SECONDS)).as("terminal event within timeout").isTrue();
             return events.stream().filter(type::isInstance).map(type::cast).findFirst()
                     .orElseThrow(() -> new AssertionError("no event of type " + type + " among " + events));
+        }
+
+        List<ExecutionEvent> events() {
+            return events;
         }
     }
 }
