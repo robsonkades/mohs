@@ -4,12 +4,16 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.stream.Stream;
 
 import javax.sql.DataSource;
 
@@ -17,6 +21,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 
 import org.h2.jdbcx.JdbcDataSource;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -30,13 +35,16 @@ import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.EngineState;
 import io.mohs.core.definition.JobDefinition;
+import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Failed;
 import io.mohs.core.event.Succeeded;
+import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.resource.MohsRunner;
 import io.mohs.jdbc.JdbcClaimer;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
@@ -89,22 +97,49 @@ class EngineTest {
     }
 
     private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners) {
+        return newEngine(nodeStoreOverride, listeners, defaultRunnerRegistry());
+    }
+
+    private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry) {
         JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
         JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
-        AsyncTaskExecutor dispatchExecutor = MohsExecutors.ioBoundExecutor("mohs-dispatch-test", BATCH_SIZE);
-        return new Engine(claimer, dispatcher, executionStore, nodeStoreOverride, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
-                tickScheduler, dispatchExecutor);
+        return new Engine(claimer, dispatcher, executionStore, jobStore, nodeStoreOverride, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
+                tickScheduler, runnerRegistry);
+    }
+
+    private static RunnerRegistry defaultRunnerRegistry() {
+        return new RunnerRegistry(List.of(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(BATCH_SIZE).build()));
+    }
+
+    /** Claim/reclaim usam as portas reais (o claim precisa funcionar); os overrides simulam falha só no caminho do dispatch. */
+    private Engine newEngineWith(JobStore jobStoreOverride, ExecutionStore executionStoreOverride, List<ExecutionListener> listeners) {
+        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
+        JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
+        AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
+        Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor);
+        ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
+        return new Engine(claimer, dispatcher, executionStoreOverride, jobStoreOverride, nodeStore, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
+                tickScheduler, defaultRunnerRegistry());
     }
 
     private void seedEnqueuedExecution(String id, String jobKey, Object payload) {
-        seedEnqueuedExecution(id, jobKey, payload, NOW.minusSeconds(1));
+        seedEnqueuedExecution(id, jobKey, payload, NOW.minusSeconds(1), null);
     }
 
     private void seedEnqueuedExecution(String id, String jobKey, Object payload, Instant scheduledAt) {
-        jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
+        seedEnqueuedExecution(id, jobKey, payload, scheduledAt, null);
+    }
+
+    private void seedEnqueuedExecution(String id, String jobKey, Object payload, Instant scheduledAt, @Nullable String runner) {
+        jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> {
+            PolicySpec policySpec = spec.onDemand();
+            if (runner != null) {
+                policySpec.runner(runner);
+            }
+        }));
         Execution execution = new Execution(ExecutionId.of(id), JobKey.of(jobKey), ExecutionState.ENQUEUED, scheduledAt, null, List.of(), "test");
         executionStore.insert(execution, payload);
     }
@@ -249,6 +284,163 @@ class EngineTest {
         assertThat(failedEvent.get().attemptsExhausted()).isTrue();
     }
 
+    @Test
+    void executionDispatchesOnItsJobsNamedRunner() throws Exception {
+        RunnerRegistry runnerRegistry = new RunnerRegistry(List.of(
+                MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(BATCH_SIZE).build(),
+                MohsRunner.io("s3").maxConcurrent(4).build()));
+        seedEnqueuedExecution("exec-1", "s3-upload", "hello", NOW.minusSeconds(1), "s3");
+        AtomicReference<String> dispatchThreadName = new AtomicReference<>();
+        handlerRegistry.register(JobKey.of("s3-upload"), (payload, ctx) -> dispatchThreadName.set(Thread.currentThread().getName()));
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        Engine engine = newEngine(nodeStore, List.of(listener), runnerRegistry);
+
+        engine.start();
+        try {
+            assertThat(succeeded.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(dispatchThreadName.get()).startsWith("mohs-runner-s3-");
+    }
+
+    /** Mesmo padrão de unreadablePayloadFailsTheExecutionWithoutHangingTheTick — falha só a execução, não o tick nem o node. */
+    @Test
+    void unknownRunnerFailsTheExecutionWithoutHangingTheTick() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello", NOW.minusSeconds(1), "ghost-runner");
+        AtomicBoolean handlerCalled = new AtomicBoolean();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true));
+        CountDownLatch failed = new CountDownLatch(1);
+        AtomicReference<Failed> failedEvent = new AtomicReference<>();
+        ExecutionListener listener = event -> {
+            if (event instanceof Failed f) {
+                failedEvent.set(f);
+                failed.countDown();
+            }
+        };
+        Engine engine = newEngine(nodeStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(failed.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(handlerCalled.get()).isFalse();
+        assertThat(failedEvent.get()).isNotNull();
+        assertThat(failedEvent.get().error()).hasMessageContaining("runner could not be resolved");
+    }
+
+    /**
+     * Erro transitório de infra ao carregar a definição não é veredito sobre
+     * a execução: falhar terminalmente violaria at-least-once (o runner pode
+     * existir e o handler nunca rodou) — fica RUNNING até o reaper reclamá-la
+     * na expiração da lease, mesmo caminho da rejeição do executor.
+     */
+    @Test
+    void transientJobStoreErrorLeavesExecutionRunningForTheReaper() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        AtomicBoolean handlerCalled = new AtomicBoolean();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true));
+        JobStore flakyJobStore = new FindOverridingJobStore(jobStore, key -> {
+            throw new RuntimeException("simulated transient database error");
+        });
+        CountDownLatch leftForReaper = new CountDownLatch(1);
+        AppenderBase<ILoggingEvent> warnWatcher = new AppenderBase<>() {
+            @Override
+            protected void append(ILoggingEvent event) {
+                if (event.getFormattedMessage().contains("could not load the job definition")) {
+                    leftForReaper.countDown();
+                }
+            }
+        };
+        warnWatcher.start();
+        engineLogger.addAppender(warnWatcher);
+        Engine engine = newEngineWith(flakyJobStore, executionStore, List.of());
+
+        engine.start();
+        try {
+            assertThat(leftForReaper.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+            engineLogger.detachAppender(warnWatcher);
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+        assertThat(handlerCalled.get()).isFalse();
+    }
+
+    /**
+     * {@code Mohs.remove} entre claim e dispatch: a definição sumiu de
+     * verdade — falha terminal com diagnóstico próprio, não o "runner could
+     * not be resolved" (que apontaria o operador pro problema errado).
+     */
+    @Test
+    void removedDefinitionFailsTheExecutionWithItsOwnError() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        AtomicBoolean handlerCalled = new AtomicBoolean();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true));
+        JobStore removedBehindOurBack = new FindOverridingJobStore(jobStore, key -> Optional.empty());
+        CountDownLatch failed = new CountDownLatch(1);
+        AtomicReference<Failed> failedEvent = new AtomicReference<>();
+        ExecutionListener listener = event -> {
+            if (event instanceof Failed f) {
+                failedEvent.set(f);
+                failed.countDown();
+            }
+        };
+        Engine engine = newEngineWith(removedBehindOurBack, executionStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(failed.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(handlerCalled.get()).isFalse();
+        assertThat(failedEvent.get().error()).hasMessageContaining("was removed after this execution was claimed");
+    }
+
+    /**
+     * A gravação da falha terminal (failBeforeDispatch) roda no for de
+     * tick(): se ela própria lançar (banco, executor de eventos saturado), o
+     * resto do lote ainda precisa ser despachado — sem a guarda, a exceção
+     * abortava o for e exec-2, já RUNNING no banco, ficava órfã até a lease
+     * expirar.
+     */
+    @Test
+    void tickContinuesWhenRecordingATerminalFailureThrows() throws Exception {
+        seedEnqueuedExecution("exec-1", "ghost-job", "hello", NOW.minusSeconds(2));
+        seedEnqueuedExecution("exec-2", "welcome-email", "hello", NOW.minusSeconds(1));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
+        // exec-1: a definição some entre claim e dispatch, e a gravação da própria falha terminal quebra
+        JobStore ghostJobStore = new FindOverridingJobStore(jobStore,
+                key -> key.equals(JobKey.of("ghost-job")) ? Optional.empty() : jobStore.find(key));
+        ExecutionStore failingCompleteStore = new CompleteThrowingExecutionStore(executionStore, ExecutionId.of("exec-1"));
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        Engine engine = newEngineWith(ghostJobStore, failingCompleteStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(succeeded.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(stateOf("exec-2")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+    }
+
     /**
      * Engine.submitDispatch: item novo do achado "A" (docs/codereview-naming.md,
      * addendum 2026-08-14) — um {@code dispatchExecutor} saturado rejeita a
@@ -296,9 +488,9 @@ class EngineTest {
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), List.of(), eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
         // concorrência 1 de propósito — exec-1 esgota o único slot, forçando exec-2/exec-3 a rejeitar.
-        AsyncTaskExecutor oneSlotDispatchExecutor = MohsExecutors.ioBoundExecutor("mohs-dispatch-test", 1);
-        Engine engine = new Engine(claimer, dispatcher, executionStore, nodeStore, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
-                tickScheduler, oneSlotDispatchExecutor);
+        RunnerRegistry oneSlotRunnerRegistry = new RunnerRegistry(List.of(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(1).build()));
+        Engine engine = new Engine(claimer, dispatcher, executionStore, jobStore, nodeStore, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
+                tickScheduler, oneSlotRunnerRegistry);
 
         engine.start();
         try {
@@ -310,6 +502,126 @@ class EngineTest {
             releaseFirstHandler.countDown();
             engine.stop(Duration.ofSeconds(5));
             engineLogger.detachAppender(rejectionWatcher);
+        }
+    }
+
+    /** Decorator que intercepta só {@link JobStore#find} — simula erro de infra ou remoção entre claim e dispatch sem tocar o resto da porta. */
+    private static final class FindOverridingJobStore implements JobStore {
+        private final JobStore delegate;
+        private final Function<JobKey, Optional<StoredJob>> find;
+
+        FindOverridingJobStore(JobStore delegate, Function<JobKey, Optional<StoredJob>> find) {
+            this.delegate = delegate;
+            this.find = find;
+        }
+
+        @Override
+        public Optional<StoredJob> find(JobKey key) {
+            return find.apply(key);
+        }
+
+        @Override
+        public JobDefinition upsert(JobDefinition definition) {
+            return delegate.upsert(definition);
+        }
+
+        @Override
+        public Stream<StoredJob> findAll() {
+            return delegate.findAll();
+        }
+
+        @Override
+        public Stream<StoredJob> findAllAnnotationSourced() {
+            return delegate.findAllAnnotationSourced();
+        }
+
+        @Override
+        public void markOrphaned(JobKey key) {
+            delegate.markOrphaned(key);
+        }
+
+        @Override
+        public void pause(JobKey key) {
+            delegate.pause(key);
+        }
+
+        @Override
+        public void resume(JobKey key) {
+            delegate.resume(key);
+        }
+
+        @Override
+        public void remove(JobKey key) {
+            delegate.remove(key);
+        }
+
+        @Override
+        public boolean tryIncrementRunningExecutions(JobKey key) {
+            return delegate.tryIncrementRunningExecutions(key);
+        }
+
+        @Override
+        public void decrementRunningExecutions(JobKey key) {
+            delegate.decrementRunningExecutions(key);
+        }
+    }
+
+    /** Decorator que faz {@link ExecutionStore#complete} lançar pra uma execução específica — simula o banco falhando na gravação da falha terminal. */
+    private static final class CompleteThrowingExecutionStore implements ExecutionStore {
+        private final ExecutionStore delegate;
+        private final ExecutionId failingId;
+
+        CompleteThrowingExecutionStore(ExecutionStore delegate, ExecutionId failingId) {
+            this.delegate = delegate;
+            this.failingId = failingId;
+        }
+
+        @Override
+        public boolean complete(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, JobStore jobStore) {
+            if (id.equals(failingId)) {
+                throw new RuntimeException("simulated database error completing " + id);
+            }
+            return delegate.complete(id, jobKey, attempt, newState, jobStore);
+        }
+
+        @Override
+        public Execution insert(Execution execution, Object payload) {
+            return delegate.insert(execution, payload);
+        }
+
+        @Override
+        public Optional<Execution> find(ExecutionId id) {
+            return delegate.find(id);
+        }
+
+        @Override
+        public Optional<Object> findPayload(ExecutionId id) {
+            return delegate.findPayload(id);
+        }
+
+        @Override
+        public void markFired(ExecutionId id, Instant firedAt) {
+            delegate.markFired(id, firedAt);
+        }
+
+        @Override
+        public Set<ExecutionId> completeAll(List<CompletionRequest> requests, JobStore jobStore) {
+            return delegate.completeAll(requests, jobStore);
+        }
+
+        @Override
+        public List<Execution> findByIds(List<ExecutionId> ids) {
+            return delegate.findByIds(ids);
+        }
+
+        @Override
+        public Stream<Execution> findByJobKey(JobKey jobKey) {
+            return delegate.findByJobKey(jobKey);
+        }
+
+        @Override
+        public Stream<Execution> findAll() {
+            return delegate.findAll();
         }
     }
 

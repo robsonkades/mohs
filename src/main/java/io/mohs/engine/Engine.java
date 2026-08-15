@@ -4,7 +4,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -42,11 +44,12 @@ import io.mohs.core.execution.Execution;
  * estável entre reinícios é decisão de {@code io.mohs.autoconfigure}
  * (ainda não construído), não desta classe.
  *
- * <p>{@code tickScheduler}/{@code dispatchExecutor} são injetados —
- * construídos por {@link MohsExecutors}, não por esta classe. {@link
- * #stop} nunca desliga o que recebeu: ciclo de vida desses dois é de quem
- * os construiu (mesma disciplina documentada em {@link MohsExecutors}),
- * só {@link #drain} espera o que já está em voo terminar.
+ * <p>{@code tickScheduler}/{@code runnerRegistry} são injetados —
+ * construídos por {@link MohsExecutors}/quem monta o {@link RunnerRegistry},
+ * não por esta classe. {@link #stop} nunca desliga o que recebeu: ciclo de
+ * vida deles é de quem os construiu (mesma disciplina documentada em
+ * {@link MohsExecutors}), só {@link #drain} espera o que já está em voo
+ * terminar.
  *
  * <p><b>Limitações conhecidas desta rodada, documentadas, não escondidas:</b>
  * sem Watchdog Bound (lease de execuções já {@code RUNNING} de ticks
@@ -63,6 +66,7 @@ public final class Engine implements MohsLifecycle {
     private final Claimer claimer;
     private final Dispatcher dispatcher;
     private final ExecutionStore executionStore;
+    private final JobStore jobStore;
     private final NodeStore nodeStore;
     private final Reaper reaper;
     private final Clock clock;
@@ -73,7 +77,7 @@ public final class Engine implements MohsLifecycle {
     private final AtomicReference<EngineState> state = new AtomicReference<>(EngineState.CREATED);
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
     private final TaskScheduler tickScheduler;
-    private final AsyncTaskExecutor dispatchExecutor;
+    private final RunnerRegistry runnerRegistry;
 
     private @Nullable ScheduledFuture<?> tickHandle;
 
@@ -81,17 +85,19 @@ public final class Engine implements MohsLifecycle {
             Claimer claimer,
             Dispatcher dispatcher,
             ExecutionStore executionStore,
+            JobStore jobStore,
             NodeStore nodeStore,
             Reaper reaper,
             Clock clock,
             Duration pollInterval,
             int batchSize,
             TaskScheduler tickScheduler,
-            AsyncTaskExecutor dispatchExecutor
+            RunnerRegistry runnerRegistry
     ) {
         this.claimer = Objects.requireNonNull(claimer, "claimer");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
+        this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
         this.reaper = Objects.requireNonNull(reaper, "reaper");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -101,7 +107,7 @@ public final class Engine implements MohsLifecycle {
         }
         this.batchSize = batchSize;
         this.tickScheduler = Objects.requireNonNull(tickScheduler, "tickScheduler");
-        this.dispatchExecutor = Objects.requireNonNull(dispatchExecutor, "dispatchExecutor");
+        this.runnerRegistry = Objects.requireNonNull(runnerRegistry, "runnerRegistry");
         this.nodeId = UUIDv7.randomUUID().toString();
     }
 
@@ -149,7 +155,7 @@ public final class Engine implements MohsLifecycle {
 
     /**
      * {@link #drain} seguido de cancelar o agendamento do tick.
-     * {@code tickScheduler}/{@code dispatchExecutor} continuam vivos —
+     * {@code tickScheduler}/{@code runnerRegistry} continuam vivos —
      * não são desta classe pra desligar (ver Javadoc da classe).
      */
     @Override
@@ -225,7 +231,7 @@ public final class Engine implements MohsLifecycle {
 
     /**
      * Fire-and-forget em relação ao próximo tick: um handler lento não trava
-     * a próxima rodada de claim. {@code dispatchExecutor} pode rejeitar
+     * a próxima rodada de claim. O executor do runner pode rejeitar
      * ({@link MohsExecutors#ioBoundExecutor} rejeita acima do teto de
      * concorrência, de propósito — backpressure real) — {@code
      * CompletableFuture.runAsync} propaga essa rejeição de forma síncrona,
@@ -236,16 +242,70 @@ public final class Engine implements MohsLifecycle {
      * recuperação bem mais lento que necessário.
      */
     private void submitDispatch(Execution execution) {
+        // Consulta síncrona, na própria thread do tick — mesmo padrão de
+        // claimer.claim()/reaper.reclaimExpired() em tick(). Deliberadamente uma
+        // consulta por execução, não em lote pro batch inteiro: candidato a
+        // próximo DBTUNE se LivenessLoadHarness mostrar que importa, não
+        // otimizado especulativamente agora (sem número, não é otimização).
+        Optional<StoredJob> storedJob;
+        try {
+            storedJob = jobStore.find(execution.jobKey());
+        } catch (RuntimeException e) {
+            // Erro de infra (banco fora, pool esgotado) não é veredito sobre a
+            // execução — falhar terminalmente aqui violaria at-least-once, o
+            // runner pode existir e o handler nunca teria rodado. Mesmo caminho
+            // de recuperação da rejeição do executor logo abaixo.
+            log.warn("could not load the job definition for execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
+                    execution.id(), e);
+            return;
+        }
+        if (storedJob.isEmpty()) {
+            failBeforeDispatchGuarded(execution, new IllegalStateException(
+                    "job definition for " + execution.jobKey() + " was removed after this execution was claimed (e.g. Mohs.remove between claim and dispatch)"));
+            return;
+        }
+
+        AsyncTaskExecutor executor;
+        try {
+            executor = runnerRegistry.resolve(storedJob.get().definition().runner());
+        } catch (NoSuchElementException e) {
+            failBeforeDispatchGuarded(execution, new IllegalStateException(
+                    "runner could not be resolved: " + (e.getMessage() != null ? e.getMessage() : e.toString()), e));
+            return;
+        }
+
         CompletableFuture<Void> future;
         try {
-            future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution), dispatchExecutor);
+            future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution), executor);
         } catch (RuntimeException e) {
-            log.warn("dispatch executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
+            log.warn("runner executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
                     execution.id(), e);
             return;
         }
         inFlight.add(future);
         future.whenComplete((_, _) -> inFlight.remove(future));
+    }
+
+    /**
+     * Falha terminal decidida ainda na thread do tick — definição removida ou
+     * nome de runner sem correspondente no {@link RunnerRegistry} (config
+     * removida depois que o job foi definido, ou erro de digitação que a
+     * validação de boot — fora de escopo ainda — não pega) falha só esta
+     * execução, mesmo racional de {@link #failUnreadablePayload}: nunca
+     * derruba o tick nem o node por causa de uma definição só. Guardada
+     * porque, ao contrário de {@code failUnreadablePayload} (que roda dentro
+     * da task assíncrona), isto roda no {@code for} de {@link #tick}: se a
+     * própria gravação da falha lançar (banco, executor de eventos saturado),
+     * o resto do lote ainda precisa ser despachado — loga e deixa esta
+     * execução RUNNING pro {@link Reaper} reclamá-la na expiração da lease.
+     */
+    private void failBeforeDispatchGuarded(Execution execution, IllegalStateException error) {
+        try {
+            dispatcher.failBeforeDispatch(execution, error);
+        } catch (RuntimeException e) {
+            log.warn("could not record the terminal failure of execution {} ({}) — will sit RUNNING until the reaper reclaims it on lease expiry",
+                    execution.id(), error.getMessage(), e);
+        }
     }
 
     /**

@@ -1,17 +1,21 @@
 package io.mohs.autoconfigure;
 
 import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.NestedConfigurationProperty;
 
+import io.mohs.core.resource.RunnerMode;
+
 /**
  * Propriedades {@code mohs.*} — só o que {@link MohsAutoConfiguration}/
  * {@link MohsJobScanner} de fato consomem até aqui (bean wiring do motor
- * M3 + escaneamento de {@code @MohsJob}). Validações de boot, REST e
- * enforcement de runner/rate limit ainda não existem — as propriedades
- * correspondentes ({@code mohs.runners.*}, {@code mohs.rate-limits.*},
+ * M3 + escaneamento de {@code @MohsJob} + runners nomeados). Validações
+ * de boot, REST e enforcement de rate limit ainda não existem — as
+ * propriedades correspondentes ({@code mohs.rate-limits.*},
  * {@code mohs.api.enabled}) entram junto delas, não antes.
  */
 @ConfigurationProperties("mohs")
@@ -34,6 +38,8 @@ public class MohsProperties {
 
     @NestedConfigurationProperty
     private final Registration registration = new Registration();
+
+    private final Map<String, Runner> runners = new LinkedHashMap<>();
 
     public boolean isEnabled() {
         return enabled;
@@ -61,6 +67,10 @@ public class MohsProperties {
 
     public Registration getRegistration() {
         return registration;
+    }
+
+    public Map<String, Runner> getRunners() {
+        return runners;
     }
 
     public static class Jdbc {
@@ -229,6 +239,83 @@ public class MohsProperties {
             PRESERVE,
             /** Divergência derruba o boot exibindo o diff. */
             FAIL
+        }
+    }
+
+    /**
+     * Runner nomeado adicional aos built-in ({@code io}/{@code cpu},
+     * montados por {@link MohsAutoConfiguration} com os defaults do
+     * documento mestre) — um valor de {@link MohsProperties#getRunners()}
+     * (o próprio {@code Map}, sem embrulho: {@code mohs.runners.<nome>.mode}
+     * mais os campos do modo declarado, mesma forma de
+     * {@code docs/API-DESIGN.md} "Runners — especificação, nunca
+     * Executor"). Campo do modo errado é erro de boot na conversão pra
+     * {@code MohsRunner} ({@link MohsAutoConfiguration}) — mesma postura do
+     * próprio {@code MohsRunner}, que lança pra campo do modo errado.
+     *
+     * <p>O binder do Spring canonicaliza chave de mapa não-bracketed pra
+     * minúsculas: {@code mohs.runners.myUpload.*} registra o runner como
+     * {@code myupload}, e {@code JobDefinition.runner()} é case-sensitive.
+     * Prefira nomes minúsculos; pra preservar a caixa exata, use a forma
+     * bracketed ({@code mohs.runners.[myUpload].max=8}).
+     */
+    public static class Runner {
+
+        private RunnerMode mode = RunnerMode.IO;
+        /** {@link RunnerMode#IO} — default 64 se omitido (mesmo default de {@code MohsRunner.IoBuilder}). */
+        private @Nullable Integer max;
+        /** {@link RunnerMode#CPU} — default núcleos disponíveis se omitido. */
+        private @Nullable Integer coreSize;
+        private @Nullable Integer maxSize;
+        private @Nullable Integer queueCapacity;
+        private @Nullable Duration keepAlive;
+
+        public RunnerMode getMode() {
+            return mode;
+        }
+
+        public void setMode(RunnerMode mode) {
+            this.mode = mode;
+        }
+
+        public @Nullable Integer getMax() {
+            return max;
+        }
+
+        public void setMax(Integer max) {
+            this.max = max;
+        }
+
+        public @Nullable Integer getCoreSize() {
+            return coreSize;
+        }
+
+        public void setCoreSize(Integer coreSize) {
+            this.coreSize = coreSize;
+        }
+
+        public @Nullable Integer getMaxSize() {
+            return maxSize;
+        }
+
+        public void setMaxSize(Integer maxSize) {
+            this.maxSize = maxSize;
+        }
+
+        public @Nullable Integer getQueueCapacity() {
+            return queueCapacity;
+        }
+
+        public void setQueueCapacity(Integer queueCapacity) {
+            this.queueCapacity = queueCapacity;
+        }
+
+        public @Nullable Duration getKeepAlive() {
+            return keepAlive;
+        }
+
+        public void setKeepAlive(Duration keepAlive) {
+            this.keepAlive = keepAlive;
         }
     }
 }

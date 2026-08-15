@@ -6,6 +6,7 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.sql.DataSource;
 
@@ -24,6 +25,7 @@ import io.mohs.core.definition.MohsJob;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Succeeded;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.resource.MohsRunner;
 import io.mohs.engine.HandlerRegistry;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -167,6 +169,86 @@ class MohsAutoConfigurationTest {
 
                     assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
                     assertThat(target.received).containsExactly(new Greeting("ana"));
+                });
+    }
+
+    @Test
+    void propertyDefinedRunnerIsResolvable() {
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        AtomicReference<String> dispatchThreadName = new AtomicReference<>();
+
+        runnerWith(freshH2DataSource(), "mohs.runners.s3.mode=io", "mohs.runners.s3.max=4")
+                .withBean(ExecutionListener.class, () -> listener)
+                .run(context -> {
+                    context.getBean(HandlerRegistry.class).register(JobKey.of("upload"),
+                            (payload, ctx) -> dispatchThreadName.set(Thread.currentThread().getName()));
+
+                    Mohs mohs = context.getBean(Mohs.class);
+                    mohs.define(JobDefinition.of("upload", Handler.class, spec -> spec.onDemand().runner("s3")));
+                    mohs.schedule("upload", new Greeting("ana")).now();
+
+                    assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
+                });
+        assertThat(dispatchThreadName.get()).startsWith("mohs-runner-s3-");
+    }
+
+    @Test
+    void beanDeclaredRunnerIsCollected() {
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        AtomicReference<String> dispatchThreadName = new AtomicReference<>();
+
+        runnerWith(freshH2DataSource())
+                .withBean(ExecutionListener.class, () -> listener)
+                .withBean("batchRunner", MohsRunner.class, () -> MohsRunner.cpu("batch").coreSize(1).maxSize(1).build())
+                .run(context -> {
+                    context.getBean(HandlerRegistry.class).register(JobKey.of("report"),
+                            (payload, ctx) -> dispatchThreadName.set(Thread.currentThread().getName()));
+
+                    Mohs mohs = context.getBean(Mohs.class);
+                    mohs.define(JobDefinition.of("report", Handler.class, spec -> spec.onDemand().runner("batch")));
+                    mohs.schedule("report", new Greeting("ana")).now();
+
+                    assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
+                });
+        assertThat(dispatchThreadName.get()).startsWith("mohs-runner-batch-");
+    }
+
+    @Test
+    void duplicateRunnerNameBetweenPropertyAndBeanFailsBoot() {
+        runnerWith(freshH2DataSource(), "mohs.runners.batch.mode=cpu")
+                .withBean("batchRunner", MohsRunner.class, () -> MohsRunner.cpu("batch").build())
+                .run(context -> assertThat(context).hasFailed());
+    }
+
+    /** core-size é campo de CPU e o mode default é io: erro de boot apontando a propriedade, nunca descarte silencioso (que viraria runner IO de 64 threads pra trabalho CPU-bound). */
+    @Test
+    void wrongModeRunnerPropertyFailsBootNamingTheProperty() {
+        runnerWith(freshH2DataSource(), "mohs.runners.batch.core-size=2")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasStackTraceContaining("mohs.runners.batch.core-size");
+                });
+    }
+
+    /** A IAE do builder ("maxSize must be >= coreSize") sozinha não diz qual runner nem qual propriedade — e core-size default depende da máquina; o embrulho dá o contexto. */
+    @Test
+    void invalidRunnerPropertyFailsBootNamingTheRunner() {
+        runnerWith(freshH2DataSource(), "mohs.runners.batch.mode=cpu", "mohs.runners.batch.core-size=4", "mohs.runners.batch.max-size=2")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("mohs.runners.batch")
+                            .hasStackTraceContaining("maxSize must be >= coreSize");
                 });
     }
 }

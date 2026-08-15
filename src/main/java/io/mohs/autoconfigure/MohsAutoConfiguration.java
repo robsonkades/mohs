@@ -1,10 +1,13 @@
 package io.mohs.autoconfigure;
 
 import java.time.Clock;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import javax.sql.DataSource;
 
+import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -21,6 +24,8 @@ import tools.jackson.databind.json.JsonMapper;
 import io.mohs.core.Mohs;
 import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
+import io.mohs.core.resource.MohsRunner;
+import io.mohs.core.resource.RunnerMode;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.Dispatcher;
 import io.mohs.engine.Engine;
@@ -31,6 +36,7 @@ import io.mohs.engine.MohsExecutors;
 import io.mohs.engine.MohsImpl;
 import io.mohs.engine.NodeStore;
 import io.mohs.engine.Reaper;
+import io.mohs.engine.RunnerRegistry;
 import io.mohs.jdbc.DatabaseClock;
 import io.mohs.jdbc.JdbcClaimer;
 import io.mohs.jdbc.JdbcExecutionStore;
@@ -50,17 +56,19 @@ import io.mohs.jdbc.dialect.SqlServerJdbcDialect;
  * da lista de pacotes barrados de enxergar {@code io.mohs.engine}/
  * {@code io.mohs.jdbc}, é exatamente o papel deste pacote.
  *
- * <p>Escaneamento de {@code @MohsJob}, validações de boot, wiring do REST e
- * enforcement de runner/rate limit ainda não existem — {@link HandlerRegistry}
- * nasce vazio nesta rodada, {@link Mohs#batch} lança
+ * <p>Validações de boot, wiring do REST e enforcement de rate limit ainda
+ * não existem — {@link Mohs#batch} lança
  * {@link UnsupportedOperationException} (ver Javadoc de {@link MohsImpl}).
+ * Escaneamento de {@code @MohsJob} ({@link MohsJobScanner}) e runners
+ * nomeados ({@link RunnerRegistry}) já existem e são montados aqui.
  *
- * <p>Dois pares de beans compartilham tipo ({@link ThreadPoolTaskScheduler}
- * pro tick do {@link Engine} vs. resync do {@link DatabaseClock};
- * {@link AsyncTaskExecutor} pro dispatch vs. eventos) — {@link Qualifier}
- * explícito em cada ponto de injeção em vez de confiar no fallback de
- * resolução por nome do Spring (CLAUDE.md: "não usar mágica onde código
- * explícito resolve").
+ * <p>Dois beans compartilham o tipo {@link ThreadPoolTaskScheduler} (tick
+ * do {@link Engine} vs. resync do {@link DatabaseClock}), e o
+ * {@link AsyncTaskExecutor} de eventos convive com executores da própria
+ * aplicação hospedeira (ex.: {@code applicationTaskExecutor}) —
+ * {@link Qualifier} explícito em cada ponto de injeção em vez de confiar
+ * no fallback de resolução por nome do Spring (CLAUDE.md: "não usar mágica
+ * onde código explícito resolve").
  */
 @AutoConfiguration(after = DataSourceAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "mohs", name = "enabled", matchIfMissing = true)
@@ -118,12 +126,6 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    @Qualifier("mohsDispatchExecutor")
-    public AsyncTaskExecutor mohsDispatchExecutor(MohsProperties properties) {
-        return MohsExecutors.ioBoundExecutor("mohs-dispatch", properties.getEngine().getDispatchConcurrency());
-    }
-
-    @Bean
     @Qualifier("mohsEventExecutor")
     public AsyncTaskExecutor mohsEventExecutor(MohsProperties properties) {
         return MohsExecutors.ioBoundExecutor("mohs-events", properties.getEngine().getEventConcurrency());
@@ -133,6 +135,103 @@ public class MohsAutoConfiguration {
     @Qualifier("mohsTickScheduler")
     public ThreadPoolTaskScheduler mohsTickScheduler() {
         return MohsExecutors.scheduler("mohs-engine-tick", 1);
+    }
+
+    /**
+     * {@code io}/{@code cpu} built-in sempre presentes (defaults do
+     * documento mestre — {@code io} reaproveita
+     * {@code mohs.engine.dispatch-concurrency}, mesmo papel que tinha
+     * quando ainda era o único executor de dispatch fixo). Nome duplicado
+     * entre {@code mohs.runners.*} e {@code @Bean MohsRunner} é erro de
+     * boot — mesma filosofia de "conflito de identidade falha sempre" já
+     * usada pro {@code annotation × programmatic} do {@link MohsJobScanner}.
+     */
+    @Bean(destroyMethod = "close")
+    public RunnerRegistry mohsRunnerRegistry(MohsProperties properties, List<MohsRunner> mohsRunnerBeans) {
+        Map<String, MohsRunner> byName = new LinkedHashMap<>();
+        Map<String, String> sourceOf = new LinkedHashMap<>();
+
+        byName.put(RunnerRegistry.DEFAULT_RUNNER, MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(properties.getEngine().getDispatchConcurrency()).build());
+        sourceOf.put(RunnerRegistry.DEFAULT_RUNNER, "built-in");
+        byName.put("cpu", MohsRunner.cpu("cpu").build());
+        sourceOf.put("cpu", "built-in");
+
+        properties.getRunners().forEach((name, spec) -> {
+            requireNoRunnerConflict(name, "mohs.runners." + name, sourceOf);
+            byName.put(name, toMohsRunner(name, spec));
+            sourceOf.put(name, "mohs.runners." + name);
+        });
+        for (MohsRunner beanRunner : mohsRunnerBeans) {
+            requireNoRunnerConflict(beanRunner.name(), "@Bean MohsRunner " + beanRunner.name(), sourceOf);
+            byName.put(beanRunner.name(), beanRunner);
+            sourceOf.put(beanRunner.name(), "@Bean MohsRunner " + beanRunner.name());
+        }
+
+        return new RunnerRegistry(List.copyOf(byName.values()));
+    }
+
+    private static void requireNoRunnerConflict(String name, String newSource, Map<String, String> sourceOf) {
+        String existing = sourceOf.get(name);
+        if (existing != null && !existing.equals("built-in")) {
+            throw new IllegalStateException("runner '" + name + "' declared more than once: " + existing + " and " + newSource);
+        }
+    }
+
+    /**
+     * Campo do modo errado é erro de boot, nunca descarte silencioso —
+     * mesma postura do compact constructor de {@link MohsRunner}, que lança
+     * pra campo do modo errado (e mesma filosofia de "conflito de identidade
+     * falha sempre" de {@link #requireNoRunnerConflict}): {@code core-size=2}
+     * com {@code mode} esquecido no default {@code io} viraria um runner de
+     * 64 virtual threads pra trabalho CPU-bound, sem aviso nenhum. A
+     * validação do próprio builder ganha o contexto que só a propriedade tem
+     * ("maxSize must be >= coreSize" sozinho não diz qual runner nem qual
+     * propriedade — e {@code core-size} default depende dos núcleos da
+     * máquina, então o boot falharia só em produção).
+     */
+    private static MohsRunner toMohsRunner(String name, MohsProperties.Runner spec) {
+        String prefix = "mohs.runners." + name;
+        try {
+            return switch (spec.getMode()) {
+                case IO -> {
+                    requireUnset(prefix, spec.getMode(), "core-size", spec.getCoreSize());
+                    requireUnset(prefix, spec.getMode(), "max-size", spec.getMaxSize());
+                    requireUnset(prefix, spec.getMode(), "queue-capacity", spec.getQueueCapacity());
+                    requireUnset(prefix, spec.getMode(), "keep-alive", spec.getKeepAlive());
+                    MohsRunner.IoBuilder builder = MohsRunner.io(name);
+                    if (spec.getMax() != null) {
+                        builder.maxConcurrent(spec.getMax());
+                    }
+                    yield builder.build();
+                }
+                case CPU -> {
+                    requireUnset(prefix, spec.getMode(), "max", spec.getMax());
+                    MohsRunner.CpuBuilder builder = MohsRunner.cpu(name);
+                    if (spec.getCoreSize() != null) {
+                        builder.coreSize(spec.getCoreSize());
+                    }
+                    if (spec.getMaxSize() != null) {
+                        builder.maxSize(spec.getMaxSize());
+                    }
+                    if (spec.getQueueCapacity() != null) {
+                        builder.queueCapacity(spec.getQueueCapacity());
+                    }
+                    if (spec.getKeepAlive() != null) {
+                        builder.keepAlive(spec.getKeepAlive());
+                    }
+                    yield builder.build();
+                }
+            };
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException("invalid runner declared at " + prefix + ".*: " + e.getMessage(), e);
+        }
+    }
+
+    private static void requireUnset(String prefix, RunnerMode mode, String property, @Nullable Object value) {
+        if (value != null) {
+            throw new IllegalStateException("invalid runner declared at " + prefix + ".*: " + property
+                    + " does not apply to mode=" + mode + " — change " + prefix + ".mode or remove " + prefix + "." + property);
+        }
     }
 
     @Bean
@@ -147,27 +246,41 @@ public class MohsAutoConfiguration {
         return new JdbcReaper(dataSource, mohsClock, mohsExecutionStore, mohsJobStore);
     }
 
-    /** Vazio nesta rodada — escaneamento de {@code @MohsJob} (fora de escopo) é quem povoa. */
+    /** Nasce vazio — {@link MohsJobScanner} povoa em {@code afterSingletonsInstantiated}, antes do {@link Engine} iniciar. */
     @Bean
     public HandlerRegistry mohsHandlerRegistry() {
         return new HandlerRegistry();
     }
 
     @Bean
-    public Dispatcher mohsDispatcher(ExecutionStore mohsExecutionStore, JobStore mohsJobStore, HandlerRegistry mohsHandlerRegistry,
-            Clock mohsClock, List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners,
-            @Qualifier("mohsEventExecutor") AsyncTaskExecutor mohsEventExecutor) {
+    public Dispatcher mohsDispatcher(
+            ExecutionStore mohsExecutionStore,
+            JobStore mohsJobStore,
+            HandlerRegistry mohsHandlerRegistry,
+            Clock mohsClock,
+            List<ExecutionInterceptor> interceptors,
+            List<ExecutionListener> listeners,
+            @Qualifier("mohsEventExecutor") AsyncTaskExecutor mohsEventExecutor
+    ) {
         return new Dispatcher(mohsExecutionStore, mohsJobStore, mohsHandlerRegistry, mohsClock, interceptors, listeners, mohsEventExecutor);
     }
 
     @Bean
-    public Engine mohsEngine(Claimer mohsClaimer, Dispatcher mohsDispatcher, ExecutionStore mohsExecutionStore, NodeStore mohsNodeStore,
-            Reaper mohsReaper, Clock mohsClock, MohsProperties properties,
+    public Engine mohsEngine(
+            Claimer mohsClaimer,
+            Dispatcher mohsDispatcher,
+            ExecutionStore mohsExecutionStore,
+            JobStore mohsJobStore,
+            NodeStore mohsNodeStore,
+            Reaper mohsReaper,
+            Clock mohsClock,
+            MohsProperties properties,
             @Qualifier("mohsTickScheduler") ThreadPoolTaskScheduler mohsTickScheduler,
-            @Qualifier("mohsDispatchExecutor") AsyncTaskExecutor mohsDispatchExecutor) {
-        return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsNodeStore, mohsReaper, mohsClock,
+            RunnerRegistry mohsRunnerRegistry
+    ) {
+        return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper, mohsClock,
                 properties.getEngine().getPollInterval(), properties.getEngine().getBatchSize(),
-                mohsTickScheduler, mohsDispatchExecutor);
+                mohsTickScheduler, mohsRunnerRegistry);
     }
 
     /** {@link SmartLifecycle} — ver Javadoc de {@link MohsEngineLifecycle} sobre a adaptação. */
@@ -191,8 +304,11 @@ public class MohsAutoConfiguration {
      * o Javadoc de classe dela.
      */
     @Bean
-    public static MohsJobScanner mohsJobScanner(ObjectProvider<HandlerRegistry> mohsHandlerRegistry,
-            ObjectProvider<JobStore> mohsJobStore, ObjectProvider<MohsProperties> properties) {
+    public static MohsJobScanner mohsJobScanner(
+            ObjectProvider<HandlerRegistry> mohsHandlerRegistry,
+            ObjectProvider<JobStore> mohsJobStore,
+            ObjectProvider<MohsProperties> properties
+    ) {
         return new MohsJobScanner(mohsHandlerRegistry, mohsJobStore, properties);
     }
 }

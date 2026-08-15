@@ -34,7 +34,7 @@ public interface JobStore {
     /**
      * Mesmo contrato de cursor de {@link #findAll()}, filtrado a
      * {@link DefinitionSource#ANNOTATION} na fonte (não em memória depois) —
-     * {@link io.mohs.autoconfigure.MohsJobScanner} reconcilia órfãs só
+     * {@code io.mohs.autoconfigure.MohsJobScanner} reconcilia órfãs só
      * contra este subconjunto; {@code PROGRAMMATIC} nunca fica
      * {@code ORPHANED} (ver {@link #markOrphaned}), então baixá-las junto
      * seria banda de leitura sem uso.
