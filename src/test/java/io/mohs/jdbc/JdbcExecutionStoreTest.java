@@ -1,14 +1,23 @@
 package io.mohs.jdbc;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.UnaryOperator;
 import java.util.stream.IntStream;
 
 import javax.sql.DataSource;
@@ -365,6 +374,72 @@ class JdbcExecutionStoreTest {
     @Test
     void renewLeasesWithNoIdsIsANoOp() {
         assertThat(store.renewLeases("node-a", List.of(), clock.instant())).isEmpty();
+    }
+
+    /**
+     * Fallback do {@code SUCCESS_NO_INFO} (o JDBC permite ao driver executar
+     * o batch sem contar linhas): a confirmação recai no SELECT por POSSE —
+     * e nunca por igualdade de timestamp, que não faz round-trip garantido
+     * entre JVM e coluna. O decorator reproduz o contrato exato do driver:
+     * executa o batch de verdade e só mente a contagem. O tracker prova que
+     * a interceptação aconteceu — sem ele, uma mudança interna do spring-jdbc
+     * (ex.: migrar pra {@code executeLargeBatch}) faria o teste decair em
+     * silêncio pro caminho normal, cobertura fantasma do branch.
+     */
+    @Test
+    void renewLeasesFallsBackToOwnershipSelectWhenTheDriverReturnsSuccessNoInfo() {
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        seedRunningExecution("019abc-noinfo-1", "welcome-email");
+        seedRunningExecution("019abc-noinfo-2", "welcome-email");
+        raw.update("UPDATE mohs_executions SET node_id = 'node-a' WHERE id = '019abc-noinfo-1'");
+        raw.update("UPDATE mohs_executions SET node_id = 'node-b' WHERE id = '019abc-noinfo-2'");
+        AtomicBoolean rewroteCounts = new AtomicBoolean();
+        JdbcExecutionStore noInfoStore = new JdbcExecutionStore(
+                successNoInfoDataSource(dataSource, rewroteCounts), clock, JsonMapper.builder().build(), new H2JdbcDialect());
+        Instant newLease = clock.instant().plusSeconds(30);
+
+        Set<ExecutionId> renewed = noInfoStore.renewLeases("node-a",
+                List.of(ExecutionId.of("019abc-noinfo-1"), ExecutionId.of("019abc-noinfo-2")), newLease);
+
+        assertThat(rewroteCounts)
+                .as("the decorator must have intercepted executeBatch — otherwise this exercises the normal path, not the fallback")
+                .isTrue();
+        assertThat(renewed).containsExactly(ExecutionId.of("019abc-noinfo-1"));
+        Timestamp renewedLease = raw.queryForObject(
+                "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", Timestamp.class, "019abc-noinfo-1");
+        assertThat(JdbcTimestamps.fromUtcTimestamp(renewedLease)).isEqualTo(newLease);
+    }
+
+    private static DataSource successNoInfoDataSource(DataSource delegate, AtomicBoolean rewroteCounts) {
+        return proxyOf(DataSource.class, delegate,
+                result -> result instanceof Connection connection ? successNoInfoConnection(connection, rewroteCounts) : result);
+    }
+
+    private static Connection successNoInfoConnection(Connection delegate, AtomicBoolean rewroteCounts) {
+        return proxyOf(Connection.class, delegate,
+                result -> result instanceof PreparedStatement statement ? successNoInfoStatement(statement, rewroteCounts) : result);
+    }
+
+    /** Só {@code executeBatch()} devolve {@code int[]} — reescrever as contagens ali é o {@code SUCCESS_NO_INFO} do driver, com o batch já aplicado. */
+    private static PreparedStatement successNoInfoStatement(PreparedStatement delegate, AtomicBoolean rewroteCounts) {
+        return proxyOf(PreparedStatement.class, delegate, result -> {
+            if (result instanceof int[] counts) {
+                Arrays.fill(counts, Statement.SUCCESS_NO_INFO);
+                rewroteCounts.set(true);
+            }
+            return result;
+        });
+    }
+
+    private static <T> T proxyOf(Class<T> type, T delegate, UnaryOperator<Object> wrapResult) {
+        InvocationHandler handler = (proxy, method, args) -> {
+            try {
+                return wrapResult.apply(method.invoke(delegate, args));
+            } catch (InvocationTargetException e) {
+                throw e.getCause();
+            }
+        };
+        return type.cast(Proxy.newProxyInstance(JdbcExecutionStoreTest.class.getClassLoader(), new Class<?>[]{type}, handler));
     }
 
     /** As duas combinações inválidas são bug do chamador — rejeitadas na construção, nunca gravadas pela metade. */
