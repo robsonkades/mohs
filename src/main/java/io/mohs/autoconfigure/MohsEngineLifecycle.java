@@ -10,6 +10,7 @@ import org.springframework.context.SmartLifecycle;
 
 import io.mohs.core.EngineState;
 import io.mohs.core.MohsLifecycle;
+import io.mohs.core.definition.JobDefinition;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.StoredJob;
 
@@ -64,22 +65,30 @@ final class MohsEngineLifecycle implements SmartLifecycle {
     private void warnAboutDeclaredPolicyGaps() {
         try (Stream<StoredJob> jobs = jobStore.findAll()) {
             jobs.map(StoredJob::definition).forEach(definition -> {
-                if (definition.timeout() != null && definition.timeout().compareTo(leaseTtl) >= 0) {
-                    log.warn(
-                            "job '{}' declares timeout {} >= mohs.engine.lease-ttl {} — without a lease-renewing watchdog, "
-                                    + "a healthy run longer than the lease is reaped as FAILED and its concurrency slot is released; "
-                                    + "raise mohs.engine.lease-ttl above the slowest expected attempt",
-                            definition.key().value(), definition.timeout(), leaseTtl);
-                }
-                if (definition.retryPolicy() != null) {
-                    log.warn(
-                            "job '{}' declares retryPolicy '{}' which is not honored yet — retries is, with the default "
-                                    + "exponential full-jitter backoff (ADR-0033)",
-                            definition.key().value(), definition.retryPolicy());
-                }
+                warnIfTimeoutOutlivesLease(definition);
+                warnIfRetryPolicyNotHonored(definition);
             });
         } catch (RuntimeException e) {
             log.warn("could not check declared job policies on startup", e);
+        }
+    }
+
+    private void warnIfTimeoutOutlivesLease(JobDefinition definition) {
+        if (definition.timeout() != null && definition.timeout().compareTo(leaseTtl) >= 0) {
+            log.warn(
+                    "job '{}' declares timeout {} >= mohs.engine.lease-ttl {} — without a lease-renewing watchdog, "
+                            + "a healthy run longer than the lease is reaped as FAILED and its concurrency slot is released; "
+                            + "raise mohs.engine.lease-ttl above the slowest expected attempt",
+                    definition.key().value(), definition.timeout(), leaseTtl);
+        }
+    }
+
+    private static void warnIfRetryPolicyNotHonored(JobDefinition definition) {
+        if (definition.retryPolicy() != null) {
+            log.warn(
+                    "job '{}' declares retryPolicy '{}' which is not honored yet — retries is, with the default "
+                            + "exponential full-jitter backoff (ADR-0033)",
+                    definition.key().value(), definition.retryPolicy());
         }
     }
 
