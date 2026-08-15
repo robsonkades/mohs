@@ -16,7 +16,8 @@ MAX_CYCLES = 3, unless $ARGUMENTS specifies a number (hard cap: 5).
 
 ## Cycle 1
 1. Invoke the **java-refactorer** subagent on the scoped files — explicit path list in the prompt, behavior preserved, tests green before and after.
-2. Invoke the **java-code-reviewer** subagent on `git diff HEAD` — same file list plus the task's intent.
+2. **Conditional:** if the scoped diff touches persistence (SQL, `*Repository`, `@Query`/JDBC code, migrations), invoke the **db-tuner** subagent on exactly those files — result-equivalent rewrites only; index changes as a new migration; destructive changes are proposals. Its 🔴 findings join the review findings in the loop state.
+3. Invoke the **java-code-reviewer** subagent on `git diff HEAD` — same file list plus the task's intent. The reviewer is always the last gate of the cycle, validating refactoring and tuning together.
 
 ## Cycles 2..MAX_CYCLES (only while verdict is not ✅)
 1. In the main session, fix every 🔴 CRITICAL and every 🟡 IMPORTANT you agree with. For a 🟡 you disagree with, do NOT change code — record a one-line justification.
