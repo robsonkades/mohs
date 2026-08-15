@@ -13,6 +13,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
@@ -101,24 +102,48 @@ public class MohsAutoConfiguration {
         };
     }
 
-    @Bean(defaultCandidate = false)
-    @Qualifier("mohsClockSyncScheduler")
+    /**
+     * ADR-0008 — a condição "modo database" tem fonte única: as duas fatias
+     * são mutuamente exclusivas e exaustivas sobre {@code mohs.time.mode}
+     * (valor inválido nem chega aqui — falha antes, no binding do enum
+     * {@link MohsProperties.Time.Mode}), e o scheduler de resync só existe
+     * na fatia que o usa.
+     */
+    @Configuration(proxyBeanMethods = false)
     @ConditionalOnProperty(prefix = "mohs.time", name = "mode", havingValue = "database")
-    public ThreadPoolTaskScheduler mohsClockSyncScheduler() {
-        return MohsExecutors.scheduler("mohs-clock-sync", 1);
+    static class DatabaseTimeConfiguration {
+
+        @Bean(defaultCandidate = false)
+        @Qualifier("mohsClockSyncScheduler")
+        ThreadPoolTaskScheduler mohsClockSyncScheduler() {
+            return MohsExecutors.scheduler("mohs-clock-sync", 1);
+        }
+
+        /**
+         * Sincroniza uma vez no boot — bloqueio deliberado: o {@link Engine}
+         * não pode partir com relógio não sincronizado — e agenda o resync
+         * (ver Javadoc de {@link io.mohs.engine.SyncableClock}).
+         */
+        @Bean(defaultCandidate = false)
+        @Qualifier("mohsClock")
+        Clock mohsClock(MohsProperties properties, DataSource dataSource,
+                @Qualifier("mohsClockSyncScheduler") ThreadPoolTaskScheduler mohsClockSyncScheduler) {
+            DatabaseClock clock = new DatabaseClock(dataSource, properties.time().skewWarnThreshold());
+            clock.sync();
+            mohsClockSyncScheduler.scheduleWithFixedDelay(clock::sync, properties.time().syncInterval());
+            return clock;
+        }
     }
 
-    /** {@code database}: sincroniza uma vez no boot e agenda resync periódico (ver Javadoc de {@link io.mohs.engine.SyncableClock}). */
-    @Bean(defaultCandidate = false)
-    @Qualifier("mohsClock")
-    public Clock mohsClock(MohsProperties properties, DataSource dataSource, @Qualifier("mohsClockSyncScheduler") ObjectProvider<ThreadPoolTaskScheduler> mohsClockSyncScheduler) {
-        if (properties.time().mode() != MohsProperties.Time.Mode.DATABASE) {
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(prefix = "mohs.time", name = "mode", havingValue = "application", matchIfMissing = true)
+    static class SystemTimeConfiguration {
+
+        @Bean(defaultCandidate = false)
+        @Qualifier("mohsClock")
+        Clock mohsClock() {
             return Clock.systemUTC();
         }
-        DatabaseClock clock = new DatabaseClock(dataSource, properties.time().skewWarnThreshold());
-        clock.sync();
-        mohsClockSyncScheduler.getObject().scheduleWithFixedDelay(clock::sync, properties.time().syncInterval());
-        return clock;
     }
 
     @Bean
