@@ -151,6 +151,13 @@ public class MohsAutoConfiguration {
         return new JdbcJobStore(dataSource, mohsClock);
     }
 
+    /**
+     * O {@code JsonMapper} cru é deliberado (ADR-0029): o formato
+     * persistido de payload pertence ao Mohs, não à config web do host —
+     * trocar pro {@code ObjectMapper} do contexto deixaria a config HTTP
+     * do app definir um formato durável compartilhado entre nós e
+     * quebraria a leitura de payloads já gravados quando ela mudar.
+     */
     @Bean
     public ExecutionStore mohsExecutionStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, JdbcDialect mohsJdbcDialect) {
         return new JdbcExecutionStore(dataSource, mohsClock, JsonMapper.builder().build(), mohsJdbcDialect);

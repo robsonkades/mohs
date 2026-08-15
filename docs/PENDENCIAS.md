@@ -18,22 +18,6 @@ no Javadoc de `ScheduleCommand.idempotencyKey`. O design
 **Decidir:** o TTL/purga entra ainda no M3, ou vira ADR própria junto com a
 política de retenção de execuções (as duas purgas compartilham mecanismo)?
 
-## 2. Payload persistido com `JsonMapper` cru
-
-`MohsAutoConfiguration.mohsExecutionStore` serializa o payload com
-`JsonMapper.builder().build()`, deliberadamente(?) isolado do
-`ObjectMapper` customizado do host — enquanto a REST converte o corpo da
-request com o mapper do contexto. Se o isolamento é decisão de estabilidade
-do formato persistido (módulos/configurações do host não podem mudar como
-payloads antigos foram gravados), ela está invisível: é fácil alguém
-"consertar" para o mapper do contexto e quebrar a leitura de payloads já
-persistidos.
-
-**Decidir:** confirmar a intenção e registrá-la (linha de Javadoc no bean ou
-mini-ADR) — ou, se não for intencional, trocar pro mapper do host **antes**
-do primeiro payload persistido em produção, enquanto não há dado antigo pra
-quebrar.
-
 ## 3. `mohs.api.base-path` sem leitor
 
 A propriedade existe em `MohsProperties.Api`, mas nenhum código de produção
@@ -62,7 +46,7 @@ listener sintetizado.
 
 Todos os beans de `MohsAutoConfiguration` são incondicionais — o
 consumidor não consegue substituir `Clock`, stores nem executores (o
-`JsonMapper` de persistência já tem pendência própria, item 2). Pode ser
+`JsonMapper` de persistência já está decidido: ADR-0029). Pode ser
 deliberado (internos não são SPI), mas é uma decisão de superfície de API
 que merece registro, não um estado implícito.
 
