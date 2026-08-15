@@ -131,6 +131,12 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!-- biblioteca embarcada: o jar normal continua sendo o artefato
+                         principal (consumível como dependência); o repackage executável
+                         do parent sai com classifier, nunca no lugar dele -->
+                    <classifier>exec</classifier>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
