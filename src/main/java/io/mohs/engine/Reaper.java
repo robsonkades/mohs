@@ -1,6 +1,7 @@
 package io.mohs.engine;
 
 import java.util.List;
+import java.util.Objects;
 
 import io.mohs.core.execution.Execution;
 
@@ -12,22 +13,32 @@ import io.mohs.core.execution.Execution;
  * ExecutionStore#complete}) e {@link JobStore} (libera a vaga de
  * concorrência do job, ADR-0025) — mesmo motivo de {@link Claimer} não
  * ser um {@code *Store}.
- *
- * <p>Sem {@code batchSize}: consulta uma tabela só, sem {@code JOIN},
- * caminho triste/infrequente — não é hot path como {@link
- * Claimer#claim}, não precisa da abstração de dialeto que o claim
- * precisa para {@code LIMIT}/{@code TOP}.
  */
 public interface Reaper {
 
     /**
-     * Reclama toda {@code Execution RUNNING} com lease expirada: grava um
-     * {@code Attempt} {@code FAILED} sintético ("lease expirada — node
-     * presumido morto") e transiciona a execução para {@code FAILED}
-     * terminal — nunca {@code RETRY_SCHEDULED} nesta etapa (ADR-0026: a
-     * claim query ainda não reconhece esse estado como candidato).
-     *
-     * @return as execuções reclamadas nesta chamada, já no estado final.
+     * Uma execução reclamada, já no estado final, mais o que só o reaper
+     * sabe na hora da decisão: se o terminal veio de orçamento esgotado
+     * ({@code Failed.attemptsExhausted}) ou de outra causa (job
+     * aposentado) — a {@link Execution} sozinha não distingue.
      */
-    List<Execution> reclaimExpired();
+    record Reclaimed(Execution execution, boolean attemptsExhausted) {
+        public Reclaimed {
+            Objects.requireNonNull(execution, "execution");
+        }
+    }
+
+    /**
+     * Reclama {@code Execution RUNNING} com lease expirada, até o teto por
+     * ciclo da implementação: grava um {@code Attempt} {@code FAILED}
+     * sintético ("lease expirada — node presumido morto") e transiciona
+     * para {@code RETRY_SCHEDULED} com backoff quando há orçamento
+     * (ADR-0033) ou {@code FAILED} terminal quando não há (ou o job foi
+     * aposentado). O teto limita o lote de uma morte de nó em massa —
+     * comportamento definido em toda borda; o excedente drena nos ciclos
+     * seguintes.
+     *
+     * @return as execuções cuja transição realmente ocorreu nesta chamada.
+     */
+    List<Reclaimed> reclaimExpired();
 }

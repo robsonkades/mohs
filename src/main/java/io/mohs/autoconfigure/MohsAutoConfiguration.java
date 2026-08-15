@@ -207,8 +207,8 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    public Reaper mohsReaper(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, ExecutionStore mohsExecutionStore, JobStore mohsJobStore) {
-        return new JdbcReaper(dataSource, mohsClock, mohsExecutionStore, mohsJobStore);
+    public Reaper mohsReaper(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock, ExecutionStore mohsExecutionStore, JobStore mohsJobStore) {
+        return new JdbcReaper(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore);
     }
 
     /** Nasce vazio — {@link MohsJobScanner} povoa em {@code afterSingletonsInstantiated}, antes do {@link Engine} iniciar. */

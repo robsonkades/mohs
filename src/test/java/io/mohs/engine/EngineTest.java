@@ -109,7 +109,7 @@ class EngineTest {
     /** O claimer nasce com o MESMO {@code leaseTtl} das settings — lease de claim e de renovação nunca divergem, igual à auto-config real. */
     private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings) {
         JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, settings.leaseTtl(), new ExecutionWindowRegistry(List.of()));
-        JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
+        JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
@@ -124,7 +124,7 @@ class EngineTest {
     /** Claim/reclaim usam as portas reais (o claim precisa funcionar); os overrides simulam falha só no caminho do dispatch. */
     private Engine newEngineWith(JobStore jobStoreOverride, ExecutionStore executionStoreOverride, List<ExecutionListener> listeners) {
         JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
-        JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
+        JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
@@ -314,6 +314,40 @@ class EngineTest {
     private Instant leaseOf(String id) {
         return JdbcTimestamps.fromUtcTimestamp(rawJdbcTemplate.queryForObject(
                 "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", java.sql.Timestamp.class, id));
+    }
+
+    /** Pendência 8 fechada: desfecho do reaper publica os mesmos eventos do dispatch — o alerta de morte de nó (Javadoc de Failed) passa a disparar de verdade. */
+    @Test
+    void reclaimOfADeadNodesExecutionPublishesRetryEvents() throws Exception {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
+        // execução de um nó morto: RUNNING com lease já expirada — o primeiro tick reclama
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_executions (
+                    id, job_key, state, scheduled_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
+                VALUES ('exec-1', 'welcome-email', 'RUNNING', ?, 'test', 'dead-node', ?, '"x"', 'java.lang.String', ?)
+                """, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(60)),
+                JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)), JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(60)));
+        CountDownLatch retryScheduled = new CountDownLatch(1);
+        CountDownLatch attemptFailed = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof io.mohs.core.event.RetryScheduled) {
+                retryScheduled.countDown();
+            }
+            if (event instanceof io.mohs.core.event.AttemptFailed) {
+                attemptFailed.countDown();
+            }
+        };
+        Engine engine = newEngine(nodeStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(attemptFailed.await(5, TimeUnit.SECONDS)).as("AttemptFailed published for the reclaim").isTrue();
+            assertThat(retryScheduled.await(5, TimeUnit.SECONDS)).as("RetryScheduled published for the reclaim").isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        // o estado final não é assertado: após o reclaim, o retry pode ser re-reivindicado
+        // no mesmo teste (jitter pode ser ~0) — o contrato sob teste são os eventos
     }
 
     /** Bound menor/igual à lease tornaria a renovação inútil (a primeira lease já nasceria condenada) — rejeitado na construção, nomeando as duas propriedades. */
@@ -637,7 +671,7 @@ class EngineTest {
         engineLogger.addAppender(rejectionWatcher);
 
         JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
-        JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
+        JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), List.of(), eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);

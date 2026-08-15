@@ -28,6 +28,7 @@ import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.Reaper;
 import io.mohs.engine.RetrySchedule;
+import io.mohs.jdbc.dialect.JdbcDialect;
 
 /**
  * {@link Reaper} sobre {@code mohs_executions} (ADR-0012/0025/0033).
@@ -49,33 +50,44 @@ public final class JdbcReaper implements Reaper {
 
     private static final String LEASE_EXPIRED_ERROR = "lease expired — node presumed dead";
 
+    /**
+     * Teto de reclaims por ciclo — morte de nó em massa não vira uma
+     * transação sem limite de locks (backpressure em toda borda); o
+     * excedente drena nos ticks seguintes, mais antigo primeiro (o
+     * {@code ORDER BY e.id} é UUIDv7, ordenado no tempo). Package-private
+     * pro teste de fronteira.
+     */
+    static final int RECLAIM_LIMIT = 500;
+
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
+    private final JdbcDialect dialect;
     private final Clock clock;
     private final ExecutionStore executionStore;
     private final JobStore jobStore;
 
-    public JdbcReaper(DataSource dataSource, Clock clock, ExecutionStore executionStore, JobStore jobStore) {
+    public JdbcReaper(DataSource dataSource, JdbcDialect dialect, Clock clock, ExecutionStore executionStore, JobStore jobStore) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         // mesmo raciocínio da DBTUNE-4 em JdbcClaimer: CAS guardado assume
         // "última escrita vence" (READ COMMITTED), não herda o default do banco.
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        this.dialect = Objects.requireNonNull(dialect, "dialect");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
     }
 
     @Override
-    public List<Execution> reclaimExpired() {
+    public List<Reaper.Reclaimed> reclaimExpired() {
         // TransactionCallback aqui nunca devolve null (reclaimWithinTransaction
         // sempre retorna uma lista) — requireNonNull só documenta esse invariante
         // pro @NullMarked, já que o contrato de execute() em si é @Nullable (JAVA-8).
         return Objects.requireNonNull(transactionTemplate.execute(status -> reclaimWithinTransaction()));
     }
 
-    private List<Execution> reclaimWithinTransaction() {
+    private List<Reaper.Reclaimed> reclaimWithinTransaction() {
         Instant now = clock.instant();
         List<ExpiredCandidate> candidates = selectExpiredCandidates(now);
         if (candidates.isEmpty()) {
@@ -127,10 +139,10 @@ public final class JdbcReaper implements Reaper {
                 .orElseGet(() -> new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.FAILED, null, candidate.leaseExpiresAt()));
     }
 
-    /** Reconstrói o resultado localmente (sem consulta extra) — {@link ExecutionStore#completeAll} só confirma quais ids venceram o CAS. */
-    private static List<Execution> buildReclaimedList(List<ExpiredCandidate> candidates, Map<String, Execution> executionsById,
+    /** Reconstrói o resultado localmente (sem consulta extra) — {@link ExecutionStore#completeAll} só confirma quais ids venceram o CAS. O flag de orçamento vem da mesma decisão de {@link #reclaimRequest}: terminal sem ser aposentado = orçamento esgotado. */
+    private static List<Reaper.Reclaimed> buildReclaimedList(List<ExpiredCandidate> candidates, Map<String, Execution> executionsById,
             Map<String, ExecutionStore.CompletionRequest> requestById, Set<ExecutionId> completedIds) {
-        List<Execution> reclaimed = new ArrayList<>(completedIds.size());
+        List<Reaper.Reclaimed> reclaimed = new ArrayList<>(completedIds.size());
         for (ExpiredCandidate candidate : candidates) {
             ExecutionId id = ExecutionId.of(candidate.id());
             if (!completedIds.contains(id)) {
@@ -141,8 +153,11 @@ public final class JdbcReaper implements Reaper {
             List<Attempt> attempts = new ArrayList<>(execution.attempts());
             attempts.add(request.attempt());
             Instant scheduledAt = Objects.requireNonNullElse(request.retryAt(), execution.scheduledAt());
-            reclaimed.add(new Execution(id, JobKey.of(candidate.jobKey()), request.newState(), scheduledAt, execution.firedAt(), attempts,
-                    execution.actor(), execution.priority(), execution.idempotencyKey()));
+            boolean attemptsExhausted = request.newState() == ExecutionState.FAILED && !candidate.retired();
+            reclaimed.add(new Reaper.Reclaimed(
+                    new Execution(id, JobKey.of(candidate.jobKey()), request.newState(), scheduledAt, execution.firedAt(), attempts,
+                            execution.actor(), execution.priority(), execution.idempotencyKey()),
+                    attemptsExhausted));
         }
         return reclaimed;
     }
@@ -151,21 +166,26 @@ public final class JdbcReaper implements Reaper {
      * {@code j.retries}/{@code j.retired} entram no mesmo SELECT — a decisão
      * de orçamento não paga uma consulta por candidato. {@code lease_expires_at}
      * sai junto porque é o fence do CAS de conclusão (ver {@link #reclaimRequest}).
+     * Teto de {@link #RECLAIM_LIMIT} por ciclo via {@code TOP}/{@code LIMIT}
+     * do dialeto (mesmo par de cláusulas do {@code findPage}).
      */
     private List<ExpiredCandidate> selectExpiredCandidates(Instant now) {
         // ORDER BY e.id: reapers concorrentes acordam juntos numa morte de nó e
         // adquirem os mesmos row locks — ordem global determinística (JCIP cap.
         // 10, lock ordering) evita deadlock entre eles; a cadeia até o
-        // batchUpdate preserva encounter order.
+        // batchUpdate preserva encounter order. Com o LIMIT, também garante
+        // drenagem mais-antigo-primeiro (UUIDv7 ordena no tempo).
         return jdbcTemplate.query("""
-                SELECT e.id AS id, e.job_key AS job_key, e.lease_expires_at AS lease_expires_at,
+                SELECT %se.id AS id, e.job_key AS job_key, e.lease_expires_at AS lease_expires_at,
                        j.retries AS retries, j.retired AS retired
                 FROM mohs_executions e
                 JOIN mohs_job_definitions j ON j.job_key = e.job_key
                 WHERE e.state = 'RUNNING' AND e.lease_expires_at < :now
                 ORDER BY e.id
-                """,
-                new MapSqlParameterSource("now", JdbcTimestamps.toUtcTimestamp(now)),
+                %s""".formatted(dialect.topClause(), dialect.limitClause()),
+                new MapSqlParameterSource()
+                        .addValue("now", JdbcTimestamps.toUtcTimestamp(now))
+                        .addValue("limit", RECLAIM_LIMIT),
                 (rs, _) -> new ExpiredCandidate(rs.getString("id"), rs.getString("job_key"),
                         JdbcTimestamps.fromUtcTimestamp(rs.getTimestamp("lease_expires_at")),
                         rs.getInt("retries"), rs.getBoolean("retired")));

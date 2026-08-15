@@ -95,6 +95,15 @@ public final class Dispatcher {
     }
 
     /**
+     * O pipeline de eventos, para o {@link Engine} publicar os desfechos do
+     * reclaim pelo mesmo caminho do dispatch — package-private: o publisher
+     * continua interno ao pacote, só muda quem pode falar por ele.
+     */
+    ExecutionEventPublisher events() {
+        return events;
+    }
+
+    /**
      * Chain of Responsibility clássica (GoF): cada interceptor embrulha o
      * próximo, o mais interno chama o handler de verdade. Roda na própria
      * thread do dispatch — Javadoc de {@link ExecutionInterceptor} já exige

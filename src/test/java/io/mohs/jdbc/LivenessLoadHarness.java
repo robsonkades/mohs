@@ -31,6 +31,7 @@ import tools.jackson.databind.json.JsonMapper;
 import io.mohs.core.EngineState;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
+import io.mohs.engine.Reaper;
 import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.jdbc.dialect.JdbcDialect;
 import io.mohs.jdbc.dialect.PostgresJdbcDialect;
@@ -167,10 +168,10 @@ class LivenessLoadHarness {
     private double runReclaim(DataSource dataSource, MutableClock clock, JdbcDialect dialect) {
         JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), dialect);
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
+        JdbcReaper reaper = new JdbcReaper(dataSource, dialect, clock, executionStore, jobStore);
 
         long start = System.nanoTime();
-        List<Execution> reclaimed = reaper.reclaimExpired();
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
         long elapsedNanos = System.nanoTime() - start;
 
         assertThat(reclaimed).hasSize(RECLAIM_BACKLOG_SIZE);

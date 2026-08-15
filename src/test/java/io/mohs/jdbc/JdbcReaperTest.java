@@ -22,6 +22,7 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.engine.Reaper;
 import io.mohs.engine.StoredJob;
 import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
@@ -48,7 +49,7 @@ class JdbcReaperTest {
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         jobStore = new JdbcJobStore(dataSource, clock);
         JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
-        reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
+        reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
     }
 
     private static DataSource freshH2DataSource() {
@@ -83,10 +84,10 @@ class JdbcReaperTest {
         seedJob("welcome-email");
         seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
 
-        List<Execution> reclaimed = reaper.reclaimExpired();
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
         assertThat(reclaimed).hasSize(1);
-        Execution execution = reclaimed.get(0);
+        Execution execution = reclaimed.get(0).execution();
         assertThat(execution.id().value()).isEqualTo("exec-1");
         assertThat(execution.state()).isEqualTo(ExecutionState.FAILED);
         assertThat(execution.attempts()).hasSize(1);
@@ -100,7 +101,7 @@ class JdbcReaperTest {
         seedJob("welcome-email");
         seedRunningExecution("exec-1", "welcome-email", NOW.plusSeconds(30));
 
-        List<Execution> reclaimed = reaper.reclaimExpired();
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
         assertThat(reclaimed).isEmpty();
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
@@ -128,12 +129,12 @@ class JdbcReaperTest {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(2)));
         seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
 
-        List<Execution> reclaimed = reaper.reclaimExpired();
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
         assertThat(reclaimed).hasSize(1);
-        assertThat(reclaimed.get(0).state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
-        assertThat(reclaimed.get(0).attempts()).hasSize(1);
-        assertThat(reclaimed.get(0).attempts().get(0).error()).contains("lease expired");
+        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(reclaimed.get(0).execution().attempts()).hasSize(1);
+        assertThat(reclaimed.get(0).execution().attempts().get(0).error()).contains("lease expired");
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
         Timestamp retryAt = rawJdbcTemplate.queryForObject(
                 "SELECT scheduled_at FROM mohs_executions WHERE id = ?", Timestamp.class, "exec-1");
@@ -141,18 +142,40 @@ class JdbcReaperTest {
         assertThat(JdbcTimestamps.fromUtcTimestamp(retryAt)).isBetween(NOW, NOW.plusSeconds(1));
     }
 
-    /** Job aposentado nunca reagenda: RETRY_SCHEDULED de job removido ficaria preso pra sempre (claim filtra retired, o cancel do remove já passou) — mesmo com orçamento sobrando, o reclaim é terminal. */
+    /** Job aposentado nunca reagenda: RETRY_SCHEDULED de job removido ficaria preso pra sempre (claim filtra retired, o cancel do remove já passou) — mesmo com orçamento sobrando, o reclaim é terminal, e o flag diz que NÃO foi por orçamento. */
     @Test
     void reclaimOfARetiredJobIsTerminalEvenWithBudgetRemaining() {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(5)));
         seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
         jobStore.remove(JobKey.of("welcome-email")); // não alcança a RUNNING; marca retired
 
-        List<Execution> reclaimed = reaper.reclaimExpired();
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
         assertThat(reclaimed).hasSize(1);
-        assertThat(reclaimed.get(0).state()).isEqualTo(ExecutionState.FAILED);
+        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.FAILED);
+        assertThat(reclaimed.get(0).attemptsExhausted()).isFalse();
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+    }
+
+    /** Teto por ciclo: morte de nó em massa drena em passadas, mais antigo primeiro (ORDER BY em id UUIDv7) — nunca uma transação sem limite. */
+    @Test
+    void reclaimIsCappedPerCycleAndDrainsTheRestOnTheNextCall() {
+        seedJob("welcome-email");
+        List<Object[]> batch = new java.util.ArrayList<>();
+        for (int i = 0; i < JdbcReaper.RECLAIM_LIMIT + 5; i++) {
+            batch.add(new Object[] { String.format("exec-%05d", i), "welcome-email",
+                    JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(60)), JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)),
+                    JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(60)) });
+        }
+        rawJdbcTemplate.batchUpdate("""
+                INSERT INTO mohs_executions (
+                    id, job_key, state, scheduled_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
+                VALUES (?, ?, 'RUNNING', ?, 'test', 'node-a', ?, '{}', 'java.lang.Object', ?)
+                """, batch);
+
+        assertThat(reaper.reclaimExpired()).hasSize(JdbcReaper.RECLAIM_LIMIT);
+        assertThat(reaper.reclaimExpired()).hasSize(5);
+        assertThat(reaper.reclaimExpired()).isEmpty();
     }
 
     /** O attempt sintético do reclaim conta no orçamento como qualquer outro — reclaim da última tentativa é FAILED terminal. */
@@ -165,11 +188,12 @@ class JdbcReaperTest {
                 VALUES (?, 1, ?, ?, 'FAILED', 'boom')
                 """, "exec-1", JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(50)), JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(49)));
 
-        List<Execution> reclaimed = reaper.reclaimExpired();
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
         assertThat(reclaimed).hasSize(1);
-        assertThat(reclaimed.get(0).state()).isEqualTo(ExecutionState.FAILED);
-        assertThat(reclaimed.get(0).attempts()).hasSize(2);
+        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.FAILED);
+        assertThat(reclaimed.get(0).execution().attempts()).hasSize(2);
+        assertThat(reclaimed.get(0).attemptsExhausted()).isTrue();
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
     }
 }

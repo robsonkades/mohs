@@ -27,8 +27,13 @@ import org.springframework.scheduling.TaskScheduler;
 import io.mohs.core.EngineState;
 import io.mohs.core.MohsLifecycle;
 import io.mohs.core.definition.JobDefinition;
+import io.mohs.core.event.AttemptFailed;
+import io.mohs.core.event.Failed;
+import io.mohs.core.event.RetryScheduled;
+import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.execution.ExecutionState;
 
 /**
  * O motor: liga {@link Claimer}, {@link Dispatcher}, {@link NodeStore} e
@@ -245,7 +250,9 @@ public final class Engine implements MohsLifecycle {
                 return;
             }
             renewOwnedLeases();
-            reaper.reclaimExpired();
+            for (Reaper.Reclaimed reclaimed : reaper.reclaimExpired()) {
+                publishReclaimOutcome(reclaimed);
+            }
             List<Execution> claimed = claimer.claim(nodeId, settings.batchSize());
             for (Execution execution : claimed) {
                 submitDispatch(execution);
@@ -301,6 +308,28 @@ public final class Engine implements MohsLifecycle {
     private boolean watchdogBoundExceeded(long startedNanos) {
         Duration bound = settings.watchdogTimeout();
         return bound != null && System.nanoTime() - startedNanos >= bound.toNanos();
+    }
+
+    /**
+     * Desfechos do reclaim publicam os mesmos eventos do caminho de
+     * dispatch, espelhando exatamente os pares do {@link Dispatcher}:
+     * retry → {@code AttemptFailed} + {@code RetryScheduled}; terminal →
+     * só {@code Failed}. É o gancho de alerta de morte de nó que o Javadoc
+     * de {@link Failed} anuncia — sem isto, um listener de observabilidade
+     * via retries de falha de handler mas ficava cego para os de
+     * crash-recovery, que são os que importam às 3h da manhã.
+     */
+    private void publishReclaimOutcome(Reaper.Reclaimed reclaimed) {
+        Execution execution = reclaimed.execution();
+        Attempt lastAttempt = execution.attempts().getLast();
+        Exception error = new IllegalStateException(Objects.requireNonNullElse(lastAttempt.error(), "lease expired"));
+        ExecutionEventPublisher events = dispatcher.events();
+        if (execution.state() == ExecutionState.RETRY_SCHEDULED) {
+            events.publish(new AttemptFailed(execution.id(), execution.jobKey(), lastAttempt.number(), error));
+            events.publish(new RetryScheduled(execution.id(), execution.jobKey(), lastAttempt.number() + 1, execution.scheduledAt()));
+        } else {
+            events.publish(new Failed(execution.id(), execution.jobKey(), lastAttempt.number(), error, reclaimed.attemptsExhausted()));
+        }
     }
 
     /**
