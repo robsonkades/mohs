@@ -42,33 +42,44 @@ final class MohsEngineLifecycle implements SmartLifecycle {
 
     @Override
     public void start() {
-        warnIfLeaseShorterThanDeclaredTimeouts();
+        warnAboutDeclaredPolicyGaps();
         engine.start();
     }
 
     /**
-     * Detecção de falha por timeout é sempre uma aposta (ADR-0012): sem
-     * watchdog que renove a lease de execuções {@code RUNNING} (limitação
-     * declarada do {@code Engine}), um handler saudável que rode além de
-     * {@code mohs.engine.lease-ttl} é reclamado como {@code FAILED} pelo
-     * reaper e a vaga de concorrência do job é devolvida — pra job com
-     * exclusão ({@code preventOverlap}), isso é dupla execução em paralelo
-     * com o handler zumbi. O operador precisa saber o preço do default no
-     * boot, não no postmortem — daí o WARN por job cujo {@code timeout}
-     * declarado alcança a lease. Diagnóstico nunca derruba o boot: falha
-     * na leitura vira WARN com a causa completa, o engine sobe igual.
+     * Avisos de boot sobre lacunas entre o que a definição declara e o que
+     * o motor entrega — o operador precisa saber o preço no boot, não no
+     * postmortem. Duas checagens, uma passada só pelo store:
+     * (1) detecção de falha por timeout é sempre uma aposta (ADR-0012):
+     * sem watchdog que renove a lease de execuções {@code RUNNING}
+     * (limitação declarada do {@code Engine}), um handler saudável que
+     * rode além de {@code mohs.engine.lease-ttl} é reclamado pelo reaper e
+     * a vaga de concorrência do job é devolvida — pra job com exclusão
+     * ({@code preventOverlap}), isso é dupla execução em paralelo com o
+     * handler zumbi; (2) {@code retryPolicy} (bean customizado) ainda não
+     * é honrada (ADR-0033) — só {@code retries} vale, com o backoff
+     * default. Diagnóstico nunca derruba o boot: falha na leitura vira
+     * WARN com a causa completa, o engine sobe igual.
      */
-    private void warnIfLeaseShorterThanDeclaredTimeouts() {
+    private void warnAboutDeclaredPolicyGaps() {
         try (Stream<StoredJob> jobs = jobStore.findAll()) {
-            jobs.map(StoredJob::definition)
-                    .filter(definition -> definition.timeout() != null && definition.timeout().compareTo(leaseTtl) >= 0)
-                    .forEach(definition -> log.warn(
+            jobs.map(StoredJob::definition).forEach(definition -> {
+                if (definition.timeout() != null && definition.timeout().compareTo(leaseTtl) >= 0) {
+                    log.warn(
                             "job '{}' declares timeout {} >= mohs.engine.lease-ttl {} — without a lease-renewing watchdog, "
                                     + "a healthy run longer than the lease is reaped as FAILED and its concurrency slot is released; "
                                     + "raise mohs.engine.lease-ttl above the slowest expected attempt",
-                            definition.key().value(), definition.timeout(), leaseTtl));
+                            definition.key().value(), definition.timeout(), leaseTtl);
+                }
+                if (definition.retryPolicy() != null) {
+                    log.warn(
+                            "job '{}' declares retryPolicy '{}' which is not honored yet — retries is, with the default "
+                                    + "exponential full-jitter backoff (ADR-0033)",
+                            definition.key().value(), definition.retryPolicy());
+                }
+            });
         } catch (RuntimeException e) {
-            log.warn("could not check job timeouts against mohs.engine.lease-ttl on startup", e);
+            log.warn("could not check declared job policies on startup", e);
         }
     }
 

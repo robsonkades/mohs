@@ -1,7 +1,8 @@
 # ADR-0026: Reaper sempre transiciona para FAILED terminal até retry scheduling existir
 
 ## Status
-Decided — 2026-08-14
+Superseded pela ADR-0033 — 2026-08-15 (os dois pré-requisitos nomeados abaixo foram
+entregues; o reaper honra `retries` desde então). Decided — 2026-08-14
 
 ## Context
 A ADR-0012 (`docs/adr/0012-liveness-heartbeat-lease-reaper.md`) decide

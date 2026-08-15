@@ -9,6 +9,7 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.sql.DataSource;
@@ -378,6 +379,57 @@ class MohsAutoConfigurationTest {
                 // start() do SmartLifecycle roda dentro do refresh — o WARN já aconteceu aqui
                 assertThat(warnWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("slow-report")
                         && event.getFormattedMessage().contains("mohs.engine.lease-ttl"));
+            });
+        } finally {
+            lifecycleLogger.detachAppender(warnWatcher);
+        }
+    }
+
+    /** ADR-0033 ponta a ponta: 1ª tentativa falha, a execução volta como RETRY_SCHEDULED com backoff, o mesmo caminho de claim a reivindica de novo e a 2ª sucede. */
+    @Test
+    void failedExecutionIsRetriedThroughTheRealEngineUntilItSucceeds() {
+        CountDownLatch succeeded = new CountDownLatch(1);
+        AtomicInteger attempts = new AtomicInteger();
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+
+        runnerWith(freshH2DataSource())
+                .withBean(ExecutionListener.class, () -> listener)
+                .run(context -> {
+                    context.getBean(HandlerRegistry.class).register(JobKey.of("flaky"), (payload, ctx) -> {
+                        if (attempts.incrementAndGet() == 1) {
+                            throw new IllegalStateException("first attempt fails");
+                        }
+                    });
+
+                    Mohs mohs = context.getBean(Mohs.class);
+                    mohs.define(JobDefinition.of("flaky", Handler.class, spec -> spec.onDemand().retries(2).runner("io")));
+                    mohs.schedule("flaky", new Greeting("ana")).now();
+
+                    assertThat(succeeded.await(10, TimeUnit.SECONDS)).as("retried and succeeded within timeout").isTrue();
+                    assertThat(attempts.get()).isEqualTo(2);
+                });
+    }
+
+    /** retryPolicy (bean customizado) ainda não é honrada (ADR-0033) — aceitar em silêncio deixaria o operador achando que a política vale; o boot avisa nomeando job e bean. */
+    @Test
+    void bootWarnsWhenAJobDeclaresACustomRetryPolicy() {
+        DataSource dataSource = freshH2DataSource();
+        new JdbcJobStore(dataSource, new MutableClock(Instant.parse("2026-08-15T12:00:00Z"), ZoneId.of("UTC")))
+                .upsert(JobDefinition.of("flaky-report", Handler.class, spec -> spec.onDemand().retryPolicy("myRetryPolicyBean")));
+        ch.qos.logback.classic.Logger lifecycleLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(MohsEngineLifecycle.class);
+        ListAppender<ILoggingEvent> warnWatcher = new ListAppender<>();
+        warnWatcher.start();
+        lifecycleLogger.addAppender(warnWatcher);
+        try {
+            runnerWith(dataSource).run(context -> {
+                assertThat(context).hasNotFailed();
+                assertThat(warnWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("flaky-report")
+                        && event.getFormattedMessage().contains("myRetryPolicyBean"));
             });
         } finally {
             lifecycleLogger.detachAppender(warnWatcher);

@@ -57,10 +57,15 @@ import io.mohs.core.execution.Execution;
  * lease nova; handlers mais lentos que {@code leaseTtl} podem ser
  * reclamados pelo {@link Reaper} prematuramente); sem mecanismo de
  * interrupt real — no estouro do grace de {@link #drain}, o trabalho em
- * voo continua rodando em segundo plano, só loga um aviso. Como não há
- * retry (ADR-0026), a garantia efetiva sob falha de nó hoje é
- * <b>at-most-once</b>: dimensione {@code mohs.engine.lease-ttl} acima do
- * pior handler esperado (o boot avisa por job — {@code MohsEngineLifecycle}).
+ * voo continua rodando em segundo plano, só loga um aviso. Com retry
+ * (ADR-0033), a garantia sob falha de nó é <b>at-least-once</b> quando
+ * {@code retries > 0}: a execução reclamada volta como
+ * {@code RETRY_SCHEDULED} e outro nó a reexecuta — com o default
+ * {@code retries = 0} continua at-most-once. Dimensione
+ * {@code mohs.engine.lease-ttl} acima do pior handler esperado mesmo
+ * assim: reclaim prematuro de handler vivo consome orçamento de retry e,
+ * com {@code preventOverlap}, é dupla execução em paralelo com o zumbi
+ * (o boot avisa por job — {@code MohsEngineLifecycle}).
  */
 public final class Engine implements MohsLifecycle {
 
