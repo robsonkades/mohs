@@ -1,5 +1,6 @@
 package io.mohs.autoconfigure;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -38,6 +39,7 @@ import io.mohs.core.job.JobKey;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.engine.HandlerRegistry;
+import io.mohs.jdbc.DatabaseClock;
 import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.test.MutableClock;
 
@@ -135,6 +137,25 @@ class MohsAutoConfigurationTest {
     void disablingMohsRegistersNoBeans() {
         runnerWith(freshH2DataSource(), "mohs.enabled=false").run(context ->
                 assertThat(context).doesNotHaveBean(Mohs.class));
+    }
+
+    /** ADR-0008, modo {@code database}: o banco é a autoridade de tempo — o Clock do motor tem que ser o {@link DatabaseClock}, com o scheduler de resync presente. */
+    @Test
+    void databaseTimeModeWiresDatabaseClockAndResyncScheduler() {
+        runnerWith(freshH2DataSource(), "mohs.time.mode=database").run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context.getBean("mohsClock", Clock.class)).isInstanceOf(DatabaseClock.class);
+            assertThat(context).hasBean("mohsClockSyncScheduler");
+        });
+    }
+
+    /** Default ({@code application}): relógio do sistema e nenhum bean de resync — o scheduler condicional não pode existir fora do modo database. */
+    @Test
+    void defaultTimeModeUsesSystemClockWithoutResyncScheduler() {
+        runnerWith(freshH2DataSource()).run(context -> {
+            assertThat(context.getBean("mohsClock", Clock.class)).isEqualTo(Clock.systemUTC());
+            assertThat(context).doesNotHaveBean("mohsClockSyncScheduler");
+        });
     }
 
     /** Sem HandlerRegistry.register/Mohs.define manual nenhum — prova que MohsJobScanner faz isso sozinho. */
