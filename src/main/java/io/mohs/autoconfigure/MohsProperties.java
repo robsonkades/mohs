@@ -1,12 +1,11 @@
 package io.mohs.autoconfigure;
 
 import java.time.Duration;
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.boot.context.properties.NestedConfigurationProperty;
+import org.springframework.boot.context.properties.bind.DefaultValue;
 
 import io.mohs.core.resource.RunnerMode;
 
@@ -18,227 +17,88 @@ import io.mohs.core.resource.RunnerMode;
  * Validações de boot e enforcement de rate limit ainda não existem — as
  * propriedades correspondentes ({@code mohs.rate-limits.*}) entram
  * junto delas, não antes.
+ *
+ * <p>Records com constructor binding: propriedade é snapshot imutável do
+ * boot, não estado mutável — Javadoc de componente fica nas tags
+ * {@code @param} (é o que o configuration-processor lê pra gerar o
+ * metadata de record).
+ *
+ * @param enabled gate mestre — desligar remove todos os beans do Mohs do contexto
+ * @param runners runners nomeados adicionais aos built-in — ver {@link Runner}
  */
 @ConfigurationProperties("mohs")
-public class MohsProperties {
+public record MohsProperties(
+        @DefaultValue("true") boolean enabled,
+        @DefaultValue Jdbc jdbc,
+        @DefaultValue Engine engine,
+        @DefaultValue Lifecycle lifecycle,
+        @DefaultValue Time time,
+        @DefaultValue Registration registration,
+        @DefaultValue Api api,
+        @DefaultValue Map<String, Runner> runners) {
 
-    /** Gate mestre — desligar remove todos os beans do Mohs do contexto. */
-    private boolean enabled = true;
-
-    @NestedConfigurationProperty
-    private final Jdbc jdbc = new Jdbc();
-
-    @NestedConfigurationProperty
-    private final Engine engine = new Engine();
-
-    @NestedConfigurationProperty
-    private final Lifecycle lifecycle = new Lifecycle();
-
-    @NestedConfigurationProperty
-    private final Time time = new Time();
-
-    @NestedConfigurationProperty
-    private final Registration registration = new Registration();
-
-    @NestedConfigurationProperty
-    private final Api api = new Api();
-
-    private final Map<String, Runner> runners = new LinkedHashMap<>();
-
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
-    }
-
-    public Jdbc getJdbc() {
-        return jdbc;
-    }
-
-    public Engine getEngine() {
-        return engine;
-    }
-
-    public Lifecycle getLifecycle() {
-        return lifecycle;
-    }
-
-    public Time getTime() {
-        return time;
-    }
-
-    public Registration getRegistration() {
-        return registration;
-    }
-
-    public Api getApi() {
-        return api;
-    }
-
-    public Map<String, Runner> getRunners() {
-        return runners;
-    }
-
-    public static class Jdbc {
-
-        /** ADR-0023: escolha explícita, nunca auto-detecção via {@code DataSource}. Sem default — obrigatório. */
-        private @Nullable Dialect dialect;
-
-        public @Nullable Dialect getDialect() {
-            return dialect;
-        }
-
-        public void setDialect(Dialect dialect) {
-            this.dialect = dialect;
-        }
+    /**
+     * @param dialect ADR-0023: escolha explícita, nunca auto-detecção via {@code DataSource}. Sem default — obrigatório.
+     */
+    public record Jdbc(@Nullable Dialect dialect) {
 
         public enum Dialect {
             H2, POSTGRESQL, MYSQL, SQLSERVER
         }
     }
 
-    public static class Engine {
-
-        private Duration pollInterval = Duration.ofSeconds(5);
-        private int batchSize = 50;
-        /** ADR-0012: alimenta {@code lease_expires_at} no claim; o reaper reclama execuções cuja lease já expirou. */
-        private Duration leaseTtl = Duration.ofSeconds(30);
-        /** Teto real de concorrência do executor de dispatch (nunca por tamanho de pool — CLAUDE.md). */
-        private int dispatchConcurrency = 64;
-        /** Teto real de concorrência do executor de publicação de eventos. */
-        private int eventConcurrency = 16;
-
-        public Duration getPollInterval() {
-            return pollInterval;
-        }
-
-        public void setPollInterval(Duration pollInterval) {
-            this.pollInterval = pollInterval;
-        }
-
-        public int getBatchSize() {
-            return batchSize;
-        }
-
-        public void setBatchSize(int batchSize) {
-            this.batchSize = batchSize;
-        }
-
-        public Duration getLeaseTtl() {
-            return leaseTtl;
-        }
-
-        public void setLeaseTtl(Duration leaseTtl) {
-            this.leaseTtl = leaseTtl;
-        }
-
-        public int getDispatchConcurrency() {
-            return dispatchConcurrency;
-        }
-
-        public void setDispatchConcurrency(int dispatchConcurrency) {
-            this.dispatchConcurrency = dispatchConcurrency;
-        }
-
-        public int getEventConcurrency() {
-            return eventConcurrency;
-        }
-
-        public void setEventConcurrency(int eventConcurrency) {
-            this.eventConcurrency = eventConcurrency;
-        }
+    /**
+     * @param pollInterval intervalo entre ticks do poll loop do engine
+     * @param batchSize máximo de execuções reclamadas por tick
+     * @param leaseTtl ADR-0012: alimenta {@code lease_expires_at} no claim; o reaper reclama execuções cuja lease já expirou
+     * @param dispatchConcurrency teto real de concorrência do executor de dispatch (nunca por tamanho de pool — CLAUDE.md)
+     * @param eventConcurrency teto real de concorrência do executor de publicação de eventos
+     */
+    public record Engine(
+            @DefaultValue("5s") Duration pollInterval,
+            @DefaultValue("50") int batchSize,
+            @DefaultValue("30s") Duration leaseTtl,
+            @DefaultValue("64") int dispatchConcurrency,
+            @DefaultValue("16") int eventConcurrency) {
     }
 
-    public static class Lifecycle {
-
-        /** ADR-0007: {@code auto} chama {@link io.mohs.core.MohsLifecycle#start()} sozinho no boot; {@code manual} espera o consumidor chamar. */
-        private StartMode startMode = StartMode.AUTO;
-
-        @NestedConfigurationProperty
-        private final Shutdown shutdown = new Shutdown();
-
-        public StartMode getStartMode() {
-            return startMode;
-        }
-
-        public void setStartMode(StartMode startMode) {
-            this.startMode = startMode;
-        }
-
-        public Shutdown getShutdown() {
-            return shutdown;
-        }
+    /**
+     * @param startMode ADR-0007: {@code auto} chama {@link io.mohs.core.MohsLifecycle#start()} sozinho no boot; {@code manual} espera o consumidor chamar
+     */
+    public record Lifecycle(
+            @DefaultValue("auto") StartMode startMode,
+            @DefaultValue Shutdown shutdown) {
 
         public enum StartMode {
             AUTO, MANUAL
         }
 
-        public static class Shutdown {
-
-            private Duration gracePeriod = Duration.ofSeconds(30);
-
-            public Duration getGracePeriod() {
-                return gracePeriod;
-            }
-
-            public void setGracePeriod(Duration gracePeriod) {
-                this.gracePeriod = gracePeriod;
-            }
+        /**
+         * @param gracePeriod quanto tempo o shutdown espera execuções em voo antes de interromper
+         */
+        public record Shutdown(@DefaultValue("30s") Duration gracePeriod) {
         }
     }
 
-    public static class Time {
-
-        /** ADR-0008: {@code application} usa o relógio do sistema; {@code database} usa {@link io.mohs.jdbc.DatabaseClock} (banco é a autoridade de tempo do cluster). */
-        private Mode mode = Mode.APPLICATION;
-        /** Só lido quando {@link #mode} é {@code DATABASE} — limiar de WARN de {@link io.mohs.jdbc.DatabaseClock#sync()}. */
-        private Duration skewWarnThreshold = Duration.ofSeconds(1);
-        /** Só lido quando {@link #mode} é {@code DATABASE} — a cada quanto tempo reamostrar (ver Javadoc de {@link io.mohs.engine.SyncableClock}, que já nomeia esta propriedade). */
-        private Duration syncInterval = Duration.ofSeconds(30);
-
-        public Mode getMode() {
-            return mode;
-        }
-
-        public void setMode(Mode mode) {
-            this.mode = mode;
-        }
-
-        public Duration getSkewWarnThreshold() {
-            return skewWarnThreshold;
-        }
-
-        public void setSkewWarnThreshold(Duration skewWarnThreshold) {
-            this.skewWarnThreshold = skewWarnThreshold;
-        }
-
-        public Duration getSyncInterval() {
-            return syncInterval;
-        }
-
-        public void setSyncInterval(Duration syncInterval) {
-            this.syncInterval = syncInterval;
-        }
+    /**
+     * @param mode ADR-0008: {@code application} usa o relógio do sistema; {@code database} usa {@link io.mohs.jdbc.DatabaseClock} (banco é a autoridade de tempo do cluster)
+     * @param skewWarnThreshold só lido quando {@code mode} é {@code database} — limiar de WARN de {@link io.mohs.jdbc.DatabaseClock#sync()}
+     * @param syncInterval só lido quando {@code mode} é {@code database} — a cada quanto tempo reamostrar (ver Javadoc de {@link io.mohs.engine.SyncableClock}, que já nomeia esta propriedade)
+     */
+    public record Time(
+            @DefaultValue("application") Mode mode,
+            @DefaultValue("1s") Duration skewWarnThreshold,
+            @DefaultValue("30s") Duration syncInterval) {
 
         public enum Mode {
             APPLICATION, DATABASE
         }
     }
 
-    public static class Registration {
-
-        /** ADR-0006: como {@link MohsJobScanner} resolve divergência definicional entre o código e o que já está no store. */
-        private OnConflict onConflict = OnConflict.OVERRIDE;
-
-        public OnConflict getOnConflict() {
-            return onConflict;
-        }
-
-        public void setOnConflict(OnConflict onConflict) {
-            this.onConflict = onConflict;
-        }
+    /**
+     * @param onConflict ADR-0006: como {@link MohsJobScanner} resolve divergência definicional entre o código e o que já está no store
+     */
+    public record Registration(@DefaultValue("override") OnConflict onConflict) {
 
         public enum OnConflict {
             /** Código vence; toda mudança logada com diff (default). */
@@ -253,36 +113,20 @@ public class MohsProperties {
     /**
      * ADR-0010: fechada por padrão ({@code enabled=false}) — ligar é ato
      * consciente, sinalizado por WARN no boot em
-     * {@link MohsRestAutoConfiguration}. {@code basePath} é o prefixo de
-     * toda rota de {@code io.mohs.rest}, mesmo default hardcoded hoje em
-     * {@code io.mohs.rest.ApiPaths#V1}.
+     * {@link MohsRestAutoConfiguration}.
+     *
+     * @param enabled liga a API REST operacional
+     * @param basePath prefixo de toda rota de {@code io.mohs.rest}, mesmo default hardcoded hoje em {@code io.mohs.rest.ApiPaths#V1}
      */
-    public static class Api {
-
-        private boolean enabled = false;
-        private String basePath = "/api/mohs/v1";
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public String getBasePath() {
-            return basePath;
-        }
-
-        public void setBasePath(String basePath) {
-            this.basePath = basePath;
-        }
+    public record Api(
+            @DefaultValue("false") boolean enabled,
+            @DefaultValue("/api/mohs/v1") String basePath) {
     }
 
     /**
      * Runner nomeado adicional aos built-in ({@code io}/{@code cpu},
      * montados por {@link MohsAutoConfiguration} com os defaults do
-     * documento mestre) — um valor de {@link MohsProperties#getRunners()}
+     * documento mestre) — um valor de {@link MohsProperties#runners()}
      * (o próprio {@code Map}, sem embrulho: {@code mohs.runners.<nome>.mode}
      * mais os campos do modo declarado, mesma forma de
      * {@code docs/API-DESIGN.md} "Runners — especificação, nunca
@@ -295,64 +139,20 @@ public class MohsProperties {
      * {@code myupload}, e {@code JobDefinition.runner()} é case-sensitive.
      * Prefira nomes minúsculos; pra preservar a caixa exata, use a forma
      * bracketed ({@code mohs.runners.[myUpload].max=8}).
+     *
+     * @param mode {@code io} (default) ou {@code cpu} — decide quais dos demais campos se aplicam
+     * @param max {@link RunnerMode#IO} — default 64 se omitido (mesmo default de {@code MohsRunner.IoBuilder})
+     * @param coreSize {@link RunnerMode#CPU} — default núcleos disponíveis se omitido
+     * @param maxSize {@link RunnerMode#CPU} — teto de threads do pool
+     * @param queueCapacity {@link RunnerMode#CPU} — capacidade da fila do pool
+     * @param keepAlive {@link RunnerMode#CPU} — keep-alive das threads acima do core
      */
-    public static class Runner {
-
-        private RunnerMode mode = RunnerMode.IO;
-        /** {@link RunnerMode#IO} — default 64 se omitido (mesmo default de {@code MohsRunner.IoBuilder}). */
-        private @Nullable Integer max;
-        /** {@link RunnerMode#CPU} — default núcleos disponíveis se omitido. */
-        private @Nullable Integer coreSize;
-        private @Nullable Integer maxSize;
-        private @Nullable Integer queueCapacity;
-        private @Nullable Duration keepAlive;
-
-        public RunnerMode getMode() {
-            return mode;
-        }
-
-        public void setMode(RunnerMode mode) {
-            this.mode = mode;
-        }
-
-        public @Nullable Integer getMax() {
-            return max;
-        }
-
-        public void setMax(Integer max) {
-            this.max = max;
-        }
-
-        public @Nullable Integer getCoreSize() {
-            return coreSize;
-        }
-
-        public void setCoreSize(Integer coreSize) {
-            this.coreSize = coreSize;
-        }
-
-        public @Nullable Integer getMaxSize() {
-            return maxSize;
-        }
-
-        public void setMaxSize(Integer maxSize) {
-            this.maxSize = maxSize;
-        }
-
-        public @Nullable Integer getQueueCapacity() {
-            return queueCapacity;
-        }
-
-        public void setQueueCapacity(Integer queueCapacity) {
-            this.queueCapacity = queueCapacity;
-        }
-
-        public @Nullable Duration getKeepAlive() {
-            return keepAlive;
-        }
-
-        public void setKeepAlive(Duration keepAlive) {
-            this.keepAlive = keepAlive;
-        }
+    public record Runner(
+            @DefaultValue("io") RunnerMode mode,
+            @Nullable Integer max,
+            @Nullable Integer coreSize,
+            @Nullable Integer maxSize,
+            @Nullable Integer queueCapacity,
+            @Nullable Duration keepAlive) {
     }
 }

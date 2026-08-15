@@ -93,7 +93,7 @@ class MohsRestAutoConfigurationTest {
     void basePathIsConfigurable() {
         runnerWith(freshH2DataSource(), "mohs.api.enabled=true", "mohs.api.base-path=/custom").run(context -> {
             assertThat(context).hasNotFailed();
-            assertThat(context.getBean(MohsProperties.class).getApi().getBasePath()).isEqualTo("/custom");
+            assertThat(context.getBean(MohsProperties.class).api().basePath()).isEqualTo("/custom");
         });
     }
 }

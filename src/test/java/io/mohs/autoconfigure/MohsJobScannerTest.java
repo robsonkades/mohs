@@ -1,6 +1,7 @@
 package io.mohs.autoconfigure;
 
 import java.time.Duration;
+import java.util.Map;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,8 +55,17 @@ class MohsJobScannerTest {
     }
 
     private MohsJobScanner newScanner(MohsProperties.Registration.OnConflict onConflict) {
-        MohsProperties properties = new MohsProperties();
-        properties.getRegistration().setOnConflict(onConflict);
+        // construção direta do record, com os mesmos defaults do binding — o scanner só lê registration()
+        MohsProperties properties = new MohsProperties(
+                true,
+                new MohsProperties.Jdbc(null),
+                new MohsProperties.Engine(Duration.ofSeconds(5), 50, Duration.ofSeconds(30), 64, 16),
+                new MohsProperties.Lifecycle(MohsProperties.Lifecycle.StartMode.AUTO,
+                        new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30))),
+                new MohsProperties.Time(MohsProperties.Time.Mode.APPLICATION, Duration.ofSeconds(1), Duration.ofSeconds(30)),
+                new MohsProperties.Registration(onConflict),
+                new MohsProperties.Api(false, "/api/mohs/v1"),
+                Map.of());
         MohsJobScanner scanner = new MohsJobScanner(providerOf(handlerRegistry), providerOf(jobStore), providerOf(properties));
         scanner.setBeanFactory(beanFactory);
         return scanner;

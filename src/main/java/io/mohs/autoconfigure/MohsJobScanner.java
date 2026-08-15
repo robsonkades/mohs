@@ -133,7 +133,7 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     public void afterSingletonsInstantiated() {
         JobStore store = jobStore.getObject();
         HandlerRegistry registry = handlerRegistry.getObject();
-        MohsProperties.Registration.OnConflict onConflict = properties.getObject().getRegistration().getOnConflict();
+        MohsProperties.Registration.OnConflict onConflict = properties.getObject().registration().onConflict();
 
         for (ScannedJob job : scanned) {
             reconcile(store, onConflict, job);

@@ -91,7 +91,7 @@ public class MohsAutoConfiguration {
 
     @Bean
     public JdbcDialect mohsJdbcDialect(MohsProperties properties) {
-        MohsProperties.Jdbc.Dialect dialect = properties.getJdbc().getDialect();
+        MohsProperties.Jdbc.Dialect dialect = properties.jdbc().dialect();
         if (dialect == null) {
             throw new IllegalStateException(
                     "mohs.jdbc.dialect must be set (h2, postgresql, mysql or sqlserver) — "
@@ -116,12 +116,12 @@ public class MohsAutoConfiguration {
     @Bean(defaultCandidate = false)
     @Qualifier("mohsClock")
     public Clock mohsClock(MohsProperties properties, DataSource dataSource, @Qualifier("mohsClockSyncScheduler") ObjectProvider<ThreadPoolTaskScheduler> mohsClockSyncScheduler) {
-        if (properties.getTime().getMode() != MohsProperties.Time.Mode.DATABASE) {
+        if (properties.time().mode() != MohsProperties.Time.Mode.DATABASE) {
             return Clock.systemUTC();
         }
-        DatabaseClock clock = new DatabaseClock(dataSource, properties.getTime().getSkewWarnThreshold());
+        DatabaseClock clock = new DatabaseClock(dataSource, properties.time().skewWarnThreshold());
         clock.sync();
-        mohsClockSyncScheduler.getObject().scheduleWithFixedDelay(clock::sync, properties.getTime().getSyncInterval());
+        mohsClockSyncScheduler.getObject().scheduleWithFixedDelay(clock::sync, properties.time().syncInterval());
         return clock;
     }
 
@@ -143,7 +143,7 @@ public class MohsAutoConfiguration {
     @Bean(defaultCandidate = false)
     @Qualifier("mohsEventExecutor")
     public AsyncTaskExecutor mohsEventExecutor(MohsProperties properties) {
-        return MohsExecutors.ioBoundExecutor("mohs-events", properties.getEngine().getEventConcurrency());
+        return MohsExecutors.ioBoundExecutor("mohs-events", properties.engine().eventConcurrency());
     }
 
     @Bean(defaultCandidate = false)
@@ -166,12 +166,12 @@ public class MohsAutoConfiguration {
         Map<String, MohsRunner> byName = new LinkedHashMap<>();
         Map<String, String> sourceOf = new LinkedHashMap<>();
 
-        byName.put(RunnerRegistry.DEFAULT_RUNNER, MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(properties.getEngine().getDispatchConcurrency()).build());
+        byName.put(RunnerRegistry.DEFAULT_RUNNER, MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(properties.engine().dispatchConcurrency()).build());
         sourceOf.put(RunnerRegistry.DEFAULT_RUNNER, "built-in");
         byName.put("cpu", MohsRunner.cpu("cpu").build());
         sourceOf.put("cpu", "built-in");
 
-        properties.getRunners().forEach((name, spec) -> {
+        properties.runners().forEach((name, spec) -> {
             requireNoRunnerConflict(name, "mohs.runners." + name, sourceOf);
             byName.put(name, toMohsRunner(name, spec));
             sourceOf.put(name, "mohs.runners." + name);
@@ -207,32 +207,32 @@ public class MohsAutoConfiguration {
     private static MohsRunner toMohsRunner(String name, MohsProperties.Runner spec) {
         String prefix = "mohs.runners." + name;
         try {
-            return switch (spec.getMode()) {
+            return switch (spec.mode()) {
                 case IO -> {
-                    requireUnset(prefix, spec.getMode(), "core-size", spec.getCoreSize());
-                    requireUnset(prefix, spec.getMode(), "max-size", spec.getMaxSize());
-                    requireUnset(prefix, spec.getMode(), "queue-capacity", spec.getQueueCapacity());
-                    requireUnset(prefix, spec.getMode(), "keep-alive", spec.getKeepAlive());
+                    requireUnset(prefix, spec.mode(), "core-size", spec.coreSize());
+                    requireUnset(prefix, spec.mode(), "max-size", spec.maxSize());
+                    requireUnset(prefix, spec.mode(), "queue-capacity", spec.queueCapacity());
+                    requireUnset(prefix, spec.mode(), "keep-alive", spec.keepAlive());
                     MohsRunner.IoBuilder builder = MohsRunner.io(name);
-                    if (spec.getMax() != null) {
-                        builder.maxConcurrent(spec.getMax());
+                    if (spec.max() != null) {
+                        builder.maxConcurrent(spec.max());
                     }
                     yield builder.build();
                 }
                 case CPU -> {
-                    requireUnset(prefix, spec.getMode(), "max", spec.getMax());
+                    requireUnset(prefix, spec.mode(), "max", spec.max());
                     MohsRunner.CpuBuilder builder = MohsRunner.cpu(name);
-                    if (spec.getCoreSize() != null) {
-                        builder.coreSize(spec.getCoreSize());
+                    if (spec.coreSize() != null) {
+                        builder.coreSize(spec.coreSize());
                     }
-                    if (spec.getMaxSize() != null) {
-                        builder.maxSize(spec.getMaxSize());
+                    if (spec.maxSize() != null) {
+                        builder.maxSize(spec.maxSize());
                     }
-                    if (spec.getQueueCapacity() != null) {
-                        builder.queueCapacity(spec.getQueueCapacity());
+                    if (spec.queueCapacity() != null) {
+                        builder.queueCapacity(spec.queueCapacity());
                     }
-                    if (spec.getKeepAlive() != null) {
-                        builder.keepAlive(spec.getKeepAlive());
+                    if (spec.keepAlive() != null) {
+                        builder.keepAlive(spec.keepAlive());
                     }
                     yield builder.build();
                 }
@@ -254,7 +254,7 @@ public class MohsAutoConfiguration {
             ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsProperties properties,
             ExecutionWindowRegistry mohsExecutionWindowRegistry) {
         return new JdbcClaimer(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore,
-                properties.getEngine().getLeaseTtl(), mohsExecutionWindowRegistry);
+                properties.engine().leaseTtl(), mohsExecutionWindowRegistry);
     }
 
     /** Sem caminho via propriedade — {@link ExecutionWindow} só existe via {@code @Bean} (ver Javadoc da classe). */
@@ -301,16 +301,16 @@ public class MohsAutoConfiguration {
             RunnerRegistry mohsRunnerRegistry
     ) {
         return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper, mohsClock,
-                properties.getEngine().getPollInterval(), properties.getEngine().getBatchSize(),
+                properties.engine().pollInterval(), properties.engine().batchSize(),
                 mohsTickScheduler, mohsRunnerRegistry);
     }
 
     /** {@link SmartLifecycle} — ver Javadoc de {@link MohsEngineLifecycle} sobre a adaptação e o WARN de lease × timeout. */
     @Bean
     public SmartLifecycle mohsEngineLifecycle(Engine mohsEngine, MohsProperties properties, JobStore mohsJobStore) {
-        boolean autoStartup = properties.getLifecycle().getStartMode() == MohsProperties.Lifecycle.StartMode.AUTO;
-        return new MohsEngineLifecycle(mohsEngine, autoStartup, properties.getLifecycle().getShutdown().getGracePeriod(),
-                mohsJobStore, properties.getEngine().getLeaseTtl());
+        boolean autoStartup = properties.lifecycle().startMode() == MohsProperties.Lifecycle.StartMode.AUTO;
+        return new MohsEngineLifecycle(mohsEngine, autoStartup, properties.lifecycle().shutdown().gracePeriod(),
+                mohsJobStore, properties.engine().leaseTtl());
     }
 
     @Bean
