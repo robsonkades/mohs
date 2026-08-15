@@ -127,6 +127,21 @@ public final class MohsImpl implements Mohs {
         return handlerRegistry.payloadType(jobKey);
     }
 
+    /**
+     * ADR-0034 — a orquestração das duas metades do cancel: primeiro o CAS
+     * de pendente; perdeu (a linha já roda, ou já terminou), tenta a flag
+     * cooperativa de {@code RUNNING}. Ambas no-op em terminal — cancelar o
+     * que já decidiu não muda nada, e o retorno mostra o estado que valeu.
+     */
+    @Override
+    public Optional<Execution> cancel(ExecutionId executionId) {
+        Objects.requireNonNull(executionId, "executionId");
+        if (!executionStore.cancelIfPending(executionId)) {
+            executionStore.requestCancellation(executionId);
+        }
+        return executionStore.find(executionId);
+    }
+
     @Override
     public Optional<Execution> findExecution(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");

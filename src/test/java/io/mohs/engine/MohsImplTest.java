@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -74,6 +75,41 @@ class MohsImplTest {
     @Test
     void findJobReturnsEmptyForAnUnknownKey() {
         assertThat(mohs.findJob(JobKey.of("ghost"))).isEmpty();
+    }
+
+    /** ADR-0034: pendente cancela por CAS direto — o caminho da flag nem é tentado. */
+    @Test
+    void cancelOfAPendingExecutionCancelsDirectly() {
+        ExecutionId id = ExecutionId.of("exec-1");
+        Execution cancelled = new Execution(id, JobKey.of("welcome-email"), ExecutionState.CANCELLED, NOW, null, List.of(), "test");
+        when(executionStore.cancelIfPending(id)).thenReturn(true);
+        when(executionStore.find(id)).thenReturn(Optional.of(cancelled));
+
+        assertThat(mohs.cancel(id)).contains(cancelled);
+        verify(executionStore, never()).requestCancellation(any());
+    }
+
+    /** ADR-0034: o CAS perdeu (execução já roda) → cai no caminho da flag; o retorno é o estado corrente, não necessariamente terminal — o contrato do 202. */
+    @Test
+    void cancelOfARunningExecutionFallsThroughToTheFlag() {
+        ExecutionId id = ExecutionId.of("exec-1");
+        Execution running = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RUNNING, NOW, null, List.of(), "test");
+        when(executionStore.cancelIfPending(id)).thenReturn(false);
+        when(executionStore.requestCancellation(id)).thenReturn(true);
+        when(executionStore.find(id)).thenReturn(Optional.of(running));
+
+        assertThat(mohs.cancel(id)).contains(running);
+        verify(executionStore).requestCancellation(id);
+    }
+
+    @Test
+    void cancelOfAnUnknownExecutionIsEmpty() {
+        ExecutionId id = ExecutionId.of("ghost");
+        when(executionStore.cancelIfPending(id)).thenReturn(false);
+        when(executionStore.requestCancellation(id)).thenReturn(false);
+        when(executionStore.find(id)).thenReturn(Optional.empty());
+
+        assertThat(mohs.cancel(id)).isEmpty();
     }
 
     @Test

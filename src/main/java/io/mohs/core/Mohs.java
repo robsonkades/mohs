@@ -54,6 +54,20 @@ public interface Mohs {
      */
     void remove(JobKey jobKey);
 
+    /**
+     * Cancela uma execução (ADR-0034). Pendente ({@code ENQUEUED}/
+     * {@code RETRY_SCHEDULED}) vira {@code CANCELLED} na hora;
+     * {@code RUNNING} recebe o pedido cooperativo — o node dono observa em
+     * até um poll-interval e o handler decide quando parar (via
+     * {@link io.mohs.core.execution.JobContext#cancellationRequested()});
+     * estado terminal não muda. Nunca é imediato nem garantido: uma
+     * conclusão pode vencer a corrida, e nesse caso ela vale.
+     *
+     * @return a execução no estado corrente logo após o pedido — não
+     *         necessariamente terminal; vazio se o id não existe
+     */
+    Optional<Execution> cancel(ExecutionId executionId);
+
     Optional<JobSnapshot> findJob(JobKey jobKey);
 
     /** Todos os jobs registrados — cardinalidade limitada (definição, não execução), sem paginação. */
