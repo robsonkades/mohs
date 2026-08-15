@@ -596,6 +596,11 @@ class EngineTest {
         }
 
         @Override
+        public Set<ExecutionId> renewLeases(String nodeId, List<ExecutionId> ids, Instant leaseExpiresAt) {
+            return delegate.renewLeases(nodeId, ids, leaseExpiresAt);
+        }
+
+        @Override
         public Execution insert(Execution execution, Object payload) {
             return delegate.insert(execution, payload);
         }

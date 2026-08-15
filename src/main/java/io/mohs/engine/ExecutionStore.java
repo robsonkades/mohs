@@ -152,6 +152,20 @@ public interface ExecutionStore {
     }
 
     /**
+     * Renova a lease das execuções {@code RUNNING} deste node (ADR-0012:
+     * "o motor renova a lease de toda Execution RUNNING a cada ciclo de
+     * poll" — em lote, cluster-wide, nunca por job). O guard
+     * {@code state = 'RUNNING' AND node_id = :nodeId} é o fence natural:
+     * renovação perde para qualquer reclaim/conclusão concorrente e nunca
+     * ressuscita a lease de uma execução que já saiu deste node.
+     *
+     * @return os ids efetivamente renovados — subconjunto de {@code ids};
+     *         um id ausente perdeu a posse (reclaim do reaper ou conclusão
+     *         concorrente) e o chamador decide o que logar.
+     */
+    Set<ExecutionId> renewLeases(String nodeId, List<ExecutionId> ids, Instant leaseExpiresAt);
+
+    /**
      * Busca várias execuções por id numa única consulta — evita N+1 quando
      * o chamador já tem a lista de ids em mãos (ex.: hidratar o resultado
      * de um claim em lote). Limitado pelo tamanho de {@code ids}, por isso

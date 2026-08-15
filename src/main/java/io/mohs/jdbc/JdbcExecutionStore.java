@@ -243,6 +243,58 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return completedIds;
     }
 
+    /**
+     * ADR-0012 — renovação em lote por node, {@code batchUpdate} por linha
+     * com o {@code int[]} como confirmação exata (mesmo padrão de
+     * {@link #completeAll}); {@code SUCCESS_NO_INFO} recai na confirmação
+     * por {@code SELECT} da lease recém-gravada.
+     */
+    @Override
+    public Set<ExecutionId> renewLeases(String nodeId, List<ExecutionId> ids, Instant leaseExpiresAt) {
+        Objects.requireNonNull(nodeId, "nodeId");
+        Objects.requireNonNull(ids, "ids");
+        Objects.requireNonNull(leaseExpiresAt, "leaseExpiresAt");
+        if (ids.isEmpty()) {
+            return Set.of();
+        }
+        Timestamp newLease = JdbcTimestamps.toUtcTimestamp(leaseExpiresAt);
+        MapSqlParameterSource[] params = ids.stream()
+                .map(id -> new MapSqlParameterSource()
+                        .addValue("id", id.value())
+                        .addValue("nodeId", nodeId)
+                        .addValue("leaseExpiresAt", newLease))
+                .toArray(MapSqlParameterSource[]::new);
+        int[] updated = jdbcTemplate.batchUpdate("""
+                UPDATE mohs_executions SET lease_expires_at = :leaseExpiresAt
+                WHERE id = :id AND state = 'RUNNING' AND node_id = :nodeId
+                """, params);
+
+        Set<ExecutionId> renewed = new LinkedHashSet<>();
+        for (int i = 0; i < updated.length; i++) {
+            if (updated[i] == Statement.SUCCESS_NO_INFO) {
+                return confirmRenewalsBySelect(nodeId, ids, newLease);
+            }
+            if (updated[i] > 0) {
+                renewed.add(ids.get(i));
+            }
+        }
+        return renewed;
+    }
+
+    /** Fallback raro do {@code SUCCESS_NO_INFO} — confirma pela lease recém-gravada, em chunks (DB-11). */
+    private Set<ExecutionId> confirmRenewalsBySelect(String nodeId, List<ExecutionId> ids, Timestamp newLease) {
+        Set<ExecutionId> renewed = new LinkedHashSet<>();
+        for (List<String> chunk : chunksOf(ids.stream().map(ExecutionId::value).toList())) {
+            renewed.addAll(jdbcTemplate.query("""
+                    SELECT id FROM mohs_executions
+                    WHERE id IN (:ids) AND state = 'RUNNING' AND node_id = :nodeId AND lease_expires_at = :leaseExpiresAt
+                    """,
+                    new MapSqlParameterSource().addValue("ids", chunk).addValue("nodeId", nodeId).addValue("leaseExpiresAt", newLease),
+                    (rs, _) -> ExecutionId.of(rs.getString("id"))));
+        }
+        return renewed;
+    }
+
     /** Particiona por presença de fence — mesmo par de templates do caminho unitário; na prática o lote do reaper é uniformemente fenced. */
     private Set<ExecutionId> transitionAll(List<ExecutionStore.CompletionRequest> requests) {
         Map<Boolean, List<ExecutionStore.CompletionRequest>> byFence = requests.stream()

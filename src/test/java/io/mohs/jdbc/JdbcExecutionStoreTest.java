@@ -339,6 +339,35 @@ class JdbcExecutionStoreTest {
         assertThat(store.find(ExecutionId.of("019abc-fence-2")).orElseThrow().state()).isEqualTo(ExecutionState.FAILED);
     }
 
+    /** ADR-0012: a renovação é fenced por node+estado — nunca ressuscita lease de execução que saiu de RUNNING nem toca a posse de outro node. */
+    @Test
+    void renewLeasesTouchesOnlyOwnRunningExecutions() {
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        seedRunningExecution("019abc-renew-1", "welcome-email");
+        seedRunningExecution("019abc-renew-2", "welcome-email");
+        seedRunningExecution("019abc-renew-3", "welcome-email");
+        raw.update("UPDATE mohs_executions SET node_id = 'node-a' WHERE id IN ('019abc-renew-1', '019abc-renew-3')");
+        raw.update("UPDATE mohs_executions SET node_id = 'node-b' WHERE id = '019abc-renew-2'");
+        raw.update("UPDATE mohs_executions SET state = 'RETRY_SCHEDULED' WHERE id = '019abc-renew-3'");
+        Instant newLease = clock.instant().plusSeconds(30);
+
+        Set<ExecutionId> renewed = store.renewLeases("node-a",
+                List.of(ExecutionId.of("019abc-renew-1"), ExecutionId.of("019abc-renew-2"), ExecutionId.of("019abc-renew-3")),
+                newLease);
+
+        assertThat(renewed).containsExactly(ExecutionId.of("019abc-renew-1"));
+        Timestamp renewedLease = raw.queryForObject(
+                "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", Timestamp.class, "019abc-renew-1");
+        assertThat(JdbcTimestamps.fromUtcTimestamp(renewedLease)).isEqualTo(newLease);
+        assertThat(raw.queryForObject(
+                "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", Timestamp.class, "019abc-renew-2")).isNull();
+    }
+
+    @Test
+    void renewLeasesWithNoIdsIsANoOp() {
+        assertThat(store.renewLeases("node-a", List.of(), clock.instant())).isEmpty();
+    }
+
     /** As duas combinações inválidas são bug do chamador — rejeitadas na construção, nunca gravadas pela metade. */
     @Test
     void completionRequestRejectsRetryAtStateMismatches() {
