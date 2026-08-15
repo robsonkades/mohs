@@ -20,6 +20,9 @@ import javax.sql.DataSource;
 import org.jspecify.annotations.Nullable;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import tools.jackson.databind.ObjectMapper;
 
@@ -31,6 +34,7 @@ import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.JobStore;
+import io.mohs.jdbc.dialect.JdbcDialect;
 
 /**
  * {@link ExecutionStore} sobre {@code mohs_executions}/{@code mohs_attempts}
@@ -41,7 +45,21 @@ import io.mohs.engine.JobStore;
  * <p>{@link #insert} é o "insert do terminal" da cláusula 4 da ADR-0003:
  * usa o mesmo {@code DataSource} do chamador via
  * {@link NamedParameterJdbcTemplate}, que participa da transação Spring
- * já ativa quando existe uma — nenhuma transação própria é aberta aqui.
+ * já ativa quando existe uma — nenhuma transação própria é aberta por ele.
+ *
+ * <p>{@link #complete}/{@link #completeAll} são a exceção: a transição de
+ * estado, o {@code INSERT} do {@link Attempt} e a devolução da vaga de
+ * concorrência ({@code JobStore.decrementRunningExecutions}) são um
+ * invariante que cruza duas tabelas — Unit of Work (PoEAA), atomicidade
+ * de transação (DDIA cap. 7). Sem fronteira de atomicidade, um crash
+ * entre o CAS e o decremento deixaria {@code running_execution_count}
+ * incrementado pra sempre (a execução já não está {@code RUNNING}, o
+ * reaper nunca a vê) — pra um job com {@code allowConcurrentExecutions =
+ * false}, o mutex vaza e o job para de rodar permanentemente.
+ * {@code PROPAGATION_REQUIRED}: participa da transação do reaper quando
+ * ela existir (sincronização por {@code DataSource}, mesmo mecanismo
+ * documentado em {@link JdbcClaimer}), abre a própria no caminho quente
+ * do dispatch, que roda sem transação ativa.
  */
 public final class JdbcExecutionStore implements ExecutionStore {
 
@@ -51,13 +69,20 @@ public final class JdbcExecutionStore implements ExecutionStore {
     private static final String EXECUTION_COLUMNS = "id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key";
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
     private final Clock clock;
     private final ObjectMapper objectMapper;
+    private final JdbcDialect dialect;
 
-    public JdbcExecutionStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
+    public JdbcExecutionStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper, JdbcDialect dialect) {
         this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
+        this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        // mesmo raciocínio da DBTUNE-4 em JdbcClaimer: CAS guardado assume
+        // "última escrita vence" (READ COMMITTED), não herda o default do banco.
+        this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.clock = Objects.requireNonNull(clock, "clock");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.dialect = Objects.requireNonNull(dialect, "dialect");
     }
 
     @Override
@@ -137,7 +162,11 @@ public final class JdbcExecutionStore implements ExecutionStore {
         Objects.requireNonNull(attempt, "attempt");
         Objects.requireNonNull(newState, "newState");
         Objects.requireNonNull(jobStore, "jobStore");
+        return Boolean.TRUE.equals(transactionTemplate.execute(_ ->
+                completeWithinTransaction(id, jobKey, attempt, newState, jobStore)));
+    }
 
+    private boolean completeWithinTransaction(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, JobStore jobStore) {
         int updated = jdbcTemplate.update(
                 "UPDATE mohs_executions SET state = :newState WHERE id = :id AND state = 'RUNNING'",
                 new MapSqlParameterSource()
@@ -171,7 +200,12 @@ public final class JdbcExecutionStore implements ExecutionStore {
         if (requests.isEmpty()) {
             return Set.of();
         }
+        // requireNonNull só documenta o invariante pro @NullMarked (JAVA-8) —
+        // o callback sempre devolve um Set.
+        return Objects.requireNonNull(transactionTemplate.execute(_ -> completeAllWithinTransaction(requests, jobStore)));
+    }
 
+    private Set<ExecutionId> completeAllWithinTransaction(List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
         Map<String, ExecutionStore.CompletionRequest> byId = requests.stream()
                 .collect(Collectors.toMap(r -> r.id().value(), r -> r));
         Set<ExecutionId> completedIds = new LinkedHashSet<>();
@@ -237,6 +271,20 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return row.map(r -> hydrate(r, fetchAttempts(r.id())));
     }
 
+    /** No máximo uma linha — unicidade garantida por {@code uq_mohs_executions_idem} no schema. */
+    @Override
+    public Optional<Execution> findByIdempotencyKey(JobKey jobKey, String idempotencyKey) {
+        Objects.requireNonNull(jobKey, "jobKey");
+        Objects.requireNonNull(idempotencyKey, "idempotencyKey");
+        Optional<ExecutionRow> row = JdbcSupport.findOne(jdbcTemplate,
+                "SELECT " + EXECUTION_COLUMNS + " FROM mohs_executions WHERE job_key = :jobKey AND idempotency_key = :idempotencyKey",
+                new MapSqlParameterSource()
+                        .addValue("jobKey", jobKey.value())
+                        .addValue("idempotencyKey", idempotencyKey),
+                JdbcExecutionStore::mapRow);
+        return row.map(r -> hydrate(r, fetchAttempts(r.id())));
+    }
+
     /**
      * DBTUNE-3: busca as linhas em lote e SÓ DEPOIS, com o cursor da query
      * externa já fechado, busca os attempts de todas elas numa segunda
@@ -292,6 +340,48 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 "SELECT " + EXECUTION_COLUMNS + " FROM mohs_executions",
                 new MapSqlParameterSource(),
                 (rs, _) -> hydrateEagerly(mapRow(rs)));
+    }
+
+    /**
+     * Sem lock, sem cursor aberto (ao contrário de {@link #findAll}/
+     * {@link #findByJobKey}) — resultado limitado por {@code limit},
+     * então batch de attempts como {@link #findByIds} (DBTUNE-3), não N+1.
+     */
+    @Override
+    public List<Execution> findPage(@Nullable JobKey jobKey, @Nullable ExecutionState status, @Nullable Instant from,
+            @Nullable Instant to, @Nullable ExecutionId cursor, int limit) {
+        MapSqlParameterSource params = new MapSqlParameterSource().addValue("limit", limit);
+        List<String> conditions = new ArrayList<>();
+        if (jobKey != null) {
+            conditions.add("job_key = :jobKey");
+            params.addValue("jobKey", jobKey.value());
+        }
+        if (status != null) {
+            conditions.add("state = :status");
+            params.addValue("status", status.name());
+        }
+        if (from != null) {
+            conditions.add("scheduled_at >= :from");
+            params.addValue("from", JdbcTimestamps.toUtcTimestamp(from));
+        }
+        if (to != null) {
+            conditions.add("scheduled_at <= :to");
+            params.addValue("to", JdbcTimestamps.toUtcTimestamp(to));
+        }
+        if (cursor != null) {
+            conditions.add("id < :cursor");
+            params.addValue("cursor", cursor.value());
+        }
+        String where = conditions.isEmpty() ? "" : " WHERE " + String.join(" AND ", conditions);
+
+        String sql = "SELECT " + dialect.topClause() + EXECUTION_COLUMNS + " FROM mohs_executions" + where
+                + " ORDER BY id DESC " + dialect.limitClause();
+
+        List<ExecutionRow> rows = jdbcTemplate.query(sql, params, (rs, _) -> mapRow(rs));
+        Map<String, List<Attempt>> attemptsByExecutionId = fetchAttemptsByExecutionIds(rows.stream().map(r -> r.id().value()).toList());
+        return rows.stream()
+                .map(row -> hydrate(row, attemptsByExecutionId.getOrDefault(row.id().value(), List.of())))
+                .toList();
     }
 
     private Execution hydrateEagerly(ExecutionRow row) {

@@ -26,6 +26,13 @@ public interface ScheduleCommand {
     @CheckReturnValue
     ScheduleCommand as(String actor);
 
+    /**
+     * Dedupe por {@code (job, key)} — Idempotent Receiver: um terminal com a
+     * mesma chave de uma execução já gravada não duplica nada e devolve o
+     * {@link Enqueued} original (mesmo recibo, mesma {@code ExecutionId}).
+     * A janela de ~24h do design ainda não existe: hoje a chave vale pra
+     * sempre — reutilizar uma chave antiga devolve a execução antiga.
+     */
     @CheckReturnValue
     ScheduleCommand idempotencyKey(String key);
 

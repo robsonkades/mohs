@@ -36,6 +36,7 @@ import io.mohs.core.job.JobKey;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.jdbc.JdbcTimestamps;
+import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -62,7 +63,7 @@ class DispatcherTest {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         jobStore = new JdbcJobStore(dataSource, clock);
-        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
         handlerRegistry = new HandlerRegistry();
         listener = new RecordingListener();
         eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);

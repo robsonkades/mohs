@@ -3,6 +3,7 @@ package io.mohs.core.execution;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PriorityTest {
 
@@ -21,5 +22,20 @@ class PriorityTest {
         assertThat(Priority.HIGH.value()).isLessThan(Priority.NORMAL.value());
         assertThat(Priority.NORMAL.value()).isLessThan(Priority.LOW.value());
         assertThat(Priority.LOW.value()).isLessThan(Priority.BACKGROUND.value());
+    }
+
+    /** Todo peso persistido resolve de volta — guarda contra drift entre os pesos declarados e o lookup da borda JDBC. */
+    @Test
+    void fromValueRoundTripsEveryConstant() {
+        for (Priority priority : Priority.values()) {
+            assertThat(Priority.fromValue(priority.value())).isSameAs(priority);
+        }
+    }
+
+    @Test
+    void fromValueRejectsAnUnknownWeight() {
+        assertThatThrownBy(() -> Priority.fromValue(7))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("7");
     }
 }

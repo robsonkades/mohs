@@ -31,6 +31,9 @@ import tools.jackson.databind.json.JsonMapper;
 import io.mohs.core.EngineState;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
+import io.mohs.jdbc.dialect.H2JdbcDialect;
+import io.mohs.jdbc.dialect.JdbcDialect;
+import io.mohs.jdbc.dialect.PostgresJdbcDialect;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -134,6 +137,7 @@ class LivenessLoadHarness {
             String dropIndexSql, String createIndexSql, String explainSql) throws Exception {
         DataSource raw = rawDataSourceFactory.get();
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
+        JdbcDialect dialect = "PostgreSQL".equals(label) ? new PostgresJdbcDialect() : new H2JdbcDialect();
         try (HikariDataSource pool = pooledDataSource(raw)) {
             seedHistory(pool, clock);
 
@@ -145,7 +149,7 @@ class LivenessLoadHarness {
             seedExpiredRunningBacklog(new JdbcTemplate(pool), new JdbcJobStore(pool, clock), "before");
             List<String> explainBefore = explain(raw, explainSql);
             writeFile("liveness-reaper-" + label.toLowerCase() + "-before", explainBefore);
-            double throughputBefore = runReclaim(pool, clock);
+            double throughputBefore = runReclaim(pool, clock, dialect);
 
             try (Connection connection = raw.getConnection(); Statement statement = connection.createStatement()) {
                 statement.execute(createIndexSql);
@@ -153,15 +157,15 @@ class LivenessLoadHarness {
             seedExpiredRunningBacklog(new JdbcTemplate(pool), new JdbcJobStore(pool, clock), "after");
             List<String> explainAfter = explain(raw, explainSql);
             writeFile("liveness-reaper-" + label.toLowerCase() + "-after", explainAfter);
-            double throughputAfter = runReclaim(pool, clock);
+            double throughputAfter = runReclaim(pool, clock, dialect);
 
             return new ReclaimResult(label, throughputBefore, throughputAfter,
                     scanSummary(explainBefore), scanSummary(explainAfter));
         }
     }
 
-    private double runReclaim(DataSource dataSource, MutableClock clock) {
-        JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+    private double runReclaim(DataSource dataSource, MutableClock clock, JdbcDialect dialect) {
+        JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), dialect);
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
         JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
 

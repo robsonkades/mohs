@@ -20,6 +20,8 @@ import io.mohs.core.schedule.OnDemandSpec;
 import io.mohs.core.schedule.Schedule;
 import io.mohs.engine.JobHandler;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * Vocabulário puro do scanner de {@link MohsJob} — sem estado, sem Spring,
  * testável isolado. {@link MohsJobScanner} é a única chamadora;
@@ -41,7 +43,7 @@ final class MohsJobs {
      * original em {@code Attempt.error()}, não o nome de
      * "InvocationTargetException".
      */
-    static JobHandler adaptHandler(Object bean, Method method) {
+    static AdaptedHandler adaptHandler(Object bean, Method method) {
         Objects.requireNonNull(bean, "bean");
         Objects.requireNonNull(method, "method");
         method.setAccessible(true);
@@ -71,7 +73,7 @@ final class MohsJobs {
         int finalPayloadIndex = payloadIndex;
         int finalContextIndex = contextIndex;
         int argCount = parameters.length;
-        return (payload, ctx) -> {
+        JobHandler handler = (payload, ctx) -> {
             Object[] args = new Object[argCount];
             if (finalPayloadIndex != -1) {
                 args[finalPayloadIndex] = payload;
@@ -92,10 +94,24 @@ final class MohsJobs {
                 throw e;
             }
         };
+        Class<?> payloadType = payloadIndex == -1 ? null : parameters[payloadIndex].getType();
+        return new AdaptedHandler(handler, payloadType);
     }
 
     private static String unsupportedSignature(Method method, String reason) {
         return "@MohsJob method " + method.getDeclaringClass().getName() + "#" + method.getName() + " " + reason;
+    }
+
+    /**
+     * {@link #adaptHandler} devolve os dois juntos porque nascem do mesmo
+     * reflection sobre o método anotado — {@code payloadType} é
+     * {@code null} quando o método não declara parâmetro de payload
+     * nenhum (ex.: só {@link JobContext}, ou nenhum parâmetro). Usado por
+     * {@code io.mohs.rest} (via {@code HandlerRegistry#payloadType}) pra
+     * converter o corpo JSON do {@code POST .../schedule} pro tipo real
+     * antes de agendar, em vez de persistir um {@code Map} cru.
+     */
+    record AdaptedHandler(JobHandler handler, @Nullable Class<?> payloadType) {
     }
 
     /**

@@ -1,15 +1,23 @@
 package io.mohs.engine;
 
 import java.time.Clock;
+import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 import io.mohs.core.Batch;
 import io.mohs.core.BatchBuilder;
+import io.mohs.core.ExecutionQuery;
+import io.mohs.core.JobSnapshot;
 import io.mohs.core.Mohs;
 import io.mohs.core.MohsLifecycle;
 import io.mohs.core.ScheduleCommand;
+import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
+import io.mohs.core.execution.Execution;
+import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.job.JobRef;
 
@@ -34,12 +42,15 @@ public final class MohsImpl implements Mohs {
 
     private final JobStore jobStore;
     private final ExecutionStore executionStore;
+    private final HandlerRegistry handlerRegistry;
     private final Clock clock;
     private final MohsLifecycle lifecycle;
+    private final NextFireCalculator nextFireCalculator = new NextFireCalculator();
 
-    public MohsImpl(JobStore jobStore, ExecutionStore executionStore, Clock clock, MohsLifecycle lifecycle) {
+    public MohsImpl(JobStore jobStore, ExecutionStore executionStore, HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
+        this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
     }
@@ -71,14 +82,73 @@ public final class MohsImpl implements Mohs {
         jobStore.upsert(definition);
     }
 
+    /** Job desconhecido (ou já aposentado) é no-op — mesma postura de {@link Mohs#pause}. */
     @Override
     public void remove(JobKey jobKey) {
         Objects.requireNonNull(jobKey, "jobKey");
-        jobStore.remove(jobKey);
+        jobStore.find(jobKey).ifPresent(stored -> {
+            if (stored.definition().source() == DefinitionSource.ANNOTATION) {
+                throw new IllegalArgumentException("job '" + jobKey.value()
+                        + "' is @MohsJob-annotated — Mohs.remove only retires PROGRAMMATIC definitions; "
+                        + "remove the annotation instead and the scanner marks it ORPHANED on the next boot");
+            }
+            jobStore.remove(jobKey);
+        });
+    }
+
+    @Override
+    public Optional<JobSnapshot> findJob(JobKey jobKey) {
+        Objects.requireNonNull(jobKey, "jobKey");
+        return jobStore.find(jobKey).map(this::toSnapshot);
+    }
+
+    @Override
+    public List<JobSnapshot> jobs() {
+        try (var stored = jobStore.findAll()) {
+            return stored.map(this::toSnapshot).toList();
+        }
+    }
+
+    @Override
+    public void pause(JobKey jobKey) {
+        Objects.requireNonNull(jobKey, "jobKey");
+        jobStore.pause(jobKey);
+    }
+
+    @Override
+    public void resume(JobKey jobKey) {
+        Objects.requireNonNull(jobKey, "jobKey");
+        jobStore.resume(jobKey);
+    }
+
+    @Override
+    public Optional<Class<?>> payloadType(JobKey jobKey) {
+        Objects.requireNonNull(jobKey, "jobKey");
+        return handlerRegistry.payloadType(jobKey);
+    }
+
+    @Override
+    public Optional<Execution> findExecution(ExecutionId executionId) {
+        Objects.requireNonNull(executionId, "executionId");
+        return executionStore.find(executionId);
+    }
+
+    @Override
+    public List<Execution> executions(ExecutionQuery query) {
+        Objects.requireNonNull(query, "query");
+        // cursor em branco (ex.: ?cursor= na REST) = primeira página, não IAE de ExecutionId.of
+        String rawCursor = query.cursor();
+        ExecutionId cursor = rawCursor == null || rawCursor.isBlank() ? null : ExecutionId.of(rawCursor);
+        return executionStore.findPage(query.jobKey(), query.status(), query.from(), query.to(), cursor, query.limit());
     }
 
     @Override
     public MohsLifecycle lifecycle() {
         return lifecycle;
+    }
+
+    private JobSnapshot toSnapshot(StoredJob stored) {
+        Instant nextFireAt = stored.paused() ? null : nextFireCalculator.nextFireAfter(stored.definition().schedule(), clock.instant()).orElse(null);
+        return new JobSnapshot(stored.definition(), stored.paused(), nextFireAt);
     }
 }

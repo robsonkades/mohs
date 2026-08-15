@@ -206,7 +206,7 @@ class ClaimIndexTuningHarness {
 
     private double measureThroughput(DataSource pool, JdbcDialect dialect, MutableClock clock) throws Exception {
         JdbcJobStore jobStore = new JdbcJobStore(pool, clock);
-        JdbcExecutionStore executionStore = new JdbcExecutionStore(pool, clock, JsonMapper.builder().build());
+        JdbcExecutionStore executionStore = new JdbcExecutionStore(pool, clock, JsonMapper.builder().build(), dialect);
         AtomicInteger claimedTotal = new AtomicInteger();
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         List<Future<?>> nodes = new ArrayList<>();

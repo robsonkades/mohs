@@ -61,7 +61,7 @@ class JdbcClaimerTest {
         dataSource = freshH2DataSource();
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
         jobStore = new JdbcJobStore(dataSource, clock);
         claimer = newClaimer();
     }

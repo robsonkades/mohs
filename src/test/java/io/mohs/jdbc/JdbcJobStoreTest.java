@@ -230,14 +230,52 @@ class JdbcJobStoreTest {
         assertThat(store.find(key)).map(StoredJob::paused).contains(false);
     }
 
+    /** mohs_executions.job_key tem FK pra mohs_job_definitions — o caso normal de um job aposentado é ter execuções. */
+    private void seedExecution(String id, String jobKey, String state) {
+        new JdbcTemplate(dataSource).update("""
+                INSERT INTO mohs_executions (id, job_key, state, scheduled_at, actor, payload, payload_type, created_at)
+                VALUES (?, ?, ?, ?, 'test', '{}', 'java.lang.String', ?)
+                """, id, jobKey, state,
+                JdbcTimestamps.toUtcTimestamp(clock.instant()), JdbcTimestamps.toUtcTimestamp(clock.instant()));
+    }
+
+    /**
+     * Soft-retire ({@code Mohs.remove}: "cancela fires futuros, preserva
+     * histórico"): a definição some das leituras, mas a linha fica — a FK
+     * de {@code mohs_executions} nunca derruba a chamada — e as execuções
+     * {@code ENQUEUED} são canceladas, nunca deixadas na fila.
+     */
     @Test
-    void removeDeletesTheRow() {
+    void removeRetiresTheJobCancellingEnqueuedAndPreservingHistory() {
         JobKey key = JobKey.of("welcome-email");
         store.upsert(definition("welcome-email", new OnDemandSpec()));
+        seedExecution("exec-done", "welcome-email", "SUCCEEDED");
+        seedExecution("exec-queued", "welcome-email", "ENQUEUED");
 
         store.remove(key);
 
         assertThat(store.find(key)).isEmpty();
+        try (Stream<StoredJob> all = store.findAll()) {
+            assertThat(all).isEmpty();
+        }
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        assertThat(raw.queryForObject("SELECT state FROM mohs_executions WHERE id = ?", String.class, "exec-done")).isEqualTo("SUCCEEDED");
+        assertThat(raw.queryForObject("SELECT state FROM mohs_executions WHERE id = ?", String.class, "exec-queued")).isEqualTo("CANCELLED");
+    }
+
+    /** Mesmo racional de {@link #upsertClearsOrphanedOnReupsert}: o upsert acontecer prova que uma fonte real quer o job de novo. */
+    @Test
+    void upsertAfterRemoveResurrectsTheDefinitionWithItsHistory() {
+        JobKey key = JobKey.of("welcome-email");
+        store.upsert(definition("welcome-email", new OnDemandSpec()));
+        seedExecution("exec-done", "welcome-email", "SUCCEEDED");
+        store.remove(key);
+
+        store.upsert(definition("welcome-email", new OnDemandSpec()));
+
+        assertThat(store.find(key)).isPresent();
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        assertThat(raw.queryForObject("SELECT COUNT(*) FROM mohs_executions WHERE job_key = ?", Integer.class, "welcome-email")).isEqualTo(1);
     }
 
     /** CONC-2 — dois nós vendo 0 linhas no UPDATE e disputando o INSERT de primeira vez. */

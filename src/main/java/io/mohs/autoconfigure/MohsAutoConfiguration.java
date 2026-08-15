@@ -71,6 +71,18 @@ import io.mohs.jdbc.dialect.SqlServerJdbcDialect;
  * {@link Qualifier} explícito em cada ponto de injeção em vez de confiar
  * no fallback de resolução por nome do Spring (CLAUDE.md: "não usar mágica
  * onde código explícito resolve").
+ *
+ * <p>Todo bean de tipo genérico do framework ({@link Clock},
+ * {@link ThreadPoolTaskScheduler}, {@link AsyncTaskExecutor}) é
+ * {@code defaultCandidate = false}: são infraestrutura interna do motor,
+ * não API compartilhada com o hospedeiro. Sem isso, a mera presença do
+ * Mohs no classpath suprimia o {@code taskScheduler}/
+ * {@code applicationTaskExecutor} auto-configurados do app (as conditions
+ * do Boot são {@code @ConditionalOnMissingBean} por tipo, e esta
+ * auto-config ordena antes das do Boot) e um segundo {@code Clock} no
+ * contexto quebrava injeção não qualificada que o app já tinha —
+ * degradação silenciosa do hospedeiro. Os pontos de injeção internos
+ * continuam funcionando via {@link Qualifier}.
  */
 @AutoConfiguration(after = DataSourceAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "mohs", name = "enabled", matchIfMissing = true)
@@ -93,7 +105,7 @@ public class MohsAutoConfiguration {
         };
     }
 
-    @Bean
+    @Bean(defaultCandidate = false)
     @Qualifier("mohsClockSyncScheduler")
     @ConditionalOnProperty(prefix = "mohs.time", name = "mode", havingValue = "database")
     public ThreadPoolTaskScheduler mohsClockSyncScheduler() {
@@ -101,7 +113,8 @@ public class MohsAutoConfiguration {
     }
 
     /** {@code database}: sincroniza uma vez no boot e agenda resync periódico (ver Javadoc de {@link io.mohs.engine.SyncableClock}). */
-    @Bean
+    @Bean(defaultCandidate = false)
+    @Qualifier("mohsClock")
     public Clock mohsClock(MohsProperties properties, DataSource dataSource, @Qualifier("mohsClockSyncScheduler") ObjectProvider<ThreadPoolTaskScheduler> mohsClockSyncScheduler) {
         if (properties.getTime().getMode() != MohsProperties.Time.Mode.DATABASE) {
             return Clock.systemUTC();
@@ -113,13 +126,13 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    public JobStore mohsJobStore(DataSource dataSource, Clock mohsClock) {
+    public JobStore mohsJobStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock) {
         return new JdbcJobStore(dataSource, mohsClock);
     }
 
     @Bean
-    public ExecutionStore mohsExecutionStore(DataSource dataSource, Clock mohsClock) {
-        return new JdbcExecutionStore(dataSource, mohsClock, JsonMapper.builder().build());
+    public ExecutionStore mohsExecutionStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, JdbcDialect mohsJdbcDialect) {
+        return new JdbcExecutionStore(dataSource, mohsClock, JsonMapper.builder().build(), mohsJdbcDialect);
     }
 
     @Bean
@@ -127,13 +140,13 @@ public class MohsAutoConfiguration {
         return new JdbcNodeStore(dataSource);
     }
 
-    @Bean
+    @Bean(defaultCandidate = false)
     @Qualifier("mohsEventExecutor")
     public AsyncTaskExecutor mohsEventExecutor(MohsProperties properties) {
         return MohsExecutors.ioBoundExecutor("mohs-events", properties.getEngine().getEventConcurrency());
     }
 
-    @Bean
+    @Bean(defaultCandidate = false)
     @Qualifier("mohsTickScheduler")
     public ThreadPoolTaskScheduler mohsTickScheduler() {
         return MohsExecutors.scheduler("mohs-engine-tick", 1);
@@ -237,7 +250,7 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    public Claimer mohsClaimer(DataSource dataSource, JdbcDialect mohsJdbcDialect, Clock mohsClock,
+    public Claimer mohsClaimer(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock,
             ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsProperties properties,
             ExecutionWindowRegistry mohsExecutionWindowRegistry) {
         return new JdbcClaimer(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore,
@@ -251,7 +264,7 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    public Reaper mohsReaper(DataSource dataSource, Clock mohsClock, ExecutionStore mohsExecutionStore, JobStore mohsJobStore) {
+    public Reaper mohsReaper(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, ExecutionStore mohsExecutionStore, JobStore mohsJobStore) {
         return new JdbcReaper(dataSource, mohsClock, mohsExecutionStore, mohsJobStore);
     }
 
@@ -266,7 +279,7 @@ public class MohsAutoConfiguration {
             ExecutionStore mohsExecutionStore,
             JobStore mohsJobStore,
             HandlerRegistry mohsHandlerRegistry,
-            Clock mohsClock,
+            @Qualifier("mohsClock") Clock mohsClock,
             List<ExecutionInterceptor> interceptors,
             List<ExecutionListener> listeners,
             @Qualifier("mohsEventExecutor") AsyncTaskExecutor mohsEventExecutor
@@ -282,7 +295,7 @@ public class MohsAutoConfiguration {
             JobStore mohsJobStore,
             NodeStore mohsNodeStore,
             Reaper mohsReaper,
-            Clock mohsClock,
+            @Qualifier("mohsClock") Clock mohsClock,
             MohsProperties properties,
             @Qualifier("mohsTickScheduler") ThreadPoolTaskScheduler mohsTickScheduler,
             RunnerRegistry mohsRunnerRegistry
@@ -292,16 +305,18 @@ public class MohsAutoConfiguration {
                 mohsTickScheduler, mohsRunnerRegistry);
     }
 
-    /** {@link SmartLifecycle} — ver Javadoc de {@link MohsEngineLifecycle} sobre a adaptação. */
+    /** {@link SmartLifecycle} — ver Javadoc de {@link MohsEngineLifecycle} sobre a adaptação e o WARN de lease × timeout. */
     @Bean
-    public SmartLifecycle mohsEngineLifecycle(Engine mohsEngine, MohsProperties properties) {
+    public SmartLifecycle mohsEngineLifecycle(Engine mohsEngine, MohsProperties properties, JobStore mohsJobStore) {
         boolean autoStartup = properties.getLifecycle().getStartMode() == MohsProperties.Lifecycle.StartMode.AUTO;
-        return new MohsEngineLifecycle(mohsEngine, autoStartup, properties.getLifecycle().getShutdown().getGracePeriod());
+        return new MohsEngineLifecycle(mohsEngine, autoStartup, properties.getLifecycle().getShutdown().getGracePeriod(),
+                mohsJobStore, properties.getEngine().getLeaseTtl());
     }
 
     @Bean
-    public Mohs mohs(JobStore mohsJobStore, ExecutionStore mohsExecutionStore, Clock mohsClock, Engine mohsEngine) {
-        return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsClock, mohsEngine);
+    public Mohs mohs(JobStore mohsJobStore, ExecutionStore mohsExecutionStore, HandlerRegistry mohsHandlerRegistry,
+            @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine) {
+        return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsHandlerRegistry, mohsClock, mohsEngine);
     }
 
     /**

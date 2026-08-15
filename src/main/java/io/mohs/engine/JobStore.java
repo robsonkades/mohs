@@ -48,7 +48,15 @@ public interface JobStore {
 
     void resume(JobKey key);
 
-    /** Aposentadoria explícita ({@code Mohs#remove}) — só pra definições {@code PROGRAMMATIC}. */
+    /**
+     * Aposentadoria explícita ({@code Mohs#remove}) — só pra definições
+     * {@code PROGRAMMATIC} (quem valida o {@code source} é o chamador,
+     * {@code MohsImpl}). Soft-retire, nunca delete: cancela as execuções
+     * {@code ENQUEUED}, marca a definição como {@code retired} — ela some
+     * de {@link #find}/{@link #findAll} e da claim query, mas a linha (e
+     * todo o histórico de execuções) permanece. Um {@link #upsert} do
+     * mesmo {@code job_key} ressuscita a definição.
+     */
     void remove(JobKey key);
 
     /**

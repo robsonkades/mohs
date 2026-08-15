@@ -192,7 +192,7 @@ class ClaimQueryExplainHarness {
         try (HikariDataSource pool = new HikariDataSource(config)) {
             MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
             JdbcJobStore jobStore = new JdbcJobStore(pool, clock);
-            JdbcExecutionStore executionStore = new JdbcExecutionStore(pool, clock, JsonMapper.builder().build());
+            JdbcExecutionStore executionStore = new JdbcExecutionStore(pool, clock, JsonMapper.builder().build(), new MySqlJdbcDialect());
             AtomicInteger claimedTotal = new AtomicInteger();
             ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
             List<Future<?>> nodes = new ArrayList<>();

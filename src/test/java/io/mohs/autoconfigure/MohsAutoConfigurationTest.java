@@ -1,6 +1,8 @@
 package io.mohs.autoconfigure;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -10,13 +12,20 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.sql.DataSource;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.task.TaskExecutionAutoConfiguration;
+import org.springframework.boot.autoconfigure.task.TaskSchedulingAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 import io.mohs.core.EngineState;
 import io.mohs.core.Mohs;
@@ -29,6 +38,8 @@ import io.mohs.core.job.JobKey;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.engine.HandlerRegistry;
+import io.mohs.jdbc.JdbcJobStore;
+import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -278,6 +289,85 @@ class MohsAutoConfigurationTest {
 
                     assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
                 });
+    }
+
+    @EnableScheduling
+    static class SchedulingEnabledApp {
+    }
+
+    static class OnExecutionUser {
+        @io.mohs.core.event.OnExecution(job = "welcome-email", event = io.mohs.core.event.ExecutionEventType.SUCCEEDED)
+        void onSucceeded() {
+        }
+    }
+
+    /** N1 (codereview-20260815): @OnExecution ainda não é processada — aceitar em silêncio seria falha silenciosa (o método nunca receberia evento); o boot falha ensinando a alternativa. */
+    @Test
+    void onExecutionAnnotatedBeanFailsBootUntilItIsSupported() {
+        runnerWith(freshH2DataSource())
+                .withUserConfiguration(OnExecutionUser.class)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("@OnExecution")
+                            .hasStackTraceContaining("ExecutionListener");
+                });
+    }
+
+    /**
+     * Biblioteca embarcada não altera a semântica do contexto do hospedeiro
+     * pela mera presença no classpath: os beans de tipos genéricos do Mohs
+     * (Clock, ThreadPoolTaskScheduler, AsyncTaskExecutor) são
+     * {@code defaultCandidate = false} — sem isso, MohsAutoConfiguration
+     * (ordenada antes das auto-configs do Boot, alfabeticamente) suprimia
+     * o {@code taskScheduler}/{@code applicationTaskExecutor} do app via
+     * {@code @ConditionalOnMissingBean} por tipo, e {@code @Scheduled} do
+     * hospedeiro caía em silêncio no fallback serial.
+     */
+    @Test
+    void mohsBeansDoNotSuppressTheHostTaskSchedulerAndExecutor() {
+        DataSource dataSource = freshH2DataSource();
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        TaskSchedulingAutoConfiguration.class, TaskExecutionAutoConfiguration.class, MohsAutoConfiguration.class))
+                .withBean(DataSource.class, () -> dataSource)
+                .withUserConfiguration(SchedulingEnabledApp.class)
+                .withPropertyValues("mohs.jdbc.dialect=h2", "mohs.engine.poll-interval=50ms")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasBean("taskScheduler");
+                    assertThat(context).hasBean("applicationTaskExecutor");
+                });
+    }
+
+    /**
+     * Importante 2 do codereview-20260815: sem watchdog que renove lease,
+     * um handler saudável mais lento que {@code mohs.engine.lease-ttl} é
+     * reclamado como FAILED e o mutex do job é violado — o operador fica
+     * sabendo o preço do default no boot (WARN nomeando job e propriedade),
+     * não no postmortem.
+     */
+    @Test
+    void bootWarnsWhenADeclaredJobTimeoutReachesTheLeaseTtl() {
+        DataSource dataSource = freshH2DataSource();
+        // job persistido por um deploy anterior — o WARN roda no start do engine, já com o store povoado
+        new JdbcJobStore(dataSource, new MutableClock(Instant.parse("2026-08-15T12:00:00Z"), ZoneId.of("UTC")))
+                .upsert(JobDefinition.of("slow-report", Handler.class, spec -> spec.onDemand().timeout(Duration.ofMinutes(5))));
+        ch.qos.logback.classic.Logger lifecycleLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(MohsEngineLifecycle.class);
+        ListAppender<ILoggingEvent> warnWatcher = new ListAppender<>();
+        warnWatcher.start();
+        lifecycleLogger.addAppender(warnWatcher);
+        try {
+            runnerWith(dataSource, "mohs.engine.lease-ttl=30s").run(context -> {
+                assertThat(context).hasNotFailed();
+                // start() do SmartLifecycle roda dentro do refresh — o WARN já aconteceu aqui
+                assertThat(warnWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("slow-report")
+                        && event.getFormattedMessage().contains("mohs.engine.lease-ttl"));
+            });
+        } finally {
+            lifecycleLogger.detachAppender(warnWatcher);
+        }
     }
 
     /** core-size é campo de CPU e o mode default é io: erro de boot apontando a propriedade, nunca descarte silencioso (que viraria runner IO de 64 threads pra trabalho CPU-bound). */

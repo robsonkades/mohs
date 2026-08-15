@@ -25,6 +25,7 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
                 .addValue("batchSize", batchSize);
         // e.priority já é Priority.value() (menor reivindica primeiro) —
         // NOT NULL DEFAULT 20 no schema, então ordena direto, sem CASE.
+        // j.retired = 0: job aposentado (Mohs.remove) nunca volta a ser candidato.
         return jdbcTemplate.query("""
                 SELECT TOP (:batchSize) e.id AS id, e.job_key AS job_key,
                        j.allow_concurrent_executions AS allow_concurrent_executions,
@@ -33,8 +34,19 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
                 JOIN mohs_job_definitions j ON j.job_key = e.job_key
                 WHERE e.state = 'ENQUEUED'
                   AND e.scheduled_at <= :now
+                  AND j.retired = 0
                   AND (j.allow_concurrent_executions = 1 OR j.running_execution_count < j.max_concurrent_executions)
                 ORDER BY e.priority ASC, e.scheduled_at ASC
                 """, params, Candidate::fromResultSet);
+    }
+
+    @Override
+    public String topClause() {
+        return "TOP (:limit) ";
+    }
+
+    @Override
+    public String limitClause() {
+        return "";
     }
 }

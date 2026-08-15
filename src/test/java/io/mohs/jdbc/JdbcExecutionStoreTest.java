@@ -30,10 +30,14 @@ import io.mohs.core.job.JobKey;
 import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.StoredJob;
+import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 
 class JdbcExecutionStoreTest {
 
@@ -51,7 +55,7 @@ class JdbcExecutionStoreTest {
     void setUp() {
         dataSource = freshH2DataSource();
         clock = new MutableClock(Instant.parse("2026-08-13T00:00:00Z"), ZoneId.of("UTC"));
-        store = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+        store = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
         seedJobDefinition("welcome-email");
     }
 
@@ -272,6 +276,47 @@ class JdbcExecutionStoreTest {
         assertThat(jobStore.find(JobKey.of("report-summary"))).map(StoredJob::runningExecutionCount).contains(0);
     }
 
+    /**
+     * O trio (CAS de estado + INSERT do Attempt + decremento da vaga) é um
+     * invariante que cruza duas tabelas — falha em qualquer passo desfaz
+     * tudo. Sem a transação, um crash/erro depois do CAS deixava a execução
+     * fora de RUNNING (invisível pro reaper) com running_execution_count
+     * incrementado pra sempre: o mutex do job vazava permanentemente.
+     */
+    @Test
+    void completeRollsBackTheStateTransitionWhenALaterStepFails() {
+        seedRunningExecution("019abc-atomic-1", "welcome-email");
+        JobStore failingJobStore = mock(JobStore.class);
+        doThrow(new RuntimeException("simulated failure releasing the slot")).when(failingJobStore).decrementRunningExecutions(any());
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+
+        assertThatThrownBy(() -> store.complete(ExecutionId.of("019abc-atomic-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, failingJobStore))
+                .hasMessageContaining("simulated failure");
+
+        Execution stillRunning = store.find(ExecutionId.of("019abc-atomic-1")).orElseThrow();
+        assertThat(stillRunning.state()).isEqualTo(ExecutionState.RUNNING);
+        assertThat(stillRunning.attempts()).isEmpty();
+    }
+
+    /** Mesma garantia de {@link #completeRollsBackTheStateTransitionWhenALaterStepFails}, pro caminho em lote do reaper. */
+    @Test
+    void completeAllRollsBackAllTransitionsWhenALaterStepFails() {
+        seedRunningExecution("019abc-atomic-2", "welcome-email");
+        seedRunningExecution("019abc-atomic-3", "welcome-email");
+        JobStore failingJobStore = mock(JobStore.class);
+        doThrow(new RuntimeException("simulated failure releasing the slot")).when(failingJobStore).decrementRunningExecutions(any());
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+        List<ExecutionStore.CompletionRequest> requests = List.of(
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-atomic-2"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-atomic-3"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED));
+
+        assertThatThrownBy(() -> store.completeAll(requests, failingJobStore))
+                .hasMessageContaining("simulated failure");
+
+        assertThat(store.find(ExecutionId.of("019abc-atomic-2")).orElseThrow().state()).isEqualTo(ExecutionState.RUNNING);
+        assertThat(store.find(ExecutionId.of("019abc-atomic-3")).orElseThrow().state()).isEqualTo(ExecutionState.RUNNING);
+    }
+
     /** DBTUNE-14: mesma garantia de {@link #completeTransitionsRunningExecutionAndRecordsTheAttempt}, para várias execuções na mesma chamada. */
     @Test
     void completeAllTransitionsMultipleRunningExecutionsAndRecordsTheAttempts() {
@@ -331,5 +376,76 @@ class JdbcExecutionStoreTest {
     @Test
     void completeAllReturnsEmptySetForEmptyRequests() {
         assertThat(store.completeAll(List.of(), new JdbcJobStore(dataSource, clock))).isEmpty();
+    }
+
+    private static Execution executionAt(String id, String jobKey, Instant scheduledAt) {
+        return new Execution(ExecutionId.of(id), JobKey.of(jobKey), ExecutionState.ENQUEUED, scheduledAt, null, List.of(), "application");
+    }
+
+    @Test
+    void findPageOrdersByIdDescending() {
+        store.insert(execution("019abc-page-1", "welcome-email"), new WelcomeEmail("a", 1));
+        store.insert(execution("019abc-page-2", "welcome-email"), new WelcomeEmail("a", 1));
+        store.insert(execution("019abc-page-3", "welcome-email"), new WelcomeEmail("a", 1));
+
+        List<Execution> page = store.findPage(null, null, null, null, null, 10);
+
+        assertThat(page).extracting(e -> e.id().value())
+                .containsExactly("019abc-page-3", "019abc-page-2", "019abc-page-1");
+    }
+
+    @Test
+    void findPageAppliesTheLimit() {
+        store.insert(execution("019abc-limit-1", "welcome-email"), new WelcomeEmail("a", 1));
+        store.insert(execution("019abc-limit-2", "welcome-email"), new WelcomeEmail("a", 1));
+
+        List<Execution> page = store.findPage(null, null, null, null, null, 1);
+
+        assertThat(page).extracting(e -> e.id().value()).containsExactly("019abc-limit-2");
+    }
+
+    @Test
+    void findPageCursorExcludesIdsAtOrAfterIt() {
+        store.insert(execution("019abc-cursor-1", "welcome-email"), new WelcomeEmail("a", 1));
+        store.insert(execution("019abc-cursor-2", "welcome-email"), new WelcomeEmail("a", 1));
+        store.insert(execution("019abc-cursor-3", "welcome-email"), new WelcomeEmail("a", 1));
+
+        List<Execution> page = store.findPage(null, null, null, null, ExecutionId.of("019abc-cursor-3"), 10);
+
+        assertThat(page).extracting(e -> e.id().value())
+                .containsExactly("019abc-cursor-2", "019abc-cursor-1");
+    }
+
+    @Test
+    void findPageFiltersByJobKey() {
+        seedJobDefinition("other-job");
+        store.insert(execution("019abc-filter-1", "welcome-email"), new WelcomeEmail("a", 1));
+        store.insert(execution("019abc-filter-2", "other-job"), new WelcomeEmail("a", 1));
+
+        List<Execution> page = store.findPage(JobKey.of("other-job"), null, null, null, null, 10);
+
+        assertThat(page).extracting(e -> e.id().value()).containsExactly("019abc-filter-2");
+    }
+
+    @Test
+    void findPageFiltersByStatus() {
+        seedRunningExecution("019abc-status-1", "welcome-email");
+        store.insert(execution("019abc-status-2", "welcome-email"), new WelcomeEmail("a", 1));
+
+        List<Execution> page = store.findPage(null, ExecutionState.RUNNING, null, null, null, 10);
+
+        assertThat(page).extracting(e -> e.id().value()).containsExactly("019abc-status-1");
+    }
+
+    @Test
+    void findPageFiltersByScheduledAtRange() {
+        store.insert(executionAt("019abc-range-1", "welcome-email", Instant.parse("2026-08-01T00:00:00Z")), new WelcomeEmail("a", 1));
+        store.insert(executionAt("019abc-range-2", "welcome-email", Instant.parse("2026-08-10T00:00:00Z")), new WelcomeEmail("a", 1));
+        store.insert(executionAt("019abc-range-3", "welcome-email", Instant.parse("2026-08-20T00:00:00Z")), new WelcomeEmail("a", 1));
+
+        List<Execution> page = store.findPage(null, null,
+                Instant.parse("2026-08-05T00:00:00Z"), Instant.parse("2026-08-15T00:00:00Z"), null, 10);
+
+        assertThat(page).extracting(e -> e.id().value()).containsExactly("019abc-range-2");
     }
 }

@@ -82,7 +82,7 @@ class EngineTest {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         jobStore = new JdbcJobStore(dataSource, clock);
-        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
         nodeStore = new JdbcNodeStore(dataSource);
         handlerRegistry = new HandlerRegistry();
     }
@@ -595,6 +595,11 @@ class EngineTest {
         }
 
         @Override
+        public Optional<Execution> findByIdempotencyKey(JobKey jobKey, String idempotencyKey) {
+            return delegate.findByIdempotencyKey(jobKey, idempotencyKey);
+        }
+
+        @Override
         public Optional<Object> findPayload(ExecutionId id) {
             return delegate.findPayload(id);
         }
@@ -622,6 +627,11 @@ class EngineTest {
         @Override
         public Stream<Execution> findAll() {
             return delegate.findAll();
+        }
+
+        @Override
+        public List<Execution> findPage(JobKey jobKey, ExecutionState status, Instant from, Instant to, ExecutionId cursor, int limit) {
+            return delegate.findPage(jobKey, status, from, to, cursor, limit);
         }
     }
 

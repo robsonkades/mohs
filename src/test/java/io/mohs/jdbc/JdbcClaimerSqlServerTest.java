@@ -59,7 +59,7 @@ class JdbcClaimerSqlServerTest {
         dataSource = SqlServerTestSupport.freshSchema();
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new SqlServerJdbcDialect());
         jobStore = new JdbcJobStore(dataSource, clock);
     }
 

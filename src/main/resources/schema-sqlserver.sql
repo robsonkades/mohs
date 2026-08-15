@@ -35,6 +35,7 @@ CREATE TABLE mohs_job_definitions (
     source          NVARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
     orphaned        BIT           NOT NULL DEFAULT 0, -- operacional (ADR-0006)
     paused          BIT           NOT NULL DEFAULT 0, -- operacional (ADR-0006)
+    retired         BIT           NOT NULL DEFAULT 0, -- aposentadoria explícita (Mohs.remove) — ver schema-h2.sql
     created_at      DATETIME2     NOT NULL,
     updated_at      DATETIME2     NOT NULL
 );
@@ -82,8 +83,11 @@ IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_reape
 CREATE INDEX idx_mohs_executions_reaper ON mohs_executions (lease_expires_at) WHERE state = 'RUNNING';
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_job_key' AND object_id = OBJECT_ID('mohs_executions'))
 CREATE INDEX idx_mohs_executions_job_key ON mohs_executions (job_key);
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_idempotency_key' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);
+-- Idempotent Receiver (EIP, DBTUNE-8) — ver schema-h2.sql. Filtrado:
+-- índice único do SQL Server rejeitaria o SEGUNDO NULL sem o WHERE.
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'uq_mohs_executions_idem' AND object_id = OBJECT_ID('mohs_executions'))
+CREATE UNIQUE INDEX uq_mohs_executions_idem ON mohs_executions (job_key, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_batch_id' AND object_id = OBJECT_ID('mohs_executions'))
 CREATE INDEX idx_mohs_executions_batch_id ON mohs_executions (batch_id);
 

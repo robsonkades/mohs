@@ -7,6 +7,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import org.jspecify.annotations.Nullable;
+
 import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
@@ -37,6 +39,15 @@ public interface ExecutionStore {
     Execution insert(Execution execution, Object payload);
 
     Optional<Execution> find(ExecutionId id);
+
+    /**
+     * A execução já gravada para {@code (jobKey, idempotencyKey)}, se
+     * houver — a leitura do Idempotent Receiver (EIP): quando o índice
+     * único do schema rejeita um {@link #insert} duplicado, o chamador
+     * recupera por aqui a execução original pra devolver o mesmo recibo.
+     * A unicidade é do banco, nunca de um SELECT prévio (corrida TOCTOU).
+     */
+    Optional<Execution> findByIdempotencyKey(JobKey jobKey, String idempotencyKey);
 
     /**
      * Reconstitui o payload gravado por {@link #insert} — o único jeito de
@@ -128,4 +139,17 @@ public interface ExecutionStore {
 
     /** Ver {@link #findByJobKey} sobre ciclo de vida do stream. */
     Stream<Execution> findAll();
+
+    /**
+     * Página filtrada, ordenada por {@code id} (UUIDv7, ordenável
+     * cronologicamente) decrescente — mais recente primeiro. {@code
+     * cursor} restringe a {@code id < cursor} quando presente (keyset
+     * pagination, uma coluna só: nenhuma chave composta precisa, porque o
+     * próprio id já ordena no tempo). Todo filtro é opcional; {@code
+     * limit} não — quem chama decide se pede {@code size + 1} pra
+     * detectar se há próxima página (esta porta não sabe de {@code
+     * CursorPage}, isso é decisão de {@code io.mohs.rest}).
+     */
+    List<Execution> findPage(@Nullable JobKey jobKey, @Nullable ExecutionState status, @Nullable Instant from,
+            @Nullable Instant to, @Nullable ExecutionId cursor, int limit);
 }

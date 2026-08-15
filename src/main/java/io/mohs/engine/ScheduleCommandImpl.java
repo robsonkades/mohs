@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Objects;
 
 import org.jspecify.annotations.Nullable;
+import org.springframework.dao.DuplicateKeyException;
 
 import io.github.robsonkades.uuidv7.UUIDv7;
 
@@ -83,8 +84,21 @@ final class ScheduleCommandImpl implements ScheduleCommand {
 
         ExecutionId id = ExecutionId.of(UUIDv7.randomUUIDString());
         Execution execution = new Execution(id, jobKey, ExecutionState.ENQUEUED, when, null, List.of(), actor, priority, idempotencyKey);
-        executionStore.insert(execution, payload);
-        return new Enqueued(id, jobKey, when, actor);
+        try {
+            executionStore.insert(execution, payload);
+            return new Enqueued(id, jobKey, when, actor);
+        } catch (DuplicateKeyException e) {
+            if (idempotencyKey == null) {
+                throw e;
+            }
+            // Idempotent Receiver (EIP): o índice único uq_mohs_executions_idem
+            // resolveu a corrida — devolve o recibo da execução original, mesma
+            // resposta pro retry do cliente, zero duplicação. Corrida decidida
+            // pelo banco, nunca por SELECT prévio (mesmo espírito do CONC-2).
+            Execution existing = executionStore.findByIdempotencyKey(jobKey, idempotencyKey)
+                    .orElseThrow(() -> e);
+            return new Enqueued(existing.id(), existing.jobKey(), existing.scheduledAt(), existing.actor());
+        }
     }
 
     @Override

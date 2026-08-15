@@ -1,7 +1,5 @@
 package io.mohs.core.execution;
 
-import java.util.Arrays;
-
 /**
  * Prioridade de uma instância agendada, 5 níveis. {@link #value()} é o peso
  * usado pra ordenar candidatos no claim — menor valor reivindica primeiro
@@ -22,6 +20,9 @@ public enum Priority {
     /** Claims last. */
     BACKGROUND(40);
 
+    /** {@code values()} clona o array a cada chamada — cacheado porque {@link #fromValue} roda por linha mapeada na borda JDBC do claim. */
+    private static final Priority[] VALUES = values();
+
     private final int value;
 
     Priority(int value) {
@@ -32,9 +33,13 @@ public enum Priority {
         return value;
     }
 
-    /** Inverso de {@link #value()} — usado na borda JDBC, onde só a coluna {@code priority} (int) é gravada. */
+    /** Inverso de {@link #value()} — usado na borda JDBC, onde só a coluna {@code priority} (int) é gravada. Zero alocação: roda por linha mapeada do claim. */
     public static Priority fromValue(int value) {
-        return Arrays.stream(values()).filter(p -> p.value == value).findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("no Priority with value " + value));
+        for (Priority priority : VALUES) {
+            if (priority.value == value) {
+                return priority;
+            }
+        }
+        throw new IllegalArgumentException("no Priority with value " + value);
     }
 }

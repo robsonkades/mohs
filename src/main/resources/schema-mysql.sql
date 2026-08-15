@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     source          VARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
     orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
     paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
+    retired         BOOLEAN      NOT NULL DEFAULT FALSE, -- aposentadoria explícita (Mohs.remove) — ver schema-h2.sql
     created_at      DATETIME(6)  NOT NULL,
     updated_at      DATETIME(6)  NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
@@ -78,7 +79,9 @@ CREATE INDEX idx_mohs_executions_claim ON mohs_executions (state, priority, sche
 -- também (DBTUNE-10): state líder, igual à do claim.
 CREATE INDEX idx_mohs_executions_reaper ON mohs_executions (state, lease_expires_at);
 CREATE INDEX idx_mohs_executions_job_key ON mohs_executions (job_key);
-CREATE INDEX idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);
+-- Idempotent Receiver (EIP, DBTUNE-8) — ver schema-h2.sql. Índice único
+-- do MySQL admite múltiplos NULLs: execuções sem chave nunca colidem.
+CREATE UNIQUE INDEX uq_mohs_executions_idem ON mohs_executions (job_key, idempotency_key);
 CREATE INDEX idx_mohs_executions_batch_id ON mohs_executions (batch_id);
 
 CREATE TABLE IF NOT EXISTS mohs_attempts (

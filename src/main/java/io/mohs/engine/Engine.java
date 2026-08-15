@@ -2,7 +2,6 @@ package io.mohs.engine;
 
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -57,7 +56,10 @@ import io.mohs.core.execution.Execution;
  * lease nova; handlers mais lentos que {@code leaseTtl} podem ser
  * reclamados pelo {@link Reaper} prematuramente); sem mecanismo de
  * interrupt real — no estouro do grace de {@link #drain}, o trabalho em
- * voo continua rodando em segundo plano, só loga um aviso.
+ * voo continua rodando em segundo plano, só loga um aviso. Como não há
+ * retry (ADR-0026), a garantia efetiva sob falha de nó hoje é
+ * <b>at-most-once</b>: dimensione {@code mohs.engine.lease-ttl} acima do
+ * pior handler esperado (o boot avisa por job — {@code MohsEngineLifecycle}).
  */
 public final class Engine implements MohsLifecycle {
 
@@ -79,7 +81,8 @@ public final class Engine implements MohsLifecycle {
     private final TaskScheduler tickScheduler;
     private final RunnerRegistry runnerRegistry;
 
-    private @Nullable ScheduledFuture<?> tickHandle;
+    /** {@code volatile}: escrito por {@link #start} e lido por {@link #stop}, que podem vir de threads distintas ({@code MohsLifecycle} é API pública) — publicação segura, JCIP 3.1. */
+    private volatile @Nullable ScheduledFuture<?> tickHandle;
 
     public Engine(
             Claimer claimer,
@@ -122,7 +125,11 @@ public final class Engine implements MohsLifecycle {
         if (!state.compareAndSet(EngineState.CREATED, EngineState.RUNNING)) {
             throw new IllegalStateException("start() only valid from CREATED, was " + state.get());
         }
-        tickHandle = tickScheduler.scheduleWithFixedDelay(this::tick, pollInterval);
+        ScheduledFuture<?> handle = tickScheduler.scheduleWithFixedDelay(this::tick, pollInterval);
+        tickHandle = handle;
+        if (state.get() == EngineState.STOPPED) { // stop() venceu a corrida durante o agendamento — cancela o tick que ele não viu
+            handle.cancel(false);
+        }
     }
 
     @Override
@@ -168,8 +175,9 @@ public final class Engine implements MohsLifecycle {
         if (current != EngineState.DRAINING) {
             drain(grace);
         }
-        if (tickHandle != null) {
-            tickHandle.cancel(false);
+        ScheduledFuture<?> handle = tickHandle;
+        if (handle != null) {
+            handle.cancel(false);
         }
         state.set(EngineState.STOPPED);
     }
@@ -184,9 +192,12 @@ public final class Engine implements MohsLifecycle {
      * verdade ou o {@code grace} acaba, o que vier primeiro.
      */
     private void awaitInFlight(Duration grace) {
-        Instant deadline = clock.instant().plus(grace);
+        // System.nanoTime, não clock.instant(): duração se mede com tempo
+        // monotônico — o Clock injetado pode ser o DatabaseClock, cujo offset
+        // salta a cada resync e encurtaria/esticaria o grace de shutdown.
+        long deadlineNanos = System.nanoTime() + grace.toNanos();
         while (!inFlight.isEmpty()) {
-            long remainingMillis = Duration.between(clock.instant(), deadline).toMillis();
+            long remainingMillis = (deadlineNanos - System.nanoTime()) / 1_000_000;
             if (remainingMillis <= 0) {
                 log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — Mohs has no interrupt mechanism yet (per-job timeout isn't enforced), they keep running in the background", grace, inFlight.size());
                 return;

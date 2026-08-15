@@ -1,5 +1,7 @@
 package io.mohs.core;
 
+import java.util.List;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 import io.mohs.core.job.JobKey;
@@ -7,12 +9,21 @@ import io.mohs.core.job.JobRef;
 import org.springframework.lang.CheckReturnValue;
 
 import io.mohs.core.definition.JobDefinition;
+import io.mohs.core.execution.Execution;
+import io.mohs.core.execution.ExecutionId;
 
 /**
  * Fachada pública do Mohs — um verbo por operação, sempre sobre definição
  * existente. Corpo ainda não ligado ao motor: M1 é só o contrato; a
  * implementação real vive em {@code io.mohs.engine}, fiada por
  * {@code io.mohs.autoconfigure} (M3).
+ *
+ * <p>Os métodos de leitura ({@link #findJob}/{@link #jobs}/
+ * {@link #findExecution}/{@link #executions}/{@link #payloadType}) existem
+ * pra {@code io.mohs.rest} (M3): a fronteira arquitetural
+ * ({@code ArchitectureTest#rest_only_sees_public_api}) proíbe a REST de
+ * enxergar {@code io.mohs.engine} diretamente — esta fachada é o único
+ * caminho de leitura que ela pode usar.
  */
 public interface Mohs {
 
@@ -23,13 +34,53 @@ public interface Mohs {
     @CheckReturnValue
     ScheduleCommand schedule(String jobId, Object payload);
 
+    /**
+     * Agenda um lote nomeado de jobs. <b>Ainda não suportado nesta versão</b>
+     * — lança {@link UnsupportedOperationException} até os contadores de
+     * conclusão de lote serem ligados ao motor
+     * (ver {@code docs/MOHS-DOCUMENTO-MESTRE.md}).
+     */
     @CheckReturnValue
     Batch batch(String name, Consumer<BatchBuilder> configurer);
 
     void define(JobDefinition definition);
 
-    /** Aposentadoria: cancela disparos futuros, preserva histórico. */
+    /**
+     * Aposentadoria: cancela disparos futuros (execuções {@code ENQUEUED}
+     * viram {@code CANCELLED}), preserva histórico. Só pra definições
+     * programáticas — pra um job {@code @MohsJob}, remova a anotação (o
+     * scanner o marca {@code ORPHANED} no próximo boot); chamar isto nele
+     * lança {@link IllegalArgumentException}. Job desconhecido é no-op.
+     */
     void remove(JobKey jobKey);
+
+    Optional<JobSnapshot> findJob(JobKey jobKey);
+
+    /** Todos os jobs registrados — cardinalidade limitada (definição, não execução), sem paginação. */
+    List<JobSnapshot> jobs();
+
+    /** Suspende disparos automáticos; schedule manual continua permitido (espelha o motor). Sem efeito se {@code jobKey} não existir. */
+    void pause(JobKey jobKey);
+
+    void resume(JobKey jobKey);
+
+    /**
+     * Tipo real do parâmetro de payload do handler de {@code jobKey}, ou
+     * vazio se o job não existir ou o método anotado não declarar payload
+     * (só {@code JobContext}, ou nenhum parâmetro). Usado pela REST pra
+     * converter o corpo JSON de {@code POST .../schedule} antes de
+     * agendar, em vez de persistir um {@code Map} cru que o handler não
+     * consegue consumir. Só o scanner de {@code @MohsJob} conhece o tipo:
+     * um handler registrado manualmente (caminho interno/de teste do
+     * {@code HandlerRegistry}) sem declarar {@code payloadType} é tratado
+     * pela REST como job que não aceita payload.
+     */
+    Optional<Class<?>> payloadType(JobKey jobKey);
+
+    Optional<Execution> findExecution(ExecutionId executionId);
+
+    /** Até {@code query.limit()} execuções, ordenadas por id (UUIDv7) decrescente — ver {@link ExecutionQuery}. */
+    List<Execution> executions(ExecutionQuery query);
 
     MohsLifecycle lifecycle();
 }

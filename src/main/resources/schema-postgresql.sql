@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     source          VARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
     orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
     paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
+    retired         BOOLEAN      NOT NULL DEFAULT FALSE, -- aposentadoria explícita (Mohs.remove) — ver schema-h2.sql
     created_at      TIMESTAMP    NOT NULL,
     updated_at      TIMESTAMP    NOT NULL
 );
@@ -66,7 +67,10 @@ CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (priorit
 -- coluna porque o predicado já fixa o state.
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_reaper ON mohs_executions (lease_expires_at) WHERE state = 'RUNNING';
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_job_key ON mohs_executions (job_key);
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_idempotency_key ON mohs_executions (idempotency_key);
+-- Idempotent Receiver (EIP, DBTUNE-8) — ver schema-h2.sql. Parcial: só
+-- linhas com chave entram no índice (NULL nunca colide e não pesa aqui).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mohs_executions_idem ON mohs_executions (job_key, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_batch_id ON mohs_executions (batch_id);
 
 CREATE TABLE IF NOT EXISTS mohs_attempts (

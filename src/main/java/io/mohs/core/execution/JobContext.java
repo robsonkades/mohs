@@ -24,7 +24,12 @@ public interface JobContext {
 
     Instant firedAt();
 
-    /** Cooperativo — respaldado por um cache do lado do motor com ~1s de staleness. */
+    /**
+     * Cooperativo — <b>nesta versão sempre {@code false}</b>: ainda não
+     * existe fonte de cancelamento ({@code POST /executions/{id}/cancel}
+     * responde 501). O design final usa um cache do lado do motor com ~1s
+     * de staleness.
+     */
     boolean cancellationRequested();
 
     /** Opcional, voltado ao dashboard. No-op se nada observar. */

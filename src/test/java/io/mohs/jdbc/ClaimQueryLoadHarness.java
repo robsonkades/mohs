@@ -126,7 +126,7 @@ class ClaimQueryLoadHarness {
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+        JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), dialect);
         JdbcClaimer claimer = new JdbcClaimer(dataSource, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
         seedBacklog(rawJdbcTemplate, jobStore, "latency", LATENCY_JOB_COUNT, LATENCY_EXECUTIONS_PER_JOB);
 
@@ -146,7 +146,7 @@ class ClaimQueryLoadHarness {
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
+        JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), dialect);
         int totalRows = seedBacklog(rawJdbcTemplate, jobStore, "throughput", THROUGHPUT_JOB_COUNT, THROUGHPUT_EXECUTIONS_PER_JOB);
 
         AtomicInteger claimedTotal = new AtomicInteger();

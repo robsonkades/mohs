@@ -20,7 +20,6 @@ import io.mohs.core.schedule.CronSpec;
 import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.schedule.Misfire;
 import io.mohs.core.schedule.OnDemandSpec;
-import io.mohs.engine.JobHandler;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -170,57 +169,62 @@ class MohsJobsTest {
     @Test
     void invokesNoArgMethod() throws Exception {
         Handlers bean = new Handlers();
-        JobHandler handler = MohsJobs.adaptHandler(bean, method("noArgs"));
+        MohsJobs.AdaptedHandler adapted = MohsJobs.adaptHandler(bean, method("noArgs"));
 
-        handler.invoke("payload-ignored", fakeContext());
+        adapted.handler().invoke("payload-ignored", fakeContext());
 
         assertThat(bean.calls).containsExactly("noArgs");
+        assertThat(adapted.payloadType()).isNull();
     }
 
     @Test
     void invokesPayloadOnlyMethod() throws Exception {
         Handlers bean = new Handlers();
-        JobHandler handler = MohsJobs.adaptHandler(bean, method("payloadOnly", Greeting.class));
+        MohsJobs.AdaptedHandler adapted = MohsJobs.adaptHandler(bean, method("payloadOnly", Greeting.class));
         Greeting payload = new Greeting("ana");
 
-        handler.invoke(payload, fakeContext());
+        adapted.handler().invoke(payload, fakeContext());
 
         assertThat(bean.calls).containsExactly(payload);
+        assertThat(adapted.payloadType()).isEqualTo(Greeting.class);
     }
 
     @Test
     void invokesContextOnlyMethod() throws Exception {
         Handlers bean = new Handlers();
-        JobHandler handler = MohsJobs.adaptHandler(bean, method("contextOnly", JobContext.class));
+        MohsJobs.AdaptedHandler adapted = MohsJobs.adaptHandler(bean, method("contextOnly", JobContext.class));
         JobContext ctx = fakeContext();
 
-        handler.invoke("payload-ignored", ctx);
+        adapted.handler().invoke("payload-ignored", ctx);
 
         assertThat(bean.calls).containsExactly(ctx);
+        assertThat(adapted.payloadType()).isNull();
     }
 
     @Test
     void invokesPayloadThenContextInDeclaredOrder() throws Exception {
         Handlers bean = new Handlers();
-        JobHandler handler = MohsJobs.adaptHandler(bean, method("payloadThenContext", Greeting.class, JobContext.class));
+        MohsJobs.AdaptedHandler adapted = MohsJobs.adaptHandler(bean, method("payloadThenContext", Greeting.class, JobContext.class));
         Greeting payload = new Greeting("ana");
         JobContext ctx = fakeContext();
 
-        handler.invoke(payload, ctx);
+        adapted.handler().invoke(payload, ctx);
 
         assertThat(bean.calls).containsExactly(payload, ctx);
+        assertThat(adapted.payloadType()).isEqualTo(Greeting.class);
     }
 
     @Test
     void invokesContextThenPayloadInDeclaredOrder() throws Exception {
         Handlers bean = new Handlers();
-        JobHandler handler = MohsJobs.adaptHandler(bean, method("contextThenPayload", JobContext.class, Greeting.class));
+        MohsJobs.AdaptedHandler adapted = MohsJobs.adaptHandler(bean, method("contextThenPayload", JobContext.class, Greeting.class));
         Greeting payload = new Greeting("ana");
         JobContext ctx = fakeContext();
 
-        handler.invoke(payload, ctx);
+        adapted.handler().invoke(payload, ctx);
 
         assertThat(bean.calls).containsExactly(ctx, payload);
+        assertThat(adapted.payloadType()).isEqualTo(Greeting.class);
     }
 
     @Test
@@ -246,9 +250,9 @@ class MohsJobsTest {
 
     @Test
     void unwrapsTheOriginalExceptionFromTheHandler() {
-        JobHandler handler = MohsJobs.adaptHandler(new Handlers(), method("throwsCheckedFromHandler"));
+        MohsJobs.AdaptedHandler adapted = MohsJobs.adaptHandler(new Handlers(), method("throwsCheckedFromHandler"));
 
-        assertThatThrownBy(() -> handler.invoke("x", fakeContext()))
+        assertThatThrownBy(() -> adapted.handler().invoke("x", fakeContext()))
                 .isInstanceOf(IOException.class)
                 .hasMessage("boom");
     }

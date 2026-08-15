@@ -20,6 +20,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import io.github.robsonkades.uuidv7.UUIDv7;
 
@@ -52,10 +55,15 @@ public final class JdbcJobStore implements JobStore {
     private static final Logger log = LoggerFactory.getLogger(JdbcJobStore.class);
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
     private final Clock clock;
 
     public JdbcJobStore(DataSource dataSource, Clock clock) {
         this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
+        this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        // mesmo raciocínio da DBTUNE-4 em JdbcClaimer: escrita guardada assume
+        // "última escrita vence" (READ COMMITTED), não herda o default do banco.
+        this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
@@ -84,6 +92,7 @@ public final class JdbcJobStore implements JobStore {
                 .addValue("retryPolicy", definition.retryPolicy())
                 .addValue("source", definition.source().name())
                 .addValue("orphaned", false)
+                .addValue("retired", false)
                 .addValue("updatedAt", now);
         // id é gerado aqui mas só entra no INSERT — se cair no UPDATE, o
         // valor gerado fica sem uso; a linha existente mantém o id que já
@@ -98,10 +107,11 @@ public final class JdbcJobStore implements JobStore {
         // dois ver 0 linhas e os dois tentar INSERT — quem perde recebe
         // DuplicateKeyException (job_key já existe, o outro venceu) e vira
         // UPDATE, não erro propagado pro bootstrap (CONC-2).
-        // orphaned = FALSE mesmo em UPDATE: diferente de paused (decisão de operador,
-        // upsert nunca toca), orphaned é dedução do sistema ("a anotação sumiu") — o
-        // próprio upsert acontecer já é prova de que uma fonte real (scan ou
-        // Mohs.define) quer este job de novo, então a precondição de ORPHANED não vale mais.
+        // orphaned/retired = FALSE mesmo em UPDATE: diferente de paused (decisão de
+        // operador, upsert nunca toca), os dois são consequência de "a fonte sumiu"
+        // (anotação removida / Mohs.remove) — o próprio upsert acontecer já é prova
+        // de que uma fonte real (scan ou Mohs.define) quer este job de novo, então
+        // define() depois de remove() ressuscita a definição com o histórico intacto.
         String updateSql = """
                 UPDATE mohs_job_definitions SET
                     name = :name, handler_type = :handlerType, schedule_type = :scheduleType,
@@ -111,7 +121,7 @@ public final class JdbcJobStore implements JobStore {
                     misfire = :misfire, allow_concurrent_executions = :allowConcurrentExecutions,
                     max_concurrent_executions = :maxConcurrentExecutions,
                     retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
-                    source = :source, orphaned = :orphaned, updated_at = :updatedAt
+                    source = :source, orphaned = :orphaned, retired = :retired, updated_at = :updatedAt
                 WHERE job_key = :jobKey
                 """;
         int updated = jdbcTemplate.update(updateSql, params);
@@ -124,13 +134,13 @@ public final class JdbcJobStore implements JobStore {
                             interval_duration, interval_after_finish, runner, window_name,
                             misfire, allow_concurrent_executions, max_concurrent_executions, retries,
                             timeout, retry_policy, source,
-                            orphaned, paused, running_execution_count, created_at, updated_at)
+                            orphaned, retired, paused, running_execution_count, created_at, updated_at)
                         VALUES (
                             :id, :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
                             :intervalDuration, :intervalAfterFinish, :runner, :windowName,
                             :misfire, :allowConcurrentExecutions, :maxConcurrentExecutions, :retries,
                             :timeout, :retryPolicy, :source,
-                            :orphaned, :paused, :runningExecutionCount, :createdAt, :updatedAt)
+                            :orphaned, :retired, :paused, :runningExecutionCount, :createdAt, :updatedAt)
                         """, params.addValue("id", id).addValue("createdAt", now)
                                 .addValue("paused", false).addValue("runningExecutionCount", 0));
             } catch (DuplicateKeyException _) {
@@ -144,10 +154,12 @@ public final class JdbcJobStore implements JobStore {
     public Optional<StoredJob> find(JobKey key) {
         Objects.requireNonNull(key, "key");
         List<String> unresolvedHandlerJobKeys = new ArrayList<>();
-        // job_key é UNIQUE — no máximo uma linha.
+        // job_key é UNIQUE — no máximo uma linha. retired fora de toda leitura
+        // (parâmetro, não literal: BIT do SQL Server não aceita FALSE): job
+        // aposentado não existe pra fachada/claim, só a linha fica pela FK.
         Optional<StoredJob> result = JdbcSupport.findOne(jdbcTemplate,
-                "SELECT * FROM mohs_job_definitions WHERE job_key = :jobKey",
-                new MapSqlParameterSource("jobKey", key.value()),
+                "SELECT * FROM mohs_job_definitions WHERE job_key = :jobKey AND retired = :retired",
+                new MapSqlParameterSource("jobKey", key.value()).addValue("retired", false),
                 rs -> mapRowOrNull(rs, 1, unresolvedHandlerJobKeys));
         markOrphanedForUnresolvedHandlers(unresolvedHandlerJobKeys);
         return result;
@@ -155,13 +167,14 @@ public final class JdbcJobStore implements JobStore {
 
     @Override
     public Stream<StoredJob> findAll() {
-        return queryForJobStream("SELECT * FROM mohs_job_definitions", new MapSqlParameterSource());
+        return queryForJobStream("SELECT * FROM mohs_job_definitions WHERE retired = :retired",
+                new MapSqlParameterSource("retired", false));
     }
 
     @Override
     public Stream<StoredJob> findAllAnnotationSourced() {
-        return queryForJobStream("SELECT * FROM mohs_job_definitions WHERE source = :source",
-                new MapSqlParameterSource("source", DefinitionSource.ANNOTATION.name()));
+        return queryForJobStream("SELECT * FROM mohs_job_definitions WHERE source = :source AND retired = :retired",
+                new MapSqlParameterSource("source", DefinitionSource.ANNOTATION.name()).addValue("retired", false));
     }
 
     private Stream<StoredJob> queryForJobStream(String sql, MapSqlParameterSource params) {
@@ -206,10 +219,29 @@ public final class JdbcJobStore implements JobStore {
                 new MapSqlParameterSource("jobKey", key.value()).addValue("paused", false));
     }
 
+    /**
+     * Soft-retire, nunca {@code DELETE}: um job aposentado normalmente tem
+     * execuções, e a FK de {@code mohs_executions.job_key} derrubaria um
+     * hard delete — e "preservar histórico" ({@code Mohs#remove}) exige a
+     * linha viva de qualquer jeito. Transação própria: cancelar os
+     * {@code ENQUEUED} e marcar {@code retired} é um par indivisível
+     * (cancelar sem marcar deixa o job aceitando claim; marcar sem
+     * cancelar deixa execuções presas em {@code ENQUEUED} pra sempre,
+     * já que a claim query filtra {@code retired}).
+     */
     @Override
     public void remove(JobKey key) {
-        jdbcTemplate.update("DELETE FROM mohs_job_definitions WHERE job_key = :jobKey",
-                new MapSqlParameterSource("jobKey", key.value()));
+        Objects.requireNonNull(key, "key");
+        transactionTemplate.executeWithoutResult(_ -> {
+            jdbcTemplate.update("""
+                    UPDATE mohs_executions SET state = 'CANCELLED'
+                    WHERE job_key = :jobKey AND state = 'ENQUEUED'
+                    """, new MapSqlParameterSource("jobKey", key.value()));
+            jdbcTemplate.update("UPDATE mohs_job_definitions SET retired = :retired, updated_at = :now WHERE job_key = :jobKey",
+                    new MapSqlParameterSource("jobKey", key.value())
+                            .addValue("retired", true)
+                            .addValue("now", JdbcTimestamps.toUtcTimestamp(clock.instant())));
+        });
     }
 
     @Override

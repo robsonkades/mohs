@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.task.AsyncTaskExecutor;
 
 import io.mohs.core.event.ExecutionInterceptor;
@@ -39,6 +41,8 @@ import io.mohs.core.job.JobKey;
  * {@link Claimer} já tem hoje (reivindica, não executa).
  */
 public final class Dispatcher {
+
+    private static final Logger log = LoggerFactory.getLogger(Dispatcher.class);
 
     private static final String NO_HANDLER_ERROR = "no handler registered for job ";
 
@@ -107,16 +111,31 @@ public final class Dispatcher {
         boolean completed = executionStore.complete(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED, jobStore);
         if (completed) {
             events.publish(new Succeeded(execution.id(), execution.jobKey(), attemptNumber));
+        } else {
+            log.warn("attempt {} of execution {} finished SUCCEEDED but the state had already moved on (reaper/concurrent completion) — result discarded",
+                    attemptNumber, execution.id().value());
         }
     }
 
+    /**
+     * O WARN com a exceção completa é o único lugar onde o stack trace da
+     * falha aparece por padrão — {@code Attempt.error} guarda só a mensagem
+     * e o evento {@code Failed} depende de um {@code ExecutionListener}
+     * registrado; sem este log, a causa de um job quebrado às 3h da manhã
+     * não estaria em lugar nenhum.
+     */
     private void fail(Execution execution, int attemptNumber, Instant firedAt, Exception error) {
         String message = error.getMessage() != null ? error.getMessage() : error.toString();
+        log.warn("execution {} of job '{}' failed on attempt {}", execution.id().value(),
+                execution.jobKey().value(), attemptNumber, error);
         Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, message);
         boolean completed = executionStore.complete(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED, jobStore);
         if (completed) {
             // sempre esgotado nesta rodada — nunca agenda RETRY_SCHEDULED (ADR-0026)
             events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, true));
+        } else {
+            log.warn("attempt {} of execution {} finished FAILED but the state had already moved on (reaper/concurrent completion) — result discarded",
+                    attemptNumber, execution.id().value());
         }
     }
 

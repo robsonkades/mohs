@@ -24,9 +24,9 @@ import org.springframework.util.ReflectionUtils;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.MohsJob;
+import io.mohs.core.event.OnExecution;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.HandlerRegistry;
-import io.mohs.engine.JobHandler;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.StoredJob;
 
@@ -95,6 +95,14 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     }
 
     private void scanMethod(Object bean, Class<?> targetClass, Method targetMethod) {
+        // fail-fast até o processamento existir — anotação aceita em silêncio
+        // seria falha silenciosa (o método nunca receberia evento nenhum);
+        // mesma filosofia de "conflito de identidade falha sempre" do reconcile.
+        if (targetMethod.isAnnotationPresent(OnExecution.class)) {
+            throw new IllegalStateException("@OnExecution on " + describe(targetMethod)
+                    + " is not supported yet — the engine does not deliver filtered events to annotated"
+                    + " methods in this milestone; register an ExecutionListener bean instead");
+        }
         MohsJob annotation = targetMethod.getAnnotation(MohsJob.class);
         if (annotation == null) {
             return;
@@ -113,7 +121,7 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         }
 
         JobDefinition definition = MohsJobs.toDefinition(key, annotation, targetClass);
-        JobHandler handler = MohsJobs.adaptHandler(bean, invocable);
+        MohsJobs.AdaptedHandler handler = MohsJobs.adaptHandler(bean, invocable);
         scanned.add(new ScannedJob(definition, handler, declaringMethod));
     }
 
@@ -129,7 +137,7 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
 
         for (ScannedJob job : scanned) {
             reconcile(store, onConflict, job);
-            registry.register(job.definition().key(), job.handler());
+            registry.register(job.definition().key(), job.handler().handler(), job.handler().payloadType());
         }
         reconcileOrphans(store);
     }
@@ -199,6 +207,6 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         }
     }
 
-    private record ScannedJob(JobDefinition definition, JobHandler handler, String declaringMethod) {
+    private record ScannedJob(JobDefinition definition, MohsJobs.AdaptedHandler handler, String declaringMethod) {
     }
 }

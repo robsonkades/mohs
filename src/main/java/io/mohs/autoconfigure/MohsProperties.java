@@ -12,11 +12,12 @@ import io.mohs.core.resource.RunnerMode;
 
 /**
  * Propriedades {@code mohs.*} — só o que {@link MohsAutoConfiguration}/
- * {@link MohsJobScanner} de fato consomem até aqui (bean wiring do motor
- * M3 + escaneamento de {@code @MohsJob} + runners nomeados). Validações
- * de boot, REST e enforcement de rate limit ainda não existem — as
- * propriedades correspondentes ({@code mohs.rate-limits.*},
- * {@code mohs.api.enabled}) entram junto delas, não antes.
+ * {@link MohsJobScanner}/{@link MohsRestAutoConfiguration} de fato
+ * consomem até aqui (bean wiring do motor M3 + escaneamento de
+ * {@code @MohsJob} + runners nomeados + REST v1 de jobs/executions).
+ * Validações de boot e enforcement de rate limit ainda não existem — as
+ * propriedades correspondentes ({@code mohs.rate-limits.*}) entram
+ * junto delas, não antes.
  */
 @ConfigurationProperties("mohs")
 public class MohsProperties {
@@ -38,6 +39,9 @@ public class MohsProperties {
 
     @NestedConfigurationProperty
     private final Registration registration = new Registration();
+
+    @NestedConfigurationProperty
+    private final Api api = new Api();
 
     private final Map<String, Runner> runners = new LinkedHashMap<>();
 
@@ -67,6 +71,10 @@ public class MohsProperties {
 
     public Registration getRegistration() {
         return registration;
+    }
+
+    public Api getApi() {
+        return api;
     }
 
     public Map<String, Runner> getRunners() {
@@ -239,6 +247,35 @@ public class MohsProperties {
             PRESERVE,
             /** Divergência derruba o boot exibindo o diff. */
             FAIL
+        }
+    }
+
+    /**
+     * ADR-0010: fechada por padrão ({@code enabled=false}) — ligar é ato
+     * consciente, sinalizado por WARN no boot em
+     * {@link MohsRestAutoConfiguration}. {@code basePath} é o prefixo de
+     * toda rota de {@code io.mohs.rest}, mesmo default hardcoded hoje em
+     * {@code io.mohs.rest.ApiPaths#V1}.
+     */
+    public static class Api {
+
+        private boolean enabled = false;
+        private String basePath = "/api/mohs/v1";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getBasePath() {
+            return basePath;
+        }
+
+        public void setBasePath(String basePath) {
+            this.basePath = basePath;
         }
     }
 
