@@ -153,12 +153,17 @@ public final class JdbcReaper implements Reaper {
      * sai junto porque é o fence do CAS de conclusão (ver {@link #reclaimRequest}).
      */
     private List<ExpiredCandidate> selectExpiredCandidates(Instant now) {
+        // ORDER BY e.id: reapers concorrentes acordam juntos numa morte de nó e
+        // adquirem os mesmos row locks — ordem global determinística (JCIP cap.
+        // 10, lock ordering) evita deadlock entre eles; a cadeia até o
+        // batchUpdate preserva encounter order.
         return jdbcTemplate.query("""
                 SELECT e.id AS id, e.job_key AS job_key, e.lease_expires_at AS lease_expires_at,
                        j.retries AS retries, j.retired AS retired
                 FROM mohs_executions e
                 JOIN mohs_job_definitions j ON j.job_key = e.job_key
                 WHERE e.state = 'RUNNING' AND e.lease_expires_at < :now
+                ORDER BY e.id
                 """,
                 new MapSqlParameterSource("now", JdbcTimestamps.toUtcTimestamp(now)),
                 (rs, _) -> new ExpiredCandidate(rs.getString("id"), rs.getString("job_key"),

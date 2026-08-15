@@ -277,8 +277,13 @@ public final class JdbcExecutionStore implements ExecutionStore {
     /**
      * Fallback raro do {@code SUCCESS_NO_INFO}: confirma por estado, em
      * chunks (DB-11). Sob READ COMMITTED pode confirmar como nossa uma
-     * transição que outro ator commitou no meio — imprecisão aceita só
-     * neste fallback; o caminho normal usa o {@code int[]} exato.
+     * transição que outro ator commitou no meio — e o raio de dano real não
+     * é só imprecisão: o id mal-atribuído entra no INSERT em lote de
+     * attempts, colide com a PK do attempt que o outro ator gravou e
+     * reverte a transação inteira do {@code completeAll} (auto-cicatriza no
+     * tick seguinte). Aceito só porque este caminho exige driver que
+     * devolva {@code SUCCESS_NO_INFO}; o caminho normal usa o {@code int[]}
+     * exato.
      */
     private Set<ExecutionId> confirmBySelect(List<ExecutionStore.CompletionRequest> batch) {
         Set<ExecutionId> confirmed = new LinkedHashSet<>();

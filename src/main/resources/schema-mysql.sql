@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     created_at       DATETIME(6)  NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
 -- MySQL não tem índice parcial/filtrado — Postgres e SQL Server usam
--- WHERE state = 'ENQUEUED' aqui (DBTUNE-5); MySQL fica com a composta cheia.
+-- WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') aqui (DBTUNE-5, ADR-0033); MySQL fica com a composta cheia.
 CREATE INDEX idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
 -- Sem índice parcial (ver comentário acima) — composta cheia pro reaper
 -- também (DBTUNE-10): state líder, igual à do claim.

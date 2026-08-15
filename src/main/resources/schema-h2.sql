@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     created_at       TIMESTAMP    NOT NULL
 );
 -- H2 não tem índice parcial/filtrado — Postgres e SQL Server usam
--- WHERE state = 'ENQUEUED' aqui (DBTUNE-5); H2 fica com a composta cheia.
+-- WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') aqui (DBTUNE-5, ADR-0033); H2 fica com a composta cheia.
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
 -- Sem índice parcial (ver comentário acima) — composta cheia pro reaper
 -- também (DBTUNE-10): state líder, igual à do claim.

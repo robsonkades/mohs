@@ -144,9 +144,8 @@ public final class Dispatcher {
      * e o evento {@code Failed} depende de um {@code ExecutionListener}
      * registrado; sem este log, a causa de um job quebrado às 3h da manhã
      * não estaria em lugar nenhum.
-     */
-    /**
-     * {@code attemptsExhausted} responde a pergunta que o Javadoc de
+     *
+     * <p>{@code attemptsExhausted} responde a pergunta que o Javadoc de
      * {@link Failed} faz: {@code true} só quando {@link RetrySchedule}
      * disse "sem saldo"; falha terminal por natureza (pré-dispatch) publica
      * {@code false} — orçamento intacto não é orçamento esgotado.
