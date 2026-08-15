@@ -7,13 +7,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.NestedConfigurationProperty;
 
 /**
- * Propriedades {@code mohs.*} — só o que {@link MohsAutoConfiguration} de
- * fato consome nesta rodada (bean wiring do motor M3). Escaneamento de
- * {@code @MohsJob}, validações de boot, REST e enforcement de runner/rate
- * limit ainda não existem — as propriedades correspondentes
- * ({@code mohs.registration.on-conflict}, {@code mohs.runners.*},
- * {@code mohs.rate-limits.*}, {@code mohs.api.enabled}) entram junto delas,
- * não antes.
+ * Propriedades {@code mohs.*} — só o que {@link MohsAutoConfiguration}/
+ * {@link MohsJobScanner} de fato consomem até aqui (bean wiring do motor
+ * M3 + escaneamento de {@code @MohsJob}). Validações de boot, REST e
+ * enforcement de runner/rate limit ainda não existem — as propriedades
+ * correspondentes ({@code mohs.runners.*}, {@code mohs.rate-limits.*},
+ * {@code mohs.api.enabled}) entram junto delas, não antes.
  */
 @ConfigurationProperties("mohs")
 public class MohsProperties {
@@ -32,6 +31,9 @@ public class MohsProperties {
 
     @NestedConfigurationProperty
     private final Time time = new Time();
+
+    @NestedConfigurationProperty
+    private final Registration registration = new Registration();
 
     public boolean isEnabled() {
         return enabled;
@@ -55,6 +57,10 @@ public class MohsProperties {
 
     public Time getTime() {
         return time;
+    }
+
+    public Registration getRegistration() {
+        return registration;
     }
 
     public static class Jdbc {
@@ -200,6 +206,29 @@ public class MohsProperties {
 
         public enum Mode {
             APPLICATION, DATABASE
+        }
+    }
+
+    public static class Registration {
+
+        /** ADR-0006: como {@link MohsJobScanner} resolve divergência definicional entre o código e o que já está no store. */
+        private OnConflict onConflict = OnConflict.OVERRIDE;
+
+        public OnConflict getOnConflict() {
+            return onConflict;
+        }
+
+        public void setOnConflict(OnConflict onConflict) {
+            this.onConflict = onConflict;
+        }
+
+        public enum OnConflict {
+            /** Código vence; toda mudança logada com diff (default). */
+            OVERRIDE,
+            /** Store vence; versão do código ignorada com WARN. */
+            PRESERVE,
+            /** Divergência derruba o boot exibindo o diff. */
+            FAIL
         }
     }
 }

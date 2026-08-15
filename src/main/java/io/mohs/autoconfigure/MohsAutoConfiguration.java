@@ -181,4 +181,18 @@ public class MohsAutoConfiguration {
     public Mohs mohs(JobStore mohsJobStore, ExecutionStore mohsExecutionStore, Clock mohsClock, Engine mohsEngine) {
         return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsClock, mohsEngine);
     }
+
+    /**
+     * {@code static}: {@code BeanPostProcessor} via {@code @Bean} não-estático
+     * arrisca inicializar esta classe de configuração cedo demais (aviso
+     * conhecido do próprio Spring) — {@code static} evita, sem abrir mão de
+     * parâmetros autowired normais. {@code ObjectProvider} nos três
+     * parâmetros pelo mesmo motivo, do lado de {@link MohsJobScanner}: ver
+     * o Javadoc de classe dela.
+     */
+    @Bean
+    public static MohsJobScanner mohsJobScanner(ObjectProvider<HandlerRegistry> mohsHandlerRegistry,
+            ObjectProvider<JobStore> mohsJobStore, ObjectProvider<MohsProperties> properties) {
+        return new MohsJobScanner(mohsHandlerRegistry, mohsJobStore, properties);
+    }
 }

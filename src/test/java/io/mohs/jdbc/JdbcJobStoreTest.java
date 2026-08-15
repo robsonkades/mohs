@@ -25,11 +25,13 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
+import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.schedule.CronSpec;
 import io.mohs.core.schedule.IntervalSpec;
+import io.mohs.core.schedule.Misfire;
 import io.mohs.core.schedule.OnDemandSpec;
 import io.mohs.core.schedule.Schedule;
 import io.mohs.engine.StoredJob;
@@ -78,6 +80,12 @@ class JdbcJobStoreTest {
 
     private static JobDefinition definitionWithCap(String id, int max) {
         return JobDefinition.of(id, Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(max));
+    }
+
+    /** JobDefinition.of (builder público) hardcoda PROGRAMMATIC — só o construtor canônico produz ANNOTATION. */
+    private static JobDefinition annotationSourcedDefinition(String id) {
+        return new JobDefinition(JobKey.of(id), null, Handler.class, new OnDemandSpec(),
+                null, null, Misfire.IGNORE, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
     }
 
     @Test
@@ -177,6 +185,17 @@ class JdbcJobStoreTest {
         }
     }
 
+    /** Filtro por source aplicado no WHERE, não em memória — PROGRAMMATIC nunca sai do cursor. */
+    @Test
+    void findAllAnnotationSourcedExcludesProgrammaticJobs() {
+        store.upsert(definition("programmatic-job", new OnDemandSpec()));
+        store.upsert(annotationSourcedDefinition("annotation-job"));
+
+        try (Stream<StoredJob> annotationSourced = store.findAllAnnotationSourced()) {
+            assertThat(annotationSourced).extracting(job -> job.definition().key()).containsExactly(JobKey.of("annotation-job"));
+        }
+    }
+
     @Test
     void markOrphanedSetsTheFlag() {
         JobKey key = JobKey.of("welcome-email");
@@ -185,6 +204,18 @@ class JdbcJobStoreTest {
         store.markOrphaned(key);
 
         assertThat(store.find(key)).map(StoredJob::orphaned).contains(true);
+    }
+
+    /** orphaned é dedução do sistema, não decisão de operador como paused — reupsert (a anotação reapareceu) limpa. */
+    @Test
+    void upsertClearsOrphanedOnReupsert() {
+        JobKey key = JobKey.of("welcome-email");
+        store.upsert(definition("welcome-email", new OnDemandSpec()));
+        store.markOrphaned(key);
+
+        store.upsert(definition("welcome-email", new OnDemandSpec()));
+
+        assertThat(store.find(key)).map(StoredJob::orphaned).contains(false);
     }
 
     @Test

@@ -3,6 +3,7 @@ package io.mohs.engine;
 import java.util.Optional;
 import java.util.stream.Stream;
 
+import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.job.JobKey;
 
@@ -29,6 +30,16 @@ public interface JobStore {
      * apesar do {@code fetchSize} configurado do lado do template.
      */
     Stream<StoredJob> findAll();
+
+    /**
+     * Mesmo contrato de cursor de {@link #findAll()}, filtrado a
+     * {@link DefinitionSource#ANNOTATION} na fonte (não em memória depois) —
+     * {@link io.mohs.autoconfigure.MohsJobScanner} reconcilia órfãs só
+     * contra este subconjunto; {@code PROGRAMMATIC} nunca fica
+     * {@code ORPHANED} (ver {@link #markOrphaned}), então baixá-las junto
+     * seria banda de leitura sem uso.
+     */
+    Stream<StoredJob> findAllAnnotationSourced();
 
     /** {@code ANNOTATION} presente no store, ausente do código (ADR-0006) — não dispara, não apaga histórico. */
     void markOrphaned(JobKey key);

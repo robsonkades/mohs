@@ -6,6 +6,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
+import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.JobStore;
@@ -22,14 +23,19 @@ public final class InMemoryJobStore implements JobStore {
 
     private final Map<JobKey, StoredJob> jobs = new ConcurrentHashMap<>();
 
+    /**
+     * {@code orphaned} sempre limpa aqui, ao contrário de {@code paused}
+     * (preservado): diferente de pause (decisão de operador), orphaned é
+     * dedução do sistema ("a anotação sumiu") — o próprio upsert acontecer
+     * já é prova de que uma fonte real quer este job de novo.
+     */
     @Override
     public JobDefinition upsert(JobDefinition definition) {
         Objects.requireNonNull(definition, "definition");
         jobs.compute(definition.key(), (_, existing) -> {
-            boolean orphaned = existing != null && existing.orphaned();
             boolean paused = existing != null && existing.paused();
             int runningExecutionCount = existing != null ? existing.runningExecutionCount() : 0;
-            return new StoredJob(definition, orphaned, paused, runningExecutionCount);
+            return new StoredJob(definition, false, paused, runningExecutionCount);
         });
         return definition;
     }
@@ -43,6 +49,11 @@ public final class InMemoryJobStore implements JobStore {
     @Override
     public Stream<StoredJob> findAll() {
         return jobs.values().stream();
+    }
+
+    @Override
+    public Stream<StoredJob> findAllAnnotationSourced() {
+        return jobs.values().stream().filter(stored -> stored.definition().source() == DefinitionSource.ANNOTATION);
     }
 
     @Override

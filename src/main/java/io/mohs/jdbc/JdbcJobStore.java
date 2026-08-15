@@ -83,6 +83,7 @@ public final class JdbcJobStore implements JobStore {
                 .addValue("timeout", definition.timeout() == null ? null : definition.timeout().toString())
                 .addValue("retryPolicy", definition.retryPolicy())
                 .addValue("source", definition.source().name())
+                .addValue("orphaned", false)
                 .addValue("updatedAt", now);
         // id é gerado aqui mas só entra no INSERT — se cair no UPDATE, o
         // valor gerado fica sem uso; a linha existente mantém o id que já
@@ -97,6 +98,10 @@ public final class JdbcJobStore implements JobStore {
         // dois ver 0 linhas e os dois tentar INSERT — quem perde recebe
         // DuplicateKeyException (job_key já existe, o outro venceu) e vira
         // UPDATE, não erro propagado pro bootstrap (CONC-2).
+        // orphaned = FALSE mesmo em UPDATE: diferente de paused (decisão de operador,
+        // upsert nunca toca), orphaned é dedução do sistema ("a anotação sumiu") — o
+        // próprio upsert acontecer já é prova de que uma fonte real (scan ou
+        // Mohs.define) quer este job de novo, então a precondição de ORPHANED não vale mais.
         String updateSql = """
                 UPDATE mohs_job_definitions SET
                     name = :name, handler_type = :handlerType, schedule_type = :scheduleType,
@@ -106,7 +111,7 @@ public final class JdbcJobStore implements JobStore {
                     misfire = :misfire, allow_concurrent_executions = :allowConcurrentExecutions,
                     max_concurrent_executions = :maxConcurrentExecutions,
                     retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
-                    source = :source, updated_at = :updatedAt
+                    source = :source, orphaned = :orphaned, updated_at = :updatedAt
                 WHERE job_key = :jobKey
                 """;
         int updated = jdbcTemplate.update(updateSql, params);
@@ -127,7 +132,7 @@ public final class JdbcJobStore implements JobStore {
                             :timeout, :retryPolicy, :source,
                             :orphaned, :paused, :runningExecutionCount, :createdAt, :updatedAt)
                         """, params.addValue("id", id).addValue("createdAt", now)
-                                .addValue("orphaned", false).addValue("paused", false).addValue("runningExecutionCount", 0));
+                                .addValue("paused", false).addValue("runningExecutionCount", 0));
             } catch (DuplicateKeyException _) {
                 jdbcTemplate.update(updateSql, params);
             }
@@ -150,8 +155,18 @@ public final class JdbcJobStore implements JobStore {
 
     @Override
     public Stream<StoredJob> findAll() {
+        return queryForJobStream("SELECT * FROM mohs_job_definitions", new MapSqlParameterSource());
+    }
+
+    @Override
+    public Stream<StoredJob> findAllAnnotationSourced() {
+        return queryForJobStream("SELECT * FROM mohs_job_definitions WHERE source = :source",
+                new MapSqlParameterSource("source", DefinitionSource.ANNOTATION.name()));
+    }
+
+    private Stream<StoredJob> queryForJobStream(String sql, MapSqlParameterSource params) {
         List<String> unresolvedHandlerJobKeys = new ArrayList<>();
-        return jdbcTemplate.queryForStream("SELECT * FROM mohs_job_definitions", new MapSqlParameterSource(),
+        return jdbcTemplate.queryForStream(sql, params,
                         (rs, rowNum) -> mapRowOrNull(rs, rowNum, unresolvedHandlerJobKeys))
                 .filter(Objects::nonNull)
                 // registrado depois do cursor interno do queryForStream — roda só

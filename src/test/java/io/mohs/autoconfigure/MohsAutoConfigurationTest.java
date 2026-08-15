@@ -1,7 +1,9 @@
 package io.mohs.autoconfigure;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -9,6 +11,7 @@ import javax.sql.DataSource;
 
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.core.io.ClassPathResource;
@@ -17,6 +20,7 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import io.mohs.core.EngineState;
 import io.mohs.core.Mohs;
 import io.mohs.core.definition.JobDefinition;
+import io.mohs.core.definition.MohsJob;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Succeeded;
 import io.mohs.core.job.JobKey;
@@ -30,6 +34,15 @@ class MohsAutoConfigurationTest {
     }
 
     record Greeting(String name) {
+    }
+
+    static class GreetingJob {
+        final List<Greeting> received = new CopyOnWriteArrayList<>();
+
+        @MohsJob(id = "greet-annotated")
+        void greet(Greeting payload) {
+            received.add(payload);
+        }
     }
 
     private static DataSource freshH2DataSource() {
@@ -109,7 +122,51 @@ class MohsAutoConfigurationTest {
                 assertThat(context).doesNotHaveBean(Mohs.class));
     }
 
-    private static void awaitState(io.mohs.engine.ExecutionStore executionStore, String jobKey, EngineState unused) throws InterruptedException {
-        // implementado abaixo, via polling curto — ver ajuste final do teste.
+    /** Sem HandlerRegistry.register/Mohs.define manual nenhum — prova que MohsJobScanner faz isso sozinho. */
+    @Test
+    void mohsJobAnnotatedBeanIsScannedAndDispatchedAutomatically() {
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+
+        runnerWith(freshH2DataSource())
+                .withBean(ExecutionListener.class, () -> listener)
+                .withUserConfiguration(GreetingJob.class)
+                .run(context -> {
+                    Mohs mohs = context.getBean(Mohs.class);
+                    mohs.schedule("greet-annotated", new Greeting("ana")).now();
+
+                    assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
+                    assertThat(context.getBean(GreetingJob.class).received).containsExactly(new Greeting("ana"));
+                });
+    }
+
+    /** AopUtils.getTargetClass/selectInvocableMethod: o método anotado precisa ser achado atrás de um proxy CGLIB, não só na classe crua. */
+    @Test
+    void mohsJobIsFoundBehindACglibProxy() {
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        GreetingJob target = new GreetingJob();
+        ProxyFactory proxyFactory = new ProxyFactory(target);
+        proxyFactory.setProxyTargetClass(true);
+        GreetingJob proxy = (GreetingJob) proxyFactory.getProxy();
+
+        runnerWith(freshH2DataSource())
+                .withBean(ExecutionListener.class, () -> listener)
+                .withBean("greetingJob", GreetingJob.class, () -> proxy)
+                .run(context -> {
+                    Mohs mohs = context.getBean(Mohs.class);
+                    mohs.schedule("greet-annotated", new Greeting("ana")).now();
+
+                    assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
+                    assertThat(target.received).containsExactly(new Greeting("ana"));
+                });
     }
 }
