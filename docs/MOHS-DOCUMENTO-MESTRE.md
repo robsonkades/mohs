@@ -668,6 +668,14 @@ Construção do zero, atrás dos contratos M1/M2 já congelados:
   `mohs.api.enabled`, `mohs.registration.on-conflict`, validações de boot
   (§5.13)
 - Idempotency-Key persistida — mesma durabilidade da Execution
+- `@OnExecution` processada — listener sintetizado por método anotado,
+  filtrado por job e tipo de evento. Sequenciada **após** o núcleo de
+  correção (watchdog/misfire/retry — DX não fura fila de correção), mas
+  dentro do M3: o milestone não fecha com anotação da API core que derruba
+  o boot. O guard fail-fast em `MohsJobScanner.scanMethod` é o ponto exato
+  a substituir; registro segue o precedente do `HandlerRegistry` (nasce
+  vazio, scanner povoa antes do Engine partir), adaptação reflection segue
+  `MohsJobs.adaptHandler`.
 
 ### M4 — Refino (só depois de M1–M3 fechados)
 

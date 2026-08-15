@@ -20,15 +20,3 @@ design REST).
 **Decidir:** a política em si — delete vs. arquivamento, janela default,
 configuração, job interno do Mohs como mecanismo (candidato do DBTUNE-9).
 Vira ADR própria quando desenhada.
-
-## 4. `@OnExecution` — milestone do processamento
-
-A anotação existe na API pública mas o motor não a processa. Correção
-provisória aplicada (N1): `MohsJobScanner` **falha o boot** ao encontrá-la,
-com mensagem apontando a alternativa (`ExecutionListener` como bean), e o
-Javadoc da anotação declara o status.
-
-**Decidir:** em qual milestone entra a entrega de eventos filtrados a
-métodos anotados. Quando entrar, o guard do fail-fast em
-`MohsJobScanner.scanMethod` é o ponto exato a substituir pelo registro do
-listener sintetizado.
