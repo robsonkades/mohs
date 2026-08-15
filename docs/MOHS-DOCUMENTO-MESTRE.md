@@ -668,6 +668,9 @@ Construção do zero, atrás dos contratos M1/M2 já congelados:
   `mohs.api.enabled`, `mohs.registration.on-conflict`, validações de boot
   (§5.13)
 - Idempotency-Key persistida — mesma durabilidade da Execution
+- Retenção de execuções (ADR-0032): job interno `mohs-retention`, delete
+  puro por faixa de PK UUIDv7 + estado terminal, `mohs.retention.window`
+  default 7d (piso 24h — ADR-0030), lotes medidos pelo harness
 - `@OnExecution` processada — listener sintetizado por método anotado,
   filtrado por job e tipo de evento. Sequenciada **após** o núcleo de
   correção (watchdog/misfire/retry — DX não fura fila de correção), mas
