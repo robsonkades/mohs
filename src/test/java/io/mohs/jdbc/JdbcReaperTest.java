@@ -1,5 +1,6 @@
 package io.mohs.jdbc;
 
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -119,5 +120,42 @@ class JdbcReaperTest {
     @Test
     void reclaimExpiredReturnsEmptyWhenNothingIsRunning() {
         assertThat(reaper.reclaimExpired()).isEmpty();
+    }
+
+    /** ADR-0033 (revoga a restrição da ADR-0026): nó morto com orçamento restante reagenda com backoff — a garantia sob falha de nó vira at-least-once. */
+    @Test
+    void reclaimSchedulesARetryWhenTheJobStillHasBudget() {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(2)));
+        seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+
+        List<Execution> reclaimed = reaper.reclaimExpired();
+
+        assertThat(reclaimed).hasSize(1);
+        assertThat(reclaimed.get(0).state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(reclaimed.get(0).attempts()).hasSize(1);
+        assertThat(reclaimed.get(0).attempts().get(0).error()).contains("lease expired");
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        Timestamp retryAt = rawJdbcTemplate.queryForObject(
+                "SELECT scheduled_at FROM mohs_executions WHERE id = ?", Timestamp.class, "exec-1");
+        // bound do backoff da 1ª falha (full jitter): [now, now + 1s]
+        assertThat(JdbcTimestamps.fromUtcTimestamp(retryAt)).isBetween(NOW, NOW.plusSeconds(1));
+    }
+
+    /** O attempt sintético do reclaim conta no orçamento como qualquer outro — reclaim da última tentativa é FAILED terminal. */
+    @Test
+    void reclaimFailsTerminallyWhenTheBudgetIsExhausted() {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
+        seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
+                VALUES (?, 1, ?, ?, 'FAILED', 'boom')
+                """, "exec-1", JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(50)), JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(49)));
+
+        List<Execution> reclaimed = reaper.reclaimExpired();
+
+        assertThat(reclaimed).hasSize(1);
+        assertThat(reclaimed.get(0).state()).isEqualTo(ExecutionState.FAILED);
+        assertThat(reclaimed.get(0).attempts()).hasSize(2);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
     }
 }

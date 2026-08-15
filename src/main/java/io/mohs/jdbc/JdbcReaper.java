@@ -27,9 +27,10 @@ import io.mohs.core.job.JobKey;
 import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.Reaper;
+import io.mohs.engine.RetrySchedule;
 
 /**
- * {@link Reaper} sobre {@code mohs_executions} (ADR-0012/0025/0026).
+ * {@link Reaper} sobre {@code mohs_executions} (ADR-0012/0025/0033).
  * Mesma forma de transação própria de {@link JdbcClaimer} — quem chama
  * {@link #reclaimExpired} não tem transação ativa (disparado pelo ciclo
  * de poll do motor, não por um chamador com contexto transacional já
@@ -84,31 +85,38 @@ public final class JdbcReaper implements Reaper {
         Map<String, Execution> executionsById = executionStore.findByIds(candidates.stream().map(c -> ExecutionId.of(c.id())).toList())
                 .stream().collect(Collectors.toMap(e -> e.id().value(), Function.identity()));
 
-        Map<String, Attempt> synthesizedAttemptById = new HashMap<>();
+        Map<String, ExecutionStore.CompletionRequest> requestById = new HashMap<>();
         List<ExecutionStore.CompletionRequest> requests = new ArrayList<>(candidates.size());
         for (ExpiredCandidate candidate : candidates) {
             Execution execution = executionsById.get(candidate.id());
             if (execution == null) {
                 throw new IllegalStateException("candidate " + candidate.id() + " vanished during reclaim — should be unreachable");
             }
+            int attemptNumber = execution.attempts().size() + 1;
             Attempt attempt = new Attempt(
-                    execution.attempts().size() + 1,
+                    attemptNumber,
                     execution.firedAt() != null ? execution.firedAt() : now,
                     now,
                     ExecutionState.FAILED,
                     LEASE_EXPIRED_ERROR);
-            synthesizedAttemptById.put(candidate.id(), attempt);
-            requests.add(new ExecutionStore.CompletionRequest(
-                    ExecutionId.of(candidate.id()), JobKey.of(candidate.jobKey()), attempt, ExecutionState.FAILED));
+            // ADR-0033: o attempt sintético do reclaim consome orçamento como
+            // qualquer outro — mesma decisão (RetrySchedule) do Dispatcher.
+            ExecutionStore.CompletionRequest request = RetrySchedule.nextRetryAt(attemptNumber, candidate.retries(), now)
+                    .map(retryAt -> new ExecutionStore.CompletionRequest(
+                            ExecutionId.of(candidate.id()), JobKey.of(candidate.jobKey()), attempt, ExecutionState.RETRY_SCHEDULED, retryAt))
+                    .orElseGet(() -> new ExecutionStore.CompletionRequest(
+                            ExecutionId.of(candidate.id()), JobKey.of(candidate.jobKey()), attempt, ExecutionState.FAILED));
+            requestById.put(candidate.id(), request);
+            requests.add(request);
         }
 
         Set<ExecutionId> completedIds = executionStore.completeAll(requests, jobStore);
-        return buildReclaimedList(candidates, executionsById, synthesizedAttemptById, completedIds);
+        return buildReclaimedList(candidates, executionsById, requestById, completedIds);
     }
 
     /** Reconstrói o resultado localmente (sem consulta extra) — {@link ExecutionStore#completeAll} só confirma quais ids venceram o CAS. */
     private static List<Execution> buildReclaimedList(List<ExpiredCandidate> candidates, Map<String, Execution> executionsById,
-            Map<String, Attempt> synthesizedAttemptById, Set<ExecutionId> completedIds) {
+            Map<String, ExecutionStore.CompletionRequest> requestById, Set<ExecutionId> completedIds) {
         List<Execution> reclaimed = new ArrayList<>(completedIds.size());
         for (ExpiredCandidate candidate : candidates) {
             ExecutionId id = ExecutionId.of(candidate.id());
@@ -116,22 +124,27 @@ public final class JdbcReaper implements Reaper {
                 continue;
             }
             Execution execution = executionsById.get(candidate.id());
-            Attempt attempt = synthesizedAttemptById.get(candidate.id());
+            ExecutionStore.CompletionRequest request = requestById.get(candidate.id());
             List<Attempt> attempts = new ArrayList<>(execution.attempts());
-            attempts.add(attempt);
-            reclaimed.add(new Execution(id, JobKey.of(candidate.jobKey()), ExecutionState.FAILED, execution.scheduledAt(), execution.firedAt(), attempts,
+            attempts.add(request.attempt());
+            reclaimed.add(new Execution(id, JobKey.of(candidate.jobKey()), request.newState(), execution.scheduledAt(), execution.firedAt(), attempts,
                     execution.actor(), execution.priority(), execution.idempotencyKey()));
         }
         return reclaimed;
     }
 
+    /** {@code j.retries} entra no mesmo SELECT — a decisão de orçamento não paga uma consulta por candidato. */
     private List<ExpiredCandidate> selectExpiredCandidates(Instant now) {
-        return jdbcTemplate.query(
-                "SELECT id, job_key FROM mohs_executions WHERE state = 'RUNNING' AND lease_expires_at < :now",
+        return jdbcTemplate.query("""
+                SELECT e.id AS id, e.job_key AS job_key, j.retries AS retries
+                FROM mohs_executions e
+                JOIN mohs_job_definitions j ON j.job_key = e.job_key
+                WHERE e.state = 'RUNNING' AND e.lease_expires_at < :now
+                """,
                 new MapSqlParameterSource("now", JdbcTimestamps.toUtcTimestamp(now)),
-                (rs, _) -> new ExpiredCandidate(rs.getString("id"), rs.getString("job_key")));
+                (rs, _) -> new ExpiredCandidate(rs.getString("id"), rs.getString("job_key"), rs.getInt("retries")));
     }
 
-    private record ExpiredCandidate(String id, String jobKey) {
+    private record ExpiredCandidate(String id, String jobKey, int retries) {
     }
 }
