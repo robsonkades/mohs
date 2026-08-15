@@ -1,8 +1,10 @@
 # Pendências — decisões em aberto
 
-Origem: `codereview-20260815-0332.md` (segunda passada, "Perguntas ao autor").
-Todas as correções do review foram aplicadas; estes 4 itens são as decisões
-que ficaram com o autor. Ao resolver um item, registrar a decisão (ADR ou
+Origem: itens 1–4 de `codereview-20260815-0332.md` (segunda passada,
+"Perguntas ao autor"); itens 5–6 do "Fora do escopo" do plano de refactor
+de `io.mohs.autoconfigure` (executado e removido em 709d5b2). Todas as
+correções do review foram aplicadas; estes itens são as decisões que
+ficaram com o autor. Ao resolver um item, registrar a decisão (ADR ou
 Javadoc, conforme o caso) e removê-lo daqui.
 
 ## 1. Janela de ~24h da Idempotency-Key
@@ -55,3 +57,26 @@ Javadoc da anotação declara o status.
 métodos anotados. Quando entrar, o guard do fail-fast em
 `MohsJobScanner.scanMethod` é o ponto exato a substituir pelo registro do
 listener sintetizado.
+
+## 5. Nenhum bean interno recua com `@ConditionalOnMissingBean`
+
+Todos os beans de `MohsAutoConfiguration` são incondicionais — o
+consumidor não consegue substituir `Clock`, stores nem executores (o
+`JsonMapper` de persistência já tem pendência própria, item 2). Pode ser
+deliberado (internos não são SPI), mas é uma decisão de superfície de API
+que merece registro, não um estado implícito.
+
+**Decidir:** confirmar que os internos não são pontos de extensão e
+registrar em mini-ADR — ou escolher quais beans viram SPI substituível e
+só então dar `@ConditionalOnMissingBean` a esses.
+
+## 6. Payload de tipo errado em `MohsJobs.adaptHandler`
+
+Estoura como `IllegalArgumentException` crua do reflection ("argument
+type mismatch"), sem dizer job nem método. Melhorar a mensagem muda o
+conteúdo de `Attempt.error()` — comportamento observável —, então
+depende de aprovação explícita, não entra como refactor.
+
+**Decidir:** aprovar (ou não) a mensagem contextualizada. Quando
+aprovada, o ponto exato é a invocação em `MohsJobs.adaptHandler`,
+nomeando job e método declarante no erro.
