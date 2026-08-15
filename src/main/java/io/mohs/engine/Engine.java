@@ -266,6 +266,7 @@ public final class Engine implements MohsLifecycle {
             EngineState current = state.get();
             nodeStore.heartbeat(nodeId, current, clock.instant());
             signalJobTimeouts();
+            pollCancelRequests();
             // node vivo renova o que ainda executa — PAUSED/DRAINING incluídos
             // (ADR-0007: drain ≠ cancel; a lease detecta morte, não pausa —
             // sem isto, um drain mais longo que a lease viraria dupla execução
@@ -308,6 +309,33 @@ public final class Engine implements MohsLifecycle {
                 log.warn("execution {} exceeded its job timeout {} — cancellation signalled and the handler interrupted; "
                         + "the outcome follows when the handler stops (ADR-0034)", entry.getKey(), attempt.timeout);
                 attempt.signal.requestCancellation(CancellationSignal.Reason.TIMEOUT, true);
+            }
+        }
+    }
+
+    /**
+     * ADR-0034: observa {@code POST /executions/{id}/cancel} — lê em lote
+     * (por PK, só quando há in-flight) a flag {@code cancel_requested} do
+     * próprio in-flight e levanta {@code MANUAL} como flag pura, sem
+     * interrupt: cancel é cooperativo por contrato; quem força é o timeout
+     * do job e o Watchdog, que continuam valendo. Staleness efetiva ≤ 1
+     * poll-interval. Ids já sinalizados saem da consulta — o SELECT
+     * encolhe enquanto o handler ainda não respondeu, e o INFO sai uma vez
+     * só. Ativo também em PAUSED/DRAINING, como o resto da varredura.
+     */
+    private void pollCancelRequests() {
+        List<ExecutionId> unsignalled = inFlightAttempts.entrySet().stream()
+                .filter(entry -> !entry.getValue().signal.cancellationRequested())
+                .map(Map.Entry::getKey)
+                .toList();
+        if (unsignalled.isEmpty()) {
+            return;
+        }
+        for (ExecutionId id : executionStore.findCancelRequested(unsignalled)) {
+            InFlightAttempt attempt = inFlightAttempts.get(id);
+            if (attempt != null) {
+                log.info("execution {} has a standing cancel request — cooperative cancellation signalled to the handler", id);
+                attempt.signal.requestCancellation(CancellationSignal.Reason.MANUAL, false);
             }
         }
     }

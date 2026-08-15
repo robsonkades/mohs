@@ -40,6 +40,7 @@ import io.mohs.core.EngineState;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.event.AttemptFailed;
+import io.mohs.core.event.Cancelled;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Failed;
 import io.mohs.core.event.RetryScheduled;
@@ -446,6 +447,43 @@ class EngineTest {
         assertThat(failedPublished.await(5, TimeUnit.SECONDS)).as("escalation interrupts and the attempt fails").isTrue();
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         assertThat(failed.get().error().getMessage()).contains("node shutdown");
+    }
+
+    /**
+     * ADR-0034 fim-a-fim: cancel manual gravado no banco (o que o POST
+     * /executions/{id}/cancel faz de outro processo) é observado pelo tick
+     * em ≤ 1 poll-interval — flag pura, sem interrupt (cancel é cooperativo
+     * por contrato); o handler observa via JobContext, sai, e o desfecho é
+     * CANCELLED com evento Cancelled.
+     */
+    @Test
+    void manualCancelRequestedInTheDatabaseCancelsTheRunningExecution() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            while (!ctx.cancellationRequested()) {
+                Thread.onSpinWait();
+            }
+            throw new IllegalStateException("stopping: cancellation observed");
+        });
+        CountDownLatch cancelledPublished = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Cancelled) {
+                cancelledPublished.countDown();
+            }
+        };
+        Engine engine = newEngine(nodeStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(executionStore.requestCancellation(ExecutionId.of("exec-1"))).isTrue();
+            assertThat(cancelledPublished.await(5, TimeUnit.SECONDS)).as("tick observes the flag and the handler exits").isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
     }
 
     private Instant leaseOf(String id) {
