@@ -29,6 +29,7 @@ import tools.jackson.databind.json.JsonMapper;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.Priority;
+import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.jdbc.dialect.JdbcDialect;
 import io.mohs.jdbc.dialect.MySqlJdbcDialect;
@@ -126,7 +127,7 @@ class ClaimQueryLoadHarness {
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
         JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
-        JdbcClaimer claimer = new JdbcClaimer(dataSource, dialect, clock, executionStore, jobStore, LEASE_TTL);
+        JdbcClaimer claimer = new JdbcClaimer(dataSource, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
         seedBacklog(rawJdbcTemplate, jobStore, "latency", LATENCY_JOB_COUNT, LATENCY_EXECUTIONS_PER_JOB);
 
         for (int i = 0; i < LATENCY_WARMUP; i++) {
@@ -153,7 +154,7 @@ class ClaimQueryLoadHarness {
         List<Future<?>> nodes = new ArrayList<>();
         long start = System.nanoTime();
         for (int i = 0; i < THROUGHPUT_NODES; i++) {
-            JdbcClaimer nodeClaimer = new JdbcClaimer(dataSource, dialect, clock, executionStore, jobStore, LEASE_TTL);
+            JdbcClaimer nodeClaimer = new JdbcClaimer(dataSource, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
             String nodeId = "throughput-node-" + i;
             nodes.add(executor.submit(() -> {
                 List<Execution> claimed;

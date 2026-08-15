@@ -101,7 +101,7 @@ class EngineTest {
     }
 
     private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry) {
-        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
+        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
         JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor);
@@ -116,7 +116,7 @@ class EngineTest {
 
     /** Claim/reclaim usam as portas reais (o claim precisa funcionar); os overrides simulam falha só no caminho do dispatch. */
     private Engine newEngineWith(JobStore jobStoreOverride, ExecutionStore executionStoreOverride, List<ExecutionListener> listeners) {
-        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
+        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
         JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor);
@@ -482,7 +482,7 @@ class EngineTest {
         rejectionWatcher.start();
         engineLogger.addAppender(rejectionWatcher);
 
-        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
+        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
         JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), List.of(), eventExecutor);

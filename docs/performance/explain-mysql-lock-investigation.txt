@@ -1,4 +1,4 @@
-Cenario: 8 nos concorrentes drenando 3000 linhas (batchSize=20) em 4716 ms.
+Cenario: 8 nos concorrentes drenando 3000 linhas (batchSize=20) em 830 ms.
 
 Innodb_row_lock_* (contadores globais cumulativos do servidor) — delta desta rodada:
   Innodb_row_lock_waits        antes=0          depois=0          delta=0

@@ -24,12 +24,14 @@ import tools.jackson.databind.json.JsonMapper;
 import io.mohs.core.Mohs;
 import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
+import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.resource.RunnerMode;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.Dispatcher;
 import io.mohs.engine.Engine;
 import io.mohs.engine.ExecutionStore;
+import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.engine.HandlerRegistry;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.MohsExecutors;
@@ -236,9 +238,16 @@ public class MohsAutoConfiguration {
 
     @Bean
     public Claimer mohsClaimer(DataSource dataSource, JdbcDialect mohsJdbcDialect, Clock mohsClock,
-            ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsProperties properties) {
+            ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsProperties properties,
+            ExecutionWindowRegistry mohsExecutionWindowRegistry) {
         return new JdbcClaimer(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore,
-                properties.getEngine().getLeaseTtl());
+                properties.getEngine().getLeaseTtl(), mohsExecutionWindowRegistry);
+    }
+
+    /** Sem caminho via propriedade — {@link ExecutionWindow} só existe via {@code @Bean} (ver Javadoc da classe). */
+    @Bean
+    public ExecutionWindowRegistry mohsExecutionWindowRegistry(List<ExecutionWindow> mohsExecutionWindowBeans) {
+        return new ExecutionWindowRegistry(mohsExecutionWindowBeans);
     }
 
     @Bean

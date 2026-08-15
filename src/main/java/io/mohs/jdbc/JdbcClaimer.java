@@ -25,6 +25,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.ExecutionStore;
+import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.engine.JobStore;
 import io.mohs.jdbc.dialect.Candidate;
 import io.mohs.jdbc.dialect.JdbcDialect;
@@ -95,8 +96,10 @@ public final class JdbcClaimer implements Claimer {
     private final ExecutionStore executionStore;
     private final JobStore jobStore;
     private final Duration leaseTtl;
+    private final ExecutionWindowRegistry windowRegistry;
 
-    public JdbcClaimer(DataSource dataSource, JdbcDialect dialect, Clock clock, ExecutionStore executionStore, JobStore jobStore, Duration leaseTtl) {
+    public JdbcClaimer(DataSource dataSource, JdbcDialect dialect, Clock clock, ExecutionStore executionStore, JobStore jobStore,
+            Duration leaseTtl, ExecutionWindowRegistry windowRegistry) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -111,6 +114,7 @@ public final class JdbcClaimer implements Claimer {
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.leaseTtl = Objects.requireNonNull(leaseTtl, "leaseTtl");
+        this.windowRegistry = Objects.requireNonNull(windowRegistry, "windowRegistry");
     }
 
     @Override
@@ -175,7 +179,7 @@ public final class JdbcClaimer implements Claimer {
 
         List<String> claimedIds = new ArrayList<>(candidates.size());
         for (Candidate candidate : candidates) {
-            if (tryClaimCandidate(candidate, nodeId, leaseExpiresAt)) {
+            if (tryClaimCandidate(candidate, nodeId, now, leaseExpiresAt)) {
                 claimedIds.add(candidate.id());
             }
         }
@@ -186,9 +190,14 @@ public final class JdbcClaimer implements Claimer {
      * Reivindica um candidato através da cadeia completa de guardas
      * atômicas, desfazendo qualquer reserva parcial se um passo posterior
      * falhar — nunca deixa mutex de job preso por um candidato que no fim
-     * não foi reivindicado.
+     * não foi reivindicado. Janela de exclusão é a primeira guarda, antes
+     * de reservar qualquer vaga de concorrência: candidato excluído nunca
+     * chega a disputar o mutex do job nem o CAS pra {@code RUNNING}.
      */
-    private boolean tryClaimCandidate(Candidate candidate, String nodeId, Instant leaseExpiresAt) {
+    private boolean tryClaimCandidate(Candidate candidate, String nodeId, Instant now, Instant leaseExpiresAt) {
+        if (windowRegistry.excludes(candidate.windowName(), now)) {
+            return false;
+        }
         boolean acquiredJobSlot = false;
         if (!candidate.allowConcurrentExecutions()) {
             if (!jobStore.tryIncrementRunningExecutions(JobKey.of(candidate.jobKey()))) {

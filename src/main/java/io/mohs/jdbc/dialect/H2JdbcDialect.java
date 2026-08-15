@@ -20,7 +20,8 @@ public final class H2JdbcDialect implements JdbcDialect {
         // NOT NULL DEFAULT 20 no schema, então ordena direto, sem CASE.
         return jdbcTemplate.query("""
                 SELECT e.id AS id, e.job_key AS job_key,
-                       j.allow_concurrent_executions AS allow_concurrent_executions
+                       j.allow_concurrent_executions AS allow_concurrent_executions,
+                       j.window_name AS window_name
                 FROM mohs_executions e
                 JOIN mohs_job_definitions j ON j.job_key = e.job_key
                 WHERE e.state = 'ENQUEUED'

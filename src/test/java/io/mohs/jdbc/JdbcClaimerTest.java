@@ -33,6 +33,8 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.resource.ExecutionWindow;
+import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
@@ -65,7 +67,11 @@ class JdbcClaimerTest {
     }
 
     private JdbcClaimer newClaimer() {
-        return new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
+        return newClaimer(new ExecutionWindowRegistry(List.of()));
+    }
+
+    private JdbcClaimer newClaimer(ExecutionWindowRegistry windowRegistry) {
+        return new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, windowRegistry);
     }
 
     private static DataSource freshH2DataSource() {
@@ -323,5 +329,33 @@ class JdbcClaimerTest {
                 .collect(Collectors.toSet());
         assertThat(claimedA.size() + claimedB.size()).isEqualTo(2);
         assertThat(allClaimedIds).containsExactlyInAnyOrder("exec-a", "exec-b");
+    }
+
+    @Test
+    void claimSkipsExecutionsInsideAnExcludedWindow() {
+        ExecutionWindow maintenance = ExecutionWindow.named("maintenance").exclude(instant -> true).build();
+        JdbcClaimer windowedClaimer = newClaimer(new ExecutionWindowRegistry(List.of(maintenance)));
+        seedJob("welcome-email", policy -> policy.window("maintenance"));
+        seedExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+
+        List<Execution> claimed = windowedClaimer.claim("node-a", 10);
+
+        assertThat(claimed).isEmpty();
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.ENQUEUED);
+    }
+
+    @Test
+    void claimClaimsTheExecutionOnceTheWindowStopsExcluding() {
+        Instant windowEnd = NOW.plusSeconds(30);
+        ExecutionWindow maintenance = ExecutionWindow.named("maintenance").exclude(instant -> instant.isBefore(windowEnd)).build();
+        JdbcClaimer windowedClaimer = newClaimer(new ExecutionWindowRegistry(List.of(maintenance)));
+        seedJob("welcome-email", policy -> policy.window("maintenance"));
+        seedExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+        assertThat(windowedClaimer.claim("node-a", 10)).isEmpty();
+
+        clock.setTo(windowEnd);
+        List<Execution> claimed = windowedClaimer.claim("node-a", 10);
+
+        assertThat(claimed).extracting(e -> e.id().value()).containsExactly("exec-1");
     }
 }

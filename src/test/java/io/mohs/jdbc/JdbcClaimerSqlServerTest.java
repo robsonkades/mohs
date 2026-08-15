@@ -24,6 +24,7 @@ import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.jdbc.dialect.SqlServerJdbcDialect;
 import io.mohs.test.MutableClock;
 
@@ -63,7 +64,7 @@ class JdbcClaimerSqlServerTest {
     }
 
     private JdbcClaimer newClaimer() {
-        return new JdbcClaimer(dataSource, new SqlServerJdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
+        return new JdbcClaimer(dataSource, new SqlServerJdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
     }
 
     private void seedJob(String jobKey, Consumer<PolicySpec> policyConfigurer) {

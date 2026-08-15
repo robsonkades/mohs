@@ -23,8 +23,10 @@ import io.mohs.core.Mohs;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.MohsJob;
 import io.mohs.core.event.ExecutionListener;
+import io.mohs.core.event.Started;
 import io.mohs.core.event.Succeeded;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.engine.HandlerRegistry;
 
@@ -228,6 +230,54 @@ class MohsAutoConfigurationTest {
         runnerWith(freshH2DataSource(), "mohs.runners.batch.mode=cpu")
                 .withBean("batchRunner", MohsRunner.class, () -> MohsRunner.cpu("batch").build())
                 .run(context -> assertThat(context).hasFailed());
+    }
+
+    @Test
+    void jobIsNeverDispatchedInsideAnExcludedWindow() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Started) {
+                started.countDown();
+            }
+        };
+        ExecutionWindow maintenance = ExecutionWindow.named("maintenance").exclude(instant -> true).build();
+
+        runnerWith(freshH2DataSource())
+                .withBean(ExecutionListener.class, () -> listener)
+                .withBean("maintenanceWindow", ExecutionWindow.class, () -> maintenance)
+                .run(context -> {
+                    context.getBean(HandlerRegistry.class).register(JobKey.of("blocked"), (payload, ctx) -> { });
+
+                    Mohs mohs = context.getBean(Mohs.class);
+                    mohs.define(JobDefinition.of("blocked", Handler.class, spec -> spec.onDemand().window("maintenance")));
+                    mohs.schedule("blocked", new Greeting("ana")).now();
+
+                    assertThat(started.await(300, TimeUnit.MILLISECONDS)).as("never claimed/dispatched while the window excludes now").isFalse();
+                });
+    }
+
+    @Test
+    void jobRunsWhenTheWindowDoesNotExclude() {
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        ExecutionWindow openWindow = ExecutionWindow.named("maintenance").exclude(instant -> false).build();
+
+        runnerWith(freshH2DataSource())
+                .withBean(ExecutionListener.class, () -> listener)
+                .withBean("maintenanceWindow", ExecutionWindow.class, () -> openWindow)
+                .run(context -> {
+                    context.getBean(HandlerRegistry.class).register(JobKey.of("allowed"), (payload, ctx) -> { });
+
+                    Mohs mohs = context.getBean(Mohs.class);
+                    mohs.define(JobDefinition.of("allowed", Handler.class, spec -> spec.onDemand().window("maintenance")));
+                    mohs.schedule("allowed", new Greeting("ana")).now();
+
+                    assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
+                });
     }
 
     /** core-size é campo de CPU e o mode default é io: erro de boot apontando a propriedade, nunca descarte silencioso (que viraria runner IO de 64 threads pra trabalho CPU-bound). */

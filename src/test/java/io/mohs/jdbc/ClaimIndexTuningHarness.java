@@ -29,6 +29,7 @@ import tools.jackson.databind.json.JsonMapper;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.Priority;
+import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.jdbc.dialect.JdbcDialect;
 import io.mohs.jdbc.dialect.PostgresJdbcDialect;
 import io.mohs.jdbc.dialect.SqlServerJdbcDialect;
@@ -211,7 +212,7 @@ class ClaimIndexTuningHarness {
         List<Future<?>> nodes = new ArrayList<>();
         long start = System.nanoTime();
         for (int i = 0; i < CONCURRENT_NODES; i++) {
-            JdbcClaimer nodeClaimer = new JdbcClaimer(pool, dialect, clock, executionStore, jobStore, LEASE_TTL);
+            JdbcClaimer nodeClaimer = new JdbcClaimer(pool, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
             String nodeId = "index-tuning-node-" + i;
             nodes.add(executor.submit(() -> {
                 List<Execution> claimed;
