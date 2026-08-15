@@ -525,6 +525,33 @@ class EngineTest {
         // no mesmo teste (jitter pode ser ~0) — o contrato sob teste são os eventos
     }
 
+    /** ADR-0034 no caminho de crash-recovery: reclaim de execução de nó morto com cancel pendente publica Cancelled — nem retry, nem Failed; a ordem do operador sobrevive à morte do nó. */
+    @Test
+    void reclaimOfACancelRequestedExecutionPublishesCancelled() throws Exception {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_executions (
+                    id, job_key, state, scheduled_at, actor, node_id, lease_expires_at, cancel_requested, payload, payload_type, created_at)
+                VALUES ('exec-1', 'welcome-email', 'RUNNING', ?, 'test', 'dead-node', ?, TRUE, '"x"', 'java.lang.String', ?)
+                """, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(60)),
+                JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)), JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(60)));
+        CountDownLatch cancelledPublished = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Cancelled) {
+                cancelledPublished.countDown();
+            }
+        };
+        Engine engine = newEngine(nodeStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(cancelledPublished.await(5, TimeUnit.SECONDS)).as("Cancelled published for the reclaim").isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
+    }
+
     /** Drain ≠ cancel (ADR-0007): o in-flight continua executando em PAUSED — a renovação tem que acompanhar o TRABALHO, não o modo do control loop; sem isto, pause/drain mais longo que a lease vira dupla execução do que o próprio drain espera. */
     @Test
     void leasesKeepRenewingWhilePaused() throws Exception {

@@ -124,6 +124,24 @@ class JdbcReaperTest {
         assertThat(reaper.reclaimExpired()).isEmpty();
     }
 
+    /** ADR-0034: reclaim com cancel pendente termina CANCELLED — a ordem do operador vence o orçamento (retries=2); Attempt sai CANCELLED com error nulo e attemptsExhausted não se aplica. */
+    @Test
+    void reclaimHonoursAStandingCancelRequest() {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(2)));
+        seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+        rawJdbcTemplate.update("UPDATE mohs_executions SET cancel_requested = TRUE WHERE id = 'exec-1'");
+
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
+
+        assertThat(reclaimed).hasSize(1);
+        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.CANCELLED);
+        assertThat(reclaimed.get(0).attemptsExhausted()).isFalse();
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
+        var lastAttempt = reclaimed.get(0).execution().attempts().getLast();
+        assertThat(lastAttempt.outcome()).isEqualTo(ExecutionState.CANCELLED);
+        assertThat(lastAttempt.error()).isNull();
+    }
+
     /** ADR-0033 (revoga a restrição da ADR-0026): nó morto com orçamento restante reagenda com backoff — a garantia sob falha de nó vira at-least-once. */
     @Test
     void reclaimSchedulesARetryWhenTheJobStillHasBudget() {

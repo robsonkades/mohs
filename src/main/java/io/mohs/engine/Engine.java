@@ -29,6 +29,7 @@ import io.mohs.core.EngineState;
 import io.mohs.core.MohsLifecycle;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.event.AttemptFailed;
+import io.mohs.core.event.Cancelled;
 import io.mohs.core.event.Failed;
 import io.mohs.core.event.RetryScheduled;
 import io.mohs.core.execution.Attempt;
@@ -457,8 +458,9 @@ public final class Engine implements MohsLifecycle {
     /**
      * Desfechos do reclaim publicam os mesmos eventos do caminho de
      * dispatch, espelhando exatamente os pares do {@link Dispatcher}:
-     * retry → {@code AttemptFailed} + {@code RetryScheduled}; terminal →
-     * só {@code Failed}. É o gancho de alerta de morte de nó que o Javadoc
+     * retry → {@code AttemptFailed} + {@code RetryScheduled}; cancel
+     * pendente honrado (ADR-0034) → {@code Cancelled}; terminal → só
+     * {@code Failed}. É o gancho de alerta de morte de nó que o Javadoc
      * de {@link Failed} anuncia — sem isto, um listener de observabilidade
      * via retries de falha de handler mas ficava cego para os de
      * crash-recovery, que são os que importam às 3h da manhã.
@@ -466,8 +468,12 @@ public final class Engine implements MohsLifecycle {
     private void publishReclaimOutcome(Reaper.Reclaimed reclaimed) {
         Execution execution = reclaimed.execution();
         Attempt lastAttempt = execution.attempts().getLast();
-        Exception error = new IllegalStateException(Objects.requireNonNullElse(lastAttempt.error(), "lease expired"));
         ExecutionEventPublisher events = dispatcher.events();
+        if (execution.state() == ExecutionState.CANCELLED) {
+            events.publish(new Cancelled(execution.id(), execution.jobKey(), lastAttempt.number()));
+            return;
+        }
+        Exception error = new IllegalStateException(Objects.requireNonNullElse(lastAttempt.error(), "lease expired"));
         if (execution.state() == ExecutionState.RETRY_SCHEDULED) {
             events.publish(new AttemptFailed(execution.id(), execution.jobKey(), lastAttempt.number(), error));
             events.publish(new RetryScheduled(execution.id(), execution.jobKey(), lastAttempt.number() + 1, execution.scheduledAt()));

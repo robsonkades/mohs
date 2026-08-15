@@ -114,23 +114,27 @@ public final class JdbcReaper implements Reaper {
      * ADR-0033: o attempt sintético do reclaim consome orçamento como
      * qualquer outro — mesma decisão ({@link RetrySchedule}) do Dispatcher:
      * orçamento restante reagenda com backoff, esgotado é FAILED terminal.
-     * Job aposentado ({@code retired}) nunca reagenda: {@code RETRY_SCHEDULED}
-     * de job removido ficaria preso pra sempre (claim filtra retired, o
-     * cancel do remove já passou). Todo request leva a lease observada como
-     * fence anti-ABA: se um re-claim concorrente já deu lease nova à
-     * execução, o CAS do reclaim perde — nunca mata a encarnação nova
-     * saudável (DDIA cap. 8: estado reentrante exige fencing token).
+     * Duas ordens vencem o orçamento (ADR-0034): {@code cancel_requested}
+     * termina {@code CANCELLED} — o nó morreu, mas a ordem do operador já
+     * estava dada; reagendar seria desobedecê-la (attempt {@code CANCELLED}
+     * com error nulo, invariante de {@link Attempt}) — e job aposentado
+     * ({@code retired}) nunca reagenda: {@code RETRY_SCHEDULED} de job
+     * removido ficaria preso pra sempre (claim filtra retired, o cancel do
+     * remove já passou). Todo request leva a lease observada como fence
+     * anti-ABA: se um re-claim concorrente já deu lease nova à execução, o
+     * CAS do reclaim perde — nunca mata a encarnação nova saudável (DDIA
+     * cap. 8: estado reentrante exige fencing token).
      */
     private static ExecutionStore.CompletionRequest reclaimRequest(ExpiredCandidate candidate, Execution execution, Instant now) {
         int attemptNumber = execution.attempts().size() + 1;
-        Attempt attempt = new Attempt(
-                attemptNumber,
-                Objects.requireNonNullElse(execution.firedAt(), now),
-                now,
-                ExecutionState.FAILED,
-                LEASE_EXPIRED_ERROR);
+        Instant startedAt = Objects.requireNonNullElse(execution.firedAt(), now);
         ExecutionId id = ExecutionId.of(candidate.id());
         JobKey jobKey = JobKey.of(candidate.jobKey());
+        if (candidate.cancelRequested()) {
+            Attempt attempt = new Attempt(attemptNumber, startedAt, now, ExecutionState.CANCELLED, null);
+            return new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.CANCELLED, null, candidate.leaseExpiresAt());
+        }
+        Attempt attempt = new Attempt(attemptNumber, startedAt, now, ExecutionState.FAILED, LEASE_EXPIRED_ERROR);
         if (candidate.retired()) {
             return new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.FAILED, null, candidate.leaseExpiresAt());
         }
@@ -177,7 +181,7 @@ public final class JdbcReaper implements Reaper {
         // drenagem mais-antigo-primeiro (UUIDv7 ordena no tempo).
         return jdbcTemplate.query("""
                 SELECT %se.id AS id, e.job_key AS job_key, e.lease_expires_at AS lease_expires_at,
-                       j.retries AS retries, j.retired AS retired
+                       e.cancel_requested AS cancel_requested, j.retries AS retries, j.retired AS retired
                 FROM mohs_executions e
                 JOIN mohs_job_definitions j ON j.job_key = e.job_key
                 WHERE e.state = 'RUNNING' AND e.lease_expires_at < :now
@@ -188,9 +192,9 @@ public final class JdbcReaper implements Reaper {
                         .addValue("limit", RECLAIM_LIMIT),
                 (rs, _) -> new ExpiredCandidate(rs.getString("id"), rs.getString("job_key"),
                         JdbcTimestamps.fromUtcTimestamp(rs.getTimestamp("lease_expires_at")),
-                        rs.getInt("retries"), rs.getBoolean("retired")));
+                        rs.getBoolean("cancel_requested"), rs.getInt("retries"), rs.getBoolean("retired")));
     }
 
-    private record ExpiredCandidate(String id, String jobKey, Instant leaseExpiresAt, int retries, boolean retired) {
+    private record ExpiredCandidate(String id, String jobKey, Instant leaseExpiresAt, boolean cancelRequested, int retries, boolean retired) {
     }
 }
