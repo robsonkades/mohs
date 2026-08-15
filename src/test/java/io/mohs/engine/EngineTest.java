@@ -315,7 +315,8 @@ class EngineTest {
             counting.resetLatch(new CountDownLatch(2));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
-            assertThat(warnWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("lost its lease"));
+            assertThat(warnWatcher.list).anyMatch(event ->
+                    event.getFormattedMessage().contains("dropped from lease renewal (state now RETRY_SCHEDULED)"));
         } finally {
             releaseHandler.countDown();
             engine.stop(Duration.ofSeconds(5));
@@ -359,7 +360,7 @@ class EngineTest {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
             assertThat(logWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("could not fetch the state"));
-            assertThat(logWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("lost its lease"));
+            assertThat(logWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("dropped from lease renewal (state now unknown)"));
             assertThat(logWatcher.list).noneMatch(event -> event.getFormattedMessage().contains("engine tick failed"));
         } finally {
             releaseHandler.countDown();

@@ -274,8 +274,8 @@ public final class Engine implements MohsLifecycle {
      * parecerem abandonadas enquanto os ticks rodam. Duas saídas da
      * renovação, cada uma com WARN único:
      * {@link #dropFromRenewalPastWatchdogBound} (runtime além do bound) e
-     * {@link #dropFromRenewalAfterLostLease} (posse perdida pra um reclaim
-     * concorrente).
+     * {@link #dropFromRenewalAfterLostLease} (renovação perdida — reclaim
+     * concorrente ou conclusão local na corrida).
      */
     private void renewOwnedLeases() {
         List<Map.Entry<ExecutionId, Long>> owned = new ArrayList<>(inFlightStartedNanos.size());
@@ -346,26 +346,34 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Id que a renovação perdeu e ainda está no mapa perdeu a posse de
-     * verdade (reclaim concorrente): o handler local virou zumbi — sai da
-     * renovação, e a escrita terminal dele será descartada pelo CAS de
-     * conclusão. O {@code remove} de dois argumentos só remove a própria
-     * encarnação (ver {@link #dropFromRenewalPastWatchdogBound}); e como a
-     * conclusão local pode ter commitado entre o snapshot da renovação e
-     * este drop, o estado real (vindo de {@link #fetchStatesBestEffort};
-     * {@code null} = desconhecido) é olhado antes de acusar reclaim — log
-     * operacional é contrato com o operador, WARN com causa errada manda
-     * caçar um reaper fantasma às 3h da manhã.
+     * Id que a renovação perdeu e ainda está no mapa sai da renovação. A
+     * causa é ambígua por estado: reclaim concorrente (o handler local
+     * virou zumbi, e a escrita terminal dele será descartada pelo CAS de
+     * conclusão) ou conclusão local que commitou entre o snapshot da
+     * renovação e este drop — {@code SUCCEEDED} cala o WARN: o reaper
+     * nunca o produz diretamente, então na prática é a conclusão local
+     * vencendo a corrida (exceção não coberta: reclaim seguido de
+     * re-execução bem-sucedida em outro node durante um stall local maior
+     * que a lease fica sem aviso — o CAS de conclusão ainda descarta o
+     * resultado do zumbi local); nos demais estados, o WARN nomeia as
+     * duas hipóteses em vez de acusar uma: log operacional é contrato com
+     * o operador, e causa errada manda caçar um reaper fantasma às 3h da
+     * manhã. O {@code remove} de dois argumentos só remove a própria
+     * encarnação (ver {@link #dropFromRenewalPastWatchdogBound});
+     * {@code actual} vem de {@link #fetchStatesBestEffort}
+     * ({@code null} = desconhecido, impresso como {@code unknown}).
      */
     private void dropFromRenewalAfterLostLease(ExecutionId id, long startedNanos, @Nullable ExecutionState actual) {
         if (!inFlightStartedNanos.remove(id, startedNanos)) {
             return;
         }
         if (actual == ExecutionState.SUCCEEDED) {
-            return; // conclusão normal venceu a corrida com o snapshot da renovação — nada a avisar
+            return; // na prática, conclusão local venceu a corrida — a exceção (re-execução remota pós-reclaim) está no Javadoc
         }
-        log.warn("execution {} lost its lease (state now {}) — the local handler is now a zombie; "
-                + "its eventual result will be discarded by the completion CAS", id, actual);
+        log.warn("execution {} dropped from lease renewal (state now {}) — either reclaimed by another node's reaper "
+                + "(the local handler is now a zombie; its result will be discarded by the completion CAS) "
+                + "or a local completion raced this check",
+                id, Objects.toString(actual, "unknown"));
     }
 
     /** Runtime por tempo monotônico ({@code System.nanoTime}) — duração nunca vem do {@code Clock} injetado, que pode saltar no resync. */
