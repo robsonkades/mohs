@@ -244,7 +244,8 @@ public class MohsAutoConfiguration {
             RunnerRegistry mohsRunnerRegistry
     ) {
         return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper, mohsClock,
-                new EngineSettings(properties.engine().pollInterval(), properties.engine().batchSize(), properties.engine().leaseTtl()),
+                new EngineSettings(properties.engine().pollInterval(), properties.engine().batchSize(),
+                        properties.engine().leaseTtl(), properties.engine().watchdogTimeout()),
                 mohsTickScheduler, mohsRunnerRegistry);
     }
 
@@ -253,7 +254,7 @@ public class MohsAutoConfiguration {
     public SmartLifecycle mohsEngineLifecycle(Engine mohsEngine, MohsProperties properties, JobStore mohsJobStore) {
         boolean autoStartup = properties.lifecycle().startMode() == MohsProperties.Lifecycle.StartMode.AUTO;
         return new MohsEngineLifecycle(mohsEngine, autoStartup, properties.lifecycle().shutdown().gracePeriod(),
-                mohsJobStore, properties.engine().leaseTtl());
+                mohsJobStore, properties.engine().watchdogTimeout());
     }
 
     @Bean

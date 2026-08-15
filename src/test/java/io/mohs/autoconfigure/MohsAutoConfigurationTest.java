@@ -356,14 +356,14 @@ class MohsAutoConfigurationTest {
     }
 
     /**
-     * Importante 2 do codereview-20260815: sem watchdog que renove lease,
-     * um handler saudável mais lento que {@code mohs.engine.lease-ttl} é
-     * reclamado como FAILED e o mutex do job é violado — o operador fica
-     * sabendo o preço do default no boot (WARN nomeando job e propriedade),
-     * não no postmortem.
+     * Com a renovação de lease por tick (ADR-0012), handler lento saudável
+     * não é mais reclamado — o risco restante é o Watchdog Bound menor que
+     * o {@code timeout} declarado do job: o node pararia de renovar antes
+     * do prazo que o próprio job se deu. O operador fica sabendo o preço no
+     * boot (WARN nomeando job e propriedade), não no postmortem.
      */
     @Test
-    void bootWarnsWhenADeclaredJobTimeoutReachesTheLeaseTtl() {
+    void bootWarnsWhenADeclaredJobTimeoutReachesTheWatchdogBound() {
         DataSource dataSource = freshH2DataSource();
         // job persistido por um deploy anterior — o WARN roda no start do engine, já com o store povoado
         new JdbcJobStore(dataSource, new MutableClock(Instant.parse("2026-08-15T12:00:00Z"), ZoneId.of("UTC")))
@@ -374,15 +374,27 @@ class MohsAutoConfigurationTest {
         warnWatcher.start();
         lifecycleLogger.addAppender(warnWatcher);
         try {
-            runnerWith(dataSource, "mohs.engine.lease-ttl=30s").run(context -> {
+            runnerWith(dataSource, "mohs.engine.watchdog-timeout=2m").run(context -> {
                 assertThat(context).hasNotFailed();
                 // start() do SmartLifecycle roda dentro do refresh — o WARN já aconteceu aqui
                 assertThat(warnWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("slow-report")
-                        && event.getFormattedMessage().contains("mohs.engine.lease-ttl"));
+                        && event.getFormattedMessage().contains("mohs.engine.watchdog-timeout"));
             });
         } finally {
             lifecycleLogger.detachAppender(warnWatcher);
         }
+    }
+
+    /** Bound menor/igual à lease é erro de boot nomeando as duas propriedades — bound abaixo da lease tornaria a renovação inútil (ADR-0012). */
+    @Test
+    void watchdogTimeoutBelowLeaseTtlFailsBoot() {
+        runnerWith(freshH2DataSource(), "mohs.engine.lease-ttl=30s", "mohs.engine.watchdog-timeout=10s")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("mohs.engine.watchdog-timeout")
+                            .hasStackTraceContaining("mohs.engine.lease-ttl");
+                });
     }
 
     /** ADR-0033 ponta a ponta: 1ª tentativa falha, a execução volta como RETRY_SCHEDULED com backoff, o mesmo caminho de claim a reivindica de novo e a 2ª sucede. */

@@ -56,6 +56,7 @@ import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class EngineTest {
 
@@ -102,13 +103,18 @@ class EngineTest {
     }
 
     private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry) {
-        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
+        return newEngine(nodeStoreOverride, listeners, runnerRegistry, new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+    }
+
+    /** O claimer nasce com o MESMO {@code leaseTtl} das settings — lease de claim e de renovação nunca divergem, igual à auto-config real. */
+    private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings) {
+        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, settings.leaseTtl(), new ExecutionWindowRegistry(List.of()));
         JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
         return new Engine(claimer, dispatcher, executionStore, jobStore, nodeStoreOverride, reaper, clock,
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), tickScheduler, runnerRegistry);
+                settings, tickScheduler, runnerRegistry);
     }
 
     private static RunnerRegistry defaultRunnerRegistry() {
@@ -308,6 +314,65 @@ class EngineTest {
     private Instant leaseOf(String id) {
         return JdbcTimestamps.fromUtcTimestamp(rawJdbcTemplate.queryForObject(
                 "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", java.sql.Timestamp.class, id));
+    }
+
+    /** Bound menor/igual à lease tornaria a renovação inútil (a primeira lease já nasceria condenada) — rejeitado na construção, nomeando as duas propriedades. */
+    @Test
+    void watchdogTimeoutMustExceedLeaseTtl() {
+        assertThatThrownBy(() -> new EngineSettings(POLL_INTERVAL, BATCH_SIZE, Duration.ofSeconds(30), Duration.ofSeconds(30)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("mohs.engine.watchdog-timeout")
+                .hasMessageContaining("mohs.engine.lease-ttl");
+    }
+
+    /**
+     * Watchdog Bound (ADR-0012): passado o bound (tempo monotônico real,
+     * ~200ms aqui), o node para de renovar — a lease expira e o reaper
+     * reclama com o orçamento (retries = 0 → FAILED terminal, imune a
+     * re-claim, o que torna a asserção final estável). Determinístico: até
+     * o advance a lease renovada (NOW+50ms) está sempre no futuro do
+     * relógio lógico parado; depois do advance a renovação já parou pra
+     * esta execução, então nenhum interleaving a salva do reaper.
+     */
+    @Test
+    void watchdogBoundStopsRenewalAndTheReaperReclaims() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            releaseHandler.await(10, TimeUnit.SECONDS);
+        });
+        CountDownLatch boundWarned = new CountDownLatch(1);
+        AppenderBase<ILoggingEvent> watcher = new AppenderBase<>() {
+            @Override
+            protected void append(ILoggingEvent event) {
+                if (event.getFormattedMessage().contains("watchdog-timeout")) {
+                    boundWarned.countDown();
+                }
+            }
+        };
+        watcher.start();
+        engineLogger.addAppender(watcher);
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, Duration.ofMillis(50), Duration.ofMillis(200)));
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(boundWarned.await(5, TimeUnit.SECONDS)).as("watchdog bound warned within timeout").isTrue();
+
+            clock.advance(Duration.ofSeconds(2));
+            counting.resetLatch(new CountDownLatch(2));
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        } finally {
+            releaseHandler.countDown();
+            engine.stop(Duration.ofSeconds(5));
+            engineLogger.detachAppender(watcher);
+        }
     }
 
     @Test

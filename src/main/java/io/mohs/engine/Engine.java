@@ -2,7 +2,9 @@ package io.mohs.engine;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
@@ -52,21 +54,21 @@ import io.mohs.core.execution.ExecutionId;
  * {@link MohsExecutors}), só {@link #drain} espera o que já está em voo
  * terminar.
  *
- * <p><b>Limitações conhecidas desta rodada, documentadas, não escondidas:</b>
- * sem Watchdog Bound (lease de execuções já {@code RUNNING} de ticks
- * anteriores não é renovada — só quem acaba de ser reivindicado ganha
- * lease nova; handlers mais lentos que {@code leaseTtl} podem ser
- * reclamados pelo {@link Reaper} prematuramente); sem mecanismo de
- * interrupt real — no estouro do grace de {@link #drain}, o trabalho em
- * voo continua rodando em segundo plano, só loga um aviso. Com retry
- * (ADR-0033), a garantia sob falha de nó é <b>at-least-once</b> quando
- * {@code retries > 0}: a execução reclamada volta como
- * {@code RETRY_SCHEDULED} e outro nó a reexecuta — com o default
- * {@code retries = 0} continua at-most-once. Dimensione
- * {@code mohs.engine.lease-ttl} acima do pior handler esperado mesmo
- * assim: reclaim prematuro de handler vivo consome orçamento de retry e,
- * com {@code preventOverlap}, é dupla execução em paralelo com o zumbi
- * (o boot avisa por job — {@code MohsEngineLifecycle}).
+ * <p><b>Liveness (ADR-0012):</b> a lease de tudo que este node executa é
+ * renovada em lote a cada tick — handler saudável mais lento que
+ * {@code lease-ttl} nunca é reclamado enquanto o node vive; a lease vira
+ * detecção de falha, não teto de runtime. O teto opcional é o Watchdog
+ * Bound ({@code mohs.engine.watchdog-timeout}): atingido, o node para de
+ * renovar, a lease expira e o reaper decide com o orçamento de retry
+ * (ADR-0033). Sob falha de nó a garantia é <b>at-least-once</b> quando
+ * {@code retries > 0} — com o default {@code retries = 0}, at-most-once.
+ *
+ * <p><b>Limitação conhecida, documentada, não escondida:</b> sem
+ * mecanismo de interrupt — zumbi (bound estourado ou posse perdida)
+ * continua rodando até terminar sozinho e tem o resultado descartado
+ * pelo CAS de conclusão; no estouro do grace de {@link #drain}, o
+ * trabalho em voo segue em segundo plano com um aviso. O interrupt por
+ * {@code timeout} de job (com escalada) é o próximo ciclo.
  */
 public final class Engine implements MohsLifecycle {
 
@@ -262,9 +264,27 @@ public final class Engine implements MohsLifecycle {
      * renovação; a escrita terminal dele será descartada pelo CAS de
      * conclusão. (Conclusão normal entre o snapshot e o WARN já removeu a
      * entrada — o {@code remove} nulo silencia o falso positivo.)
+     *
+     * <p>Watchdog Bound: execução cujo runtime monotônico passou de
+     * {@code mohs.engine.watchdog-timeout} sai da renovação (WARN único) —
+     * a lease expira sozinha e o reaper decide com o orçamento de retry
+     * (ADR-0033). É a rede de segurança de último caso da ADR-0012: entra
+     * depois que o {@code timeout} do job falhou em parar o handler.
      */
     private void renewOwnedLeases() {
-        List<ExecutionId> owned = List.copyOf(inFlightStartedNanos.keySet());
+        List<ExecutionId> owned = new ArrayList<>(inFlightStartedNanos.size());
+        for (Map.Entry<ExecutionId, Long> entry : inFlightStartedNanos.entrySet()) {
+            if (watchdogBoundExceeded(entry.getValue())) {
+                if (inFlightStartedNanos.remove(entry.getKey()) != null) {
+                    log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} — lease renewal stopped; the reaper will "
+                                    + "reclaim it when the lease expires (retry budget applies) and the local handler keeps "
+                                    + "running as a zombie until it finishes (no interrupt mechanism yet)",
+                            entry.getKey(), settings.watchdogTimeout());
+                }
+                continue;
+            }
+            owned.add(entry.getKey());
+        }
         if (owned.isEmpty()) {
             return;
         }
@@ -275,6 +295,12 @@ public final class Engine implements MohsLifecycle {
                         + "its eventual result will be discarded by the completion CAS", id);
             }
         }
+    }
+
+    /** Runtime por tempo monotônico ({@code System.nanoTime}) — duração nunca vem do {@code Clock} injetado, que pode saltar no resync. */
+    private boolean watchdogBoundExceeded(long startedNanos) {
+        Duration bound = settings.watchdogTimeout();
+        return bound != null && System.nanoTime() - startedNanos >= bound.toNanos();
     }
 
     /**

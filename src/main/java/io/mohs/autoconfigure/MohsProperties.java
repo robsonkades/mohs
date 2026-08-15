@@ -51,7 +51,8 @@ public record MohsProperties(
     /**
      * @param pollInterval intervalo entre ticks do poll loop do engine
      * @param batchSize máximo de execuções reclamadas por tick
-     * @param leaseTtl ADR-0012: alimenta {@code lease_expires_at} no claim; o reaper reclama execuções cuja lease já expirou
+     * @param leaseTtl ADR-0012: alimenta {@code lease_expires_at} no claim e na renovação por tick; o reaper reclama execuções cuja lease já expirou
+     * @param watchdogTimeout Watchdog Bound (ADR-0012): teto da renovação de lease — atingido, o node para de renovar e o reaper reclama na expiração; {@code null} (default) = sem teto; quando presente, deve ser maior que {@code lease-ttl} (validado na montagem do engine)
      * @param dispatchConcurrency teto real de concorrência do executor de dispatch (nunca por tamanho de pool — CLAUDE.md)
      * @param eventConcurrency teto real de concorrência do executor de publicação de eventos
      */
@@ -59,6 +60,7 @@ public record MohsProperties(
             @DefaultValue("5s") Duration pollInterval,
             @DefaultValue("50") int batchSize,
             @DefaultValue("30s") Duration leaseTtl,
+            @Nullable Duration watchdogTimeout,
             @DefaultValue("64") int dispatchConcurrency,
             @DefaultValue("16") int eventConcurrency) {
     }

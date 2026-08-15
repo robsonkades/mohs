@@ -59,7 +59,7 @@ class MohsJobScannerTest {
         MohsProperties properties = new MohsProperties(
                 true,
                 new MohsProperties.Jdbc(null),
-                new MohsProperties.Engine(Duration.ofSeconds(5), 50, Duration.ofSeconds(30), 64, 16),
+                new MohsProperties.Engine(Duration.ofSeconds(5), 50, Duration.ofSeconds(30), null, 64, 16),
                 new MohsProperties.Lifecycle(MohsProperties.Lifecycle.StartMode.AUTO,
                         new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30))),
                 new MohsProperties.Time(MohsProperties.Time.Mode.APPLICATION, Duration.ofSeconds(1), Duration.ofSeconds(30)),
