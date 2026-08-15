@@ -1,11 +1,12 @@
 # Pendências — decisões em aberto
 
-Origem: itens 1–4 de `codereview-20260815-0332.md` (segunda passada,
-"Perguntas ao autor"); itens 5–6 do "Fora do escopo" do plano de refactor
-de `io.mohs.autoconfigure` (executado e removido em 709d5b2). Todas as
-correções do review foram aplicadas; estes itens são as decisões que
-ficaram com o autor. Ao resolver um item, registrar a decisão (ADR ou
-Javadoc, conforme o caso) e removê-lo daqui.
+Origens: `codereview-20260815-0332.md` (segunda passada, "Perguntas ao
+autor"), o "Fora do escopo" do plano de refactor de `io.mohs.autoconfigure`
+(executado e removido em 709d5b2) e achados registrados ao resolver itens
+anteriores. Todas as correções do review foram aplicadas; estes itens são
+as decisões que ficaram com o autor. Ao resolver um item, registrar a
+decisão (ADR ou Javadoc, conforme o caso) e removê-lo daqui — a numeração
+dos demais não muda.
 
 ## 1. Política de retenção de execuções
 
@@ -31,3 +32,18 @@ Javadoc da anotação declara o status.
 métodos anotados. Quando entrar, o guard do fail-fast em
 `MohsJobScanner.scanMethod` é o ponto exato a substituir pelo registro do
 listener sintetizado.
+
+## 7. `MohsRestAutoConfiguration` ignora o gate mestre `mohs.enabled`
+
+Encontrado ao resolver a pendência 3. A auto-config REST condiciona só em
+`mohs.api.enabled` — com `mohs.enabled=false` + `mohs.api.enabled=true`, a
+`MohsAutoConfiguration` inteira some (nenhum bean `Mohs`/`MohsProperties`)
+e o boot quebra com `NoSuchBeanDefinitionException` genérica ao criar
+`mohsJobsController`, em vez de recuar ou de ensinar a causa. O Javadoc do
+gate promete "desligar remove todos os beans do Mohs do contexto" — os do
+REST hoje não obedecem.
+
+**Decidir:** honrar o gate mestre também no REST (`@ConditionalOnProperty`
+de `mohs.enabled` na classe — a combinação vira no-op silencioso, como o
+Javadoc do gate promete), ou falhar o boot com mensagem que ensina que
+`mohs.api.enabled=true` exige `mohs.enabled=true`.
