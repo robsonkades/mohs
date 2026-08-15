@@ -70,6 +70,13 @@ configurável (YAGNI). Durante o grace, nada muda: drain ≠ cancel (ADR-0007).
 - A escada completa passa a existir: `timeout` (flag + interrupt) → Watchdog Bound (para de
   renovar) → lease expira → reaper. Cancel manual e shutdown pegam carona nos mesmos
   degraus.
+- (Revisão do ciclo) Drop de renovação **marca** a encarnação (`renewalStopped`) em vez de
+  removê-la do mapa de in-flight — remoção só na conclusão. O zumbi continua alcançável
+  pela escalada de drain e pelo poll de cancel: pra job sem timeout, o interrupt do
+  shutdown é a única chance de pará-lo. Complementos do mesmo review: checagem pré-start
+  do sinal no dispatch (task enfileirada com MANUAL/SHUTDOWN nem roda o handler) e
+  `succeed()` fora do try do mapeamento — falha da escrita de sucesso propaga (RUNNING até
+  o reaper, indistinguível de crash) em vez de ser reclassificada pelo sinal.
 - `Mohs` ganha `cancel(ExecutionId)` (mudança de API pública aprovada); `mohs_executions`
   ganha `cancel_requested BOOLEAN NOT NULL DEFAULT FALSE` nos 4 dialetos.
 - A flag persiste entre attempts: se o attempt falhar antes do node observar a flag, o

@@ -552,6 +552,47 @@ class EngineTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
     }
 
+    /**
+     * Review ADR-0034: zumbi dropado da renovação (posse perdida) continua
+     * no mapa — marcado, não removido — e por isso a escalada do shutdown
+     * ainda o interrompe (pra job sem timeout, a única chance de pará-lo
+     * antes de a JVM morrer). O resultado tardio é descartado pelo CAS,
+     * como todo zumbi.
+     */
+    @Test
+    void aZombieDroppedFromRenewalStillReceivesTheShutdownInterrupt() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch never = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            try {
+                never.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                interrupted.countDown();
+                throw e;
+            }
+        });
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = newEngine(counting, List.of());
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            // reclaim externo: a renovação perde a posse e MARCA a encarnação (não remove)
+            rawJdbcTemplate.update(
+                    "UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', node_id = NULL, scheduled_at = ? WHERE id = 'exec-1'",
+                    JdbcTimestamps.toUtcTimestamp(NOW.plusSeconds(3600)));
+            counting.resetLatch(new CountDownLatch(2));
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofMillis(50));
+        }
+
+        assertThat(interrupted.await(5, TimeUnit.SECONDS)).as("escalation still reaches the dropped zombie").isTrue();
+    }
+
     /** Drain ≠ cancel (ADR-0007): o in-flight continua executando em PAUSED — a renovação tem que acompanhar o TRABALHO, não o modo do control loop; sem isto, pause/drain mais longo que a lease vira dupla execução do que o próprio drain espera. */
     @Test
     void leasesKeepRenewingWhilePaused() throws Exception {

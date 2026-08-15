@@ -97,9 +97,13 @@ public final class Engine implements MohsLifecycle {
     /**
      * As execuções em voo NESTE node — a base da renovação de lease
      * (ADR-0012) e da escada de timeout/cancelamento (ADR-0034) a cada
-     * tick. Entrada nasce no submit e morre na conclusão
-     * ({@code whenComplete}) ou quando a renovação descobre que a posse
-     * foi perdida.
+     * tick. Entrada nasce no submit e SÓ morre na conclusão
+     * ({@code whenComplete}): os drops de renovação (watchdog, posse
+     * perdida) MARCAM a encarnação ({@code renewalStopped}) em vez de
+     * removê-la — o zumbi continua alcançável pela escalada de drain e
+     * pelo poll de cancel; removê-lo o deixaria fora do alcance de
+     * qualquer sinal exatamente no cenário pra que a escalada existe
+     * (review ADR-0034).
      */
     private final ConcurrentHashMap<ExecutionId, InFlightAttempt> inFlightAttempts = new ConcurrentHashMap<>();
     private final TaskScheduler tickScheduler;
@@ -248,9 +252,9 @@ public final class Engine implements MohsLifecycle {
      * nada disso acontece: drain ≠ cancel (ADR-0007).
      */
     private void escalateAfterDrainGrace(Duration grace) {
-        // as duas contagens de propósito: um zumbi dropado da renovação (watchdog/
-        // lease perdida) segura o future em inFlight mas já saiu do mapa — não é
-        // mais sinalizável, e esconder isso do operador mentiria a contagem
+        // as duas contagens de propósito: inFlight (futures) é quem segura o
+        // grace; o mapa é quem a escalada alcança — com a marca de renovação
+        // (zumbi fica no mapa), divergem só na janela de conclusão do whenComplete
         log.warn("drain grace period ({}) elapsed with {} dispatch(es) still in flight ({} still signallable) — "
                 + "signalling cancellation and interrupting them; their attempts will fail with a node-shutdown cause "
                 + "and follow the retry policy (ADR-0034)",
@@ -346,8 +350,9 @@ public final class Engine implements MohsLifecycle {
     /**
      * ADR-0012: renova em lote a lease de tudo que este node ainda executa
      * — ANTES do reaper no mesmo tick, para as próprias execuções nunca
-     * parecerem abandonadas enquanto os ticks rodam. Duas saídas da
-     * renovação, cada uma com WARN único:
+     * parecerem abandonadas enquanto os ticks rodam. Duas marcas de saída
+     * da renovação ({@code renewalStopped} — a entrada fica no mapa),
+     * cada uma com WARN único:
      * {@link #dropFromRenewalPastWatchdogBound} (runtime além do bound) e
      * {@link #dropFromRenewalAfterLostLease} (renovação perdida — reclaim
      * concorrente ou conclusão local na corrida).
@@ -355,10 +360,14 @@ public final class Engine implements MohsLifecycle {
     private void renewOwnedLeases() {
         List<Map.Entry<ExecutionId, InFlightAttempt>> owned = new ArrayList<>(inFlightAttempts.size());
         for (Map.Entry<ExecutionId, InFlightAttempt> entry : inFlightAttempts.entrySet()) {
-            if (watchdogBoundExceeded(entry.getValue().submittedNanos)) {
-                dropFromRenewalPastWatchdogBound(entry.getKey(), entry.getValue());
+            InFlightAttempt attempt = entry.getValue();
+            if (attempt.renewalStopped) {
+                continue;
+            }
+            if (watchdogBoundExceeded(attempt.submittedNanos)) {
+                dropFromRenewalPastWatchdogBound(entry.getKey(), attempt);
             } else {
-                owned.add(Map.entry(entry.getKey(), entry.getValue()));
+                owned.add(Map.entry(entry.getKey(), attempt));
             }
         }
         if (owned.isEmpty()) {
@@ -405,19 +414,18 @@ public final class Engine implements MohsLifecycle {
      * expira sozinha e o reaper decide com o orçamento de retry
      * (ADR-0033). É a rede de segurança de último caso da ADR-0012: entra
      * depois que o {@code timeout} do job falhou em parar o handler.
-     * O {@code remove} de dois argumentos é o CAS do mapa: só remove a
-     * PRÓPRIA encarnação — o mesmo {@code ExecutionId} pode ter sido
-     * re-reivindicado por este node depois de um reclaim, e remover a
-     * entrada da encarnação nova mataria a renovação de uma execução
-     * saudável sem aviso nenhum (o ABA do banco, repetido em memória).
+     * MARCA a encarnação em vez de removê-la (review ADR-0034): a marca na
+     * PRÓPRIA instância é inerentemente segura contra o ABA de re-claim
+     * (encarnação nova é outro objeto), e o zumbi continua no mapa pra
+     * escalada de drain e poll de cancel ainda o alcançarem — a remoção é
+     * exclusiva da conclusão ({@code whenComplete}).
      */
     private void dropFromRenewalPastWatchdogBound(ExecutionId id, InFlightAttempt attempt) {
-        if (inFlightAttempts.remove(id, attempt)) {
-            log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} — lease renewal stopped; the reaper will "
-                            + "reclaim it when the lease expires (retry budget applies) and the local handler keeps "
-                            + "running as a zombie until it finishes (it already survived or lacked a job timeout interrupt)",
-                    id, settings.watchdogTimeout());
-        }
+        attempt.renewalStopped = true;
+        log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} — lease renewal stopped; the reaper will "
+                        + "reclaim it when the lease expires (retry budget applies) and the local handler keeps "
+                        + "running as a zombie until it finishes (it already survived or lacked a job timeout interrupt)",
+                id, settings.watchdogTimeout());
     }
 
     /**
@@ -433,15 +441,14 @@ public final class Engine implements MohsLifecycle {
      * resultado do zumbi local); nos demais estados, o WARN nomeia as
      * duas hipóteses em vez de acusar uma: log operacional é contrato com
      * o operador, e causa errada manda caçar um reaper fantasma às 3h da
-     * manhã. O {@code remove} de dois argumentos só remove a própria
-     * encarnação (ver {@link #dropFromRenewalPastWatchdogBound});
-     * {@code actual} vem de {@link #fetchStatesBestEffort}
-     * ({@code null} = desconhecido, impresso como {@code unknown}).
+     * manhã. MARCA em vez de remover, como
+     * {@link #dropFromRenewalPastWatchdogBound} — o zumbi continua
+     * alcançável pela escalada e pelo poll; {@code actual} vem de
+     * {@link #fetchStatesBestEffort} ({@code null} = desconhecido,
+     * impresso como {@code unknown}).
      */
     private void dropFromRenewalAfterLostLease(ExecutionId id, InFlightAttempt attempt, @Nullable ExecutionState actual) {
-        if (!inFlightAttempts.remove(id, attempt)) {
-            return;
-        }
+        attempt.renewalStopped = true;
         if (actual == ExecutionState.SUCCEEDED) {
             return; // na prática, conclusão local venceu a corrida — a exceção (re-execução remota pós-reclaim) está no Javadoc
         }
@@ -577,6 +584,13 @@ public final class Engine implements MohsLifecycle {
         final long submittedNanos = System.nanoTime();
         final @Nullable Duration timeout;
         final CancellationSignal signal = new CancellationSignal();
+        /**
+         * Renovação parou (watchdog ou posse perdida) — escrito só pela
+         * thread do tick, lido por ela e pela escalada. A entrada continua
+         * no mapa até a conclusão: zumbi marcado ainda recebe o interrupt
+         * do shutdown e o sinal de cancel (review ADR-0034).
+         */
+        volatile boolean renewalStopped;
 
         InFlightAttempt(@Nullable Duration timeout) {
             this.timeout = timeout;
