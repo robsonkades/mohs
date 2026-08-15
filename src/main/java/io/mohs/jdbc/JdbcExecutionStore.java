@@ -272,7 +272,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
         Set<ExecutionId> renewed = new LinkedHashSet<>();
         for (int i = 0; i < updated.length; i++) {
             if (updated[i] == Statement.SUCCESS_NO_INFO) {
-                return confirmRenewalsBySelect(nodeId, ids, newLease);
+                return confirmRenewalsBySelect(nodeId, ids);
             }
             if (updated[i] > 0) {
                 renewed.add(ids.get(i));
@@ -281,15 +281,24 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return renewed;
     }
 
-    /** Fallback raro do {@code SUCCESS_NO_INFO} — confirma pela lease recém-gravada, em chunks (DB-11). */
-    private Set<ExecutionId> confirmRenewalsBySelect(String nodeId, List<ExecutionId> ids, Timestamp newLease) {
+    /**
+     * Fallback raro do {@code SUCCESS_NO_INFO} — confirma por POSSE
+     * ({@code state + node_id}), nunca por igualdade de timestamp: precisão
+     * temporal não faz round-trip garantido entre JVM e os 4 dialetos
+     * (nanos do {@code Instant} vs micros da coluna), e uma igualdade
+     * quebrada aqui dropava o node inteiro da renovação como falso "lost
+     * lease". A posse implica o UPDATE aplicado: re-claim pelo próprio node
+     * dentro da mesma chamada é impossível (o claim roda depois, na mesma
+     * thread do tick) e re-claim por outro node troca o {@code node_id}.
+     */
+    private Set<ExecutionId> confirmRenewalsBySelect(String nodeId, List<ExecutionId> ids) {
         Set<ExecutionId> renewed = new LinkedHashSet<>();
         for (List<String> chunk : chunksOf(ids.stream().map(ExecutionId::value).toList())) {
             renewed.addAll(jdbcTemplate.query("""
                     SELECT id FROM mohs_executions
-                    WHERE id IN (:ids) AND state = 'RUNNING' AND node_id = :nodeId AND lease_expires_at = :leaseExpiresAt
+                    WHERE id IN (:ids) AND state = 'RUNNING' AND node_id = :nodeId
                     """,
-                    new MapSqlParameterSource().addValue("ids", chunk).addValue("nodeId", nodeId).addValue("leaseExpiresAt", newLease),
+                    new MapSqlParameterSource().addValue("ids", chunk).addValue("nodeId", nodeId),
                     (rs, _) -> ExecutionId.of(rs.getString("id"))));
         }
         return renewed;

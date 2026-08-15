@@ -14,7 +14,10 @@ import org.jspecify.annotations.Nullable;
  * {@code watchdogTimeout} é o teto opcional da renovação (Watchdog
  * Bound, ADR-0012): {@code null} = sem teto; quando presente, precisa
  * ser maior que a lease — um bound menor tornaria a renovação inútil
- * (a primeira lease já nasceria condenada).
+ * (a primeira lease já nasceria condenada). O bound mede
+ * submit→agora em tempo monotônico: espera na fila de um runner CPU
+ * conta como runtime — semântica deliberada até o interrupt por
+ * timeout de job (próximo ciclo) trazer um carimbo do início real.
  */
 public record EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl, @Nullable Duration watchdogTimeout) {
 
@@ -23,6 +26,13 @@ public record EngineSettings(Duration pollInterval, int batchSize, Duration leas
         Objects.requireNonNull(leaseTtl, "leaseTtl");
         if (batchSize <= 0) {
             throw new IllegalArgumentException("batchSize must be positive");
+        }
+        if (!pollInterval.isPositive()) {
+            throw new IllegalArgumentException("mohs.engine.poll-interval must be positive, got " + pollInterval);
+        }
+        if (!leaseTtl.isPositive()) {
+            throw new IllegalArgumentException("mohs.engine.lease-ttl must be positive, got " + leaseTtl
+                    + " — a non-positive lease is born expired and turns the first tick into a reclaim storm");
         }
         if (watchdogTimeout != null && watchdogTimeout.compareTo(leaseTtl) <= 0) {
             throw new IllegalArgumentException("mohs.engine.watchdog-timeout (" + watchdogTimeout

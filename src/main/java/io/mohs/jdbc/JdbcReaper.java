@@ -84,7 +84,7 @@ public final class JdbcReaper implements Reaper {
         // TransactionCallback aqui nunca devolve null (reclaimWithinTransaction
         // sempre retorna uma lista) — requireNonNull só documenta esse invariante
         // pro @NullMarked, já que o contrato de execute() em si é @Nullable (JAVA-8).
-        return Objects.requireNonNull(transactionTemplate.execute(status -> reclaimWithinTransaction()));
+        return Objects.requireNonNull(transactionTemplate.execute(_ -> reclaimWithinTransaction()));
     }
 
     private List<Reaper.Reclaimed> reclaimWithinTransaction() {

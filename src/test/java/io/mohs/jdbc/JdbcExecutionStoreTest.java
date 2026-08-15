@@ -226,10 +226,9 @@ class JdbcExecutionStoreTest {
         boolean completed = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED), jobStore);
 
         assertThat(completed).isTrue();
-        Optional<Execution> found = store.find(ExecutionId.of("019abc-complete-1"));
-        assertThat(found).isPresent();
-        assertThat(found.get().state()).isEqualTo(ExecutionState.FAILED);
-        assertThat(found.get().attempts()).containsExactly(attempt);
+        Execution found = store.find(ExecutionId.of("019abc-complete-1")).orElseThrow();
+        assertThat(found.state()).isEqualTo(ExecutionState.FAILED);
+        assertThat(found.attempts()).containsExactly(attempt);
     }
 
     @Test
@@ -258,9 +257,9 @@ class JdbcExecutionStoreTest {
 
         assertThat(first).isTrue();
         assertThat(second).isFalse();
-        Optional<Execution> found = store.find(ExecutionId.of("019abc-complete-3"));
-        assertThat(found.get().state()).isEqualTo(ExecutionState.SUCCEEDED);
-        assertThat(found.get().attempts()).containsExactly(firstAttempt);
+        Execution found = store.find(ExecutionId.of("019abc-complete-3")).orElseThrow();
+        assertThat(found.state()).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(found.attempts()).containsExactly(firstAttempt);
     }
 
     /** ADR-0033: o backoff aterrissa junto do CAS — RETRY_SCHEDULED reescreve scheduled_at pra hora do retry na mesma transição. */

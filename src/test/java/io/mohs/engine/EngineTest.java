@@ -1,5 +1,6 @@
 package io.mohs.engine;
 
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -37,8 +38,10 @@ import tools.jackson.databind.json.JsonMapper;
 import io.mohs.core.EngineState;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.PolicySpec;
+import io.mohs.core.event.AttemptFailed;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Failed;
+import io.mohs.core.event.RetryScheduled;
 import io.mohs.core.event.Succeeded;
 import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.Execution;
@@ -313,7 +316,7 @@ class EngineTest {
 
     private Instant leaseOf(String id) {
         return JdbcTimestamps.fromUtcTimestamp(rawJdbcTemplate.queryForObject(
-                "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", java.sql.Timestamp.class, id));
+                "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", Timestamp.class, id));
     }
 
     /** Pendência 8 fechada: desfecho do reaper publica os mesmos eventos do dispatch — o alerta de morte de nó (Javadoc de Failed) passa a disparar de verdade. */
@@ -330,10 +333,10 @@ class EngineTest {
         CountDownLatch retryScheduled = new CountDownLatch(1);
         CountDownLatch attemptFailed = new CountDownLatch(1);
         ExecutionListener listener = event -> {
-            if (event instanceof io.mohs.core.event.RetryScheduled) {
+            if (event instanceof RetryScheduled) {
                 retryScheduled.countDown();
             }
-            if (event instanceof io.mohs.core.event.AttemptFailed) {
+            if (event instanceof AttemptFailed) {
                 attemptFailed.countDown();
             }
         };
@@ -348,6 +351,38 @@ class EngineTest {
         }
         // o estado final não é assertado: após o reclaim, o retry pode ser re-reivindicado
         // no mesmo teste (jitter pode ser ~0) — o contrato sob teste são os eventos
+    }
+
+    /** Drain ≠ cancel (ADR-0007): o in-flight continua executando em PAUSED — a renovação tem que acompanhar o TRABALHO, não o modo do control loop; sem isto, pause/drain mais longo que a lease vira dupla execução do que o próprio drain espera. */
+    @Test
+    void leasesKeepRenewingWhilePaused() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            releaseHandler.await(10, TimeUnit.SECONDS);
+        });
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = newEngine(counting, List.of());
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            engine.pause();
+            Instant initialLease = leaseOf("exec-1");
+            clock.advance(Duration.ofSeconds(5));
+            counting.resetLatch(new CountDownLatch(2));
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(leaseOf("exec-1")).isAfter(initialLease);
+            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+            engine.resume();
+        } finally {
+            releaseHandler.countDown();
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     /** Bound menor/igual à lease tornaria a renovação inútil (a primeira lease já nasceria condenada) — rejeitado na construção, nomeando as duas propriedades. */
@@ -670,15 +705,9 @@ class EngineTest {
         rejectionWatcher.start();
         engineLogger.addAppender(rejectionWatcher);
 
-        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
-        JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
-        AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
-        Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), List.of(), eventExecutor);
-        ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
         // concorrência 1 de propósito — exec-1 esgota o único slot, forçando exec-2/exec-3 a rejeitar.
         RunnerRegistry oneSlotRunnerRegistry = new RunnerRegistry(List.of(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(1).build()));
-        Engine engine = new Engine(claimer, dispatcher, executionStore, jobStore, nodeStore, reaper, clock, new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL),
-                tickScheduler, oneSlotRunnerRegistry);
+        Engine engine = newEngine(nodeStore, List.of(), oneSlotRunnerRegistry);
 
         engine.start();
         try {

@@ -2,6 +2,7 @@ package io.mohs.engine;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.RejectedExecutionException;
 
 import org.springframework.core.task.AsyncTaskExecutor;
 
@@ -40,16 +41,28 @@ final class ExecutionEventPublisher {
         this.executor = Objects.requireNonNull(executor, "executor");
     }
 
+    /**
+     * O pipeline de observação nunca exerce backpressure sobre o de
+     * controle: executor saturado descarta o evento com WARN aqui — a borda
+     * que descarta é o publisher, nunca uma exceção subindo pelo poll loop
+     * (um reclaim em massa publicando 2×500 eventos não pode sequestrar o
+     * tick) nem pelo caminho de conclusão do dispatch.
+     */
     void publish(ExecutionEvent event) {
         Objects.requireNonNull(event, "event");
         for (ExecutionListener listener : listeners) {
-            executor.execute(() -> {
-                try {
-                    listener.on(event);
-                } catch (RuntimeException e) {
-                    log.warn("execution listener {} threw for event {} — ignored, listener exceptions never affect the job", listener.getClass().getName(), event, e);
-                }
-            });
+            try {
+                executor.execute(() -> {
+                    try {
+                        listener.on(event);
+                    } catch (RuntimeException e) {
+                        log.warn("execution listener {} threw for event {} — ignored, listener exceptions never affect the job", listener.getClass().getName(), event, e);
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                log.warn("event executor saturated — dropping {} for listener {} (delivery is best-effort by contract)",
+                        event.getClass().getSimpleName(), listener.getClass().getName());
+            }
         }
     }
 }

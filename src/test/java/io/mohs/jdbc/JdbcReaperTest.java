@@ -4,6 +4,7 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -161,7 +162,7 @@ class JdbcReaperTest {
     @Test
     void reclaimIsCappedPerCycleAndDrainsTheRestOnTheNextCall() {
         seedJob("welcome-email");
-        List<Object[]> batch = new java.util.ArrayList<>();
+        List<Object[]> batch = new ArrayList<>();
         for (int i = 0; i < JdbcReaper.RECLAIM_LIMIT + 5; i++) {
             batch.add(new Object[] { String.format("exec-%05d", i), "welcome-email",
                     JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(60)), JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)),

@@ -246,10 +246,15 @@ public final class Engine implements MohsLifecycle {
         try {
             EngineState current = state.get();
             nodeStore.heartbeat(nodeId, current, clock.instant());
+            // node vivo renova o que ainda executa — PAUSED/DRAINING incluídos
+            // (ADR-0007: drain ≠ cancel; a lease detecta morte, não pausa —
+            // sem isto, um drain mais longo que a lease viraria dupla execução
+            // do trabalho que ele mesmo espera terminar). Só reaper e claim
+            // são exclusivos de RUNNING: "isto ainda é meu" ≠ "quero mais".
+            renewOwnedLeases();
             if (current != EngineState.RUNNING) {
                 return;
             }
-            renewOwnedLeases();
             for (Reaper.Reclaimed reclaimed : reaper.reclaimExpired()) {
                 publishReclaimOutcome(reclaimed);
             }
@@ -265,43 +270,75 @@ public final class Engine implements MohsLifecycle {
     /**
      * ADR-0012: renova em lote a lease de tudo que este node ainda executa
      * — ANTES do reaper no mesmo tick, para as próprias execuções nunca
-     * parecerem abandonadas enquanto os ticks rodam. Id que a renovação
-     * perdeu e ainda está no mapa perdeu a posse de verdade (reclaim
-     * concorrente): o handler local virou zumbi — WARN único e sai da
-     * renovação; a escrita terminal dele será descartada pelo CAS de
-     * conclusão. (Conclusão normal entre o snapshot e o WARN já removeu a
-     * entrada — o {@code remove} nulo silencia o falso positivo.)
-     *
-     * <p>Watchdog Bound: execução cujo runtime monotônico passou de
-     * {@code mohs.engine.watchdog-timeout} sai da renovação (WARN único) —
-     * a lease expira sozinha e o reaper decide com o orçamento de retry
-     * (ADR-0033). É a rede de segurança de último caso da ADR-0012: entra
-     * depois que o {@code timeout} do job falhou em parar o handler.
+     * parecerem abandonadas enquanto os ticks rodam. Duas saídas da
+     * renovação, cada uma com WARN único:
+     * {@link #dropFromRenewalPastWatchdogBound} (runtime além do bound) e
+     * {@link #dropFromRenewalAfterLostLease} (posse perdida pra um reclaim
+     * concorrente).
      */
     private void renewOwnedLeases() {
-        List<ExecutionId> owned = new ArrayList<>(inFlightStartedNanos.size());
+        List<Map.Entry<ExecutionId, Long>> owned = new ArrayList<>(inFlightStartedNanos.size());
         for (Map.Entry<ExecutionId, Long> entry : inFlightStartedNanos.entrySet()) {
             if (watchdogBoundExceeded(entry.getValue())) {
-                if (inFlightStartedNanos.remove(entry.getKey()) != null) {
-                    log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} — lease renewal stopped; the reaper will "
-                                    + "reclaim it when the lease expires (retry budget applies) and the local handler keeps "
-                                    + "running as a zombie until it finishes (no interrupt mechanism yet)",
-                            entry.getKey(), settings.watchdogTimeout());
-                }
-                continue;
+                dropFromRenewalPastWatchdogBound(entry.getKey(), entry.getValue());
+            } else {
+                owned.add(Map.entry(entry.getKey(), entry.getValue()));
             }
-            owned.add(entry.getKey());
         }
         if (owned.isEmpty()) {
             return;
         }
-        Set<ExecutionId> renewed = executionStore.renewLeases(nodeId, owned, clock.instant().plus(settings.leaseTtl()));
-        for (ExecutionId id : owned) {
-            if (!renewed.contains(id) && inFlightStartedNanos.remove(id) != null) {
-                log.warn("execution {} lost its lease (reclaimed by another node's reaper) — the local handler is now a zombie; "
-                        + "its eventual result will be discarded by the completion CAS", id);
+        Set<ExecutionId> renewed = executionStore.renewLeases(nodeId,
+                owned.stream().map(Map.Entry::getKey).toList(), clock.instant().plus(settings.leaseTtl()));
+        for (Map.Entry<ExecutionId, Long> entry : owned) {
+            if (!renewed.contains(entry.getKey())) {
+                dropFromRenewalAfterLostLease(entry.getKey(), entry.getValue());
             }
         }
+    }
+
+    /**
+     * Watchdog Bound: execução cujo runtime monotônico passou de
+     * {@code mohs.engine.watchdog-timeout} sai da renovação — a lease
+     * expira sozinha e o reaper decide com o orçamento de retry
+     * (ADR-0033). É a rede de segurança de último caso da ADR-0012: entra
+     * depois que o {@code timeout} do job falhou em parar o handler.
+     * O {@code remove} de dois argumentos é o CAS do mapa: só remove a
+     * PRÓPRIA encarnação — o mesmo {@code ExecutionId} pode ter sido
+     * re-reivindicado por este node depois de um reclaim, e remover a
+     * entrada da encarnação nova mataria a renovação de uma execução
+     * saudável sem aviso nenhum (o ABA do banco, repetido em memória).
+     */
+    private void dropFromRenewalPastWatchdogBound(ExecutionId id, long startedNanos) {
+        if (inFlightStartedNanos.remove(id, startedNanos)) {
+            log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} — lease renewal stopped; the reaper will "
+                            + "reclaim it when the lease expires (retry budget applies) and the local handler keeps "
+                            + "running as a zombie until it finishes (no interrupt mechanism yet)",
+                    id, settings.watchdogTimeout());
+        }
+    }
+
+    /**
+     * Id que a renovação perdeu e ainda está no mapa perdeu a posse de
+     * verdade (reclaim concorrente): o handler local virou zumbi — sai da
+     * renovação, e a escrita terminal dele será descartada pelo CAS de
+     * conclusão. O {@code remove} de dois argumentos só remove a própria
+     * encarnação (ver {@link #dropFromRenewalPastWatchdogBound}); e como a
+     * conclusão local pode ter commitado entre o snapshot da renovação e
+     * este drop, o estado real é consultado antes de acusar reclaim — log
+     * operacional é contrato com o operador, WARN com causa errada manda
+     * caçar um reaper fantasma às 3h da manhã.
+     */
+    private void dropFromRenewalAfterLostLease(ExecutionId id, long startedNanos) {
+        if (!inFlightStartedNanos.remove(id, startedNanos)) {
+            return;
+        }
+        ExecutionState actual = executionStore.find(id).map(Execution::state).orElse(null);
+        if (actual == ExecutionState.SUCCEEDED) {
+            return; // conclusão normal venceu a corrida com o snapshot da renovação — nada a avisar
+        }
+        log.warn("execution {} lost its lease (state now {}) — the local handler is now a zombie; "
+                + "its eventual result will be discarded by the completion CAS", id, actual);
     }
 
     /** Runtime por tempo monotônico ({@code System.nanoTime}) — duração nunca vem do {@code Clock} injetado, que pode saltar no resync. */
@@ -380,13 +417,17 @@ public final class Engine implements MohsLifecycle {
 
         // registrado ANTES do runAsync: a execução está RUNNING no banco desde o
         // claim — a primeira renovação precisa cobri-la mesmo que o executor a
-        // deixe na fila por um tick inteiro
-        inFlightStartedNanos.put(execution.id(), System.nanoTime());
+        // deixe na fila por um tick inteiro. Remoções sempre com o remove de
+        // dois argumentos: o mesmo ExecutionId pode ser re-reivindicado por
+        // este node após um reclaim, e o whenComplete tardio de um zumbi não
+        // pode apagar a entrada da encarnação nova (ABA em memória).
+        long startedNanos = System.nanoTime();
+        inFlightStartedNanos.put(execution.id(), startedNanos);
         CompletableFuture<Void> future;
         try {
             future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution, definition), executor);
         } catch (RuntimeException e) {
-            inFlightStartedNanos.remove(execution.id());
+            inFlightStartedNanos.remove(execution.id(), startedNanos);
             log.warn("runner executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
                     execution.id(), e);
             return;
@@ -400,7 +441,7 @@ public final class Engine implements MohsLifecycle {
             if (thrown != null) {
                 log.error("dispatch of execution {} threw outside the normal failure paths", execution.id(), thrown);
             }
-            inFlightStartedNanos.remove(execution.id());
+            inFlightStartedNanos.remove(execution.id(), startedNanos);
             inFlight.remove(future);
         });
     }
