@@ -29,7 +29,16 @@ public final class RunnerRegistry implements AutoCloseable {
     /** {@code JobDefinition.runner() == null} resolve pra este nome — o único runner que esta classe exige que exista. */
     public static final String DEFAULT_RUNNER = "io";
 
-    private final Map<String, AsyncTaskExecutor> executors;
+    private final Map<String, LiveRunner> executors;
+
+    /**
+     * Executor vivo pareado com a ação de desligamento que nasce junto
+     * dele em {@link #build} — {@link #close()} só executa
+     * {@code shutdown.run()}, sem re-derivar o tipo concreto por
+     * {@code instanceof}: um modo novo de runner muda um único lugar.
+     */
+    private record LiveRunner(AsyncTaskExecutor executor, Runnable shutdown) {
+    }
 
     public RunnerRegistry(List<MohsRunner> runners) {
         Objects.requireNonNull(runners, "runners");
@@ -46,16 +55,29 @@ public final class RunnerRegistry implements AutoCloseable {
             throw new IllegalArgumentException(
                     "RunnerRegistry requires a '" + DEFAULT_RUNNER + "' runner (the default) — none provided: " + specs.keySet());
         }
-        Map<String, AsyncTaskExecutor> built = new LinkedHashMap<>();
+        Map<String, LiveRunner> built = new LinkedHashMap<>();
         specs.forEach((name, spec) -> built.put(name, build(spec)));
         this.executors = Map.copyOf(built);
     }
 
-    private static AsyncTaskExecutor build(MohsRunner runner) {
+    /**
+     * Protocolo de desligamento certo por tipo concreto —
+     * {@link SimpleAsyncTaskExecutor#close()} (IO) vs.
+     * {@link ThreadPoolTaskExecutor#destroy()} (CPU), a mesma assimetria
+     * já documentada em {@link MohsExecutors} — decidido aqui, no único
+     * lugar que conhece o tipo construído.
+     */
+    private static LiveRunner build(MohsRunner runner) {
         String namePrefix = "mohs-runner-" + runner.name();
         return switch (runner.mode()) {
-            case IO -> MohsExecutors.ioBoundExecutor(namePrefix, runner.maxConcurrent());
-            case CPU -> MohsExecutors.cpuBoundExecutor(namePrefix, runner.coreSize(), runner.maxSize(), runner.queueCapacity(), runner.keepAlive());
+            case IO -> {
+                SimpleAsyncTaskExecutor io = MohsExecutors.ioBoundExecutor(namePrefix, runner.maxConcurrent());
+                yield new LiveRunner(io, io::close);
+            }
+            case CPU -> {
+                ThreadPoolTaskExecutor cpu = MohsExecutors.cpuBoundExecutor(namePrefix, runner.coreSize(), runner.maxSize(), runner.queueCapacity(), runner.keepAlive());
+                yield new LiveRunner(cpu, cpu::destroy);
+            }
         };
     }
 
@@ -68,11 +90,11 @@ public final class RunnerRegistry implements AutoCloseable {
      */
     public AsyncTaskExecutor resolve(@Nullable String runnerName) {
         String name = runnerName == null ? DEFAULT_RUNNER : runnerName;
-        AsyncTaskExecutor executor = executors.get(name);
-        if (executor == null) {
+        LiveRunner runner = executors.get(name);
+        if (runner == null) {
             throw new NoSuchElementException(noSuchRunnerMessage(name));
         }
-        return executor;
+        return runner.executor();
     }
 
     /**
@@ -93,20 +115,10 @@ public final class RunnerRegistry implements AutoCloseable {
         return "no runner named '" + name + "' registered — available: " + executors.keySet();
     }
 
-    /**
-     * Protocolo de desligamento certo por tipo concreto —
-     * {@link SimpleAsyncTaskExecutor#close()} (IO) vs.
-     * {@link ThreadPoolTaskExecutor#destroy()} (CPU), a mesma assimetria
-     * já documentada em {@link MohsExecutors}.
-     */
     @Override
     public void close() {
-        for (AsyncTaskExecutor executor : executors.values()) {
-            switch (executor) {
-                case SimpleAsyncTaskExecutor io -> io.close();
-                case ThreadPoolTaskExecutor cpu -> cpu.destroy();
-                default -> throw new IllegalStateException("unknown executor type built by RunnerRegistry: " + executor.getClass());
-            }
+        for (LiveRunner runner : executors.values()) {
+            runner.shutdown().run();
         }
     }
 }
