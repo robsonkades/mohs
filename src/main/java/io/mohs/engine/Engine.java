@@ -6,27 +6,24 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
+import io.github.robsonkades.uuidv7.UUIDv7;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.scheduling.TaskScheduler;
 
 import io.mohs.core.EngineState;
 import io.mohs.core.MohsLifecycle;
-import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.Execution;
-import io.mohs.core.execution.ExecutionState;
 
 /**
  * O motor: liga {@link Claimer}, {@link Dispatcher}, {@link NodeStore} e
@@ -45,6 +42,12 @@ import io.mohs.core.execution.ExecutionState;
  * estável entre reinícios é decisão de {@code io.mohs.autoconfigure}
  * (ainda não construído), não desta classe.
  *
+ * <p>{@code tickScheduler}/{@code dispatchExecutor} são injetados —
+ * construídos por {@link MohsExecutors}, não por esta classe. {@link
+ * #stop} nunca desliga o que recebeu: ciclo de vida desses dois é de quem
+ * os construiu (mesma disciplina documentada em {@link MohsExecutors}),
+ * só {@link #drain} espera o que já está em voo terminar.
+ *
  * <p><b>Limitações conhecidas desta rodada, documentadas, não escondidas:</b>
  * sem Watchdog Bound (lease de execuções já {@code RUNNING} de ticks
  * anteriores não é renovada — só quem acaba de ser reivindicado ganha
@@ -60,7 +63,6 @@ public final class Engine implements MohsLifecycle {
     private final Claimer claimer;
     private final Dispatcher dispatcher;
     private final ExecutionStore executionStore;
-    private final JobStore jobStore;
     private final NodeStore nodeStore;
     private final Reaper reaper;
     private final Clock clock;
@@ -70,19 +72,26 @@ public final class Engine implements MohsLifecycle {
 
     private final AtomicReference<EngineState> state = new AtomicReference<>(EngineState.CREATED);
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
-    private final ScheduledExecutorService tickScheduler =
-            Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().name("mohs-engine-tick").factory());
-    private final ExecutorService dispatchExecutor =
-            Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("mohs-dispatch-", 0).factory());
+    private final TaskScheduler tickScheduler;
+    private final AsyncTaskExecutor dispatchExecutor;
 
     private @Nullable ScheduledFuture<?> tickHandle;
 
-    public Engine(Claimer claimer, Dispatcher dispatcher, ExecutionStore executionStore, JobStore jobStore,
-            NodeStore nodeStore, Reaper reaper, Clock clock, Duration pollInterval, int batchSize) {
+    public Engine(
+            Claimer claimer,
+            Dispatcher dispatcher,
+            ExecutionStore executionStore,
+            NodeStore nodeStore,
+            Reaper reaper,
+            Clock clock,
+            Duration pollInterval,
+            int batchSize,
+            TaskScheduler tickScheduler,
+            AsyncTaskExecutor dispatchExecutor
+    ) {
         this.claimer = Objects.requireNonNull(claimer, "claimer");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
-        this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
         this.reaper = Objects.requireNonNull(reaper, "reaper");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -91,7 +100,9 @@ public final class Engine implements MohsLifecycle {
             throw new IllegalArgumentException("batchSize must be positive");
         }
         this.batchSize = batchSize;
-        this.nodeId = UUID.randomUUID().toString();
+        this.tickScheduler = Objects.requireNonNull(tickScheduler, "tickScheduler");
+        this.dispatchExecutor = Objects.requireNonNull(dispatchExecutor, "dispatchExecutor");
+        this.nodeId = UUIDv7.randomUUID().toString();
     }
 
     @Override
@@ -105,8 +116,7 @@ public final class Engine implements MohsLifecycle {
         if (!state.compareAndSet(EngineState.CREATED, EngineState.RUNNING)) {
             throw new IllegalStateException("start() only valid from CREATED, was " + state.get());
         }
-        long intervalMillis = pollInterval.toMillis();
-        tickHandle = tickScheduler.scheduleWithFixedDelay(this::tick, 0, intervalMillis, TimeUnit.MILLISECONDS);
+        tickHandle = tickScheduler.scheduleWithFixedDelay(this::tick, pollInterval);
     }
 
     @Override
@@ -137,7 +147,11 @@ public final class Engine implements MohsLifecycle {
         awaitInFlight(grace);
     }
 
-    /** {@link #drain} seguido do desligamento dos executors. */
+    /**
+     * {@link #drain} seguido de cancelar o agendamento do tick.
+     * {@code tickScheduler}/{@code dispatchExecutor} continuam vivos —
+     * não são desta classe pra desligar (ver Javadoc da classe).
+     */
     @Override
     public void stop(Duration grace) {
         Objects.requireNonNull(grace, "grace");
@@ -151,22 +165,38 @@ public final class Engine implements MohsLifecycle {
         if (tickHandle != null) {
             tickHandle.cancel(false);
         }
-        tickScheduler.shutdown();
-        dispatchExecutor.shutdown();
         state.set(EngineState.STOPPED);
     }
 
+    /**
+     * Espera {@code inFlight} esvaziar em loop, não num snapshot só — um
+     * tick que já tinha passado de {@code claimer.claim(...)} no instante
+     * exato do CAS pra {@code DRAINING} ainda vai submeter as execuções que
+     * acabou de reivindicar, e essas entram em {@code inFlight} depois de
+     * qualquer snapshot único já tirado. Um segundo snapshot pega o que o
+     * primeiro perdeu; o loop para quando {@code inFlight} esvazia de
+     * verdade ou o {@code grace} acaba, o que vier primeiro.
+     */
     private void awaitInFlight(Duration grace) {
-        CompletableFuture<?>[] snapshot = inFlight.toArray(CompletableFuture[]::new);
-        try {
-            CompletableFuture.allOf(snapshot).get(grace.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
-            log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — Mohs has no interrupt "
-                    + "mechanism yet (per-job timeout isn't enforced), they keep running in the background", grace, inFlight.size());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException e) {
-            log.warn("unexpected exception waiting for in-flight dispatch during drain", e);
+        Instant deadline = clock.instant().plus(grace);
+        while (!inFlight.isEmpty()) {
+            long remainingMillis = Duration.between(clock.instant(), deadline).toMillis();
+            if (remainingMillis <= 0) {
+                log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — Mohs has no interrupt mechanism yet (per-job timeout isn't enforced), they keep running in the background", grace, inFlight.size());
+                return;
+            }
+            CompletableFuture<?>[] snapshot = inFlight.toArray(CompletableFuture[]::new);
+            try {
+                CompletableFuture.allOf(snapshot).get(remainingMillis, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                log.warn("drain grace period ({}) elapsed with {} execution(s) still in flight — Mohs has no interrupt mechanism yet (per-job timeout isn't enforced), they keep running in the background", grace, inFlight.size());
+                return;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (ExecutionException e) {
+                log.warn("unexpected exception waiting for in-flight dispatch during drain", e);
+            }
         }
     }
 
@@ -193,18 +223,45 @@ public final class Engine implements MohsLifecycle {
         }
     }
 
-    /** Fire-and-forget em relação ao próximo tick: um handler lento não trava a próxima rodada de claim. */
+    /**
+     * Fire-and-forget em relação ao próximo tick: um handler lento não trava
+     * a próxima rodada de claim. {@code dispatchExecutor} pode rejeitar
+     * ({@link MohsExecutors#ioBoundExecutor} rejeita acima do teto de
+     * concorrência, de propósito — backpressure real) — {@code
+     * CompletableFuture.runAsync} propaga essa rejeição de forma síncrona,
+     * antes mesmo de existir um {@code future}; sem capturar aqui, uma única
+     * rejeição no meio do lote abortaria o {@code for} de {@link #tick} e
+     * deixaria as execuções seguintes já reivindicadas (RUNNING no banco)
+     * órfãs até a lease expirar e o {@link Reaper} reclamá-las — caminho de
+     * recuperação bem mais lento que necessário.
+     */
     private void submitDispatch(Execution execution) {
-        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> dispatchOne(execution), dispatchExecutor);
+        CompletableFuture<Void> future;
+        try {
+            future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution), dispatchExecutor);
+        } catch (RuntimeException e) {
+            log.warn("dispatch executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
+                    execution.id(), e);
+            return;
+        }
         inFlight.add(future);
-        future.whenComplete((result, error) -> inFlight.remove(future));
+        future.whenComplete((_, _) -> inFlight.remove(future));
     }
 
-    private void dispatchOne(Execution execution) {
+    /**
+     * Resolve o payload gravado por {@code ExecutionStore#insert} — a única
+     * coisa que só {@link Engine} sabe fazer aqui, já que {@link Dispatcher}
+     * é deliberadamente agnóstico a como o payload chega (testável com
+     * {@code Object} puro) — e só então delega pra
+     * {@link Dispatcher#dispatch}. Payload ilegível vira falha terminal via
+     * {@link #failUnreadablePayload}, nunca propaga.
+     */
+    private void resolvePayloadAndDispatch(Execution execution) {
         Object payload;
         try {
-            payload = executionStore.findPayload(execution.id()).orElseThrow(
-                    () -> new IllegalStateException("execution " + execution.id() + " vanished before payload could be read — should be unreachable"));
+            payload = executionStore
+                    .findPayload(execution.id())
+                    .orElseThrow(() -> new IllegalStateException("execution " + execution.id() + " vanished before payload could be read — should be unreachable"));
         } catch (RuntimeException e) {
             failUnreadablePayload(execution, e);
             return;
@@ -212,13 +269,20 @@ public final class Engine implements MohsLifecycle {
         dispatcher.dispatch(execution, payload);
     }
 
-    /** Payload corrompido/classe sumida do classpath não trava o ciclo — falha só esta execução, direto, sem passar pelo handler. */
+    /**
+     * Payload corrompido/classe sumida do classpath não trava o ciclo —
+     * falha só esta execução, direto, sem passar pelo handler.
+     * {@link Dispatcher#failBeforeDispatch} sintetiza o {@code Attempt} e
+     * publica {@code Failed} — mesmo caminho que qualquer outra falha
+     * terminal do sistema usa, então um {@code ExecutionListener} é
+     * notificado aqui também. A causa original preservada em
+     * {@code getCause()}; a mensagem prefixada é o que fica gravado no
+     * {@code Attempt}/publicado no evento, contexto que só {@link Engine}
+     * tem (não é falha de handler nem de interceptor).
+     */
     private void failUnreadablePayload(Execution execution, RuntimeException cause) {
-        Instant now = clock.instant();
-        int attemptNumber = execution.attempts().size() + 1;
         String message = "payload could not be read: " + (cause.getMessage() != null ? cause.getMessage() : cause.toString());
-        Attempt attempt = new Attempt(attemptNumber, now, now, ExecutionState.FAILED, message);
-        executionStore.complete(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED, jobStore);
+        dispatcher.failBeforeDispatch(execution, new IllegalStateException(message, cause));
     }
 
     /** Package-private — só {@code EngineTest} usa isto pra confirmar a identidade do node por trás de heartbeat/claim. */

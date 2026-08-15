@@ -19,7 +19,8 @@ import org.testcontainers.mssqlserver.MSSQLServerContainer;
  */
 final class SqlServerTestSupport {
 
-    private static final MSSQLServerContainer CONTAINER = new MSSQLServerContainer("mcr.microsoft.com/mssql/server:2022-latest").acceptLicense();
+    private static final MSSQLServerContainer CONTAINER = new MSSQLServerContainer("mcr.microsoft.com/mssql/server:2025-latest")
+            .acceptLicense();
 
     static {
         CONTAINER.start();

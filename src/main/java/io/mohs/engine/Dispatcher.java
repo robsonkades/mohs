@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
+import org.springframework.core.task.AsyncTaskExecutor;
+
 import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Failed;
@@ -48,13 +50,13 @@ public final class Dispatcher {
     private final ExecutionEventPublisher events;
 
     public Dispatcher(ExecutionStore executionStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
-            List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners) {
+            List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor) {
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.interceptors = List.copyOf(Objects.requireNonNull(interceptors, "interceptors"));
-        this.events = new ExecutionEventPublisher(Objects.requireNonNull(listeners, "listeners"));
+        this.events = new ExecutionEventPublisher(Objects.requireNonNull(listeners, "listeners"), Objects.requireNonNull(eventExecutor, "eventExecutor"));
     }
 
     public void dispatch(Execution execution, Object payload) {
@@ -119,14 +121,27 @@ public final class Dispatcher {
     }
 
     /**
+     * Falha uma execução terminalmente sem ter passado por {@link #dispatch}
+     * — mesma síntese de {@link Attempt} e publicação de {@link Failed} que
+     * {@link #fail} já usa, pra quando o chamador (ex.: {@link Engine},
+     * quando o payload não pôde ser lido de volta) já sabe que a execução
+     * falhou antes do handler sequer poder rodar.
+     */
+    void failBeforeDispatch(Execution execution, Exception cause) {
+        Objects.requireNonNull(execution, "execution");
+        Objects.requireNonNull(cause, "cause");
+        int attemptNumber = execution.attempts().size() + 1;
+        fail(execution, attemptNumber, clock.instant(), cause);
+    }
+
+    /**
      * {@link #cancellationRequested()} sempre {@code false} nesta rodada —
      * não existe fonte nenhuma pra "cancelamento pedido" ainda ({@code POST
      * /executions/{id}/cancel} não existe, sem coluna/mecanismo). Honesto: não
      * finge um cache que não tem o que observar. {@link #progress} é no-op —
      * já é o contrato documentado quando nada observa.
      */
-    private record DefaultJobContext(JobKey jobKey, ExecutionId executionId, int attempt,
-            Instant scheduledAt, Instant firedAt) implements JobContext {
+    private record DefaultJobContext(JobKey jobKey, ExecutionId executionId, int attempt, Instant scheduledAt, Instant firedAt) implements JobContext {
 
         @Override
         public boolean cancellationRequested() {

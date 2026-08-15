@@ -15,6 +15,7 @@ import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
@@ -53,6 +54,7 @@ class DispatcherTest {
     private JdbcExecutionStore executionStore;
     private HandlerRegistry handlerRegistry;
     private RecordingListener listener;
+    private AsyncTaskExecutor eventExecutor;
 
     @BeforeEach
     void setUp() {
@@ -63,6 +65,7 @@ class DispatcherTest {
         executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build());
         handlerRegistry = new HandlerRegistry();
         listener = new RecordingListener();
+        eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
     }
 
     private static DataSource freshH2DataSource() {
@@ -75,7 +78,7 @@ class DispatcherTest {
     }
 
     private Dispatcher newDispatcher(List<ExecutionInterceptor> interceptors) {
-        return new Dispatcher(executionStore, jobStore, handlerRegistry, clock, interceptors, List.of(listener));
+        return new Dispatcher(executionStore, jobStore, handlerRegistry, clock, interceptors, List.of(listener), eventExecutor);
     }
 
     private Execution seedRunningExecution(String id, String jobKey) {
@@ -186,7 +189,7 @@ class DispatcherTest {
             throw new RuntimeException("listener blew up");
         };
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(),
-                List.of(throwingListener, listener));
+                List.of(throwingListener, listener), eventExecutor);
 
         dispatcher.dispatch(execution, "hello");
 

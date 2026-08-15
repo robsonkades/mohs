@@ -13,18 +13,25 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.sql.DataSource;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
+
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.EngineState;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.event.ExecutionListener;
+import io.mohs.core.event.Failed;
 import io.mohs.core.event.Succeeded;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
@@ -59,6 +66,8 @@ class EngineTest {
     private JdbcNodeStore nodeStore;
     private HandlerRegistry handlerRegistry;
 
+    private final ch.qos.logback.classic.Logger engineLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(Engine.class);
+
     @BeforeEach
     void setUp() {
         dataSource = freshH2DataSource();
@@ -82,13 +91,21 @@ class EngineTest {
     private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners) {
         JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
         JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
-        Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners);
-        return new Engine(claimer, dispatcher, executionStore, jobStore, nodeStoreOverride, reaper, clock, POLL_INTERVAL, BATCH_SIZE);
+        AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
+        Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor);
+        ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
+        AsyncTaskExecutor dispatchExecutor = MohsExecutors.ioBoundExecutor("mohs-dispatch-test", BATCH_SIZE);
+        return new Engine(claimer, dispatcher, executionStore, nodeStoreOverride, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
+                tickScheduler, dispatchExecutor);
     }
 
     private void seedEnqueuedExecution(String id, String jobKey, Object payload) {
+        seedEnqueuedExecution(id, jobKey, payload, NOW.minusSeconds(1));
+    }
+
+    private void seedEnqueuedExecution(String id, String jobKey, Object payload, Instant scheduledAt) {
         jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
-        Execution execution = new Execution(ExecutionId.of(id), JobKey.of(jobKey), ExecutionState.ENQUEUED, NOW.minusSeconds(1), null, List.of(), "test");
+        Execution execution = new Execution(ExecutionId.of(id), JobKey.of(jobKey), ExecutionState.ENQUEUED, scheduledAt, null, List.of(), "test");
         executionStore.insert(execution, payload);
     }
 
@@ -206,12 +223,19 @@ class EngineTest {
                 """, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)), JdbcTimestamps.toUtcTimestamp(NOW));
         AtomicBoolean handlerCalled = new AtomicBoolean();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true));
-        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
-        Engine engine = newEngine(counting, List.of());
+        CountDownLatch failed = new CountDownLatch(1);
+        AtomicReference<Failed> failedEvent = new AtomicReference<>();
+        ExecutionListener listener = event -> {
+            if (event instanceof Failed f) {
+                failedEvent.set(f);
+                failed.countDown();
+            }
+        };
+        Engine engine = newEngine(nodeStore, List.of(listener));
 
         engine.start();
         try {
-            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(failed.await(5, TimeUnit.SECONDS)).isTrue();
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
@@ -219,6 +243,74 @@ class EngineTest {
         assertThat(handlerCalled.get()).isFalse();
         Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
         assertThat(found.attempts().get(0).error()).contains("payload could not be read");
+        // RESP-3 (docs/codereview-naming.md): payload ilegível também publica Failed, mesmo caminho de qualquer outra falha terminal.
+        assertThat(failedEvent.get()).isNotNull();
+        assertThat(failedEvent.get().error()).hasMessageContaining("payload could not be read");
+        assertThat(failedEvent.get().attemptsExhausted()).isTrue();
+    }
+
+    /**
+     * Engine.submitDispatch: item novo do achado "A" (docs/codereview-naming.md,
+     * addendum 2026-08-14) — um {@code dispatchExecutor} saturado rejeita a
+     * 2ª/3ª submissão do mesmo lote de claim; antes da correção, a exceção
+     * síncrona de {@code CompletableFuture.runAsync} abortava o {@code for}
+     * de {@code tick()} assim que a 1ª rejeição acontecia, deixando as
+     * execuções seguintes do lote sem sequer tentar {@code submitDispatch}.
+     * `exec-1` prende o único slot do executor (concorrência 1); `exec-2` e
+     * `exec-3` são reivindicadas no mesmo lote e têm que ser rejeitadas
+     * individualmente — as duas aparecem no log, não só a primeira, o que só
+     * é possível se o loop continuou depois da rejeição de `exec-2`.
+     */
+    @Test
+    void submitDispatchContinuesAfterDispatchExecutorRejectsOne() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello", NOW.minusSeconds(3));
+        seedEnqueuedExecution("exec-2", "welcome-email", "hello", NOW.minusSeconds(2));
+        seedEnqueuedExecution("exec-3", "welcome-email", "hello", NOW.minusSeconds(1));
+        CountDownLatch releaseFirstHandler = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseFirstHandler.await(5, TimeUnit.SECONDS));
+
+        // CountDownLatch, não ListAppender.list: o append() de um Appender roda na
+        // thread do tick scheduler, esta asserção roda na thread do teste —
+        // contar um latch dá a publicação segura (JCIP) que ler uma lista comum
+        // concorrentemente não dá (ListAppender.list é um ArrayList cru).
+        CountDownLatch exec2Rejected = new CountDownLatch(1);
+        CountDownLatch exec3Rejected = new CountDownLatch(1);
+        AppenderBase<ILoggingEvent> rejectionWatcher = new AppenderBase<>() {
+            @Override
+            protected void append(ILoggingEvent event) {
+                String message = event.getFormattedMessage();
+                if (message.contains("exec-2")) {
+                    exec2Rejected.countDown();
+                }
+                if (message.contains("exec-3")) {
+                    exec3Rejected.countDown();
+                }
+            }
+        };
+        rejectionWatcher.start();
+        engineLogger.addAppender(rejectionWatcher);
+
+        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
+        JdbcReaper reaper = new JdbcReaper(dataSource, clock, executionStore, jobStore);
+        AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
+        Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), List.of(), eventExecutor);
+        ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
+        // concorrência 1 de propósito — exec-1 esgota o único slot, forçando exec-2/exec-3 a rejeitar.
+        AsyncTaskExecutor oneSlotDispatchExecutor = MohsExecutors.ioBoundExecutor("mohs-dispatch-test", 1);
+        Engine engine = new Engine(claimer, dispatcher, executionStore, nodeStore, reaper, clock, POLL_INTERVAL, BATCH_SIZE,
+                tickScheduler, oneSlotDispatchExecutor);
+
+        engine.start();
+        try {
+            // as duas têm que disparar — só é possível se o loop de tick() continuou
+            // depois da rejeição de exec-2 e chegou a tentar exec-3 também.
+            assertThat(exec2Rejected.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(exec3Rejected.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseFirstHandler.countDown();
+            engine.stop(Duration.ofSeconds(5));
+            engineLogger.detachAppender(rejectionWatcher);
+        }
     }
 
     /** Decorator só pra dar ao teste um jeito determinístico de esperar N ticks reais, sem Thread.sleep. */

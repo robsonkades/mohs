@@ -438,3 +438,152 @@ para o que é.
 - **Nomenclatura de teste uniformemente descritiva**: as ~57 classes de teste varridas nesta revisão
   não têm uma única ocorrência de `testX`/nome não-descritivo — todas seguem frase-em-camelCase
   (`claimIsMutuallyExclusiveAcrossConcurrentNodes`, `reclaimExpiredReleasesTheJobConcurrencySlot`).
+
+---
+
+## 11. Addendum (2026-08-14, mesmo dia) — `io.mohs.engine.Engine`
+
+`Engine` e o método novo `ExecutionStore.findPayload` chegaram via commit `dd5fb84` durante a
+sessão em que este documento foi escrito, depois que as Seções 1-10 já tinham sido concluídas —
+por isso ficaram de fora da revisão original (`EngineTest`, testado junto no mesmo commit, já foi
+corrigido — mesmo problema do achado ORG-2 — antes deste addendum ser escrito). Mesma metodologia
+das seções anteriores, aplicada agora só a `Engine.java` e ao que ele toca diretamente.
+
+### RESP-3 — `Engine.failUnreadablePayload` duplica a lógica de `Dispatcher.fail`, mas sem publicar o evento `Failed` — ALTO
+
+- **Onde:** `io.mohs.engine.Engine.java:215-222` (`failUnreadablePayload`) vs.
+  `io.mohs.engine.Dispatcher.java:111-119` (`fail`, `private`).
+- **Problema:** as duas fazem a mesma coisa — sintetizar um `Attempt` `FAILED` e chamar
+  `executionStore.complete(...)` — mas só `Dispatcher.fail` publica o evento correspondente
+  (`events.publish(new Failed(...))`, linha 117). `Engine.failUnreadablePayload` não tem como
+  chamar `Dispatcher.fail` (é `private`) nem publicar o evento por conta própria — `Engine` não
+  guarda referência nenhuma a `ExecutionEventPublisher`/`ExecutionListener`, esse mecanismo vive
+  inteiramente dentro de `Dispatcher`, construído no seu próprio construtor. Resultado: toda
+  execução que falha por payload ilegível (classe sumida do classpath, JSON corrompido) termina
+  em `FAILED` de verdade no banco, mas **nenhum `ExecutionListener` é notificado** — diferente de
+  toda outra falha terminal do sistema (handler lançou exceção, interceptor lançou exceção,
+  nenhum handler registrado), que passam por `Dispatcher.fail` e publicam `Failed` normalmente.
+- **Impacto:** é exatamente a classe de gancho que `docs/API-DESIGN.md` usa como exemplo central
+  (`case Failed f when f.attemptsExhausted() -> slack.alert(...)`) — um alerta de ops configurado
+  sobre `Failed` simplesmente não dispara pra este caso, silenciosamente. O único teste que
+  exercita este caminho, `EngineTest.unreadablePayloadFailsTheExecutionWithoutHangingTheTick`,
+  não ajuda a pegar isso: chama `newEngine(counting, List.of())` — zero listeners — e só verifica
+  estado persistido (`stateOf`/`executionStore.find`), nunca publicação de evento. A lacuna existe
+  sem nenhum teste vermelho apontando pra ela.
+- **Correção sugerida:** expor uma via estreita em `Dispatcher` pra este caso específico — ex.
+  `Dispatcher.failBeforeDispatch(Execution execution, Exception cause)` — reaproveitando a mesma
+  síntese de `Attempt`/chamada a `complete`/publicação de `Failed` que `fail(...)` já tem, e
+  trocar `Engine.failUnreadablePayload` por uma chamada a esse método. Resolve duplicação e
+  lacuna de evento na mesma mudança, sem desfazer a separação deliberada que já existe hoje
+  (resolução de payload continua fora de `Dispatcher`, que segue testável com `Object payload`
+  puro, como os testes de `DispatcherTest` já fazem).
+
+### ORG-3 — `package-info.java` de `io.mohs.engine` para de narrar em "etapa 3a" (`Claimer`) — ALTO (dado o padrão que o próprio projeto mantém em todo outro lugar)
+
+- **Onde:** `src/main/java/io/mohs/engine/package-info.java` — o texto atual descreve
+  `JobStore`/`StoredJob`/`SyncableClock`/`ExecutionStore`/`BatchStore`/`RateLimitStore` e termina
+  em `Claimer` ("a etapa 3a"). Não menciona `Dispatcher`, `HandlerRegistry`, `JobHandler`,
+  `ExecutionEventPublisher`, `Reaper`, `NodeStore`, `StoredNode` nem `Engine` — 8 dos ~17 tipos
+  hoje neste pacote.
+- **Por que isso é notável aqui especificamente:** a Seção 10 (Pontos fortes) deste documento cita
+  a disciplina de `package-info.java` deste projeto como um destaque incomum. Esse padrão ficou
+  pra trás exatamente no pacote de desenvolvimento mais ativo: `io.mohs.engine` ganhou
+  `Dispatcher`+`HandlerRegistry`+`JobHandler`+`ExecutionEventPublisher` numa rodada, `Reaper`+
+  `NodeStore`+`StoredNode` noutra, `Engine` numa terceira — três adições reais, zero atualização
+  do texto que deveria narrar cada uma, no mesmo espírito de "Claimer é a etapa 3a" que já está lá.
+- **Correção:** estender o texto no mesmo estilo — narrar `Dispatcher`/`HandlerRegistry`/
+  `JobHandler` como a etapa "3b" que o próprio Javadoc de `Claimer` já anuncia como pendente
+  ("dispatch fica pra frente"), `Reaper`/`NodeStore`/`StoredNode` como a etapa de liveness
+  (ADR-0012), e `Engine` como o que finalmente liga tudo — a própria frase de abertura do Javadoc
+  de `Engine` ("nenhum dos quatro tinha chamador em produção antes desta classe") já é quase o
+  parágrafo pronto.
+
+### CLASS-5 — Três métodos com "dispatch" no nome, mesma cadeia de chamada, papéis diferentes não refletidos no nome — BAIXO-MÉDIO
+
+- **Onde:** `Engine.submitDispatch` (`Engine.java:197-201`) chama `Engine.dispatchOne`
+  (`Engine.java:203-213`), que chama `Dispatcher.dispatch` (`Dispatcher.java:60`).
+- **Problema:** `submitDispatch` comunica bem seu papel (submeter pra execução assíncrona).
+  `dispatchOne` não: seu trabalho real — resolver o payload via `executionStore.findPayload`,
+  desviar pra `failUnreadablePayload` se a leitura falhar (achado RESP-3 acima), só então delegar
+  pra `dispatcher.dispatch` — não aparece no nome, que soa como sinônimo raso de
+  `Dispatcher.dispatch`. Um leitor seguindo `tick() → submitDispatch → dispatchOne` não tem como
+  saber, pelos nomes, onde a resolução de payload realmente acontece.
+- **Correção sugerida:** renomear `dispatchOne` pra algo que nomeie o passo extra — ex.
+  `resolvePayloadAndDispatch` — ou, no mínimo, um Javadoc de uma linha que hoje esse método não
+  tem (é o único método privado de `Engine` sem nenhum comentário).
+
+Entre a análise acima e este ponto, uma segunda leva de mudanças não commitadas apareceu no
+working tree (mesma sessão): `MohsExecutors` (fábrica central de executor/scheduler, nova),
+`Dispatcher`/`ExecutionEventPublisher`/`Engine` passando a receber executor/scheduler injetados em
+vez de criá-los na própria construção, e os testes atualizados de acordo. Refatoração real, bem
+documentada, que resolve exatamente o tipo de questão de posse de ciclo de vida que uma revisão
+como esta costuma levantar — RESP-3/ORG-3/CLASS-5 acima continuam válidos sem alteração (nenhuma
+delas tocou `failUnreadablePayload`/`dispatchOne`, nem o próprio `package-info.java`), com um
+detalhe a mais para ORG-3: `MohsExecutors` é mais um tipo do pacote ausente da narrativa. Dois
+achados novos, específicos desta leva:
+
+### METHOD-2 — `virtualThreadExecutor`/`cpuBoundExecutor`: dois métodos irmãos, dois eixos de nome diferentes — MÉDIO
+
+- **Onde:** `io.mohs.engine.MohsExecutors.java:58` (`virtualThreadExecutor`) e `:84`
+  (`cpuBoundExecutor`).
+- **Problema:** os dois métodos existem pra exatamente a mesma escolha que `RunnerMode`/
+  `MohsRunner` já nomeiam como `IO`/`CPU` (`MohsRunner.io(...)`/`MohsRunner.cpu(...)`), e o
+  próprio Javadoc de cada método já enquadra a escolha nesses termos ("I/O-bound: uma virtual
+  thread por tarefa..." / "CPU-bound: pool de platform threads limitado..."). Mas os
+  *identificadores* dos dois métodos não seguem o mesmo eixo: `cpuBoundExecutor` nomeia a
+  categoria de carga (workload), `virtualThreadExecutor` nomeia o mecanismo (tipo de thread) —
+  um leitor precisa saber de cor que "virtual thread" é sinônimo de "I/O-bound" aqui, porque o
+  nome do método de I/O nunca diz "I/O".
+- **Correção sugerida:** `ioBoundExecutor` no lugar de `virtualThreadExecutor` — alinha com
+  `cpuBoundExecutor` no mesmo eixo (workload) e com o vocabulário que `RunnerMode.IO`/
+  `MohsRunner.io(...)` já fixou no resto do projeto.
+
+### CLASS-6 — Dois dos três métodos de `MohsExecutors` devolvem o tipo concreto do Spring, um devolve a interface — BAIXO-MÉDIO
+
+- **Onde:** `virtualThreadExecutor` devolve `AsyncTaskExecutor` (interface); `cpuBoundExecutor`
+  devolve `ThreadPoolTaskExecutor` (classe concreta); `scheduler` devolve `ThreadPoolTaskScheduler`
+  (classe concreta) — `MohsExecutors.java:58,84,118`.
+- **Problema:** este projeto cita Effective Java Item 64 ("referencie pela interface, não pela
+  implementação") explicitamente em pelo menos um outro lugar (`MohsRunner`) — os três métodos
+  desta classe, irmãos na mesma fábrica, não seguem a mesma escolha entre si. Possível
+  justificativa real: `ThreadPoolTaskExecutor`/`ThreadPoolTaskScheduler` concretos expõem
+  `shutdown`/`destroy` (via `DisposableBean`) que suas interfaces não têm, e o Javadoc de cada
+  método já deixa claro que "ciclo de vida é por conta de quem chama" — ou seja, quem recebe
+  de volta pode genuinely precisar do tipo concreto pra poder desligar depois. Se for essa a
+  razão, ela vale igualmente pra `virtualThreadExecutor` (o próprio Javadoc desse método diz
+  que o chamador é quem decide fechar via `close()`), que ainda assim devolve só a interface.
+- **Correção sugerida:** ou alinhar os três atrás da interface (documentando explicitamente como
+  o chamador desliga cada um — provavelmente via cast pontual no único lugar que hoje faria
+  isso, `io.mohs.autoconfigure`, ainda não construído), ou alinhar os três atrás do tipo
+  concreto — o que importa é que os três sigam a mesma regra, com o motivo escrito, não dois
+  regras diferentes por acaso.
+
+### Nota menor (2) — duas formas de gerar UUIDv7 no projeto
+
+`Engine.java` agora gera `nodeId` com `UUIDv7.randomUUID().toString()`; `JdbcJobStore` gera `id`
+com `UUIDv7.randomUUIDString()` — mesma biblioteca (`io.github.robsonkades:uuidv7`), dois pontos
+de entrada diferentes pro mesmo resultado. Não é um erro (as duas produzem um UUIDv7 válido como
+`String`), só uma inconsistência de estilo entre os dois únicos call sites do projeto que geram
+UUIDv7 hoje — vale escolher um dos dois quando o segundo aparecer de novo.
+
+### Nota menor — `Engine.nodeId()` segue sem uso mesmo depois da correção de pacote
+
+O método package-private `nodeId()` (`Engine.java:224-227`) já carrega o Javadoc "só `EngineTest`
+usa isto" — Javadoc que só fazia sentido depois que `EngineTest` fosse movido pra `io.mohs.engine`
+(a correção que este documento já registrou na Seção "achado extra"). Confirmado: mesmo agora que
+o acesso é possível, nenhum dos 5 testes de `EngineTest` chama `engine.nodeId()`. Não é um achado
+de nomenclatura — só um lembrete de que o método continua vestigial; ou algum teste passa a usá-lo
+(ex.: para confirmar que dois `Engine`s no mesmo processo têm `nodeId` distintos), ou o método (e
+seu Javadoc) saem.
+
+### Ordem sugerida para este addendum
+
+1. RESP-3 — a mais substantiva: fecha uma lacuna de observabilidade real, não só nomenclatura.
+2. ORG-3 — mecânico, mesmo padrão das outras seções deste documento (incluir `MohsExecutors` na
+   narrativa junto com o resto).
+3. CLASS-5 — cosmético, cabe no mesmo commit de ORG-3 se `dispatchOne` for tocado por RESP-3 de
+   qualquer forma (a correção de RESP-3 já mexe no corpo desse método).
+4. METHOD-2 — mecânico, `MohsExecutors` também não commitado ainda, mesmo raciocínio de custo
+   mínimo agora que já valeu para CLASS-1.
+5. CLASS-6 — decisão a registrar (qual dos dois padrões — interface ou tipo concreto — vale pros
+   três métodos), não só um rename; cabe no mesmo commit de METHOD-2 se a decisão for rápida.
