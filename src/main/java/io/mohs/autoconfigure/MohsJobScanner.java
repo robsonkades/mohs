@@ -2,11 +2,11 @@ package io.mohs.autoconfigure;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -62,7 +62,16 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     private final ObjectProvider<HandlerRegistry> handlerRegistry;
     private final ObjectProvider<JobStore> jobStore;
     private final ObjectProvider<MohsProperties> properties;
-    private final List<ScannedJob> scanned = new ArrayList<>();
+
+    /**
+     * Guardado por {@code synchronized} — mesmo motivo de
+     * {@code ScheduledAnnotationBeanPostProcessor} guardar suas coleções:
+     * com o bootstrap em background do Spring Framework 6.2+
+     * ({@code bootstrapExecutor}), {@link #postProcessAfterInitialization}
+     * pode rodar em threads concorrentes na aplicação hospedeira —
+     * biblioteca embarcada não controla isso.
+     */
+    private final Map<JobKey, ScannedJob> scanned = new LinkedHashMap<>();
 
     private @Nullable ConfigurableListableBeanFactory beanFactory;
 
@@ -113,16 +122,17 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         JobKey key = JobKey.of(annotation.id());
         String declaringMethod = describe(targetMethod);
 
-        for (ScannedJob already : scanned) {
-            if (already.definition().key().equals(key)) {
+        synchronized (scanned) {
+            ScannedJob already = scanned.get(key);
+            if (already != null) {
                 throw new IllegalStateException("duplicate @MohsJob id '" + annotation.id() + "' — "
                         + already.declaringMethod() + " and " + declaringMethod + " both declare it");
             }
-        }
 
-        JobDefinition definition = MohsJobs.toDefinition(key, annotation, targetClass);
-        MohsJobs.AdaptedHandler handler = MohsJobs.adaptHandler(bean, invocable);
-        scanned.add(new ScannedJob(definition, handler, declaringMethod));
+            JobDefinition definition = MohsJobs.toDefinition(key, annotation, targetClass);
+            MohsJobs.AdaptedHandler handler = MohsJobs.adaptHandler(bean, invocable);
+            scanned.put(key, new ScannedJob(definition, handler, declaringMethod));
+        }
     }
 
     private static String describe(Method method) {
@@ -135,11 +145,13 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         HandlerRegistry registry = handlerRegistry.getObject();
         MohsProperties.Registration.OnConflict onConflict = properties.getObject().registration().onConflict();
 
-        for (ScannedJob job : scanned) {
-            reconcile(store, onConflict, job);
-            registry.register(job.definition().key(), job.handler().handler(), job.handler().payloadType());
+        synchronized (scanned) {
+            for (ScannedJob job : scanned.values()) {
+                reconcile(store, onConflict, job);
+                registry.register(job.definition().key(), job.handler().handler(), job.handler().payloadType());
+            }
+            reconcileOrphans(store);
         }
-        reconcileOrphans(store);
     }
 
     /**
@@ -191,14 +203,10 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
      * escrever com um cursor de leitura ainda aberto na mesma conexão.
      */
     private void reconcileOrphans(JobStore jobStore) {
-        Set<JobKey> scannedKeys = new HashSet<>();
-        for (ScannedJob job : scanned) {
-            scannedKeys.add(job.definition().key());
-        }
         List<JobKey> toOrphan = new ArrayList<>();
         try (var annotationSourced = jobStore.findAllAnnotationSourced()) {
             annotationSourced.filter(stored -> !stored.orphaned())
-                    .filter(stored -> !scannedKeys.contains(stored.definition().key()))
+                    .filter(stored -> !scanned.containsKey(stored.definition().key()))
                     .forEach(stored -> toOrphan.add(stored.definition().key()));
         }
         for (JobKey key : toOrphan) {
