@@ -92,8 +92,7 @@ public class MohsAutoConfiguration {
 
     /** {@code database}: sincroniza uma vez no boot e agenda resync periódico (ver Javadoc de {@link io.mohs.engine.SyncableClock}). */
     @Bean
-    public Clock mohsClock(MohsProperties properties, DataSource dataSource,
-            @Qualifier("mohsClockSyncScheduler") ObjectProvider<ThreadPoolTaskScheduler> mohsClockSyncScheduler) {
+    public Clock mohsClock(MohsProperties properties, DataSource dataSource, @Qualifier("mohsClockSyncScheduler") ObjectProvider<ThreadPoolTaskScheduler> mohsClockSyncScheduler) {
         if (properties.getTime().getMode() != MohsProperties.Time.Mode.DATABASE) {
             return Clock.systemUTC();
         }

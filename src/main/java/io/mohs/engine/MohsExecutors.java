@@ -114,9 +114,21 @@ public final class MohsExecutors {
     }
 
     /**
-     * Scheduler dedicado — hoje só o tick do poll loop ({@link Engine}),
-     * genérico o bastante pra qualquer ciclo futuro. Mesma observação de
-     * {@link #cpuBoundExecutor} sobre {@code initialize()}/ciclo de vida.
+     * Scheduler dedicado — hoje o tick do poll loop ({@link Engine}, cujo
+     * corpo faz claim/reaper em JDBC bloqueante direto na thread do
+     * scheduler) e o resync do {@code DatabaseClock}
+     * ({@code io.mohs.autoconfigure}), genérico o bastante pra qualquer
+     * ciclo futuro. Ambos são I/O-bound pela classificação do CLAUDE.md —
+     * por isso virtual thread, não platform thread.
+     *
+     * <p>Virtual thread aqui não abre mão do teto de concorrência: ao
+     * contrário de {@link #ioBoundExecutor} (thread-per-task sem limite,
+     * daí o {@code Semaphore}), {@link ThreadPoolTaskScheduler} continua
+     * envolto num {@code ScheduledThreadPoolExecutor(poolSize, threadFactory)}
+     * de verdade — {@code setVirtualThreads(true)} só troca o tipo da
+     * thread do worker, {@code poolSize} continua sendo o teto real de
+     * execuções concorrentes (confirmado na fonte do Spring 7.0.8, não só
+     * no Javadoc).
      */
     public static ThreadPoolTaskScheduler scheduler(String namePrefix, int poolSize) {
         requireNotBlank(namePrefix, "namePrefix");
@@ -126,6 +138,7 @@ public final class MohsExecutors {
 
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setThreadNamePrefix(threadNamePrefix(namePrefix));
+        scheduler.setVirtualThreads(true);
         scheduler.setPoolSize(poolSize);
         scheduler.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         scheduler.setWaitForTasksToCompleteOnShutdown(true);

@@ -3,6 +3,7 @@ package io.mohs.engine;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
@@ -93,8 +94,9 @@ class MohsExecutorsTest {
         assertThatThrownBy(() -> MohsExecutors.scheduler("test", 0)).isInstanceOf(IllegalArgumentException.class);
     }
 
+    /** O corpo da tarefa (claim/reaper em Engine) é JDBC bloqueante — I/O-bound, daí virtual thread (CLAUDE.md). */
     @Test
-    void schedulerRunsScheduledTaskOnNamedThread() throws Exception {
+    void schedulerRunsScheduledTaskOnNamedVirtualThread() throws Exception {
         ThreadPoolTaskScheduler scheduler = MohsExecutors.scheduler("mohs-sched-probe", 1);
         AtomicReference<Thread> threadRef = new AtomicReference<>();
         CountDownLatch fired = new CountDownLatch(1);
@@ -105,6 +107,46 @@ class MohsExecutorsTest {
         }, Duration.ofMillis(10));
 
         assertThat(fired.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(threadRef.get().isVirtual()).isTrue();
         assertThat(threadRef.get().getName()).startsWith("mohs-sched-probe-");
+    }
+
+    /**
+     * poolSize continua sendo o teto real de execuções concorrentes com
+     * virtual threads — {@link ThreadPoolTaskScheduler}, não thread-per-task
+     * (ver Javadoc de {@link MohsExecutors#scheduler}). Tarefas
+     * independentes, não uma única recorrente via
+     * {@code scheduleWithFixedDelay}: essa nunca se sobrepõe a si mesma por
+     * contrato do próprio JDK (a próxima execução só é agendada depois que a
+     * anterior termina) — não provaria nada sobre {@code poolSize}, valeria
+     * pra qualquer tamanho de pool. Aqui, {@code taskCount} tarefas distintas
+     * disputam o mesmo pool de tamanho 1 de propósito.
+     */
+    @Test
+    void schedulerWithPoolSizeOneNeverRunsTasksConcurrently() throws Exception {
+        ThreadPoolTaskScheduler scheduler = MohsExecutors.scheduler("mohs-sched-concurrency-probe", 1);
+        int taskCount = 5;
+        AtomicInteger concurrentRunners = new AtomicInteger(0);
+        AtomicInteger maxObservedConcurrency = new AtomicInteger(0);
+        CountDownLatch allTasksRan = new CountDownLatch(taskCount);
+
+        Runnable task = () -> {
+            int current = concurrentRunners.incrementAndGet();
+            maxObservedConcurrency.updateAndGet(max -> Math.max(max, current));
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                concurrentRunners.decrementAndGet();
+                allTasksRan.countDown();
+            }
+        };
+        for (int i = 0; i < taskCount; i++) {
+            scheduler.execute(task);
+        }
+
+        assertThat(allTasksRan.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(maxObservedConcurrency.get()).isEqualTo(1);
     }
 }
