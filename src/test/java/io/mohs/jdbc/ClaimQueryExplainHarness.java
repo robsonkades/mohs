@@ -252,7 +252,13 @@ class ClaimQueryExplainHarness {
         }
     }
 
-    /** Mesma forma de {@code JdbcJobStore.upsert} — todo job com {@code allowConcurrentExecutions = true} (isola o custo da query do mutex de job). */
+    /**
+     * Mesma forma de {@code JdbcJobStore.upsert} — todo job com
+     * {@code allowConcurrentExecutions = true} (isola o custo da query do
+     * mutex de job). Seed misto (~20% {@code RETRY_SCHEDULED},
+     * determinístico) — mesmo espelho do {@code ClaimQueryLoadHarness}: o
+     * plano deve refletir a condição sob a qual os números foram medidos.
+     */
     private static void seedBacklog(DataSource dataSource) {
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
@@ -262,8 +268,9 @@ class ClaimQueryExplainHarness {
             String jobKey = "explain-job-" + j;
             jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
             for (int e = 0; e < EXECUTIONS_PER_JOB; e++) {
+                String state = e % 5 == 0 ? "RETRY_SCHEDULED" : "ENQUEUED";
                 batchArgs.add(new Object[] {
-                        UUID.randomUUID().toString(), jobKey, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)),
+                        UUID.randomUUID().toString(), jobKey, state, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)),
                         Priority.NORMAL.value(), JdbcTimestamps.toUtcTimestamp(NOW)
                 });
             }
@@ -271,7 +278,7 @@ class ClaimQueryExplainHarness {
         rawJdbcTemplate.batchUpdate("""
                 INSERT INTO mohs_executions (
                     id, job_key, state, scheduled_at, actor, priority, payload, payload_type, created_at)
-                VALUES (?, ?, 'ENQUEUED', ?, 'explain-harness', ?, '{}', 'java.lang.Object', ?)
+                VALUES (?, ?, ?, ?, 'explain-harness', ?, '{}', 'java.lang.Object', ?)
                 """, batchArgs);
     }
 

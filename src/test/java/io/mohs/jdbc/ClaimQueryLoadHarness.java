@@ -176,15 +176,22 @@ class ClaimQueryLoadHarness {
         return claimedTotal.get() / elapsedSeconds;
     }
 
-    /** Todo job com {@code allowConcurrentExecutions = true} (default) — isola o custo da query do mutex de job. */
+    /**
+     * Todo job com {@code allowConcurrentExecutions = true} (default) —
+     * isola o custo da query do mutex de job. Seed misto (~20%
+     * {@code RETRY_SCHEDULED}, determinístico): desde a ADR-0033 retry é
+     * claimável — semear só {@code ENQUEUED} mediria o predicado, não o
+     * cenário (limitação declarada na rodada 08-15 do BASELINE.md).
+     */
     private int seedBacklog(JdbcTemplate rawJdbcTemplate, JdbcJobStore jobStore, String prefix, int jobCount, int executionsPerJob) {
         List<Object[]> batchArgs = new ArrayList<>();
         for (int j = 0; j < jobCount; j++) {
             String jobKey = prefix + "-job-" + j;
             jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
             for (int e = 0; e < executionsPerJob; e++) {
+                String state = e % 5 == 0 ? "RETRY_SCHEDULED" : "ENQUEUED";
                 batchArgs.add(new Object[] {
-                        UUID.randomUUID().toString(), jobKey, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)),
+                        UUID.randomUUID().toString(), jobKey, state, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(1)),
                         Priority.NORMAL.value(), JdbcTimestamps.toUtcTimestamp(NOW)
                 });
             }
@@ -192,7 +199,7 @@ class ClaimQueryLoadHarness {
         rawJdbcTemplate.batchUpdate("""
                 INSERT INTO mohs_executions (
                     id, job_key, state, scheduled_at, actor, priority, payload, payload_type, created_at)
-                VALUES (?, ?, 'ENQUEUED', ?, 'harness', ?, '{}', 'java.lang.Object', ?)
+                VALUES (?, ?, ?, ?, 'harness', ?, '{}', 'java.lang.Object', ?)
                 """, batchArgs);
         return batchArgs.size();
     }

@@ -348,6 +348,71 @@ otimização entra com número próprio.
   preservados (capturados ainda com as cópias em drift; ver a nota de
   metodologia acima).
 
+## Candidata `UNION ALL` por estado no MySQL — medida e **rejeitada** — 2026-08-15
+
+Executa a decisão pendente da rodada anterior. Metodologia atualizada
+conforme a limitação lá declarada: os dois harnesses agora semeiam seed
+misto determinístico (~20% `RETRY_SCHEDULED` — 25% exatos na fase de
+latência, 3 de 12 por job; 20% exatos em throughput/explain). Mesma
+máquina, mesmas imagens da rodada anterior desta data, mesmo dia.
+
+### Antes — template ANSI com seed misto (a régua desta rodada)
+
+| Dialeto    | p50 (ms) | p99 (ms) | throughput (rows/s) |
+|------------|---------:|---------:|--------------------:|
+| H2         |     2.35 |     4.99 |             11742.3 |
+| PostgreSQL |     7.81 |     9.76 |             11299.6 |
+| MySQL      |    23.51 |    47.78 |              1429.8 |
+| SQL Server |    18.20 |    28.03 |              5811.6 |
+
+(Os números de MySQL desta tabela **não** são comparáveis 1:1 com o
+987.7/3060.1 das rodadas anteriores — seed, predicado das capturas e
+estatísticas mudaram entre elas; a comparação controlada desta rodada é
+a linha de cima contra a candidata abaixo, mesmo seed, mesmo dia.)
+
+### Candidata: `UNION ALL` de dois braços `state = constante`
+
+Implementada em template próprio do `MySqlJdbcDialect` e medida:
+
+| Métrica MySQL | ANSI (antes) | UNION ALL | veredito |
+|---|---:|---:|---|
+| p50 (ms) | 23.51 | 23.60 | ~igual |
+| p99 (ms) | 47.78 | 28.40 | melhor |
+| throughput (rows/s) | **1429.8** | 970.0 | **−32% — rejeitada** |
+
+O plano da candidata (capturado com `EXPLAIN ANALYZE`, estatísticas
+frescas) mostra por que a premissa era incompleta: **nem com
+`state = constante` o otimizador usa o índice de claim** — ele dirige o
+join por `mohs_job_definitions` (table scan de 300 jobs) → lookup em
+`mohs_executions` pelo índice de idempotência → filtro de estado →
+**Sort dentro de cada braço** (2.400 e 600 linhas). A candidata virou
+dois scan+sort em vez de um. O problema real não é o `IN` de dois
+estados: é a **escolha de join order** do otimizador com estatísticas
+frescas. Consequência: a candidata 2 da rodada anterior (duas queries +
+merge em Java) herdaria exatamente o mesmo plano por query — descartada
+sem medir, pelo mesmo mecanismo.
+
+### Decisão
+
+`MySqlJdbcDialect` permanece no template ANSI — melhor configuração
+medida (1429.8 rows/s). A próxima alavanca nomeada, se o throughput de
+claim do MySQL importar de verdade em produção, é **hint de join/índice**
+no template do dialeto (`STRAIGHT_JOIN` ou
+`FORCE INDEX (idx_mohs_executions_claim)`) — atacar a escolha de join
+order, que é o mecanismo demonstrado — medida com este mesmo protocolo
+(seed misto). Ganho colateral que fica: os 4 testes de contrato do par
+de estados claimáveis em `JdbcClaimerMySqlTest` (retry devido, merge
+global, truncamento de batch, prioridade cross-state) pinam o
+comportamento que qualquer template substituto precisa preservar.
+
+`explain-mysql.txt` desta rodada = plano ANSI final (recapturado após o
+reverso da candidata); o plano da candidata está transcrito acima por
+mecanismo, não preservado em arquivo — falha de ordem de operações
+(revertido antes de salvar), não decisão. **Regra a partir daqui**: o
+plano bruto de toda candidata medida é preservado em arquivo sufixado
+*antes* de decidir/reverter — a evidência primária do achado central de
+um ciclo não pode depender de reimplementar a candidata.
+
 ## Como reproduzir
 
 ```
