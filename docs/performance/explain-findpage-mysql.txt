@@ -1,0 +1,41 @@
+=== sem filtro (primeira pagina) ===
+SELECT id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key FROM mohs_executions ORDER BY id DESC LIMIT 51
+
+-> Limit: 51 row(s)  (cost=0.132 rows=51) (actual time=0.0133..0.0291 rows=51 loops=1)
+    -> Index scan on mohs_executions using PRIMARY (reverse)  (cost=0.132 rows=51) (actual time=0.0126..0.0269 rows=51 loops=1)
+
+
+=== state comum (SUCCEEDED) ===
+SELECT id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key FROM mohs_executions WHERE state = 'SUCCEEDED' ORDER BY id DESC LIMIT 51
+
+-> Limit: 51 row(s)  (cost=0.758 rows=51) (actual time=0.197..0.215 rows=51 loops=1)
+    -> Filter: (mohs_executions.state = 'SUCCEEDED')  (cost=0.758 rows=51) (actual time=0.197..0.213 rows=51 loops=1)
+        -> Index scan on mohs_executions using PRIMARY (reverse)  (cost=0.758 rows=102) (actual time=0.0115..0.0242 rows=51 loops=1)
+
+
+=== state raro (ENQUEUED) ===
+SELECT id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key FROM mohs_executions WHERE state = 'ENQUEUED' ORDER BY id DESC LIMIT 51
+
+-> Limit: 51 row(s)  (cost=105 rows=51) (actual time=0.982..0.985 rows=51 loops=1)
+    -> Sort: mohs_executions.id DESC, limit input to 51 row(s) per chunk  (cost=105 rows=300) (actual time=0.981..0.983 rows=51 loops=1)
+        -> Index lookup on mohs_executions using idx_mohs_executions_claim (state='ENQUEUED')  (cost=105 rows=300) (actual time=0.103..0.924 rows=300 loops=1)
+
+
+=== job_key ===
+SELECT id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key FROM mohs_executions WHERE job_key = 'findpage-job-42' ORDER BY id DESC LIMIT 51
+
+-> Limit: 51 row(s)  (cost=70 rows=51) (actual time=0.285..0.288 rows=51 loops=1)
+    -> Sort: mohs_executions.id DESC, limit input to 51 row(s) per chunk  (cost=70 rows=200) (actual time=0.284..0.286 rows=51 loops=1)
+        -> Index lookup on mohs_executions using uq_mohs_executions_idem (job_key='findpage-job-42')  (cost=70 rows=200) (actual time=0.0647..0.257 rows=200 loops=1)
+
+
+=== job_key + cursor (keyset) ===
+SELECT id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key FROM mohs_executions WHERE job_key = 'findpage-job-42' AND id < '01a0056c-a679-768a-8cfe-b03fdb0304f8' ORDER BY id DESC LIMIT 51
+
+-> Limit: 51 row(s)  (cost=27.4 rows=50) (actual time=0.212..0.215 rows=51 loops=1)
+    -> Sort: mohs_executions.id DESC, limit input to 51 row(s) per chunk  (cost=27.4 rows=50) (actual time=0.212..0.213 rows=51 loops=1)
+        -> Filter: ((mohs_executions.job_key = 'findpage-job-42') and (mohs_executions.id < '01a0056c-a679-768a-8cfe-b03fdb0304f8'))  (cost=27.4 rows=50) (actual time=0.0297..0.193 rows=100 loops=1)
+            -> Intersect rows sorted by row ID  (cost=27.4 rows=50) (actual time=0.0282..0.166 rows=100 loops=1)
+                -> Index range scan on mohs_executions using idx_mohs_executions_job_key over (job_key = 'findpage-job-42' AND id < '01a0056c-a679-768a-8cfe-b03fdb0304f8')  (cost=5.2 rows=100) (actual time=0.0221..0.0627 rows=100 loops=1)
+
+
