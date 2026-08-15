@@ -369,6 +369,51 @@ class EngineTest {
         }
     }
 
+    /**
+     * ADR-0034 fim-a-fim: o timeout do job dispara de carona no tick,
+     * interrompe o handler bloqueado, e o desfecho é passivo — segue o
+     * orçamento quando o handler responde (aqui retries=0 → FAILED com
+     * causa de timeout).
+     */
+    @Test
+    void jobTimeoutInterruptsTheHandlerAndTheOutcomeFollowsTheRetryBudget() throws Exception {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().timeout(Duration.ofMillis(50))));
+        executionStore.insert(new Execution(ExecutionId.of("exec-1"), JobKey.of("welcome-email"),
+                ExecutionState.ENQUEUED, NOW.minusSeconds(1), null, List.of(), "test"), "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch never = new CountDownLatch(1);
+        AtomicBoolean interrupted = new AtomicBoolean();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            try {
+                never.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                interrupted.set(true);
+                throw e;
+            }
+        });
+        CountDownLatch failedPublished = new CountDownLatch(1);
+        AtomicReference<Failed> failed = new AtomicReference<>();
+        ExecutionListener listener = event -> {
+            if (event instanceof Failed f) {
+                failed.set(f);
+                failedPublished.countDown();
+            }
+        };
+        Engine engine = newEngine(nodeStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(failedPublished.await(5, TimeUnit.SECONDS)).as("timeout interrupts and the attempt fails").isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(interrupted).isTrue();
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(failed.get().error().getMessage()).contains("exceeded job timeout");
+    }
+
     private Instant leaseOf(String id) {
         return JdbcTimestamps.fromUtcTimestamp(rawJdbcTemplate.queryForObject(
                 "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", Timestamp.class, id));

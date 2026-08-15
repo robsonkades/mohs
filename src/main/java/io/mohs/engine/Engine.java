@@ -69,12 +69,13 @@ import io.mohs.core.execution.ExecutionState;
  * (ADR-0033). Sob falha de nó a garantia é <b>at-least-once</b> quando
  * {@code retries > 0} — com o default {@code retries = 0}, at-most-once.
  *
- * <p><b>Limitação conhecida, documentada, não escondida:</b> sem
- * mecanismo de interrupt — zumbi (bound estourado ou posse perdida)
- * continua rodando até terminar sozinho e tem o resultado descartado
- * pelo CAS de conclusão; no estouro do grace de {@link #drain}, o
- * trabalho em voo segue em segundo plano com um aviso. O interrupt por
- * {@code timeout} de job (com escalada) é o próximo ciclo.
+ * <p><b>Timeout e cancelamento (ADR-0034):</b> o {@code timeout} do job é
+ * verificado de carona no tick — flag + interrupt via
+ * {@link CancellationSignal}, desfecho passivo no {@link Dispatcher}.
+ * Handler que ignora o interrupt continua zumbi até terminar sozinho
+ * (a JVM não mata thread que não coopera) e tem o resultado descartado
+ * pelo CAS de conclusão — é exatamente o caso do Watchdog Bound, o
+ * degrau seguinte da escada.
  */
 public final class Engine implements MohsLifecycle {
 
@@ -248,6 +249,7 @@ public final class Engine implements MohsLifecycle {
         try {
             EngineState current = state.get();
             nodeStore.heartbeat(nodeId, current, clock.instant());
+            signalJobTimeouts();
             // node vivo renova o que ainda executa — PAUSED/DRAINING incluídos
             // (ADR-0007: drain ≠ cancel; a lease detecta morte, não pausa —
             // sem isto, um drain mais longo que a lease viraria dupla execução
@@ -266,6 +268,31 @@ public final class Engine implements MohsLifecycle {
             }
         } catch (RuntimeException e) {
             log.error("engine tick failed — will retry next tick", e);
+        }
+    }
+
+    /**
+     * ADR-0034: o deadline de {@code JobDefinition.timeout} verificado de
+     * carona na varredura do tick — granularidade de até 1 poll-interval de
+     * atraso (irrelevante pra timeout de job, tipicamente minutos), zero
+     * thread nova, ativo também em PAUSED/DRAINING. Dispara flag +
+     * interrupt; o desfecho é passivo — gravado quando o handler parar
+     * ({@link Dispatcher}), nunca aqui: falhar o attempt com o handler vivo
+     * liberaria o slot de concorrência por job com a thread ainda ocupada.
+     * Handler surdo ao interrupt é exatamente o caso do Watchdog Bound, o
+     * degrau seguinte da escada. O relógio corre do início REAL do handler
+     * ({@link CancellationSignal#handlerRunningLongerThan}) — fila de
+     * runner não conta.
+     */
+    private void signalJobTimeouts() {
+        for (Map.Entry<ExecutionId, InFlightAttempt> entry : inFlightAttempts.entrySet()) {
+            InFlightAttempt attempt = entry.getValue();
+            if (attempt.timeout != null && !attempt.signal.cancellationRequested()
+                    && attempt.signal.handlerRunningLongerThan(attempt.timeout)) {
+                log.warn("execution {} exceeded its job timeout {} — cancellation signalled and the handler interrupted; "
+                        + "the outcome follows when the handler stops (ADR-0034)", entry.getKey(), attempt.timeout);
+                attempt.signal.requestCancellation(CancellationSignal.Reason.TIMEOUT, true);
+            }
         }
     }
 
@@ -341,7 +368,7 @@ public final class Engine implements MohsLifecycle {
         if (inFlightAttempts.remove(id, attempt)) {
             log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} — lease renewal stopped; the reaper will "
                             + "reclaim it when the lease expires (retry budget applies) and the local handler keeps "
-                            + "running as a zombie until it finishes (no interrupt mechanism yet)",
+                            + "running as a zombie until it finishes (it already survived or lacked a job timeout interrupt)",
                     id, settings.watchdogTimeout());
         }
     }

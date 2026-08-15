@@ -1,5 +1,6 @@
 package io.mohs.engine;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -23,6 +24,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.event.AttemptFailed;
+import io.mohs.core.event.Cancelled;
 import io.mohs.core.event.ExecutionEvent;
 import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
@@ -266,6 +268,76 @@ class DispatcherTest {
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
+    }
+
+    /** ADR-0034: sinal MANUAL + saída anormal = CANCELLED terminal com evento Cancelled — cancel vence orçamento (reagendar o que o operador mandou parar contradiz a ordem). */
+    @Test
+    void manualCancellationMapsAnAbnormalExitToCancelledWithoutRetry() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(5));
+        CancellationSignal signal = new CancellationSignal();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            signal.requestCancellation(CancellationSignal.Reason.MANUAL, false);
+            assertThat(ctx.cancellationRequested()).isTrue();
+            throw new IllegalStateException("stopping at the operator's request");
+        });
+
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal);
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
+        Cancelled cancelled = listener.awaitEvent(Cancelled.class);
+        assertThat(cancelled.attempt()).isEqualTo(1);
+    }
+
+    /** ADR-0034: sinal TIMEOUT reclassifica a falha com causa de timeout e mantém o orçamento — e a thread sai limpa (interrupt pendente nunca sobrevive ao dispatch). */
+    @Test
+    void timeoutSignalMapsTheFailureToTimeoutCauseAndKeepsTheRetryBudget() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class,
+                spec -> spec.onDemand().retries(1).timeout(Duration.ofMinutes(5)));
+        CancellationSignal signal = new CancellationSignal();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            signal.requestCancellation(CancellationSignal.Reason.TIMEOUT, true);
+            throw new InterruptedException("interrupted mid-await");
+        });
+
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal);
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        AttemptFailed failed = listener.awaitEvent(AttemptFailed.class);
+        assertThat(failed.error().getMessage()).contains("exceeded job timeout PT5M");
+        assertThat(Thread.currentThread().isInterrupted()).isFalse();
+    }
+
+    /** ADR-0034/API-DESIGN passo 3 do shutdown: sinal SHUTDOWN reclassifica com causa NodeShutdown e segue o retry normal — at-least-once honesto até no desligamento. */
+    @Test
+    void shutdownSignalMapsTheFailureToNodeShutdownCause() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        CancellationSignal signal = new CancellationSignal();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
+            throw new InterruptedException("interrupted by drain escalation");
+        });
+
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal);
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        Failed failed = listener.awaitEvent(Failed.class);
+        assertThat(failed.error().getMessage()).contains("node shutdown");
+    }
+
+    /** ADR-0034: retorno normal com sinal disparado é SUCCEEDED — o trabalho terminou; registrar outra coisa mentiria e agendaria uma duplicata. */
+    @Test
+    void aHandlerThatFinishesDespiteTheSignalSucceeds() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        CancellationSignal signal = new CancellationSignal();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) ->
+                signal.requestCancellation(CancellationSignal.Reason.MANUAL, false));
+
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal);
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        listener.awaitEvent(Succeeded.class);
     }
 
     private static final class RecordingListener implements ExecutionListener {

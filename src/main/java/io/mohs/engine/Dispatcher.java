@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.TimeoutException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,6 +13,7 @@ import org.springframework.core.task.AsyncTaskExecutor;
 
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.event.AttemptFailed;
+import io.mohs.core.event.Cancelled;
 import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Failed;
@@ -104,8 +106,52 @@ public final class Dispatcher {
             }
             succeed(execution, attemptNumber, firedAt);
         } catch (Exception e) {
-            fail(execution, definition, attemptNumber, firedAt, e);
+            failSignalAware(execution, definition, attemptNumber, firedAt, e, signal);
         }
+    }
+
+    /**
+     * ADR-0034: sinal disparado reclassifica SÓ a saída anormal — retorno
+     * normal é {@code SUCCEEDED} mesmo com sinal (o trabalho terminou;
+     * registrar outra coisa mentiria e agendaria uma duplicata).
+     * {@code TIMEOUT}/{@code SHUTDOWN} seguem o orçamento de retry como
+     * qualquer falha; {@code MANUAL} é {@code CANCELLED} terminal — cancel
+     * vence orçamento.
+     */
+    private void failSignalAware(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt,
+            Exception error, CancellationSignal signal) {
+        CancellationSignal.Reason reason = signal.reason();
+        if (reason == null) {
+            fail(execution, definition, attemptNumber, firedAt, error);
+            return;
+        }
+        switch (reason) {
+            case TIMEOUT -> fail(execution, definition, attemptNumber, firedAt, timeoutError(definition, attemptNumber, error));
+            case SHUTDOWN -> fail(execution, definition, attemptNumber, firedAt, new IllegalStateException(
+                    "node shutdown: drain grace elapsed before attempt " + attemptNumber + " finished", error));
+            case MANUAL -> cancelled(execution, attemptNumber, firedAt, error);
+        }
+    }
+
+    private static TimeoutException timeoutError(JobDefinition definition, int attemptNumber, Exception cause) {
+        TimeoutException error = new TimeoutException("attempt " + attemptNumber + " exceeded job timeout " + definition.timeout());
+        error.initCause(cause);
+        return error;
+    }
+
+    /**
+     * INFO, não WARN, e sem stack trace: cancelamento honrado é o sistema
+     * fazendo o que o operador pediu, não uma falha. O {@code Attempt}
+     * {@code CANCELLED} carrega {@code error} nulo (invariante de
+     * {@code Attempt}) — a exceção com que o handler saiu vai no log.
+     */
+    private void cancelled(Execution execution, int attemptNumber, Instant firedAt, Exception error) {
+        log.info("execution {} of job '{}' cancelled on attempt {} — cooperative cancellation honoured (handler exited with: {})",
+                execution.id().value(), execution.jobKey().value(), attemptNumber, error.toString());
+        Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.CANCELLED, null);
+        completeOrDiscard(
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.CANCELLED),
+                () -> events.publish(new Cancelled(execution.id(), execution.jobKey(), attemptNumber)));
     }
 
     /**
