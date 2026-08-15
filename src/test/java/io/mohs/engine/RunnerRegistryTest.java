@@ -4,16 +4,20 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.core.task.TaskRejectedException;
 
 import io.mohs.core.resource.MohsRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 class RunnerRegistryTest {
 
@@ -110,6 +114,42 @@ class RunnerRegistryTest {
 
         assertThatThrownBy(() -> ioExecutor.execute(() -> { })).isInstanceOf(TaskRejectedException.class);
         assertThatThrownBy(() -> cpuExecutor.execute(() -> { })).isInstanceOf(TaskRejectedException.class);
+    }
+
+    /** A promessa do construtor ("nenhum pool órfão") vale pra falha NO MEIO da construção, não só pra pré-validação — inatingível com os builders reais, daí a fábrica injetada. */
+    @Test
+    void buildFailureMidConstructionClosesTheAlreadyBuiltRunners() {
+        AtomicBoolean ioShutDown = new AtomicBoolean();
+        RuntimeException boom = new IllegalStateException("cpu pool failed to initialize");
+        Function<MohsRunner, RunnerRegistry.LiveRunner> factory = spec -> {
+            if (spec.name().equals("io")) {
+                return new RunnerRegistry.LiveRunner(new SimpleAsyncTaskExecutor(), () -> ioShutDown.set(true));
+            }
+            throw boom;
+        };
+
+        assertThatThrownBy(() -> new RunnerRegistry(List.of(io("io"), cpu("cpu")), factory)).isSameAs(boom);
+        assertThat(ioShutDown).isTrue();
+    }
+
+    /** Sem best-effort, o vizinho que falhou ao morrer deixaria vivo um pool CPU de platform threads não-daemon — que segura o shutdown da JVM inteira. */
+    @Test
+    void closeIsBestEffortAndRethrowsTheFirstFailureWithTheRestSuppressed() {
+        AtomicBoolean s3ShutDown = new AtomicBoolean();
+        RuntimeException ioFailure = new IllegalStateException("io refused to die");
+        RuntimeException cpuFailure = new IllegalStateException("cpu refused to die");
+        Function<MohsRunner, RunnerRegistry.LiveRunner> factory = spec -> switch (spec.name()) {
+            case "io" -> new RunnerRegistry.LiveRunner(new SimpleAsyncTaskExecutor(), () -> { throw ioFailure; });
+            case "cpu" -> new RunnerRegistry.LiveRunner(new SimpleAsyncTaskExecutor(), () -> { throw cpuFailure; });
+            default -> new RunnerRegistry.LiveRunner(new SimpleAsyncTaskExecutor(), () -> s3ShutDown.set(true));
+        };
+        RunnerRegistry registry = new RunnerRegistry(List.of(io("io"), cpu("cpu"), io("s3")), factory);
+
+        // Map.copyOf não preserva ordem de inserção — qual falha vem primeiro é indeterminado
+        Throwable thrown = catchThrowable(registry::close);
+        assertThat(thrown).isIn(ioFailure, cpuFailure);
+        assertThat(thrown.getSuppressed()).containsExactly(thrown == ioFailure ? cpuFailure : ioFailure);
+        assertThat(s3ShutDown).isTrue();
     }
 
     private static String threadNameOf(AsyncTaskExecutor executor) throws InterruptedException {

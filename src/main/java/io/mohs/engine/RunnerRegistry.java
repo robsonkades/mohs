@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.function.Function;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.core.task.AsyncTaskExecutor;
@@ -37,14 +38,22 @@ public final class RunnerRegistry implements AutoCloseable {
      * {@code shutdown.run()}, sem re-derivar o tipo concreto por
      * {@code instanceof}: um modo novo de runner muda um único lugar.
      */
-    private record LiveRunner(AsyncTaskExecutor executor, Runnable shutdown) {
+    record LiveRunner(AsyncTaskExecutor executor, Runnable shutdown) {
     }
 
     public RunnerRegistry(List<MohsRunner> runners) {
+        this(runners, RunnerRegistry::build);
+    }
+
+    /**
+     * Seam de teste: os caminhos de falha no meio da construção não são
+     * atingíveis com os builders reais (o spec já chega válido) — a fábrica
+     * injetável existe só pra prová-los. A validação antecipada dos specs
+     * cobre duplicata e default ausente; a garantia de "nenhum pool órfão"
+     * pro resto é o try/catch em volta do loop de construção.
+     */
+    RunnerRegistry(List<MohsRunner> runners, Function<MohsRunner, LiveRunner> factory) {
         Objects.requireNonNull(runners, "runners");
-        // valida os specs inteiros antes de construir qualquer executor: lançar
-        // no meio da construção deixaria pools já inicializados órfãos, sem
-        // ninguém pra chamar close()/destroy() neles
         Map<String, MohsRunner> specs = new LinkedHashMap<>();
         for (MohsRunner runner : runners) {
             if (specs.putIfAbsent(runner.name(), runner) != null) {
@@ -56,7 +65,19 @@ public final class RunnerRegistry implements AutoCloseable {
                     "RunnerRegistry requires a '" + DEFAULT_RUNNER + "' runner (the default) — none provided: " + specs.keySet());
         }
         Map<String, LiveRunner> built = new LinkedHashMap<>();
-        specs.forEach((name, spec) -> built.put(name, build(spec)));
+        try {
+            specs.forEach((name, spec) -> built.put(name, factory.apply(spec)));
+        } catch (RuntimeException buildFailure) {
+            // nenhum pool órfão: fecha o que já nasceu e relança a causa original intacta
+            for (LiveRunner alreadyBuilt : built.values()) {
+                try {
+                    alreadyBuilt.shutdown().run();
+                } catch (RuntimeException shutdownFailure) {
+                    buildFailure.addSuppressed(shutdownFailure);
+                }
+            }
+            throw buildFailure;
+        }
         this.executors = Map.copyOf(built);
     }
 
@@ -115,10 +136,28 @@ public final class RunnerRegistry implements AutoCloseable {
         return "no runner named '" + name + "' registered — available: " + executors.keySet();
     }
 
+    /**
+     * Best-effort: nenhum runner fica vivo porque o vizinho falhou ao
+     * morrer — o pool CPU usa platform threads não-daemon, que segurariam
+     * o shutdown da JVM. A primeira exceção é relançada no fim com as
+     * demais como suppressed.
+     */
     @Override
     public void close() {
+        RuntimeException failure = null;
         for (LiveRunner runner : executors.values()) {
-            runner.shutdown().run();
+            try {
+                runner.shutdown().run();
+            } catch (RuntimeException e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 }
