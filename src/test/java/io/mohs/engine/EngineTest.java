@@ -206,8 +206,18 @@ class EngineTest {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
             engine.pause();
 
-            counting.resetLatch(new CountDownLatch(3));
+            // Ticks são serializados por scheduleWithFixedDelay (o próximo só
+            // agenda quando o anterior retorna). Dentro do tick, state.get() —
+            // o gate do claim — vem ANTES do heartbeat: o 1º heartbeat fresco
+            // pode ser do tick em voo que já leu RUNNING e ainda vai reivindicar.
+            // O 2º heartbeat é necessariamente de um tick que só começou depois
+            // do em-voo terminar, claim incluso — só então é seguro semear
+            // (flake real observado com a semeadura antes deste marco).
+            counting.resetLatch(new CountDownLatch(2));
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+
             seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+            counting.resetLatch(new CountDownLatch(3));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.ENQUEUED);
 
