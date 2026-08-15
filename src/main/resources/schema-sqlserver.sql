@@ -63,6 +63,7 @@ CREATE TABLE mohs_executions (
     priority         INT           NOT NULL DEFAULT 20, -- Priority.value(); 20 = NORMAL
     node_id          NVARCHAR(255),  -- claim, etapa 3 (ADR-0016)
     lease_expires_at DATETIME2,      -- claim, etapa 3 (ADR-0012/0016)
+    cancel_requested BIT           NOT NULL DEFAULT 0, -- cancel cooperativo (ADR-0034) — ver schema-h2.sql
     batch_id         NVARCHAR(255) REFERENCES mohs_batches(id),
     payload          NVARCHAR(MAX) NOT NULL, -- não CLOB/TEXT: deprecado em SQL Server
     payload_type     NVARCHAR(500) NOT NULL,

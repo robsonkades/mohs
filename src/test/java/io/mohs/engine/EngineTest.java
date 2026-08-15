@@ -941,6 +941,21 @@ class EngineTest {
         }
 
         @Override
+        public boolean cancelIfPending(ExecutionId id) {
+            return delegate.cancelIfPending(id);
+        }
+
+        @Override
+        public boolean requestCancellation(ExecutionId id) {
+            return delegate.requestCancellation(id);
+        }
+
+        @Override
+        public Set<ExecutionId> findCancelRequested(List<ExecutionId> ids) {
+            return delegate.findCancelRequested(ids);
+        }
+
+        @Override
         public Execution insert(Execution execution, Object payload) {
             return delegate.insert(execution, payload);
         }

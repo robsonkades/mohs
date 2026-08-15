@@ -304,6 +304,43 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return renewed;
     }
 
+    /** ADR-0034 — mesmo CAS de {@code JdbcJobStore.remove}, por id: só os dois estados claimáveis; claim concorrente vence e o chamador cai no caminho da flag. */
+    @Override
+    public boolean cancelIfPending(ExecutionId id) {
+        Objects.requireNonNull(id, "id");
+        return jdbcTemplate.update("""
+                UPDATE mohs_executions SET state = 'CANCELLED'
+                WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+                """, new MapSqlParameterSource("id", id.value())) > 0;
+    }
+
+    /** Booleano por parâmetro, nunca literal — {@code TRUE} não existe no SQL Server ({@code BIT}); o driver converte. */
+    @Override
+    public boolean requestCancellation(ExecutionId id) {
+        Objects.requireNonNull(id, "id");
+        return jdbcTemplate.update("""
+                UPDATE mohs_executions SET cancel_requested = :requested
+                WHERE id = :id AND state = 'RUNNING'
+                """, new MapSqlParameterSource().addValue("id", id.value()).addValue("requested", true)) > 0;
+    }
+
+    @Override
+    public Set<ExecutionId> findCancelRequested(List<ExecutionId> ids) {
+        Objects.requireNonNull(ids, "ids");
+        if (ids.isEmpty()) {
+            return Set.of();
+        }
+        Set<ExecutionId> flagged = new LinkedHashSet<>();
+        for (List<String> chunk : chunksOf(ids.stream().map(ExecutionId::value).toList())) {
+            flagged.addAll(jdbcTemplate.query("""
+                    SELECT id FROM mohs_executions WHERE id IN (:ids) AND cancel_requested = :requested
+                    """,
+                    new MapSqlParameterSource().addValue("ids", chunk).addValue("requested", true),
+                    (rs, _) -> ExecutionId.of(rs.getString("id"))));
+        }
+        return flagged;
+    }
+
     /** Particiona por presença de fence — mesmo par de templates do caminho unitário; na prática o lote do reaper é uniformemente fenced. */
     private Set<ExecutionId> transitionAll(List<ExecutionStore.CompletionRequest> requests) {
         Map<Boolean, List<ExecutionStore.CompletionRequest>> byFence = requests.stream()

@@ -376,6 +376,48 @@ class JdbcExecutionStoreTest {
         assertThat(store.renewLeases("node-a", List.of(), clock.instant())).isEmpty();
     }
 
+    /** ADR-0034: cancel de execução que ainda não roda é CAS direto pra CANCELLED — só os dois estados claimáveis; RUNNING fica pro caminho da flag. */
+    @Test
+    void cancelIfPendingCancelsOnlyClaimableStates() {
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        store.insert(execution("019abc-cancel-1", "welcome-email"), new WelcomeEmail("a", 1));
+        seedRunningExecution("019abc-cancel-2", "welcome-email");
+        store.insert(execution("019abc-cancel-3", "welcome-email"), new WelcomeEmail("a", 1));
+        raw.update("UPDATE mohs_executions SET state = 'RETRY_SCHEDULED' WHERE id = '019abc-cancel-3'");
+
+        assertThat(store.cancelIfPending(ExecutionId.of("019abc-cancel-1"))).isTrue();
+        assertThat(store.cancelIfPending(ExecutionId.of("019abc-cancel-2"))).isFalse();
+        assertThat(store.cancelIfPending(ExecutionId.of("019abc-cancel-3"))).isTrue();
+        assertThat(store.find(ExecutionId.of("019abc-cancel-1")).orElseThrow().state()).isEqualTo(ExecutionState.CANCELLED);
+        assertThat(store.find(ExecutionId.of("019abc-cancel-2")).orElseThrow().state()).isEqualTo(ExecutionState.RUNNING);
+        assertThat(store.find(ExecutionId.of("019abc-cancel-3")).orElseThrow().state()).isEqualTo(ExecutionState.CANCELLED);
+    }
+
+    /** ADR-0034: a flag só alcança RUNNING — pendente cancela por CAS, terminal já decidiu. */
+    @Test
+    void requestCancellationFlagsOnlyRunningExecutions() {
+        seedRunningExecution("019abc-flag-1", "welcome-email");
+        store.insert(execution("019abc-flag-2", "welcome-email"), new WelcomeEmail("a", 1));
+
+        assertThat(store.requestCancellation(ExecutionId.of("019abc-flag-1"))).isTrue();
+        assertThat(store.requestCancellation(ExecutionId.of("019abc-flag-2"))).isFalse();
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        assertThat(raw.queryForObject("SELECT cancel_requested FROM mohs_executions WHERE id = '019abc-flag-1'", Boolean.class)).isTrue();
+        assertThat(raw.queryForObject("SELECT cancel_requested FROM mohs_executions WHERE id = '019abc-flag-2'", Boolean.class)).isFalse();
+    }
+
+    /** O poll do tick (ADR-0034): em lote, devolve só os ids com a flag ligada. */
+    @Test
+    void findCancelRequestedReturnsOnlyFlaggedIds() {
+        seedRunningExecution("019abc-poll-1", "welcome-email");
+        seedRunningExecution("019abc-poll-2", "welcome-email");
+        store.requestCancellation(ExecutionId.of("019abc-poll-1"));
+
+        assertThat(store.findCancelRequested(List.of(ExecutionId.of("019abc-poll-1"), ExecutionId.of("019abc-poll-2"))))
+                .containsExactly(ExecutionId.of("019abc-poll-1"));
+        assertThat(store.findCancelRequested(List.of())).isEmpty();
+    }
+
     /**
      * Fallback do {@code SUCCESS_NO_INFO} (o JDBC permite ao driver executar
      * o batch sem contar linhas): a confirmação recai no SELECT por POSSE —

@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     priority         INT          NOT NULL DEFAULT 20, -- Priority.value(); 20 = NORMAL
     node_id          VARCHAR(255),  -- claim, etapa 3 (ADR-0016)
     lease_expires_at TIMESTAMP,     -- claim, etapa 3 (ADR-0012/0016)
+    cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE, -- cancel cooperativo (ADR-0034) — ver schema-h2.sql
     batch_id         VARCHAR(255) REFERENCES mohs_batches(id),
     payload          TEXT         NOT NULL, -- não CLOB: não existe em Postgres (DB-3)
     payload_type     VARCHAR(500) NOT NULL,

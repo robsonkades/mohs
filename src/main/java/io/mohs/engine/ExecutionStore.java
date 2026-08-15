@@ -166,6 +166,37 @@ public interface ExecutionStore {
     Set<ExecutionId> renewLeases(String nodeId, List<ExecutionId> ids, Instant leaseExpiresAt);
 
     /**
+     * Cancela uma execução que ainda não roda — CAS
+     * {@code ENQUEUED/RETRY_SCHEDULED → CANCELLED}, o mesmo padrão que
+     * {@code JobStore.remove} aplica por job (ADR-0034, por id). Perde para
+     * qualquer claim concorrente (a linha já virou {@code RUNNING}) — o
+     * chamador então cai no caminho da flag ({@link #requestCancellation}).
+     *
+     * @return {@code true} se ESTA chamada transicionou a linha
+     */
+    boolean cancelIfPending(ExecutionId id);
+
+    /**
+     * Pede cancelamento cooperativo de uma execução {@code RUNNING} —
+     * grava {@code cancel_requested}, o único canal que alcança o node dono
+     * em outro processo (ADR-0034). O node dono observa via
+     * {@link #findCancelRequested} a cada tick e levanta o sinal
+     * {@code MANUAL}; nada é interrompido — cancel é cooperativo por
+     * contrato. A flag não é limpa nunca: sobrevive como registro histórico
+     * mesmo se a conclusão vencer a corrida.
+     *
+     * @return {@code true} se havia uma linha {@code RUNNING} pra marcar
+     */
+    boolean requestCancellation(ExecutionId id);
+
+    /**
+     * Os ids de {@code ids} com {@code cancel_requested} ligado — o poll em
+     * lote do tick sobre o próprio in-flight (ADR-0034); staleness efetiva
+     * do cancel cooperativo ≤ 1 poll-interval.
+     */
+    Set<ExecutionId> findCancelRequested(List<ExecutionId> ids);
+
+    /**
      * Busca várias execuções por id numa única consulta — evita N+1 quando
      * o chamador já tem a lista de ids em mãos (ex.: hidratar o resultado
      * de um claim em lote). Limitado pelo tamanho de {@code ids}, por isso
