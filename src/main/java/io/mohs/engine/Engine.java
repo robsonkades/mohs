@@ -16,6 +16,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import io.github.robsonkades.uuidv7.UUIDv7;
 import org.jspecify.annotations.Nullable;
@@ -290,10 +291,36 @@ public final class Engine implements MohsLifecycle {
         }
         Set<ExecutionId> renewed = executionStore.renewLeases(nodeId,
                 owned.stream().map(Map.Entry::getKey).toList(), clock.instant().plus(settings.leaseTtl()));
-        for (Map.Entry<ExecutionId, Long> entry : owned) {
-            if (!renewed.contains(entry.getKey())) {
-                dropFromRenewalAfterLostLease(entry.getKey(), entry.getValue());
-            }
+        List<Map.Entry<ExecutionId, Long>> lost = owned.stream()
+                .filter(entry -> !renewed.contains(entry.getKey()))
+                .toList();
+        if (lost.isEmpty()) {
+            return;
+        }
+        Map<ExecutionId, ExecutionState> lostStates = fetchStatesBestEffort(lost.stream().map(Map.Entry::getKey).toList());
+        for (Map.Entry<ExecutionId, Long> entry : lost) {
+            dropFromRenewalAfterLostLease(entry.getKey(), entry.getValue(), lostStates.get(entry.getKey()));
+        }
+    }
+
+    /**
+     * Consulta diagnóstica dos ids que perderam a renovação — em lote e
+     * best-effort. Em lote porque perda em massa (stall > lease seguido de
+     * reclaim de todo o in-flight por outro node) é exatamente quando este
+     * caminho fica grande: N+1 serial aqui atrasaria heartbeat e renovação
+     * do que sobrou, no pior momento. Best-effort porque a consulta só
+     * qualifica o WARN — ela nunca pode ter mais autoridade pra abortar o
+     * tick do que a informação que agrega: falhou, os drops acontecem do
+     * mesmo jeito, com estado desconhecido.
+     */
+    private Map<ExecutionId, ExecutionState> fetchStatesBestEffort(List<ExecutionId> lostIds) {
+        try {
+            return executionStore.findByIds(lostIds).stream()
+                    .collect(Collectors.toMap(Execution::id, Execution::state));
+        } catch (RuntimeException e) {
+            log.warn("could not fetch the state of {} lost-lease execution(s) — dropping them from renewal with unknown state",
+                    lostIds.size(), e);
+            return Map.of();
         }
     }
 
@@ -325,15 +352,15 @@ public final class Engine implements MohsLifecycle {
      * conclusão. O {@code remove} de dois argumentos só remove a própria
      * encarnação (ver {@link #dropFromRenewalPastWatchdogBound}); e como a
      * conclusão local pode ter commitado entre o snapshot da renovação e
-     * este drop, o estado real é consultado antes de acusar reclaim — log
+     * este drop, o estado real (vindo de {@link #fetchStatesBestEffort};
+     * {@code null} = desconhecido) é olhado antes de acusar reclaim — log
      * operacional é contrato com o operador, WARN com causa errada manda
      * caçar um reaper fantasma às 3h da manhã.
      */
-    private void dropFromRenewalAfterLostLease(ExecutionId id, long startedNanos) {
+    private void dropFromRenewalAfterLostLease(ExecutionId id, long startedNanos, @Nullable ExecutionState actual) {
         if (!inFlightStartedNanos.remove(id, startedNanos)) {
             return;
         }
-        ExecutionState actual = executionStore.find(id).map(Execution::state).orElse(null);
         if (actual == ExecutionState.SUCCEEDED) {
             return; // conclusão normal venceu a corrida com o snapshot da renovação — nada a avisar
         }

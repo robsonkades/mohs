@@ -29,6 +29,7 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
@@ -60,6 +61,10 @@ import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 
 class EngineTest {
 
@@ -126,12 +131,17 @@ class EngineTest {
 
     /** Claim/reclaim usam as portas reais (o claim precisa funcionar); os overrides simulam falha só no caminho do dispatch. */
     private Engine newEngineWith(JobStore jobStoreOverride, ExecutionStore executionStoreOverride, List<ExecutionListener> listeners) {
+        return newEngineWith(jobStoreOverride, executionStoreOverride, listeners, nodeStore);
+    }
+
+    private Engine newEngineWith(JobStore jobStoreOverride, ExecutionStore executionStoreOverride, List<ExecutionListener> listeners,
+            NodeStore nodeStoreOverride) {
         JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
         JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
-        return new Engine(claimer, dispatcher, executionStoreOverride, jobStoreOverride, nodeStore, reaper, clock,
+        return new Engine(claimer, dispatcher, executionStoreOverride, jobStoreOverride, nodeStoreOverride, reaper, clock,
                 new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), tickScheduler, defaultRunnerRegistry());
     }
 
@@ -312,6 +322,50 @@ class EngineTest {
             engineLogger.detachAppender(warnWatcher);
         }
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+    }
+
+    /**
+     * A consulta diagnóstica do lost-lease é em lote e best-effort: o banco
+     * piscar durante o fetch não pode apagar o WARN do zumbi nem abortar o
+     * tick — perda em massa (stall > lease + reclaim de todo o in-flight) é
+     * exatamente quando esse caminho fica grande, e é o pior momento pra
+     * atrasar heartbeat/renovação do que sobrou.
+     */
+    @Test
+    void lostLeaseStateFetchFailureNeverAbortsTheTick() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            releaseHandler.await(10, TimeUnit.SECONDS);
+        });
+        ExecutionStore blinkingStore = mock(ExecutionStore.class, delegatesTo(executionStore));
+        doThrow(new DataAccessResourceFailureException("database blinked")).when(blinkingStore).findByIds(any());
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = newEngineWith(jobStore, blinkingStore, List.of(), counting);
+        ListAppender<ILoggingEvent> logWatcher = new ListAppender<>();
+        logWatcher.start();
+        engineLogger.addAppender(logWatcher);
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            // reclaim externo simulado, como em lostLeaseIsDetectedWarnedAndTheZombieResultDiscarded
+            rawJdbcTemplate.update(
+                    "UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', node_id = NULL, scheduled_at = ? WHERE id = 'exec-1'",
+                    JdbcTimestamps.toUtcTimestamp(NOW.plusSeconds(3600)));
+            counting.resetLatch(new CountDownLatch(2));
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(logWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("could not fetch the state"));
+            assertThat(logWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("lost its lease"));
+            assertThat(logWatcher.list).noneMatch(event -> event.getFormattedMessage().contains("engine tick failed"));
+        } finally {
+            releaseHandler.countDown();
+            engine.stop(Duration.ofSeconds(5));
+            engineLogger.detachAppender(logWatcher);
+        }
     }
 
     private Instant leaseOf(String id) {
