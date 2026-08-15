@@ -31,15 +31,3 @@ Javadoc da anotação declara o status.
 métodos anotados. Quando entrar, o guard do fail-fast em
 `MohsJobScanner.scanMethod` é o ponto exato a substituir pelo registro do
 listener sintetizado.
-
-## 5. Nenhum bean interno recua com `@ConditionalOnMissingBean`
-
-Todos os beans de `MohsAutoConfiguration` são incondicionais — o
-consumidor não consegue substituir `Clock`, stores nem executores (o
-`JsonMapper` de persistência já está decidido: ADR-0029). Pode ser
-deliberado (internos não são SPI), mas é uma decisão de superfície de API
-que merece registro, não um estado implícito.
-
-**Decidir:** confirmar que os internos não são pontos de extensão e
-registrar em mini-ADR — ou escolher quais beans viram SPI substituível e
-só então dar `@ConditionalOnMissingBean` a esses.

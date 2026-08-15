@@ -80,6 +80,11 @@ import io.mohs.jdbc.dialect.SqlServerJdbcDialect;
  * contexto quebrava injeção não qualificada que o app já tinha —
  * degradação silenciosa do hospedeiro. Os pontos de injeção internos
  * continuam funcionando via {@link Qualifier}.
+ *
+ * <p>Nenhum bean daqui recua com {@code @ConditionalOnMissingBean} — é
+ * deliberado, não omissão (ADR-0031): infraestrutura interna não é ponto
+ * de extensão; a superfície do host é o vocabulário de {@code io.mohs.core}
+ * coletado como beans, mais as propriedades validadas.
  */
 @AutoConfiguration(after = DataSourceAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "mohs", name = "enabled", matchIfMissing = true)
