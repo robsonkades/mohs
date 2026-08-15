@@ -119,7 +119,8 @@ public final class JdbcReaper implements Reaper {
             Attempt attempt = synthesizedAttemptById.get(candidate.id());
             List<Attempt> attempts = new ArrayList<>(execution.attempts());
             attempts.add(attempt);
-            reclaimed.add(new Execution(id, JobKey.of(candidate.jobKey()), ExecutionState.FAILED, execution.scheduledAt(), execution.firedAt(), attempts, execution.actor()));
+            reclaimed.add(new Execution(id, JobKey.of(candidate.jobKey()), ExecutionState.FAILED, execution.scheduledAt(), execution.firedAt(), attempts,
+                    execution.actor(), execution.priority(), execution.idempotencyKey()));
         }
         return reclaimed;
     }

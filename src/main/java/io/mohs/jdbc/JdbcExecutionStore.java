@@ -27,6 +27,7 @@ import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.JobStore;
@@ -47,7 +48,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
     /** Bem abaixo do teto de 2100 parâmetros do SQL Server pro `IN (:ids)` de {@link #findByIds} (DB-11). Package-private pro teste de fronteira. */
     static final int MAX_IDS_PER_QUERY = 1000;
 
-    private static final String EXECUTION_COLUMNS = "id, job_key, state, scheduled_at, fired_at, actor";
+    private static final String EXECUTION_COLUMNS = "id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key";
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final Clock clock;
@@ -76,14 +77,16 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 .addValue("scheduledAt", JdbcTimestamps.toUtcTimestamp(execution.scheduledAt()))
                 .addValue("firedAt", execution.firedAt() == null ? null : JdbcTimestamps.toUtcTimestamp(execution.firedAt()))
                 .addValue("actor", execution.actor())
+                .addValue("priority", execution.priority().value())
+                .addValue("idempotencyKey", execution.idempotencyKey())
                 .addValue("payload", payloadJson)
                 .addValue("payloadType", payload.getClass().getName())
                 .addValue("createdAt", JdbcTimestamps.toUtcTimestamp(clock.instant()));
 
         jdbcTemplate.update("""
                 INSERT INTO mohs_executions (
-                    id, job_key, state, scheduled_at, fired_at, actor, payload, payload_type, created_at)
-                VALUES (:id, :jobKey, :state, :scheduledAt, :firedAt, :actor, :payload, :payloadType, :createdAt)
+                    id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key, payload, payload_type, created_at)
+                VALUES (:id, :jobKey, :state, :scheduledAt, :firedAt, :actor, :priority, :idempotencyKey, :payload, :payloadType, :createdAt)
                 """, params);
 
         return execution;
@@ -296,7 +299,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
     }
 
     private static Execution hydrate(ExecutionRow row, List<Attempt> attempts) {
-        return new Execution(row.id(), row.jobKey(), row.state(), row.scheduledAt(), row.firedAt(), attempts, row.actor());
+        return new Execution(row.id(), row.jobKey(), row.state(), row.scheduledAt(), row.firedAt(), attempts, row.actor(), row.priority(), row.idempotencyKey());
     }
 
     /** DBTUNE-6: colunas explícitas em vez de {@code SELECT *} — {@code payload} sozinho é JSON de tamanho arbitrário que nenhum destes métodos lê, transferido e descartado à toa em todo poll do claim. */
@@ -308,7 +311,9 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 ExecutionState.valueOf(rs.getString("state")),
                 JdbcTimestamps.fromUtcTimestamp(rs.getTimestamp("scheduled_at")),
                 firedAt == null ? null : JdbcTimestamps.fromUtcTimestamp(firedAt),
-                rs.getString("actor"));
+                rs.getString("actor"),
+                Priority.fromValue(rs.getInt("priority")),
+                rs.getString("idempotency_key"));
     }
 
     private List<Attempt> fetchAttempts(ExecutionId executionId) {
@@ -346,7 +351,8 @@ public final class JdbcExecutionStore implements ExecutionStore {
     }
 
     /** Linha crua de {@code mohs_executions}, sem attempts — hidratada por {@link #hydrate}/{@link #hydrateEagerly}. */
-    private record ExecutionRow(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt, @Nullable Instant firedAt, String actor) {
+    private record ExecutionRow(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt, @Nullable Instant firedAt, String actor,
+                                 Priority priority, @Nullable String idempotencyKey) {
     }
 
     private record ExecutionIdAndAttempt(String executionId, Attempt attempt) {

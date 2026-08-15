@@ -24,7 +24,9 @@ public record Execution(
         Instant scheduledAt,
         @Nullable Instant firedAt,
         List<Attempt> attempts,
-        String actor) {
+        String actor,
+        Priority priority,
+        @Nullable String idempotencyKey) {
 
     public Execution {
         Objects.requireNonNull(id, "id");
@@ -35,6 +37,13 @@ public record Execution(
         if (actor.isBlank()) {
             throw new IllegalArgumentException("actor must not be blank");
         }
+        Objects.requireNonNull(priority, "priority");
         attempts = List.copyOf(attempts); // cópia defensiva (Effective Java, Item 50)
+    }
+
+    /** {@link Priority#NORMAL}, sem {@code idempotencyKey} — mesmo default do schema (`DEFAULT 20`). */
+    public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
+            @Nullable Instant firedAt, List<Attempt> attempts, String actor) {
+        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, Priority.NORMAL, null);
     }
 }
