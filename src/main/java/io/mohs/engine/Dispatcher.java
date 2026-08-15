@@ -94,11 +94,46 @@ public final class Dispatcher {
             return;
         }
 
+        CancellationSignal.Reason preStart = signal.reason();
+        if (preStart != null) {
+            failBeforeStart(execution, definition, attemptNumber, firedAt, preStart);
+            return;
+        }
+
+        // succeed() fora do try de propósito (review ADR-0034): o catch mapeia
+        // por razão do sinal, e a precondição dele é "o HANDLER saiu anormal" —
+        // falha da escrita de sucesso não é falha do handler; propaga (o Engine
+        // loga, a execução fica RUNNING e o reaper decide — indistinguível de
+        // crash pré-conclusão, que é o caminho honesto)
         try {
             invokeWithinInterruptWindow(handler.orElseThrow(), payload, ctx, signal);
-            succeed(execution, attemptNumber, firedAt);
         } catch (Exception e) {
             failSignalAware(execution, definition, attemptNumber, firedAt, e, signal);
+            return;
+        }
+        succeed(execution, attemptNumber, firedAt);
+    }
+
+    /**
+     * Checagem pré-start (review ADR-0034): sinal levantado com a task ainda
+     * na fila do runner é honrado ANTES de invocar o handler — não iniciar
+     * trabalho novo é o primeiro passo de shutdown gracioso (Burns), e rodar
+     * o que o operador mandou parar desperdiçaria a chance barata de honrar
+     * a ordem. {@code MANUAL} → {@code CANCELLED} sem rodar; {@code SHUTDOWN}
+     * → falha NodeShutdown sem rodar (trabalho não feito → retry limpo em
+     * outro node). {@code TIMEOUT} pré-start é inalcançável (o relógio só
+     * corre a partir do registro) — mapeado pelo mesmo caminho por
+     * exaustividade, nunca ignorado.
+     */
+    private void failBeforeStart(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt,
+            CancellationSignal.Reason reason) {
+        switch (reason) {
+            case MANUAL -> cancelled(execution, attemptNumber, firedAt,
+                    new IllegalStateException("cancel requested before the handler started"));
+            case SHUTDOWN -> fail(execution, definition, attemptNumber, firedAt, new IllegalStateException(
+                    "node shutdown: drain grace elapsed before attempt " + attemptNumber + " started"));
+            case TIMEOUT -> fail(execution, definition, attemptNumber, firedAt, timeoutError(definition, attemptNumber,
+                    new IllegalStateException("timeout signalled before the handler started — should be unreachable")));
         }
     }
 

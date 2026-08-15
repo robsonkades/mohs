@@ -9,6 +9,7 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.sql.DataSource;
 
@@ -44,6 +45,11 @@ import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 
 class DispatcherTest {
 
@@ -338,6 +344,63 @@ class DispatcherTest {
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
         listener.awaitEvent(Succeeded.class);
+    }
+
+    /**
+     * Aprovado no review do ciclo ADR-0034: falha da ESCRITA de sucesso não
+     * é falha do handler — propaga (o Engine loga e a execução fica RUNNING
+     * pro reaper, indistinguível de crash pré-conclusão) em vez de ser
+     * reclassificada pelo sinal (CANCELLED de trabalho concluído) ou pelo
+     * orçamento (FAILED→retry fabricando duplicata).
+     */
+    @Test
+    void aFailingSuccessWriteIsNeverReclassifiedBySignalOrBudget() {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        CancellationSignal signal = new CancellationSignal();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) ->
+                signal.requestCancellation(CancellationSignal.Reason.MANUAL, false));
+        ExecutionStore blinkingStore = mock(ExecutionStore.class, delegatesTo(executionStore));
+        doThrow(new RuntimeException("simulated database error on the success write")).when(blinkingStore).complete(any(), any());
+        Dispatcher dispatcher = new Dispatcher(blinkingStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener), eventExecutor);
+
+        assertThatThrownBy(() -> dispatcher.dispatch(execution, onDemand("welcome-email"), "hello", signal))
+                .hasMessageContaining("simulated database error");
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+    }
+
+    /** Checagem pré-start (review ADR-0034): MANUAL já em pé quando a task sai da fila — o handler nem roda, a ordem do operador é honrada sem gastar CPU. */
+    @Test
+    void aManualSignalRaisedBeforeTheHandlerStartsSkipsTheHandlerAndCancels() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        CancellationSignal signal = new CancellationSignal();
+        signal.requestCancellation(CancellationSignal.Reason.MANUAL, false);
+        AtomicBoolean handlerRan = new AtomicBoolean();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerRan.set(true));
+
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal);
+
+        assertThat(handlerRan).isFalse();
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
+        listener.awaitEvent(Cancelled.class);
+    }
+
+    /** Checagem pré-start (review ADR-0034): SHUTDOWN em task enfileirada — trabalho não feito falha NodeShutdown sem rodar e vira retry limpo em outro node (não iniciar trabalho novo é o primeiro passo de graceful shutdown). */
+    @Test
+    void aShutdownSignalRaisedBeforeTheHandlerStartsSkipsTheHandlerAndFollowsTheBudget() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1));
+        CancellationSignal signal = new CancellationSignal();
+        signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
+        AtomicBoolean handlerRan = new AtomicBoolean();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerRan.set(true));
+
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal);
+
+        assertThat(handlerRan).isFalse();
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        AttemptFailed failed = listener.awaitEvent(AttemptFailed.class);
+        assertThat(failed.error().getMessage()).contains("before attempt 1 started");
     }
 
     private static final class RecordingListener implements ExecutionListener {
