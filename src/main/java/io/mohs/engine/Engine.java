@@ -93,12 +93,13 @@ public final class Engine implements MohsLifecycle {
     private final AtomicReference<EngineState> state = new AtomicReference<>(EngineState.CREATED);
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
     /**
-     * As execuções em voo NESTE node, com o instante monotônico do
-     * despacho — a base da renovação de lease (ADR-0012) a cada tick.
-     * Entrada nasce no submit e morre na conclusão ({@code whenComplete})
-     * ou quando a renovação descobre que a posse foi perdida.
+     * As execuções em voo NESTE node — a base da renovação de lease
+     * (ADR-0012) e da escada de timeout/cancelamento (ADR-0034) a cada
+     * tick. Entrada nasce no submit e morre na conclusão
+     * ({@code whenComplete}) ou quando a renovação descobre que a posse
+     * foi perdida.
      */
-    private final ConcurrentHashMap<ExecutionId, Long> inFlightStartedNanos = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ExecutionId, InFlightAttempt> inFlightAttempts = new ConcurrentHashMap<>();
     private final TaskScheduler tickScheduler;
     private final RunnerRegistry runnerRegistry;
 
@@ -278,9 +279,9 @@ public final class Engine implements MohsLifecycle {
      * concorrente ou conclusão local na corrida).
      */
     private void renewOwnedLeases() {
-        List<Map.Entry<ExecutionId, Long>> owned = new ArrayList<>(inFlightStartedNanos.size());
-        for (Map.Entry<ExecutionId, Long> entry : inFlightStartedNanos.entrySet()) {
-            if (watchdogBoundExceeded(entry.getValue())) {
+        List<Map.Entry<ExecutionId, InFlightAttempt>> owned = new ArrayList<>(inFlightAttempts.size());
+        for (Map.Entry<ExecutionId, InFlightAttempt> entry : inFlightAttempts.entrySet()) {
+            if (watchdogBoundExceeded(entry.getValue().submittedNanos)) {
                 dropFromRenewalPastWatchdogBound(entry.getKey(), entry.getValue());
             } else {
                 owned.add(Map.entry(entry.getKey(), entry.getValue()));
@@ -291,14 +292,14 @@ public final class Engine implements MohsLifecycle {
         }
         Set<ExecutionId> renewed = executionStore.renewLeases(nodeId,
                 owned.stream().map(Map.Entry::getKey).toList(), clock.instant().plus(settings.leaseTtl()));
-        List<Map.Entry<ExecutionId, Long>> lost = owned.stream()
+        List<Map.Entry<ExecutionId, InFlightAttempt>> lost = owned.stream()
                 .filter(entry -> !renewed.contains(entry.getKey()))
                 .toList();
         if (lost.isEmpty()) {
             return;
         }
         Map<ExecutionId, ExecutionState> lostStates = fetchStatesBestEffort(lost.stream().map(Map.Entry::getKey).toList());
-        for (Map.Entry<ExecutionId, Long> entry : lost) {
+        for (Map.Entry<ExecutionId, InFlightAttempt> entry : lost) {
             dropFromRenewalAfterLostLease(entry.getKey(), entry.getValue(), lostStates.get(entry.getKey()));
         }
     }
@@ -336,8 +337,8 @@ public final class Engine implements MohsLifecycle {
      * entrada da encarnação nova mataria a renovação de uma execução
      * saudável sem aviso nenhum (o ABA do banco, repetido em memória).
      */
-    private void dropFromRenewalPastWatchdogBound(ExecutionId id, long startedNanos) {
-        if (inFlightStartedNanos.remove(id, startedNanos)) {
+    private void dropFromRenewalPastWatchdogBound(ExecutionId id, InFlightAttempt attempt) {
+        if (inFlightAttempts.remove(id, attempt)) {
             log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} — lease renewal stopped; the reaper will "
                             + "reclaim it when the lease expires (retry budget applies) and the local handler keeps "
                             + "running as a zombie until it finishes (no interrupt mechanism yet)",
@@ -363,8 +364,8 @@ public final class Engine implements MohsLifecycle {
      * {@code actual} vem de {@link #fetchStatesBestEffort}
      * ({@code null} = desconhecido, impresso como {@code unknown}).
      */
-    private void dropFromRenewalAfterLostLease(ExecutionId id, long startedNanos, @Nullable ExecutionState actual) {
-        if (!inFlightStartedNanos.remove(id, startedNanos)) {
+    private void dropFromRenewalAfterLostLease(ExecutionId id, InFlightAttempt attempt, @Nullable ExecutionState actual) {
+        if (!inFlightAttempts.remove(id, attempt)) {
             return;
         }
         if (actual == ExecutionState.SUCCEEDED) {
@@ -455,14 +456,15 @@ public final class Engine implements MohsLifecycle {
         // deixe na fila por um tick inteiro. Remoções sempre com o remove de
         // dois argumentos: o mesmo ExecutionId pode ser re-reivindicado por
         // este node após um reclaim, e o whenComplete tardio de um zumbi não
-        // pode apagar a entrada da encarnação nova (ABA em memória).
-        long startedNanos = System.nanoTime();
-        inFlightStartedNanos.put(execution.id(), startedNanos);
+        // pode apagar a entrada da encarnação nova (ABA em memória —
+        // InFlightAttempt tem igualdade de identidade de propósito).
+        InFlightAttempt attempt = new InFlightAttempt(definition.timeout());
+        inFlightAttempts.put(execution.id(), attempt);
         CompletableFuture<Void> future;
         try {
-            future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution, definition), executor);
+            future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution, definition, attempt.signal), executor);
         } catch (RuntimeException e) {
-            inFlightStartedNanos.remove(execution.id(), startedNanos);
+            inFlightAttempts.remove(execution.id(), attempt);
             log.warn("runner executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
                     execution.id(), e);
             return;
@@ -476,9 +478,30 @@ public final class Engine implements MohsLifecycle {
             if (thrown != null) {
                 log.error("dispatch of execution {} threw outside the normal failure paths", execution.id(), thrown);
             }
-            inFlightStartedNanos.remove(execution.id(), startedNanos);
+            inFlightAttempts.remove(execution.id(), attempt);
             inFlight.remove(future);
         });
+    }
+
+    /**
+     * Uma encarnação de dispatch em voo neste node: o instante monotônico do
+     * submit (base do Watchdog Bound — fila conta de propósito, fila
+     * entupida também é problema de liveness), o {@code timeout} do job
+     * (ADR-0034; {@code null} = sem timeout próprio) e o
+     * {@link CancellationSignal} da encarnação. Classe, não record, e sem
+     * {@code equals} de propósito: a igualdade É a identidade — cada
+     * dispatch é uma encarnação distinta, e o {@code remove(id, attempt)}
+     * de dois argumentos do mapa só pode remover ESTA.
+     */
+    private static final class InFlightAttempt {
+
+        final long submittedNanos = System.nanoTime();
+        final @Nullable Duration timeout;
+        final CancellationSignal signal = new CancellationSignal();
+
+        InFlightAttempt(@Nullable Duration timeout) {
+            this.timeout = timeout;
+        }
     }
 
     /**
@@ -511,7 +534,7 @@ public final class Engine implements MohsLifecycle {
      * {@link Dispatcher#dispatch}. Payload ilegível vira falha terminal via
      * {@link #failUnreadablePayload}, nunca propaga.
      */
-    private void resolvePayloadAndDispatch(Execution execution, JobDefinition definition) {
+    private void resolvePayloadAndDispatch(Execution execution, JobDefinition definition, CancellationSignal signal) {
         Object payload;
         try {
             payload = executionStore
@@ -521,7 +544,7 @@ public final class Engine implements MohsLifecycle {
             failUnreadablePayload(execution, e);
             return;
         }
-        dispatcher.dispatch(execution, definition, payload);
+        dispatcher.dispatch(execution, definition, payload, signal);
     }
 
     /**

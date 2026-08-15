@@ -66,16 +66,22 @@ public final class Dispatcher {
         this.events = new ExecutionEventPublisher(Objects.requireNonNull(listeners, "listeners"), Objects.requireNonNull(eventExecutor, "eventExecutor"));
     }
 
+    /** Forma sem fonte externa de cancelamento — sinal próprio, nada o levanta. Conveniência de teste e de chamador avulso. */
     public void dispatch(Execution execution, JobDefinition definition, Object payload) {
+        dispatch(execution, definition, payload, new CancellationSignal());
+    }
+
+    public void dispatch(Execution execution, JobDefinition definition, Object payload, CancellationSignal signal) {
         Objects.requireNonNull(execution, "execution");
         Objects.requireNonNull(definition, "definition");
         Objects.requireNonNull(payload, "payload");
+        Objects.requireNonNull(signal, "signal");
 
         Instant firedAt = clock.instant();
         executionStore.markFired(execution.id(), firedAt);
 
         int attemptNumber = execution.attempts().size() + 1;
-        JobContext ctx = new DefaultJobContext(execution.jobKey(), execution.id(), attemptNumber, execution.scheduledAt(), firedAt);
+        JobContext ctx = new DefaultJobContext(execution.jobKey(), execution.id(), attemptNumber, execution.scheduledAt(), firedAt, signal);
         events.publish(new Started(execution.id(), execution.jobKey(), attemptNumber, firedAt));
 
         Optional<JobHandler> handler = handlerRegistry.find(execution.jobKey());
@@ -86,8 +92,16 @@ public final class Dispatcher {
             return;
         }
 
+        // a janela de interrupt (ADR-0034) abre imediatamente antes da cadeia e
+        // fecha em finally, ANTES de qualquer escrita de conclusão: JDBC nunca
+        // roda interrompido e a thread de um runner CPU volta limpa ao pool
         try {
-            runInterceptorChain(handler.orElseThrow(), payload, ctx);
+            signal.registerHandlerThread();
+            try {
+                runInterceptorChain(handler.orElseThrow(), payload, ctx);
+            } finally {
+                signal.unregisterHandlerThreadAndClearInterrupt();
+            }
             succeed(execution, attemptNumber, firedAt);
         } catch (Exception e) {
             fail(execution, definition, attemptNumber, firedAt, e);
@@ -209,17 +223,18 @@ public final class Dispatcher {
     }
 
     /**
-     * {@link #cancellationRequested()} sempre {@code false} nesta rodada —
-     * não existe fonte nenhuma pra "cancelamento pedido" ainda ({@code POST
-     * /executions/{id}/cancel} não existe, sem coluna/mecanismo). Honesto: não
-     * finge um cache que não tem o que observar. {@link #progress} é no-op —
-     * já é o contrato documentado quando nada observa.
+     * {@link #cancellationRequested()} lê o {@link CancellationSignal} da
+     * encarnação (ADR-0034) — as fontes são o timeout do job, o estouro do
+     * grace de drain e o {@code POST /executions/{id}/cancel} observado
+     * pelo tick. {@link #progress} é no-op — já é o contrato documentado
+     * quando nada observa.
      */
-    private record DefaultJobContext(JobKey jobKey, ExecutionId executionId, int attempt, Instant scheduledAt, Instant firedAt) implements JobContext {
+    private record DefaultJobContext(JobKey jobKey, ExecutionId executionId, int attempt, Instant scheduledAt, Instant firedAt,
+            CancellationSignal signal) implements JobContext {
 
         @Override
         public boolean cancellationRequested() {
-            return false;
+            return signal.cancellationRequested();
         }
 
         @Override
