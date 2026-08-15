@@ -1,0 +1,19 @@
+Limit  (cost=0.27..18.51 rows=1 width=1573) (actual time=0.024..0.044 rows=20 loops=1)
+  Buffers: shared hit=43
+  ->  LockRows  (cost=0.27..18.51 rows=1 width=1573) (actual time=0.023..0.042 rows=20 loops=1)
+        Buffers: shared hit=43
+        ->  Nested Loop  (cost=0.27..18.50 rows=1 width=1573) (actual time=0.017..0.032 rows=20 loops=1)
+              Join Filter: ((j.job_key)::text = (e.job_key)::text)
+              Rows Removed by Join Filter: 10
+              Buffers: shared hit=23
+              ->  Index Scan using idx_mohs_executions_claim on mohs_executions e  (cost=0.27..8.29 rows=1 width=1050) (actual time=0.012..0.015 rows=20 loops=1)
+                    Index Cond: (scheduled_at <= '2026-08-14 12:00:00'::timestamp without time zone)
+                    Filter: ((state)::text = 'ENQUEUED'::text)
+                    Buffers: shared hit=3
+              ->  Seq Scan on mohs_job_definitions j  (cost=0.00..10.12 rows=7 width=1039) (actual time=0.001..0.001 rows=2 loops=20)
+                    Filter: (allow_concurrent_executions OR (running_execution_count < max_concurrent_executions))
+                    Buffers: shared hit=20
+Planning:
+  Buffers: shared hit=372 read=4
+Planning Time: 1.316 ms
+Execution Time: 0.073 ms

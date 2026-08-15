@@ -251,6 +251,103 @@ melhor cache locality — não latência de claim).
 Aplicado em `schema-postgresql.sql` e `schema-sqlserver.sql`. MySQL/H2
 mantêm a composta cheia — sem suporte a índice parcial.
 
+## Depois do retry claimável (ADR-0033) — 2026-08-15
+
+`state IN ('ENQUEUED', 'RETRY_SCHEDULED')` entrou na claim query (retry
+viaja pelo caminho do claim — ADR-0033), os índices parcial (Postgres) e
+filtrado (SQL Server) acompanharam o predicado, e o CAS final ganhou
+`scheduled_at <= :now`. Mesma metodologia/escala, mesma máquina — dia
+diferente da rodada anterior. Imagens: `postgres:16-alpine`, `mysql:8.0`
+e H2 embarcado como antes; **SQL Server subiu de `2022-latest` para
+`2025-latest`** (`d2d5c7f`, depois da rodada 08-14) — o "~igual" do SQL
+Server compara engines de major versions diferentes e vale o mesmo
+asterisco de não-atribuição de H2/PG.
+
+**Limitação declarada**: o backlog semeado é 100% `ENQUEUED` — esta
+rodada mede o *predicado* novo, não o *cenário* com retries no dado.
+A rodada que decidir a correção do MySQL (abaixo) precisa de seed misto
+(ex.: ~20% `RETRY_SCHEDULED`), senão o braço/query do segundo estado
+retorna vazio de graça e ambas as candidatas parecerão melhores do que
+são.
+
+**Correção de metodologia nesta rodada**, aplicada ao
+`ClaimQueryExplainHarness` antes das capturas: as cópias literais da
+query tinham sofrido drift (sem o par de estados desta rodada e — desde
+`b09d0b9` — sem `j.retired`), e as estatísticas do otimizador passaram a
+ser atualizadas após o seed nas **duas** tabelas do join (lição do
+`FindPageQueryExplainHarness`, que é single-table e só precisava de uma).
+Planos anteriores a esta correção mediam uma query que não existia mais.
+
+### Resultados (ClaimQueryLoadHarness)
+
+| Dialeto    | min (ms) | p50 (ms) | p99 (ms) | max (ms) | throughput (rows/s) | vs 08-14 (throughput) |
+|------------|---------:|---------:|---------:|---------:|--------------------:|----------------------:|
+| H2         |     1.42 |     2.11 |     5.15 |     5.15 |             10370.2 |       5958.6 → +74%* |
+| PostgreSQL |     6.65 |     7.42 |    11.45 |    11.45 |             11259.2 |      5378.4 → +109%* |
+| MySQL      |    20.92 |    23.85 |    90.81 |    90.81 |               987.7 |  3060.1 → **−68%**   |
+| SQL Server |    16.75 |    17.83 |    29.63 |    29.63 |              4899.5 |      4879.5 → ~igual |
+
+\* Ganhos de H2/Postgres nesta magnitude **não são atribuíveis à
+mudança** (ampliar um `IN` não acelera nada por si) — dia diferente na
+mesma máquina carrega ruído de ambiente. O que os planos sustentam é a
+afirmação negativa: nenhuma regressão de plano nesses dialetos.
+
+### Planos desta rodada
+
+- **PostgreSQL** (`explain-postgresql.txt`): `Index Scan using
+  idx_mohs_executions_claim` (parcial novo, `WHERE state IN (...)`), sem
+  Sort — `state` não está nas colunas do índice parcial, então a ordem
+  `(priority, scheduled_at)` satisfaz o `ORDER BY` globalmente,
+  independente de quantos estados o predicado aceite. A regressão que o
+  predicado novo causava com o índice antigo (Seq Scan + Sort da tabela
+  inteira por tick — medida na revisão da ADR-0033) não existe com o
+  índice acompanhando.
+- **SQL Server** (`explain-sqlserver.txt`): `Index Scan(
+  idx_mohs_executions_claim, ORDERED FORWARD)` — filtered index novo,
+  sem Sort. Mesmo raciocínio do Postgres.
+- **H2** (`explain-h2.txt`): o otimizador escolheu
+  `idx_mohs_executions_reaper` pro filtro de estado; os números
+  melhoraram mesmo assim (in-memory, sort de 3k linhas barato) — sem
+  ação.
+- **MySQL** (`explain-mysql.txt`): **regressão real e explicada** — com
+  `state IN` de dois valores, os dois ranges do índice composto
+  `(state, priority, scheduled_at)` não concatenam na ordem do
+  `ORDER BY`, e o otimizador (estatísticas frescas) descartou o índice
+  de claim: `Table scan on j` → lookup por `uq_mohs_executions_idem` →
+  **`Sort` de 3.000 linhas por chamada**. É o mesmo par scan+sort que o
+  índice composto tinha eliminado (+369% na rodada 08-14), desfeito pelo
+  segundo estado claimável. p99 45.64 → 90.81ms (45.64 é da rodada 08-14
+  inicial — a rodada do índice composto não registrou p99); throughput
+  3060 → 988 rows/s.
+
+### Próxima alavanca (MySQL) — não implementada nesta rodada
+
+Duas candidatas, a decidir por medição (sem número, não é otimização):
+
+1. Template próprio no `MySqlJdbcDialect` (a liberdade que o Javadoc de
+   `ANSI_SKIP_LOCKED_CANDIDATES` já prevê): `UNION ALL` de dois braços
+   `state = constante` — cada braço sai na ordem do índice com `LIMIT`,
+   sort final sobre ≤ 2×batch linhas. Pré-requisito a validar: locking
+   clause em query block parentesizado exige MySQL 8.0.31+.
+2. Duas consultas por tick no dialeto (uma por estado), merge por
+   `(priority, scheduled_at)` no lado Java — top-k da união ⊆ união dos
+   top-k por partição, então é correto; custo de um round-trip extra só
+   no MySQL.
+
+Contexto de severidade: 988 rows/s ainda fica ordens de magnitude acima
+de qualquer taxa de claim realista — correção veio primeiro, a
+otimização entra com número próprio.
+
+### Arquivos desta rodada
+
+- `explain-h2.txt`, `explain-postgresql.txt`, `explain-mysql.txt`,
+  `explain-sqlserver.txt`, `explain-mysql-lock-investigation.txt` —
+  estado atual (query completa da ADR-0033, estatísticas atualizadas nas
+  duas tabelas).
+- Sufixo `-2026-08-14-before-retry-claim` — planos da rodada anterior,
+  preservados (capturados ainda com as cópias em drift; ver a nota de
+  metodologia acima).
+
 ## Como reproduzir
 
 ```

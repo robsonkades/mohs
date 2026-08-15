@@ -1,19 +1,23 @@
-Limit  (cost=0.27..18.51 rows=1 width=1573) (actual time=0.024..0.044 rows=20 loops=1)
-  Buffers: shared hit=43
-  ->  LockRows  (cost=0.27..18.51 rows=1 width=1573) (actual time=0.023..0.042 rows=20 loops=1)
-        Buffers: shared hit=43
-        ->  Nested Loop  (cost=0.27..18.50 rows=1 width=1573) (actual time=0.017..0.032 rows=20 loops=1)
-              Join Filter: ((j.job_key)::text = (e.job_key)::text)
-              Rows Removed by Join Filter: 10
-              Buffers: shared hit=23
-              ->  Index Scan using idx_mohs_executions_claim on mohs_executions e  (cost=0.27..8.29 rows=1 width=1050) (actual time=0.012..0.015 rows=20 loops=1)
+Limit  (cost=0.56..3.32 rows=20 width=593) (actual time=0.030..0.044 rows=20 loops=1)
+  Buffers: shared hit=29
+  ->  LockRows  (cost=0.56..413.73 rows=3000 width=593) (actual time=0.029..0.042 rows=20 loops=1)
+        Buffers: shared hit=29
+        ->  Nested Loop  (cost=0.56..383.73 rows=3000 width=593) (actual time=0.024..0.033 rows=20 loops=1)
+              Buffers: shared hit=9
+              ->  Index Scan using idx_mohs_executions_claim on mohs_executions e  (cost=0.28..216.09 rows=3000 width=70) (actual time=0.011..0.014 rows=20 loops=1)
                     Index Cond: (scheduled_at <= '2026-08-14 12:00:00'::timestamp without time zone)
-                    Filter: ((state)::text = 'ENQUEUED'::text)
+                    Filter: ((state)::text = ANY ('{ENQUEUED,RETRY_SCHEDULED}'::text[]))
                     Buffers: shared hit=3
-              ->  Seq Scan on mohs_job_definitions j  (cost=0.00..10.12 rows=7 width=1039) (actual time=0.001..0.001 rows=2 loops=20)
-                    Filter: (allow_concurrent_executions OR (running_execution_count < max_concurrent_executions))
-                    Buffers: shared hit=20
+              ->  Memoize  (cost=0.28..0.32 rows=1 width=538) (actual time=0.001..0.001 rows=1 loops=20)
+                    Cache Key: e.job_key
+                    Cache Mode: logical
+                    Hits: 18  Misses: 2  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+                    Buffers: shared hit=6
+                    ->  Index Scan using mohs_job_definitions_job_key_key on mohs_job_definitions j  (cost=0.27..0.31 rows=1 width=538) (actual time=0.005..0.005 rows=1 loops=2)
+                          Index Cond: ((job_key)::text = (e.job_key)::text)
+                          Filter: ((NOT retired) AND (allow_concurrent_executions OR (running_execution_count < max_concurrent_executions)))
+                          Buffers: shared hit=6
 Planning:
-  Buffers: shared hit=372 read=4
-Planning Time: 1.316 ms
-Execution Time: 0.073 ms
+  Buffers: shared hit=387 read=3
+Planning Time: 1.449 ms
+Execution Time: 0.093 ms

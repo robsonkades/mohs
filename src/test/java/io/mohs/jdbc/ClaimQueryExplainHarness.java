@@ -38,6 +38,7 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.Priority;
 import io.mohs.engine.ExecutionWindowRegistry;
+import io.mohs.jdbc.dialect.JdbcDialect;
 import io.mohs.jdbc.dialect.MySqlJdbcDialect;
 import io.mohs.test.MutableClock;
 
@@ -77,60 +78,38 @@ class ClaimQueryExplainHarness {
     private static final int CONCURRENT_NODES = 8;
     private static final Path OUTPUT_DIR = Path.of("docs", "performance");
 
-    private static final String H2_EXPLAIN_SQL = """
-            EXPLAIN SELECT e.id AS id, e.job_key AS job_key,
-                   j.allow_concurrent_executions AS allow_concurrent_executions,
-                   j.window_name AS window_name
-            FROM mohs_executions e
-            JOIN mohs_job_definitions j ON j.job_key = e.job_key
-            WHERE e.state = 'ENQUEUED'
-              AND e.scheduled_at <= TIMESTAMP '2026-08-14 12:00:00'
-              AND (j.allow_concurrent_executions = TRUE OR j.running_execution_count < j.max_concurrent_executions)
-            ORDER BY e.priority ASC, e.scheduled_at ASC
-            LIMIT 20
-            FOR UPDATE OF e SKIP LOCKED
-            """;
+    /**
+     * A query ANSI real com literais no lugar dos binds (EXPLAIN precisa de
+     * literais) — derivada da constante, nunca copiada: drift já aconteceu
+     * duas vezes (ADR-0033 ampliou o predicado de estado, b09d0b9 adicionou
+     * {@code j.retired}, e as cópias desta classe ficaram para trás nas
+     * duas, capturando plano de query que não existia mais). O literal
+     * {@code TIMESTAMP '...'} é aceito por H2, Postgres e MySQL.
+     */
+    private static final String ANSI_LITERAL_SQL = JdbcDialect.ANSI_SKIP_LOCKED_CANDIDATES
+            .replace(":now", "TIMESTAMP '2026-08-14 12:00:00'")
+            .replace(":batchSize", String.valueOf(BATCH_SIZE));
 
-    private static final String POSTGRES_EXPLAIN_SQL = """
-            EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
-            SELECT e.id AS id, e.job_key AS job_key,
-                   j.allow_concurrent_executions AS allow_concurrent_executions,
-                   j.window_name AS window_name
-            FROM mohs_executions e
-            JOIN mohs_job_definitions j ON j.job_key = e.job_key
-            WHERE e.state = 'ENQUEUED'
-              AND e.scheduled_at <= TIMESTAMP '2026-08-14 12:00:00'
-              AND (j.allow_concurrent_executions = TRUE OR j.running_execution_count < j.max_concurrent_executions)
-            ORDER BY e.priority ASC, e.scheduled_at ASC
-            LIMIT 20
-            FOR UPDATE OF e SKIP LOCKED
-            """;
+    private static final String H2_EXPLAIN_SQL = "EXPLAIN " + ANSI_LITERAL_SQL;
 
-    private static final String MYSQL_EXPLAIN_SQL = """
-            EXPLAIN ANALYZE
-            SELECT e.id AS id, e.job_key AS job_key,
-                   j.allow_concurrent_executions AS allow_concurrent_executions,
-                   j.window_name AS window_name
-            FROM mohs_executions e
-            JOIN mohs_job_definitions j ON j.job_key = e.job_key
-            WHERE e.state = 'ENQUEUED'
-              AND e.scheduled_at <= '2026-08-14 12:00:00'
-              AND (j.allow_concurrent_executions = TRUE OR j.running_execution_count < j.max_concurrent_executions)
-            ORDER BY e.priority ASC, e.scheduled_at ASC
-            LIMIT 20
-            FOR UPDATE OF e SKIP LOCKED
-            """;
+    private static final String POSTGRES_EXPLAIN_SQL = "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)\n" + ANSI_LITERAL_SQL;
+
+    private static final String MYSQL_EXPLAIN_SQL = "EXPLAIN ANALYZE\n" + ANSI_LITERAL_SQL;
 
     private static final String SQLSERVER_SHOWPLAN_ON = "SET SHOWPLAN_ALL ON";
 
+    // Única cópia manual restante — o template do SQL Server vive inline em
+    // SqlServerJdbcDialect.selectCandidates, sem constante pra derivar; se
+    // ele mudar, esta cópia muda junto.
     private static final String SQLSERVER_SELECT_SQL = """
             SELECT TOP (20) e.id AS id, e.job_key AS job_key,
                    j.allow_concurrent_executions AS allow_concurrent_executions,
                    j.window_name AS window_name
             FROM mohs_executions e WITH (UPDLOCK, ROWLOCK, READPAST)
             JOIN mohs_job_definitions j ON j.job_key = e.job_key
-            WHERE e.state = 'ENQUEUED'
+            WHERE e.state IN ('ENQUEUED', 'RETRY_SCHEDULED')
               AND e.scheduled_at <= '2026-08-14T12:00:00'
+              AND j.retired = 0
               AND (j.allow_concurrent_executions = 1 OR j.running_execution_count < j.max_concurrent_executions)
             ORDER BY e.priority ASC, e.scheduled_at ASC
             """;
@@ -138,23 +117,30 @@ class ClaimQueryExplainHarness {
     @Test
     void run() throws Exception {
         Files.createDirectories(OUTPUT_DIR);
-        captureExplain("h2", ClaimQueryExplainHarness::freshH2DataSource, H2_EXPLAIN_SQL);
-        captureExplain("postgresql", PostgresTestSupport::freshSchema, POSTGRES_EXPLAIN_SQL);
-        captureExplain("mysql", MySqlTestSupport::freshSchema, MYSQL_EXPLAIN_SQL);
+        // ao contrário do findPage (single-table), a claim query faz join com
+        // mohs_job_definitions — as estatísticas das DUAS tabelas entram no plano
+        captureExplain("h2", ClaimQueryExplainHarness::freshH2DataSource, "ANALYZE", H2_EXPLAIN_SQL);
+        captureExplain("postgresql", PostgresTestSupport::freshSchema, "ANALYZE mohs_executions, mohs_job_definitions", POSTGRES_EXPLAIN_SQL);
+        captureExplain("mysql", MySqlTestSupport::freshSchema, "ANALYZE TABLE mohs_executions, mohs_job_definitions", MYSQL_EXPLAIN_SQL);
         captureShowplanSqlServer();
         investigateMySqlRowLockContention();
     }
 
-    private void captureExplain(String label, Supplier<DataSource> dataSourceFactory, String explainSql) throws SQLException, IOException {
+    /** {@code statsSql} atualiza as estatísticas do otimizador depois do seed — mesma lição do {@link FindPageQueryExplainHarness}: sem isso o plano reflete estatísticas defasadas, não a condição de produção. */
+    private void captureExplain(String label, Supplier<DataSource> dataSourceFactory, String statsSql, String explainSql) throws SQLException, IOException {
         DataSource dataSource = dataSourceFactory.get();
         seedBacklog(dataSource);
+        new JdbcTemplate(dataSource).execute(statsSql);
         writeFile(label, runExplain(dataSource, explainSql));
     }
 
-    /** {@code SET SHOWPLAN_ALL} precisa ser o único statement do batch (T-SQL) — duas chamadas separadas na mesma conexão. */
+    /** {@code SET SHOWPLAN_ALL} precisa ser o único statement do batch (T-SQL) — duas chamadas separadas na mesma conexão. Estatísticas ANTES do showplan (sob showplan nada executa de verdade). */
     private void captureShowplanSqlServer() throws SQLException, IOException {
         DataSource dataSource = SqlServerTestSupport.freshSchema();
         seedBacklog(dataSource);
+        JdbcTemplate statistics = new JdbcTemplate(dataSource);
+        statistics.execute("UPDATE STATISTICS mohs_executions");
+        statistics.execute("UPDATE STATISTICS mohs_job_definitions");
         List<String> lines = new ArrayList<>();
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
