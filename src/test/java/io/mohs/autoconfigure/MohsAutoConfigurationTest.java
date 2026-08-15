@@ -258,13 +258,6 @@ class MohsAutoConfigurationTest {
     }
 
     @Test
-    void duplicateRunnerNameBetweenPropertyAndBeanFailsBoot() {
-        runnerWith(freshH2DataSource(), "mohs.runners.batch.mode=cpu")
-                .withBean("batchRunner", MohsRunner.class, () -> MohsRunner.cpu("batch").build())
-                .run(context -> assertThat(context).hasFailed());
-    }
-
-    @Test
     void jobIsNeverDispatchedInsideAnExcludedWindow() throws Exception {
         CountDownLatch started = new CountDownLatch(1);
         ExecutionListener listener = event -> {
@@ -389,27 +382,5 @@ class MohsAutoConfigurationTest {
         } finally {
             lifecycleLogger.detachAppender(warnWatcher);
         }
-    }
-
-    /** core-size é campo de CPU e o mode default é io: erro de boot apontando a propriedade, nunca descarte silencioso (que viraria runner IO de 64 threads pra trabalho CPU-bound). */
-    @Test
-    void wrongModeRunnerPropertyFailsBootNamingTheProperty() {
-        runnerWith(freshH2DataSource(), "mohs.runners.batch.core-size=2")
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure()).hasStackTraceContaining("mohs.runners.batch.core-size");
-                });
-    }
-
-    /** A IAE do builder ("maxSize must be >= coreSize") sozinha não diz qual runner nem qual propriedade — e core-size default depende da máquina; o embrulho dá o contexto. */
-    @Test
-    void invalidRunnerPropertyFailsBootNamingTheRunner() {
-        runnerWith(freshH2DataSource(), "mohs.runners.batch.mode=cpu", "mohs.runners.batch.core-size=4", "mohs.runners.batch.max-size=2")
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure())
-                            .hasStackTraceContaining("mohs.runners.batch")
-                            .hasStackTraceContaining("maxSize must be >= coreSize");
-                });
     }
 }

@@ -1,13 +1,10 @@
 package io.mohs.autoconfigure;
 
 import java.time.Clock;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 import javax.sql.DataSource;
 
-import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -26,7 +23,6 @@ import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
-import io.mohs.core.resource.RunnerMode;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.Dispatcher;
 import io.mohs.engine.Engine;
@@ -152,101 +148,10 @@ public class MohsAutoConfiguration {
         return MohsExecutors.scheduler("mohs-engine-tick", 1);
     }
 
-    /**
-     * {@code io}/{@code cpu} built-in sempre presentes (defaults do
-     * documento mestre — {@code io} reaproveita
-     * {@code mohs.engine.dispatch-concurrency}, mesmo papel que tinha
-     * quando ainda era o único executor de dispatch fixo). Nome duplicado
-     * entre {@code mohs.runners.*} e {@code @Bean MohsRunner} é erro de
-     * boot — mesma filosofia de "conflito de identidade falha sempre" já
-     * usada pro {@code annotation × programmatic} do {@link MohsJobScanner}.
-     */
+    /** Defaults built-in, overrides e conflito de fonte: {@link MohsRunners#assemble}. */
     @Bean(destroyMethod = "close")
     public RunnerRegistry mohsRunnerRegistry(MohsProperties properties, List<MohsRunner> mohsRunnerBeans) {
-        Map<String, MohsRunner> byName = new LinkedHashMap<>();
-        Map<String, String> sourceOf = new LinkedHashMap<>();
-
-        byName.put(RunnerRegistry.DEFAULT_RUNNER, MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(properties.engine().dispatchConcurrency()).build());
-        sourceOf.put(RunnerRegistry.DEFAULT_RUNNER, "built-in");
-        byName.put("cpu", MohsRunner.cpu("cpu").build());
-        sourceOf.put("cpu", "built-in");
-
-        properties.runners().forEach((name, spec) -> {
-            requireNoRunnerConflict(name, "mohs.runners." + name, sourceOf);
-            byName.put(name, toMohsRunner(name, spec));
-            sourceOf.put(name, "mohs.runners." + name);
-        });
-        for (MohsRunner beanRunner : mohsRunnerBeans) {
-            requireNoRunnerConflict(beanRunner.name(), "@Bean MohsRunner " + beanRunner.name(), sourceOf);
-            byName.put(beanRunner.name(), beanRunner);
-            sourceOf.put(beanRunner.name(), "@Bean MohsRunner " + beanRunner.name());
-        }
-
-        return new RunnerRegistry(List.copyOf(byName.values()));
-    }
-
-    private static void requireNoRunnerConflict(String name, String newSource, Map<String, String> sourceOf) {
-        String existing = sourceOf.get(name);
-        if (existing != null && !existing.equals("built-in")) {
-            throw new IllegalStateException("runner '" + name + "' declared more than once: " + existing + " and " + newSource);
-        }
-    }
-
-    /**
-     * Campo do modo errado é erro de boot, nunca descarte silencioso —
-     * mesma postura do compact constructor de {@link MohsRunner}, que lança
-     * pra campo do modo errado (e mesma filosofia de "conflito de identidade
-     * falha sempre" de {@link #requireNoRunnerConflict}): {@code core-size=2}
-     * com {@code mode} esquecido no default {@code io} viraria um runner de
-     * 64 virtual threads pra trabalho CPU-bound, sem aviso nenhum. A
-     * validação do próprio builder ganha o contexto que só a propriedade tem
-     * ("maxSize must be >= coreSize" sozinho não diz qual runner nem qual
-     * propriedade — e {@code core-size} default depende dos núcleos da
-     * máquina, então o boot falharia só em produção).
-     */
-    private static MohsRunner toMohsRunner(String name, MohsProperties.Runner spec) {
-        String prefix = "mohs.runners." + name;
-        try {
-            return switch (spec.mode()) {
-                case IO -> {
-                    requireUnset(prefix, spec.mode(), "core-size", spec.coreSize());
-                    requireUnset(prefix, spec.mode(), "max-size", spec.maxSize());
-                    requireUnset(prefix, spec.mode(), "queue-capacity", spec.queueCapacity());
-                    requireUnset(prefix, spec.mode(), "keep-alive", spec.keepAlive());
-                    MohsRunner.IoBuilder builder = MohsRunner.io(name);
-                    if (spec.max() != null) {
-                        builder.maxConcurrent(spec.max());
-                    }
-                    yield builder.build();
-                }
-                case CPU -> {
-                    requireUnset(prefix, spec.mode(), "max", spec.max());
-                    MohsRunner.CpuBuilder builder = MohsRunner.cpu(name);
-                    if (spec.coreSize() != null) {
-                        builder.coreSize(spec.coreSize());
-                    }
-                    if (spec.maxSize() != null) {
-                        builder.maxSize(spec.maxSize());
-                    }
-                    if (spec.queueCapacity() != null) {
-                        builder.queueCapacity(spec.queueCapacity());
-                    }
-                    if (spec.keepAlive() != null) {
-                        builder.keepAlive(spec.keepAlive());
-                    }
-                    yield builder.build();
-                }
-            };
-        } catch (IllegalArgumentException e) {
-            throw new IllegalStateException("invalid runner declared at " + prefix + ".*: " + e.getMessage(), e);
-        }
-    }
-
-    private static void requireUnset(String prefix, RunnerMode mode, String property, @Nullable Object value) {
-        if (value != null) {
-            throw new IllegalStateException("invalid runner declared at " + prefix + ".*: " + property
-                    + " does not apply to mode=" + mode + " — change " + prefix + ".mode or remove " + prefix + "." + property);
-        }
+        return new RunnerRegistry(MohsRunners.assemble(properties, mohsRunnerBeans));
     }
 
     @Bean
