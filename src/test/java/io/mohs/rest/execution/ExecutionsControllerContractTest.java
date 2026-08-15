@@ -1,42 +1,121 @@
 package io.mohs.rest.execution;
 
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import io.mohs.core.Mohs;
+import io.mohs.core.execution.Execution;
+import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.job.JobKey;
 import io.mohs.rest.ApiPaths;
+import io.mohs.rest.error.RestExceptionHandler;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-/** Ver Javadoc de {@link io.mohs.rest.job.JobsControllerContractTest} — mesmo padrão de contrato. */
-@WebMvcTest(ExecutionsController.class)
+/** Ver Javadoc de {@link io.mohs.rest.job.JobsControllerContractTest} — mesmo padrão de teste. */
+@WebMvcTest(properties = "mohs.enabled=false")
 class ExecutionsControllerContractTest {
+
+    private static final Instant NOW = Instant.parse("2026-08-15T12:00:00Z");
+
+    @TestConfiguration
+    static class ControllerConfig {
+
+        @Bean
+        ExecutionsController executionsController(Mohs mohs) {
+            return new ExecutionsController(mohs);
+        }
+
+        @Bean
+        RestExceptionHandler restExceptionHandler() {
+            return new RestExceptionHandler();
+        }
+    }
 
     @Autowired
     private MockMvc mockMvc;
 
+    @MockitoBean
+    private Mohs mohs;
+
     @Test
-    void searchRoutes() throws Exception {
+    void searchSignalsANextPageViaCursorWhenThereAreMoreRows() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        Execution first = new Execution(ExecutionId.of("exec-2"), key, ExecutionState.ENQUEUED, NOW, null, List.of(), "tester");
+        Execution second = new Execution(ExecutionId.of("exec-1"), key, ExecutionState.ENQUEUED, NOW.minusSeconds(1), null, List.of(), "tester");
+        when(mohs.executions(any())).thenReturn(List.of(first, second));
+
         mockMvc.perform(get(ApiPaths.V1 + "/executions")
-                        .param("status", "RUNNING").param("jobKey", "welcome-email"))
-                .andExpect(status().isInternalServerError());
+                        .param("status", "ENQUEUED").param("jobKey", "welcome-email").param("size", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].executionId").value("exec-2"))
+                .andExpect(jsonPath("$.nextCursor").value("exec-2"));
+    }
+
+    /** size=0/-1 saturam em 1 (CursorPage.clampSize) — antes, 0 estourava IndexOutOfBounds e negativo estourava IAE, ambos 500. */
+    @Test
+    void searchSaturatesANonPositiveSizeInsteadOfFailing() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        Execution first = new Execution(ExecutionId.of("exec-2"), key, ExecutionState.ENQUEUED, NOW, null, List.of(), "tester");
+        Execution second = new Execution(ExecutionId.of("exec-1"), key, ExecutionState.ENQUEUED, NOW.minusSeconds(1), null, List.of(), "tester");
+        when(mohs.executions(any())).thenReturn(List.of(first, second));
+
+        mockMvc.perform(get(ApiPaths.V1 + "/executions").param("size", "0"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1));
+
+        mockMvc.perform(get(ApiPaths.V1 + "/executions").param("size", "-1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1));
     }
 
     @Test
-    void getRoutes() throws Exception {
-        mockMvc.perform(get(ApiPaths.V1 + "/executions/exec-1")).andExpect(status().isInternalServerError());
+    void getReturnsTheExecution() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        Execution execution = new Execution(ExecutionId.of("exec-1"), key, ExecutionState.SUCCEEDED, NOW, NOW, List.of(), "tester");
+        when(mohs.findExecution(ExecutionId.of("exec-1"))).thenReturn(Optional.of(execution));
+
+        mockMvc.perform(get(ApiPaths.V1 + "/executions/exec-1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.executionId").value("exec-1"))
+                .andExpect(jsonPath("$.state").value("SUCCEEDED"));
     }
 
     @Test
-    void cancelRoutes() throws Exception {
-        mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/cancel")).andExpect(status().isInternalServerError());
+    void getUnknownExecutionReturns404() throws Exception {
+        when(mohs.findExecution(ExecutionId.of("ghost"))).thenReturn(Optional.empty());
+
+        mockMvc.perform(get(ApiPaths.V1 + "/executions/ghost"))
+                .andExpect(status().isNotFound());
     }
 
     @Test
-    void retryRoutes() throws Exception {
-        mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/retry")).andExpect(status().isInternalServerError());
+    void cancelIsNotImplementedYet() throws Exception {
+        mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/cancel"))
+                .andExpect(status().isNotImplemented())
+                .andExpect(jsonPath("$.title").value("Not implemented"));
+    }
+
+    @Test
+    void retryIsNotImplementedYet() throws Exception {
+        mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/retry"))
+                .andExpect(status().isNotImplemented())
+                .andExpect(jsonPath("$.title").value("Not implemented"));
     }
 }

@@ -57,6 +57,25 @@ class RestExceptionHandlerTest {
     }
 
     @Test
+    void invalidActorBecomes400WithTheTeachingDetail() {
+        InvalidActorException ex = new InvalidActorException("X-Mohs-Actor must be at most 255 characters, got 300");
+
+        ProblemDetail problem = handler.handleInvalidActor(ex);
+
+        assertThat(problem.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST.value());
+        assertThat(problem.getDetail()).contains("255");
+    }
+
+    /** Racional de MohsRestAutoConfiguration: contrato v1 sem implementação é 501 honesto, nunca 500 "unexpected". */
+    @Test
+    void unsupportedOperationBecomes501() {
+        ProblemDetail problem = handler.handleNotImplemented(new UnsupportedOperationException("M3: ainda não implementado"));
+
+        assertThat(problem.getStatus()).isEqualTo(HttpStatus.NOT_IMPLEMENTED.value());
+        assertThat(problem.getTitle()).isEqualTo("Not implemented");
+    }
+
+    @Test
     void unexpectedExceptionBecomes500WithoutLeakingItsMessage() {
         RuntimeException ex = new RuntimeException("connection string: postgres://user:secret@host/db");
 

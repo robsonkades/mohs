@@ -51,6 +51,13 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
         return problem;
     }
 
+    @ExceptionHandler(InvalidActorException.class)
+    public ProblemDetail handleInvalidActor(InvalidActorException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
+        problem.setTitle("Invalid actor");
+        return problem;
+    }
+
     @ExceptionHandler(PayloadValidationException.class)
     public ProblemDetail handlePayloadValidation(PayloadValidationException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, ex.getMessage());
@@ -87,6 +94,22 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, cause.getMessage());
         problem.setTitle("Payload validation failed");
         return new ResponseEntity<>(problem, HttpStatus.UNPROCESSABLE_CONTENT);
+    }
+
+    /**
+     * Operação do contrato v1 ainda sem implementação (ex.: {@code cancel}/
+     * {@code retry} de {@code ExecutionsController}) — 501 honesto em vez de
+     * o {@code UnsupportedOperationException} virar 500 "unexpected error"
+     * com stack trace no log: é exatamente o racional que
+     * {@code MohsRestAutoConfiguration} usa pra nem registrar os
+     * controllers M2 sem implementação.
+     */
+    @ExceptionHandler(UnsupportedOperationException.class)
+    public ProblemDetail handleNotImplemented(UnsupportedOperationException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_IMPLEMENTED,
+                "This operation is part of the v1 contract but is not implemented yet");
+        problem.setTitle("Not implemented");
+        return problem;
     }
 
     /**

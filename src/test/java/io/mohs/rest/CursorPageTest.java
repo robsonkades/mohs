@@ -32,4 +32,14 @@ class CursorPageTest {
         assertThatThrownBy(() -> new CursorPage<String>(null, null))
                 .isInstanceOf(NullPointerException.class);
     }
+
+    /** Saturação nos dois sentidos — todo parâmetro de request é hostil até validado; a borda normaliza, nunca estoura. */
+    @Test
+    void clampSizeSaturatesAtBothEnds() {
+        assertThat(CursorPage.clampSize(null)).isEqualTo(CursorPage.DEFAULT_PAGE_SIZE);
+        assertThat(CursorPage.clampSize(0)).isEqualTo(1);
+        assertThat(CursorPage.clampSize(-1)).isEqualTo(1);
+        assertThat(CursorPage.clampSize(25)).isEqualTo(25);
+        assertThat(CursorPage.clampSize(CursorPage.MAX_PAGE_SIZE + 1)).isEqualTo(CursorPage.MAX_PAGE_SIZE);
+    }
 }
