@@ -7,16 +7,18 @@ correções do review foram aplicadas; estes itens são as decisões que
 ficaram com o autor. Ao resolver um item, registrar a decisão (ADR ou
 Javadoc, conforme o caso) e removê-lo daqui.
 
-## 1. Janela de ~24h da Idempotency-Key
+## 1. Política de retenção de execuções
 
-O dedupe por `(job_key, idempotency_key)` está implementado e testado nos 4
-dialetos (índice único `uq_mohs_executions_idem` + Idempotent Receiver em
-`ScheduleCommandImpl`), mas a chave hoje vale **para sempre** — documentado
-no Javadoc de `ScheduleCommand.idempotencyKey`. O design
-(`REST-API-DESIGN.md`) pede janela de ~24h.
+Linhas terminais de `mohs_executions` nunca saem, por desenho — apontado
+pelo review de tuning (DBTUNE-9) como decisão de produto sem ADR. A
+ADR-0030 amarrou a janela da Idempotency-Key a esta política (a chave
+deduplica enquanto a execução existir), o que acrescenta um requisito: a
+janela de retenção não pode ficar abaixo de ~24h (mínimo prometido pelo
+design REST).
 
-**Decidir:** o TTL/purga entra ainda no M3, ou vira ADR própria junto com a
-política de retenção de execuções (as duas purgas compartilham mecanismo)?
+**Decidir:** a política em si — delete vs. arquivamento, janela default,
+configuração, job interno do Mohs como mecanismo (candidato do DBTUNE-9).
+Vira ADR própria quando desenhada.
 
 ## 4. `@OnExecution` — milestone do processamento
 

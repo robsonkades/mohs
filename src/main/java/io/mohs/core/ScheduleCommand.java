@@ -30,8 +30,10 @@ public interface ScheduleCommand {
      * Dedupe por {@code (job, key)} — Idempotent Receiver: um terminal com a
      * mesma chave de uma execução já gravada não duplica nada e devolve o
      * {@link Enqueued} original (mesmo recibo, mesma {@code ExecutionId}).
-     * A janela de ~24h do design ainda não existe: hoje a chave vale pra
-     * sempre — reutilizar uma chave antiga devolve a execução antiga.
+     * A chave deduplica enquanto a execução existir (ADR-0030: a janela é
+     * a da retenção de execuções — ilimitada enquanto a política de
+     * retenção não existir); reutilizar uma chave antiga devolve a
+     * execução antiga.
      */
     @CheckReturnValue
     ScheduleCommand idempotencyKey(String key);

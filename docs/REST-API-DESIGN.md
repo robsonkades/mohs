@@ -72,8 +72,10 @@ Content-Type: application/json
   "scheduledAt": "2026-09-01T05:00:00Z", "actor": "ana.ops" }
 ```
 
-- **Idempotency-Key**: mesmo key nas próximas ~24h → mesma resposta, zero
-  duplicação. Obrigatória para clientes que fazem retry (todos deveriam).
+- **Idempotency-Key**: mesma key → mesma resposta, zero duplicação, enquanto
+  a execução existir — janela = retenção de execuções, mínimo ~24h quando a
+  política de retenção existir (ADR-0030). Obrigatória para clientes que
+  fazem retry (todos deveriam).
   Na API Java, o equivalente é o pré-terminal `.idempotencyKey(...)`.
   **Durabilidade [DECIDIDO]:** persistida junto da Execution, mesma garantia
   de custódia da cláusula assíncrona — sobrevive restart, é cluster-wide,

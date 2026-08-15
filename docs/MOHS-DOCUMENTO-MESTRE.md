@@ -513,7 +513,7 @@ pluga só o resolver — zero mudança de contrato).
 |---|---|
 | `GET /overview` | âncora de polling do dashboard (contagens, throughput) |
 | `GET /jobs` · `/jobs/{key}` | definições, estado, próximo fire |
-| `POST /jobs/{key}/schedule` | invoca — body `{payload, at?}`; `Idempotency-Key` (~24h) → 202 |
+| `POST /jobs/{key}/schedule` | invoca — body `{payload, at?}`; `Idempotency-Key` (janela = retenção, ADR-0030) → 202 |
 | `POST /jobs/{key}/pause` · `/resume` | cluster-wide; schedule manual segue permitido |
 | `GET /executions` (+filtros) · `/{id}` | busca global · detalhe (attempts, erro, actor) |
 | `POST /executions/{id}/cancel` · `/retry` | cooperativo · retry manual de ops |
