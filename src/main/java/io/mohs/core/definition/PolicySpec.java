@@ -19,6 +19,14 @@ public sealed interface PolicySpec permits JobSpecImpl {
     PolicySpec misfire(Misfire policy);
 
     /**
+     * Nasce pausado no PRIMEIRO registro da definição (ADR-0037): a agenda
+     * fica declarada e desarmada até um {@code resume}; execução manual
+     * sob demanda continua valendo mesmo pausado. Depois do nascimento,
+     * {@code paused} é decisão de operador — redeploy nunca re-pausa.
+     */
+    PolicySpec startPaused();
+
+    /**
      * Impede que mais de uma execução deste job fique {@code RUNNING} ao
      * mesmo tempo. Default: concorrência permitida — a maioria dos jobs é
      * invocada várias vezes com payloads independentes (ex.: um job de

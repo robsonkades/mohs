@@ -26,6 +26,7 @@ CREATE TABLE mohs_job_definitions (
     runner          NVARCHAR(255),
     window_name     NVARCHAR(255),
     misfire         NVARCHAR(20)  NOT NULL,
+    start_paused    BIT           NOT NULL DEFAULT 0, -- definicional (ADR-0037) — ver schema-h2.sql
     allow_concurrent_executions BIT NOT NULL DEFAULT 1,
     max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = 0 (ADR-0020)
     running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job (ADR-0018/0020)

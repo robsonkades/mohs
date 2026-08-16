@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     runner          VARCHAR(255),
     window_name     VARCHAR(255),
     misfire         VARCHAR(20)  NOT NULL,
+    start_paused    BOOLEAN      NOT NULL DEFAULT FALSE, -- definicional (ADR-0037): nasce pausado no 1º registro; 'paused' segue operacional
     allow_concurrent_executions BOOLEAN NOT NULL DEFAULT TRUE,
     max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE (ADR-0020)
     running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job (ADR-0018/0020)

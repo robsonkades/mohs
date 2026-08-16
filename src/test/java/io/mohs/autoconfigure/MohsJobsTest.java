@@ -108,6 +108,10 @@ class MohsJobsTest {
         @MohsJob(id = "invalid-exclusive-job", allowConcurrentExecutions = false)
         void invalidExclusiveMethod() {
         }
+
+        @MohsJob(id = "dormant-job", every = "PT30S", startPaused = true)
+        void dormantMethod() {
+        }
     }
 
     private static Method method(String name, Class<?>... paramTypes) {
@@ -271,6 +275,16 @@ class MohsJobsTest {
     }
 
     // ---- toDefinition ----
+
+    /** ADR-0037: startPaused viaja da anotação pra definição; ausente, o job nasce armado (default de sempre). */
+    @Test
+    void translatesStartPaused() {
+        JobDefinition dormant = MohsJobs.toDefinition(JobKey.of("dormant-job"), annotationOf("dormantMethod"), AnnotatedFixtures.class);
+        JobDefinition armed = MohsJobs.toDefinition(JobKey.of("every-job"), annotationOf("everyMethod"), AnnotatedFixtures.class);
+
+        assertThat(dormant.startPaused()).isTrue();
+        assertThat(armed.startPaused()).isFalse();
+    }
 
     @Test
     void translatesCronTrigger() {
