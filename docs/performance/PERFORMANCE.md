@@ -42,8 +42,9 @@ final: 256 → 1024 levou de ~1.9k/s a ~4.2k/s.
 | Propriedade | Default | Papel | Como dimensionar |
 |---|---|---|---|
 | `mohs.engine.dispatch-concurrency` | 64 | **Teto real do node** (ADR-0039): dimensiona o runner `io` E o clamp de claim | A alavanca principal de vazão. Virtual threads: subir é barato na JVM; o limite real vem do pool JDBC e do banco. Meça: se a vazão não subir junto, o gargalo já é o banco |
-| `mohs.engine.poll-interval` | 5s | Latência de pickup e cadência de reabastecimento | 5s é default de *scheduler*, não de fila de alto volume. Para vazão: 50–100ms. Abaixo disso só compra ticks vazios em idle |
-| `mohs.engine.batch-size` | 50 | Teto de claim por tick | ≈ `dispatch-concurrency` (o clamp nunca usa mais que a folga). Batch maior que a folga é inócuo; menor vira gargalo de reabastecimento |
+| `mohs.engine.poll-interval` | 5s | Latência de pickup e cadência de reabastecimento | 5s é default de *scheduler*, não de fila de alto volume. Para vazão: 50–100ms — ou maior, compensado por `claim-rounds` (abaixo). Poll curto demais só compra ticks vazios em idle |
+| `mohs.engine.claim-rounds` | 1 | Claims encadeados num mesmo tick sob backlog (ADR-0040) | Relaxa o acoplamento com o poll: medido, a 250ms de poll, rounds=8 rendeu 3,6–3,7k/s vs 2,3k/s com rounds=1. Não elimina o poll: o teto por ciclo segue a folga de dispatch, e um orçamento de `lease-ttl/4` limita a duração dos rounds (a renovação de lease roda uma vez por tick). Valores pequenos (4–8) — rounds é teto, não cota |
+| `mohs.engine.batch-size` | 50 | Teto de claim por round | ≈ `dispatch-concurrency` (o clamp nunca usa mais que a folga). Batch maior que a folga é inócuo; menor vira gargalo de reabastecimento |
 | `mohs.engine.event-concurrency` | 16 | Executor de publicação de eventos | Sob vazão alta, 16 vira fila. Suba junto com o dispatch (bench usou 256 para 1024 de dispatch) |
 | `spring.datasource.hikari.maximum-pool-size` | 10 | Conexões JDBC | Virtual threads pedem pool alto (CLAUDE.md: 100+) e `connection-timeout` baixo (<3s). **Nunca dimensione olhando só um node** — ver multi-instância abaixo |
 | `mohs.engine.lease-ttl` | 30s | Detecção de morte de node | Menor = failover mais rápido, mas mais risco de reclaim falso sob stall (GC, CPU starvation). 30s é um bom equilíbrio; não encurte para "ganhar vazão" — lease não é knob de vazão |
