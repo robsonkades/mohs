@@ -22,12 +22,26 @@ import org.jspecify.annotations.Nullable;
  * perdido: ocorrência devida dentro do threshold dispara atrasada em
  * qualquer política; mais velha que ele responde ao {@code Misfire} do
  * job.
+ *
+ * <p>{@code dispatchConcurrency} (ADR-0039) é o teto de execuções em voo do
+ * node — o mesmo valor que dimensiona o runner {@code io} built-in
+ * ({@code mohs.engine.dispatch-concurrency}); o claim de cada tick é
+ * limitado pela folga em relação a ele, para o node nunca reivindicar o
+ * que não tem capacidade de despachar.
  */
-public record EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl, @Nullable Duration watchdogTimeout,
-        Duration misfireThreshold) {
+public record EngineSettings(Duration pollInterval, int batchSize, int dispatchConcurrency, Duration leaseTtl,
+        @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
 
     /** Mesmo default de {@code mohs.engine.misfire-threshold} ({@code MohsProperties}) — precedente Quartz. */
     public static final Duration DEFAULT_MISFIRE_THRESHOLD = Duration.ofSeconds(60);
+
+    /**
+     * Claim sem teto de dispatch — o comportamento anterior à ADR-0039,
+     * preservado pelos construtores de conveniência (uso de teste);
+     * produção ({@code MohsAutoConfiguration}) sempre passa o teto real
+     * pelo construtor canônico.
+     */
+    private static final int UNBOUNDED_DISPATCH = Integer.MAX_VALUE;
 
     public EngineSettings {
         Objects.requireNonNull(pollInterval, "pollInterval");
@@ -35,6 +49,9 @@ public record EngineSettings(Duration pollInterval, int batchSize, Duration leas
         Objects.requireNonNull(misfireThreshold, "misfireThreshold");
         if (batchSize <= 0) {
             throw new IllegalArgumentException("batchSize must be positive");
+        }
+        if (dispatchConcurrency <= 0) {
+            throw new IllegalArgumentException("mohs.engine.dispatch-concurrency must be positive, got " + dispatchConcurrency);
         }
         if (!pollInterval.isPositive()) {
             throw new IllegalArgumentException("mohs.engine.poll-interval must be positive, got " + pollInterval);
@@ -54,12 +71,12 @@ public record EngineSettings(Duration pollInterval, int batchSize, Duration leas
         }
     }
 
-    /** Threshold de misfire default (ADR-0035). */
+    /** Threshold de misfire default (ADR-0035) e claim sem teto de dispatch (pré-ADR-0039) — conveniência de teste. */
     public EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl, @Nullable Duration watchdogTimeout) {
-        this(pollInterval, batchSize, leaseTtl, watchdogTimeout, DEFAULT_MISFIRE_THRESHOLD);
+        this(pollInterval, batchSize, UNBOUNDED_DISPATCH, leaseTtl, watchdogTimeout, DEFAULT_MISFIRE_THRESHOLD);
     }
 
-    /** Sem Watchdog Bound — renovação sem teto (default da ADR-0012) — e threshold de misfire default (ADR-0035). */
+    /** Sem Watchdog Bound (default da ADR-0012), threshold de misfire default (ADR-0035) e claim sem teto de dispatch (pré-ADR-0039) — conveniência de teste. */
     public EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl) {
         this(pollInterval, batchSize, leaseTtl, null);
     }

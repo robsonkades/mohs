@@ -4,7 +4,11 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.resource.RunnerMode;
@@ -68,6 +72,25 @@ class MohsRunnersTest {
         assertThat(assembled).filteredOn(runner -> runner.name().equals("io"))
                 .singleElement()
                 .extracting(MohsRunner::maxConcurrent).isEqualTo(4);
+    }
+
+    /** ADR-0039: io sobrescrito abaixo de dispatch-concurrency quebra a premissa do clamp — WARN de boot nomeando os dois valores, nunca degradação silenciosa. */
+    @Test
+    void ioRunnerSmallerThanTheClaimBoundIsWarnedAtAssembly() {
+        ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(MohsRunners.class);
+        ListAppender<ILoggingEvent> warnWatcher = new ListAppender<>();
+        warnWatcher.start();
+        logger.addAppender(warnWatcher);
+        try {
+            MohsProperties.Runner io = new MohsProperties.Runner(RunnerMode.IO, 8, null, null, null, null);
+
+            MohsRunners.assemble(props(Map.of("io", io)), List.of());
+
+            assertThat(warnWatcher.list).anyMatch(event -> event.getFormattedMessage()
+                    .contains("max-concurrent 8 below mohs.engine.dispatch-concurrency 64"));
+        } finally {
+            logger.detachAppender(warnWatcher);
+        }
     }
 
     @Test

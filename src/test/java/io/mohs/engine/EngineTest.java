@@ -172,6 +172,11 @@ class EngineTest {
         return ExecutionState.valueOf(rawJdbcTemplate.queryForObject("SELECT state FROM mohs_executions WHERE id = ?", String.class, id));
     }
 
+    private int countByState(ExecutionState state) {
+        Integer count = rawJdbcTemplate.queryForObject("SELECT count(*) FROM mohs_executions WHERE state = ?", Integer.class, state.name());
+        return count == null ? 0 : count;
+    }
+
     @Test
     void startClaimsAndDispatchesUntilSuccess() throws Exception {
         seedEnqueuedExecution("exec-1", "welcome-email", "hello");
@@ -325,6 +330,56 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+    }
+
+    /**
+     * ADR-0039: o claim de cada tick é limitado pela folga de dispatch
+     * ({@code dispatchConcurrency − in-flight}) — node saturado para de
+     * reivindicar em vez de estourar o teto do runner (a rejeição deixava
+     * a execução RUNNING presa até o reaper reclamá-la na lease — a
+     * patologia medida no drain de 50k do BASELINE). O excedente fica
+     * ENQUEUED no banco, reivindicável por qualquer node com folga.
+     */
+    @Test
+    void claimIsBoundedByTheFreeDispatchCapacity() throws Exception {
+        for (int i = 1; i <= 5; i++) {
+            seedEnqueuedExecution("exec-" + i, "welcome-email", "hello");
+        }
+        int dispatchConcurrency = 2;
+        CountDownLatch handlersStarted = new CountDownLatch(dispatchConcurrency);
+        CountDownLatch releaseHandlers = new CountDownLatch(1);
+        CountDownLatch allSucceeded = new CountDownLatch(5);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlersStarted.countDown();
+            releaseHandlers.await(10, TimeUnit.SECONDS);
+        });
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                allSucceeded.countDown();
+            }
+        };
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = newEngine(counting, List.of(listener), defaultRunnerRegistry(),
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, dispatchConcurrency, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+
+        engine.start();
+        try {
+            assertThat(handlersStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            // >= 2 ticks completos com o node saturado: folga 0, nenhum claim novo pode acontecer
+            counting.resetLatch(new CountDownLatch(3));
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(countByState(ExecutionState.RUNNING)).isEqualTo(dispatchConcurrency);
+            assertThat(countByState(ExecutionState.ENQUEUED)).isEqualTo(3);
+
+            releaseHandlers.countDown();
+            // com a folga de volta, os ticks seguintes drenam o excedente
+            assertThat(allSucceeded.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseHandlers.countDown();
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(countByState(ExecutionState.SUCCEEDED)).isEqualTo(5);
     }
 
     /** Posse perdida (reclaim externo) é detectada pela renovação: WARN de zumbi, e o resultado tardio do handler é descartado pelo CAS de conclusão. */

@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.resource.RunnerMode;
@@ -17,6 +19,8 @@ import io.mohs.engine.RunnerRegistry;
  * (Effective Java Item 15: minimize acessibilidade).
  */
 final class MohsRunners {
+
+    private static final Logger log = LoggerFactory.getLogger(MohsRunners.class);
 
     private static final String BUILT_IN = "built-in";
 
@@ -48,7 +52,27 @@ final class MohsRunners {
         for (MohsRunner beanRunner : beanRunners) {
             declare(byName, beanRunner.name(), beanRunner, "@Bean MohsRunner " + beanRunner.name());
         }
+        warnWhenIoRunnerIsSmallerThanTheClaimBound(byName, properties.engine().dispatchConcurrency());
         return byName.values().stream().map(SourcedRunner::runner).toList();
+    }
+
+    /**
+     * ADR-0039: o clamp de claim usa {@code mohs.engine.dispatch-concurrency}
+     * como teto do node — premissa de fonte única que um override do runner
+     * {@code io} com {@code max} menor quebra em silêncio: o excedente entre
+     * os dois valores volta a ser rejeitado pelo executor e fica RUNNING até
+     * o reaper (a patologia que a ADR eliminou). WARN, não erro de boot:
+     * capar o {@code io} é escolha operacional legítima e o caminho de
+     * recuperação existe — o aviso devolve ao operador a consequência.
+     */
+    private static void warnWhenIoRunnerIsSmallerThanTheClaimBound(Map<String, SourcedRunner> byName, int dispatchConcurrency) {
+        MohsRunner ioRunner = byName.get(RunnerRegistry.DEFAULT_RUNNER).runner();
+        if (ioRunner.mode() == RunnerMode.IO && ioRunner.maxConcurrent() < dispatchConcurrency) {
+            log.warn("runner 'io' overridden with max-concurrent {} below mohs.engine.dispatch-concurrency {} — "
+                    + "the claim bound (ADR-0039) follows dispatch-concurrency, so the excess will be rejected by the "
+                    + "executor and sit RUNNING until the reaper reclaims it; align the two values",
+                    ioRunner.maxConcurrent(), dispatchConcurrency);
+        }
     }
 
     private static void declare(Map<String, SourcedRunner> byName, String name, MohsRunner runner, String source) {

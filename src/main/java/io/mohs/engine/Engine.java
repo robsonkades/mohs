@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -310,12 +311,31 @@ public final class Engine implements MohsLifecycle {
                 publishReclaimOutcome(reclaimed);
             }
             fireDueTriggers();
-            List<Execution> claimed = claimer.claim(nodeId, settings.batchSize());
-            for (Execution execution : claimed) {
-                submitDispatch(execution);
-            }
+            claimAndDispatch();
         } catch (RuntimeException e) {
             log.error("engine tick failed — will retry next tick", e);
+        }
+    }
+
+    /**
+     * A etapa "aquisição → dispatch" do tick. ADR-0039: o claim é limitado
+     * pela folga de dispatch — reivindicar além dela só produzia rejeição
+     * do runner e execução RUNNING presa até o reaper (medido: 56k
+     * rejeições e 11,6k execuções duplicadas num drain de 50k). Node
+     * saturado não reivindica; o excedente fica ENQUEUED no banco,
+     * reivindicável por qualquer node com folga. DBTUNE-18: uma consulta
+     * de definição por job_key DISTINTO do lote, não por execução — o mapa
+     * de memoização vive só neste tick (ver {@link #submitDispatch}).
+     */
+    private void claimAndDispatch() {
+        int claimLimit = Math.min(settings.batchSize(), settings.dispatchConcurrency() - inFlight.size());
+        if (claimLimit <= 0) {
+            return;
+        }
+        List<Execution> claimed = claimer.claim(nodeId, claimLimit);
+        Map<JobKey, Optional<StoredJob>> definitionsByKey = new HashMap<>();
+        for (Execution execution : claimed) {
+            submitDispatch(execution, definitionsByKey);
         }
     }
 
@@ -591,15 +611,21 @@ public final class Engine implements MohsLifecycle {
      * órfãs até a lease expirar e o {@link Reaper} reclamá-las — caminho de
      * recuperação bem mais lento que necessário.
      */
-    private void submitDispatch(Execution execution) {
+    private void submitDispatch(Execution execution, Map<JobKey, Optional<StoredJob>> definitionsByKey) {
         // Consulta síncrona, na própria thread do tick — mesmo padrão de
-        // claimer.claim()/reaper.reclaimExpired() em tick(). Deliberadamente uma
-        // consulta por execução, não em lote pro batch inteiro: candidato a
-        // próximo DBTUNE se LivenessLoadHarness mostrar que importa, não
-        // otimizado especulativamente agora (sem número, não é otimização).
+        // claimer.claim()/reaper.reclaimExpired() em tick(). DBTUNE-18:
+        // memoizada por job_key dentro do tick — os N finds seriais eram o
+        // maior componente do ciclo (medido no drain de 50k, Postgres,
+        // 2026-08-16: ~260 ms de um ciclo de 454 ms com batch 500; o lote
+        // inteiro gotejava pro dispatch no ritmo de um round trip por
+        // execução). O snapshot por tick corresponde a uma ordem serial
+        // legal do código anterior (todos os finds podiam rodar antes de
+        // qualquer escrita concorrente); falha de consulta não é memoizada
+        // — a próxima execução do mesmo job_key tenta de novo, mesmo
+        // caminho de recuperação de antes.
         Optional<StoredJob> storedJob;
         try {
-            storedJob = jobStore.find(execution.jobKey());
+            storedJob = definitionsByKey.computeIfAbsent(execution.jobKey(), jobStore::find);
         } catch (RuntimeException e) {
             // Erro de infra (banco fora, pool esgotado) não é veredito sobre a
             // execução — falhar terminalmente aqui violaria at-least-once, o

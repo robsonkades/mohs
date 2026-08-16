@@ -250,12 +250,12 @@ public class MohsAutoConfiguration {
             @Qualifier("mohsTickScheduler") ThreadPoolTaskScheduler mohsTickScheduler,
             RunnerRegistry mohsRunnerRegistry
     ) {
+        MohsProperties.Engine engineProperties = properties.engine();
+        EngineSettings settings = new EngineSettings(engineProperties.pollInterval(), engineProperties.batchSize(),
+                engineProperties.dispatchConcurrency(), engineProperties.leaseTtl(),
+                engineProperties.watchdogTimeout(), engineProperties.misfireThreshold());
         return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper,
-                mohsTriggerFirer, mohsClock,
-                new EngineSettings(properties.engine().pollInterval(), properties.engine().batchSize(),
-                        properties.engine().leaseTtl(), properties.engine().watchdogTimeout(),
-                        properties.engine().misfireThreshold()),
-                mohsTickScheduler, mohsRunnerRegistry);
+                mohsTriggerFirer, mohsClock, settings, mohsTickScheduler, mohsRunnerRegistry);
     }
 
     /** {@link SmartLifecycle} — ver Javadoc de {@link MohsEngineLifecycle} sobre a adaptação e o WARN de lease × timeout. */
