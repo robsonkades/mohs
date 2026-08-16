@@ -1,6 +1,7 @@
 package io.mohs.jdbc;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -13,6 +14,7 @@ import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 
+import org.jspecify.annotations.Nullable;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -130,9 +132,17 @@ public final class JdbcReaper implements Reaper {
         Instant startedAt = Objects.requireNonNullElse(execution.firedAt(), now);
         ExecutionId id = ExecutionId.of(candidate.id());
         JobKey jobKey = JobKey.of(candidate.jobKey());
+        // ADR-0035: reclaim terminal de ocorrência do scheduler em job fixed-delay
+        // rearma a corrente — o "fim" de um zumbi é desconhecido, `now` (a
+        // observação do reaper) ancora. Execução manual não é a corrente; job
+        // aposentado nunca rearma (não dispara; a ressurreição via upsert cura).
+        Instant rearmNextFireAt = !candidate.retired() && Execution.SCHEDULER_ACTOR.equals(execution.actor())
+                ? candidate.rearmNextFireAt(now)
+                : null;
         if (candidate.cancelRequested()) {
             Attempt attempt = new Attempt(attemptNumber, startedAt, now, ExecutionState.CANCELLED, null);
-            return new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.CANCELLED, null, candidate.leaseExpiresAt());
+            return new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.CANCELLED, null,
+                    candidate.leaseExpiresAt(), rearmNextFireAt);
         }
         Attempt attempt = new Attempt(attemptNumber, startedAt, now, ExecutionState.FAILED, LEASE_EXPIRED_ERROR);
         if (candidate.retired()) {
@@ -140,7 +150,8 @@ public final class JdbcReaper implements Reaper {
         }
         return RetrySchedule.nextRetryAt(attemptNumber, candidate.retries(), now)
                 .map(retryAt -> new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.RETRY_SCHEDULED, retryAt, candidate.leaseExpiresAt()))
-                .orElseGet(() -> new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.FAILED, null, candidate.leaseExpiresAt()));
+                .orElseGet(() -> new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.FAILED, null,
+                        candidate.leaseExpiresAt(), rearmNextFireAt));
     }
 
     /** Reconstrói o resultado localmente (sem consulta extra) — {@link ExecutionStore#completeAll} só confirma quais ids venceram o CAS. O flag de orçamento vem da mesma decisão de {@link #reclaimRequest}: terminal sem ser aposentado = orçamento esgotado. */
@@ -181,7 +192,8 @@ public final class JdbcReaper implements Reaper {
         // drenagem mais-antigo-primeiro (UUIDv7 ordena no tempo).
         return jdbcTemplate.query("""
                 SELECT %se.id AS id, e.job_key AS job_key, e.lease_expires_at AS lease_expires_at,
-                       e.cancel_requested AS cancel_requested, j.retries AS retries, j.retired AS retired
+                       e.cancel_requested AS cancel_requested, j.retries AS retries, j.retired AS retired,
+                       j.interval_duration AS interval_duration, j.interval_after_finish AS interval_after_finish
                 FROM mohs_executions e
                 JOIN mohs_job_definitions j ON j.job_key = e.job_key
                 WHERE e.state = 'RUNNING' AND e.lease_expires_at < :now
@@ -192,9 +204,17 @@ public final class JdbcReaper implements Reaper {
                         .addValue("limit", RECLAIM_LIMIT),
                 (rs, _) -> new ExpiredCandidate(rs.getString("id"), rs.getString("job_key"),
                         JdbcTimestamps.fromUtcTimestamp(rs.getTimestamp("lease_expires_at")),
-                        rs.getBoolean("cancel_requested"), rs.getInt("retries"), rs.getBoolean("retired")));
+                        rs.getBoolean("cancel_requested"), rs.getInt("retries"), rs.getBoolean("retired"),
+                        rs.getString("interval_duration"), rs.getBoolean("interval_after_finish")));
     }
 
-    private record ExpiredCandidate(String id, String jobKey, Instant leaseExpiresAt, boolean cancelRequested, int retries, boolean retired) {
+    /** As colunas de agenda saem no mesmo SELECT pelo mesmo motivo de {@code retries}/{@code retired}: a decisão de rearme (ADR-0035) não paga uma consulta por candidato. */
+    private record ExpiredCandidate(String id, String jobKey, Instant leaseExpiresAt, boolean cancelRequested, int retries,
+            boolean retired, @Nullable String intervalDuration, boolean intervalAfterFinish) {
+
+        /** {@code fim + interval} de uma agenda fixed-delay; {@code null} nas demais (nada a rearmar). */
+        @Nullable Instant rearmNextFireAt(Instant now) {
+            return intervalAfterFinish && intervalDuration != null ? now.plus(Duration.parse(intervalDuration)) : null;
+        }
     }
 }

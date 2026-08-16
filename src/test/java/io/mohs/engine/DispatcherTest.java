@@ -1,5 +1,6 @@
 package io.mohs.engine;
 
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -14,6 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 
 import org.h2.jdbcx.JdbcDataSource;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
@@ -158,11 +160,77 @@ class DispatcherTest {
     void failBeforeDispatchPublishesFailedWithoutTheExhaustedFlag() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
 
-        newDispatcher(List.of()).failBeforeDispatch(execution, new IllegalStateException("payload could not be read"));
+        newDispatcher(List.of()).failBeforeDispatch(execution, null, new IllegalStateException("payload could not be read"));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         Failed event = listener.awaitEvent(Failed.class);
         assertThat(event.attemptsExhausted()).isFalse();
+    }
+
+    /** ADR-0035: conclusão terminal de ocorrência do scheduler em job fixed-delay rearma a corrente — fim da execução + interval. */
+    @Test
+    void terminalCompletionOfASchedulerOccurrenceRearmsTheAfterFinishChain() {
+        JobDefinition definition = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
+        Execution execution = seedRunningOccurrence("exec-1", definition, "scheduler");
+        disarmTrigger("poll"); // NULL-until-finish: o disparo desarmou o trigger (ADR-0035)
+        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { });
+
+        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(nextFireAtOf("poll")).isEqualTo(NOW.plus(Duration.ofMinutes(5)));
+    }
+
+    /** Execução manual de job fixed-delay não é a corrente — concluir não rearma. */
+    @Test
+    void terminalCompletionOfAManualExecutionDoesNotRearmTheChain() {
+        JobDefinition definition = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
+        Execution execution = seedRunningOccurrence("exec-1", definition, "api:user");
+        disarmTrigger("poll");
+        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { });
+
+        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(nextFireAtOf("poll")).isNull();
+    }
+
+    /** Falha com orçamento não rearma — a corrente continua viva pelo retry; o rearme vem da conclusão terminal do retry. */
+    @Test
+    void aBudgetedFailureOfASchedulerOccurrenceDoesNotRearm() {
+        JobDefinition definition = JobDefinition.of("poll", Handler.class,
+                spec -> spec.everyAfterFinish(Duration.ofMinutes(5)).retries(2));
+        Execution execution = seedRunningOccurrence("exec-1", definition, "scheduler");
+        disarmTrigger("poll");
+        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> {
+            throw new IllegalStateException("boom");
+        });
+
+        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(nextFireAtOf("poll")).isNull();
+    }
+
+    private Execution seedRunningOccurrence(String id, JobDefinition definition, String actor) {
+        jobStore.upsert(definition);
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_executions (
+                    id, job_key, state, scheduled_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
+                VALUES (?, ?, 'RUNNING', ?, ?, 'node-a', ?, '{}', 'java.lang.Object', ?)
+                """, id, definition.key().value(), JdbcTimestamps.toUtcTimestamp(NOW), actor,
+                JdbcTimestamps.toUtcTimestamp(NOW.plusSeconds(30)), JdbcTimestamps.toUtcTimestamp(NOW));
+        return executionStore.find(ExecutionId.of(id)).orElseThrow();
+    }
+
+    private void disarmTrigger(String jobKey) {
+        rawJdbcTemplate.update("UPDATE mohs_job_definitions SET next_fire_at = NULL WHERE job_key = ?", jobKey);
+    }
+
+    private @Nullable Instant nextFireAtOf(String jobKey) {
+        Timestamp stored = rawJdbcTemplate.queryForObject(
+                "SELECT next_fire_at FROM mohs_job_definitions WHERE job_key = ?", Timestamp.class, jobKey);
+        return stored == null ? null : JdbcTimestamps.fromUtcTimestamp(stored);
     }
 
     /** Segunda tentativa: um attempt FAILED já gravado — o dispatch seguinte é o attempt 2. */

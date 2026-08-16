@@ -1,9 +1,14 @@
 package io.mohs.jdbc;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -19,7 +24,9 @@ import java.util.stream.Stream;
 import javax.sql.DataSource;
 
 import org.h2.jdbcx.JdbcDataSource;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -99,6 +106,55 @@ class JdbcJobStoreTest {
         assertThat(stored.get().definition()).isEqualTo(definition);
         assertThat(stored.get().orphaned()).isFalse();
         assertThat(stored.get().paused()).isFalse();
+    }
+
+    /** ADR-0037: startPaused arma só o nascimento — o job nasce pausado e o trigger não é varrido até o resume. */
+    @Test
+    void upsertCreatesAStartPausedJobBornPaused() {
+        store.upsert(JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused()));
+
+        assertThat(store.find(JobKey.of("dormant")).orElseThrow().paused()).isTrue();
+        clock.advance(Duration.ofMinutes(5));
+        assertThat(store.findDueRecurring(clock.instant(), 10)).isEmpty();
+    }
+
+    /** Depois do nascimento, paused é do operador (ADR-0006) — redeploy com startPaused=true nunca re-pausa um job que o operador ligou. */
+    @Test
+    void redeployNeverReappliesStartPaused() {
+        JobDefinition definition = JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused());
+        store.upsert(definition);
+        store.resume(JobKey.of("dormant"));
+
+        store.upsert(definition);
+
+        assertThat(store.find(JobKey.of("dormant")).orElseThrow().paused()).isFalse();
+    }
+
+    /** O happy path completo da feature: nasce pausado → resume → o trigger armado no nascimento (agora envelhecido) fica devido — a política de misfire decide dali (ADR-0035). */
+    @Test
+    void resumedDormantJobBecomesDueWithItsBirthTrigger() {
+        store.upsert(JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused()));
+        clock.advance(Duration.ofMinutes(5));
+        assertThat(store.findDueRecurring(clock.instant(), 10)).isEmpty();
+
+        store.resume(JobKey.of("dormant"));
+
+        assertThat(store.findDueRecurring(clock.instant(), 10))
+                .extracting(stored -> stored.definition().key().value())
+                .containsExactly("dormant");
+    }
+
+    /** "A linha é a memória" (review ADR-0037): soft-retire preserva a linha, então ressurreição via upsert NÃO re-aplica startPaused — paused volta como o operador o deixou. */
+    @Test
+    void resurrectionAfterRetireKeepsTheOperatorPauseState() {
+        JobDefinition definition = JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused());
+        store.upsert(definition);
+        store.resume(JobKey.of("dormant"));
+        store.remove(JobKey.of("dormant"));
+
+        store.upsert(definition);
+
+        assertThat(store.find(JobKey.of("dormant")).orElseThrow().paused()).isFalse();
     }
 
     @Test
@@ -453,5 +509,220 @@ class JdbcJobStoreTest {
         Boolean orphaned = rawJdbcTemplate.queryForObject(
                 "SELECT orphaned FROM mohs_job_definitions WHERE job_key = ?", Boolean.class, "ghost-handler");
         assertThat(orphaned).isTrue();
+    }
+
+    /** O estado do trigger (ADR-0035): quem arma/preserva/recalcula/cura o {@code next_fire_at} é o upsert; a leitura devida é {@code findDueRecurring}. */
+    @Nested
+    class TriggerState {
+
+        private JdbcTemplate rawJdbc() {
+            return new JdbcTemplate(dataSource);
+        }
+
+        private @Nullable Instant nextFireAtOf(String jobKey) {
+            Timestamp stored = rawJdbc().queryForObject(
+                    "SELECT next_fire_at FROM mohs_job_definitions WHERE job_key = ?", Timestamp.class, jobKey);
+            return stored == null ? null : JdbcTimestamps.fromUtcTimestamp(stored);
+        }
+
+        private void disarm(String jobKey) {
+            rawJdbc().update("UPDATE mohs_job_definitions SET next_fire_at = NULL WHERE job_key = ?", jobKey);
+        }
+
+        @Test
+        void upsertArmsTheTriggerOfACronDefinition() {
+            store.upsert(definition("welcome-email", new CronSpec("0 0 2 * * *", ZoneId.of("America/Sao_Paulo"))));
+
+            // base 2026-08-13T00:00Z = 12/08 21:00 em São Paulo → próximas 02:00 SP = 05:00Z de 13/08
+            assertThat(nextFireAtOf("welcome-email")).isEqualTo(Instant.parse("2026-08-13T05:00:00Z"));
+        }
+
+        @Test
+        void upsertArmsTheTriggerOfAFixedRateDefinition() {
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
+
+            assertThat(nextFireAtOf("poll")).isEqualTo(clock.instant().plus(Duration.ofMinutes(5)));
+        }
+
+        @Test
+        void upsertLeavesOnDemandUnarmed() {
+            store.upsert(definition("import-file", new OnDemandSpec()));
+
+            assertThat(nextFireAtOf("import-file")).isNull();
+        }
+
+        /** Sem isto, todo redeploy de um job every-30min empurraria o disparo para sempre. */
+        @Test
+        void upsertPreservesTheTriggerWhenTheScheduleIsUnchanged() {
+            JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), false));
+            store.upsert(definition);
+            Instant armedAt = nextFireAtOf("poll");
+
+            clock.advance(Duration.ofMinutes(10));
+            store.upsert(definition);
+
+            assertThat(nextFireAtOf("poll")).isEqualTo(armedAt);
+        }
+
+        @Test
+        void upsertRecomputesTheTriggerWhenTheScheduleChanges() {
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
+
+            clock.advance(Duration.ofMinutes(10));
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(1), false)));
+
+            assertThat(nextFireAtOf("poll")).isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
+        }
+
+        /** Cura de coluna nova em base velha (pré-ADR-0035): agenda recorrente com next_fire_at NULL rearma no boot. */
+        @Test
+        void upsertHealsAnUnarmedRecurringTrigger() {
+            JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), false));
+            store.upsert(definition);
+            disarm("poll");
+
+            store.upsert(definition);
+
+            assertThat(nextFireAtOf("poll")).isEqualTo(clock.instant().plus(Duration.ofMinutes(5)));
+        }
+
+        /** afterFinish com ocorrência viva do scheduler NÃO cura — armar criaria a sobreposição que fixed-delay promete não ter. */
+        @Test
+        void upsertDoesNotHealAnAfterFinishChainWithALiveSchedulerOccurrence() {
+            JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), true));
+            store.upsert(definition);
+            disarm("poll");
+            seedExecution("occ-1", "poll", "scheduler", "RUNNING");
+
+            store.upsert(definition);
+
+            assertThat(nextFireAtOf("poll")).isNull();
+        }
+
+        @Test
+        void upsertHealsAnAfterFinishChainWhoseOccurrencesAllFinished() {
+            JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), true));
+            store.upsert(definition);
+            disarm("poll");
+            seedExecution("occ-1", "poll", "scheduler", "SUCCEEDED");
+            seedExecution("man-1", "poll", "api:user", "RUNNING"); // execução manual não é a corrente
+
+            store.upsert(definition);
+
+            assertThat(nextFireAtOf("poll")).isEqualTo(clock.instant().plus(Duration.ofMinutes(5)));
+        }
+
+        @Test
+        void findDueRecurringReturnsDueJobsOldestFirstWithinTheLimit() {
+            store.upsert(definition("due-late", new IntervalSpec(Duration.ofMinutes(1), false)));
+            clock.advance(Duration.ofMinutes(2));
+            store.upsert(definition("due-recent", new IntervalSpec(Duration.ofMinutes(1), false)));
+            store.upsert(definition("not-due", new IntervalSpec(Duration.ofHours(6), false)));
+            store.upsert(definition("import-file", new OnDemandSpec()));
+            store.upsert(definition("paused", new IntervalSpec(Duration.ofMinutes(1), false)));
+            store.pause(JobKey.of("paused"));
+            store.upsert(definition("orphaned", new IntervalSpec(Duration.ofMinutes(1), false)));
+            store.markOrphaned(JobKey.of("orphaned"));
+            clock.advance(Duration.ofMinutes(2));
+
+            assertThat(store.findDueRecurring(clock.instant(), 10))
+                    .extracting(stored -> stored.definition().key().value())
+                    .containsExactly("due-late", "due-recent");
+            assertThat(store.findDueRecurring(clock.instant(), 1))
+                    .extracting(stored -> stored.definition().key().value())
+                    .containsExactly("due-late");
+        }
+
+        @Test
+        void findDueRecurringExposesTheStoredNextFireAt() {
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(1), false)));
+            Instant armedAt = clock.instant().plus(Duration.ofMinutes(1));
+            clock.advance(Duration.ofMinutes(2));
+
+            assertThat(store.findDueRecurring(clock.instant(), 10))
+                    .singleElement()
+                    .extracting(StoredJob::nextFireAt)
+                    .isEqualTo(armedAt);
+        }
+
+        /**
+         * Review ADR-0035 (lost update): preservar é NÃO escrever a coluna.
+         * A corrida real (CAS de disparo/rearme entre o snapshot e o UPDATE
+         * do upsert) não é reproduzível em teste unitário — o que se pina é
+         * o mecanismo que a elimina: com agenda inalterada, {@code
+         * next_fire_at} fica FORA do statement, então não existe escrita
+         * capaz de regredir um avanço concorrente.
+         */
+        @Test
+        void upsertOmitsTheTriggerColumnWhenPreserving() {
+            JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), false));
+            store.upsert(definition);
+            List<String> statements = new ArrayList<>();
+            JdbcJobStore spying = new JdbcJobStore(sqlRecordingDataSource(statements), clock);
+
+            spying.upsert(definition); // agenda inalterada — preserva
+
+            assertThat(statements)
+                    .filteredOn(sql -> sql.contains("UPDATE mohs_job_definitions"))
+                    .isNotEmpty()
+                    .noneMatch(sql -> sql.contains("next_fire_at"));
+        }
+
+        /** O contraponto: mudança de agenda escreve a coluna — reconfiguração explícita vence disparo concorrente (ADR-0035). */
+        @Test
+        void upsertWritesTheTriggerColumnWhenTheScheduleChanges() {
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
+            List<String> statements = new ArrayList<>();
+            JdbcJobStore spying = new JdbcJobStore(sqlRecordingDataSource(statements), clock);
+
+            spying.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(1), false)));
+
+            // o template já substituiu os parâmetros nomeados por ? quando o SQL chega no prepareStatement
+            assertThat(statements)
+                    .filteredOn(sql -> sql.contains("UPDATE mohs_job_definitions"))
+                    .anyMatch(sql -> sql.contains("next_fire_at = ?"));
+        }
+
+        /** DataSource que grava o SQL de todo prepareStatement — pass-through no resto (mesma técnica de proxy de JdbcExecutionStoreTest). */
+        private DataSource sqlRecordingDataSource(List<String> statements) {
+            InvocationHandler onDataSource = (_, method, args) -> {
+                Object result = method.invoke(dataSource, args);
+                if (result instanceof Connection connection) {
+                    return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                            (_, connectionMethod, connectionArgs) -> {
+                                if (connectionMethod.getName().equals("prepareStatement")
+                                        && connectionArgs != null && connectionArgs.length > 0
+                                        && connectionArgs[0] instanceof String sql) {
+                                    statements.add(sql);
+                                }
+                                return connectionMethod.invoke(connection, connectionArgs);
+                            });
+                }
+                return result;
+            };
+            return (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class}, onDataSource);
+        }
+
+        @Test
+        void armNextFireOnlyArmsAnUnarmedTrigger() {
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), true)));
+            Instant armedAt = nextFireAtOf("poll");
+
+            store.armNextFire(JobKey.of("poll"), clock.instant().plus(Duration.ofHours(1)));
+            assertThat(nextFireAtOf("poll")).isEqualTo(armedAt); // já armado — guard IS NULL protege
+
+            disarm("poll");
+            Instant rearmAt = clock.instant().plus(Duration.ofHours(1));
+            store.armNextFire(JobKey.of("poll"), rearmAt);
+            assertThat(nextFireAtOf("poll")).isEqualTo(rearmAt);
+        }
+
+        private void seedExecution(String id, String jobKey, String actor, String state) {
+            Timestamp now = JdbcTimestamps.toUtcTimestamp(clock.instant());
+            rawJdbc().update("""
+                    INSERT INTO mohs_executions (id, job_key, state, scheduled_at, actor, priority, payload, payload_type, created_at)
+                    VALUES (?, ?, ?, ?, ?, 20, '{}', 'java.util.LinkedHashMap', ?)
+                    """, id, jobKey, state, now, actor, now);
+        }
     }
 }

@@ -1,5 +1,7 @@
 package io.mohs.test;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
@@ -49,6 +51,71 @@ class InMemoryJobStoreTest {
         assertThat(stored.get().definition()).isEqualTo(definition);
         assertThat(stored.get().orphaned()).isFalse();
         assertThat(stored.get().paused()).isFalse();
+    }
+
+    /** ADR-0035 no test kit: upsert arma o trigger com o relógio determinístico; agenda inalterada preserva, alterada recalcula. */
+    @Test
+    void upsertArmsPreservesAndRecomputesTheTrigger() {
+        MutableClock clock = MutableClock.startingAt(Instant.parse("2026-08-15T12:00:00Z"));
+        InMemoryJobStore clocked = new InMemoryJobStore(clock);
+        JobDefinition every5m = JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofMinutes(5)));
+
+        clocked.upsert(every5m);
+        Instant armedAt = clocked.find(JobKey.of("poll")).orElseThrow().nextFireAt();
+        assertThat(armedAt).isEqualTo(Instant.parse("2026-08-15T12:05:00Z"));
+
+        clock.advance(Duration.ofMinutes(10));
+        clocked.upsert(every5m);
+        assertThat(clocked.find(JobKey.of("poll")).orElseThrow().nextFireAt()).isEqualTo(armedAt);
+
+        clocked.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        assertThat(clocked.find(JobKey.of("poll")).orElseThrow().nextFireAt())
+                .isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
+    }
+
+    /** ADR-0037 no test kit: nasce pausado no primeiro registro; depois disso, paused é do operador — redeploy nunca re-pausa. */
+    @Test
+    void startPausedAppliesOnlyAtBirth() {
+        JobDefinition dormant = JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused());
+        store.upsert(dormant);
+        assertThat(store.find(JobKey.of("dormant")).orElseThrow().paused()).isTrue();
+
+        store.resume(JobKey.of("dormant"));
+        store.upsert(dormant);
+        assertThat(store.find(JobKey.of("dormant")).orElseThrow().paused()).isFalse();
+    }
+
+    @Test
+    void findDueRecurringReturnsDueUnpausedJobsOldestFirstWithinTheLimit() {
+        MutableClock clock = MutableClock.startingAt(Instant.parse("2026-08-15T12:00:00Z"));
+        InMemoryJobStore clocked = new InMemoryJobStore(clock);
+        clocked.upsert(JobDefinition.of("due-late", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        clock.advance(Duration.ofMinutes(2));
+        clocked.upsert(JobDefinition.of("due-recent", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        clocked.upsert(JobDefinition.of("not-due", Handler.class, spec -> spec.every(Duration.ofHours(6))));
+        clocked.upsert(JobDefinition.of("import-file", Handler.class, spec -> spec.onDemand()));
+        clocked.upsert(JobDefinition.of("paused", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        clocked.pause(JobKey.of("paused"));
+        clock.advance(Duration.ofMinutes(2));
+
+        assertThat(clocked.findDueRecurring(clock.instant(), 10))
+                .extracting(stored -> stored.definition().key().value())
+                .containsExactly("due-late", "due-recent");
+        assertThat(clocked.findDueRecurring(clock.instant(), 1))
+                .extracting(stored -> stored.definition().key().value())
+                .containsExactly("due-late");
+    }
+
+    @Test
+    void armNextFireOnlyArmsAnUnarmedTrigger() {
+        store.upsert(definition("import-file")); // on-demand: nasce desarmado
+        Instant armAt = Instant.parse("2026-08-15T12:00:00Z");
+
+        store.armNextFire(JobKey.of("import-file"), armAt);
+        assertThat(store.find(JobKey.of("import-file")).orElseThrow().nextFireAt()).isEqualTo(armAt);
+
+        store.armNextFire(JobKey.of("import-file"), armAt.plusSeconds(60));
+        assertThat(store.find(JobKey.of("import-file")).orElseThrow().nextFireAt()).isEqualTo(armAt);
     }
 
     @Test

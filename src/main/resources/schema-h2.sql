@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
     paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
     retired         BOOLEAN      NOT NULL DEFAULT FALSE, -- aposentadoria explícita (Mohs.remove): some das leituras/claim, linha fica pela FK de mohs_executions (histórico preservado)
+    next_fire_at    TIMESTAMP,   -- estado do trigger (ADR-0035): NULL = nada a disparar (on-demand; fixed-delay aguardando o fim da execução anterior)
     created_at      TIMESTAMP    NOT NULL,
     updated_at      TIMESTAMP    NOT NULL
 );

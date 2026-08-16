@@ -197,7 +197,21 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 VALUES (:executionId, :number, :startedAt, :finishedAt, :outcome, :error)
                 """, attemptParams(request.id(), request.attempt()));
         jobStore.decrementRunningExecutions(request.jobKey());
+        rearmIfRequested(request, jobStore);
         return true;
+    }
+
+    /**
+     * ADR-0035: o rearme da corrente fixed-delay aterrissa na mesma
+     * transação do CAS que venceu — {@code jobStore} participa dela pelo
+     * mesmo mecanismo de {@code decrementRunningExecutions} (mesmo
+     * {@code DataSource}); o guard {@code IS NULL} é de
+     * {@link JobStore#armNextFire}.
+     */
+    private static void rearmIfRequested(ExecutionStore.CompletionRequest request, JobStore jobStore) {
+        if (request.rearmNextFireAt() != null) {
+            jobStore.armNextFire(request.jobKey(), request.rearmNextFireAt());
+        }
     }
 
     /**
@@ -238,7 +252,9 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 """, attemptParams);
 
         for (ExecutionId id : completedIds) {
-            jobStore.decrementRunningExecutions(byId.get(id.value()).jobKey());
+            ExecutionStore.CompletionRequest request = byId.get(id.value());
+            jobStore.decrementRunningExecutions(request.jobKey());
+            rearmIfRequested(request, jobStore);
         }
         return completedIds;
     }

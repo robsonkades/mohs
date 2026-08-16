@@ -36,6 +36,7 @@ CREATE TABLE mohs_job_definitions (
     orphaned        BIT           NOT NULL DEFAULT 0, -- operacional (ADR-0006)
     paused          BIT           NOT NULL DEFAULT 0, -- operacional (ADR-0006)
     retired         BIT           NOT NULL DEFAULT 0, -- aposentadoria explícita (Mohs.remove) — ver schema-h2.sql
+    next_fire_at    DATETIME2,    -- estado do trigger (ADR-0035) — ver schema-h2.sql
     created_at      DATETIME2     NOT NULL,
     updated_at      DATETIME2     NOT NULL
 );

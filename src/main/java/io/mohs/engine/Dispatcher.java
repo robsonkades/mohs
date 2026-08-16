@@ -7,11 +7,13 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeoutException;
 
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.task.AsyncTaskExecutor;
 
 import io.mohs.core.definition.JobDefinition;
+import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.event.AttemptFailed;
 import io.mohs.core.event.Cancelled;
 import io.mohs.core.event.ExecutionInterceptor;
@@ -111,7 +113,7 @@ public final class Dispatcher {
             failSignalAware(execution, definition, attemptNumber, firedAt, e, signal);
             return;
         }
-        succeed(execution, attemptNumber, firedAt);
+        succeed(execution, definition, attemptNumber, firedAt);
     }
 
     /**
@@ -128,7 +130,7 @@ public final class Dispatcher {
     private void failBeforeStart(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt,
             CancellationSignal.Reason reason) {
         switch (reason) {
-            case MANUAL -> cancelled(execution, attemptNumber, firedAt,
+            case MANUAL -> cancelled(execution, definition, attemptNumber, firedAt,
                     new IllegalStateException("cancel requested before the handler started"));
             case SHUTDOWN -> fail(execution, definition, attemptNumber, firedAt, new IllegalStateException(
                     "node shutdown: drain grace elapsed before attempt " + attemptNumber + " started"));
@@ -174,7 +176,7 @@ public final class Dispatcher {
             case TIMEOUT -> fail(execution, definition, attemptNumber, firedAt, timeoutError(definition, attemptNumber, error));
             case SHUTDOWN -> fail(execution, definition, attemptNumber, firedAt, new IllegalStateException(
                     "node shutdown: drain grace elapsed before attempt " + attemptNumber + " finished", error));
-            case MANUAL -> cancelled(execution, attemptNumber, firedAt, error);
+            case MANUAL -> cancelled(execution, definition, attemptNumber, firedAt, error);
         }
     }
 
@@ -190,12 +192,14 @@ public final class Dispatcher {
      * {@code CANCELLED} carrega {@code error} nulo (invariante de
      * {@code Attempt}) — a exceção com que o handler saiu vai no log.
      */
-    private void cancelled(Execution execution, int attemptNumber, Instant firedAt, Exception error) {
+    private void cancelled(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt, Exception error) {
         log.info("execution {} of job '{}' cancelled on attempt {} — cooperative cancellation honoured (handler exited with: {})",
                 execution.id().value(), execution.jobKey().value(), attemptNumber, error.toString());
-        Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.CANCELLED, null);
+        Instant finishedAt = clock.instant();
+        Attempt attempt = new Attempt(attemptNumber, firedAt, finishedAt, ExecutionState.CANCELLED, null);
         completeOrDiscard(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.CANCELLED),
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.CANCELLED,
+                        null, null, rearmNextFireAt(execution, definition, finishedAt)),
                 () -> events.publish(new Cancelled(execution.id(), execution.jobKey(), attemptNumber)));
     }
 
@@ -226,18 +230,37 @@ public final class Dispatcher {
         chain.proceed();
     }
 
-    private void succeed(Execution execution, int attemptNumber, Instant firedAt) {
-        Attempt attempt = new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.SUCCEEDED, null);
+    private void succeed(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt) {
+        Instant finishedAt = clock.instant();
+        Attempt attempt = new Attempt(attemptNumber, firedAt, finishedAt, ExecutionState.SUCCEEDED, null);
         completeOrDiscard(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED),
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED,
+                        null, null, rearmNextFireAt(execution, definition, finishedAt)),
                 () -> events.publish(new Succeeded(execution.id(), execution.jobKey(), attemptNumber)));
+    }
+
+    /**
+     * ADR-0035: conclusão terminal de ocorrência do scheduler em agenda
+     * fixed-delay rearma a corrente — {@code fim + interval}, "ancorado no
+     * fim da execução anterior" ao pé da letra. {@code null} nas demais
+     * agendas, em execução manual (não é a corrente — o guard
+     * {@code IS NULL} do rearme já protege, mas rearmar por ela anteciparia
+     * a série com a corrente ainda em voo) e sem definição em mãos
+     * ({@link #failBeforeDispatch} com definição removida — job retired
+     * não dispara, a ressurreição via upsert cura).
+     */
+    private static @Nullable Instant rearmNextFireAt(Execution execution, @Nullable JobDefinition definition, Instant finishedAt) {
+        return Execution.SCHEDULER_ACTOR.equals(execution.actor())
+                && definition != null && definition.schedule() instanceof IntervalSpec interval && interval.afterFinish()
+                ? finishedAt.plus(interval.interval())
+                : null;
     }
 
     /** Orçamento restante ({@link RetrySchedule}) decide: reagenda com backoff ou falha terminal ({@link #failTerminally}). */
     private void fail(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt, Exception error) {
         Optional<Instant> nextRetry = RetrySchedule.nextRetryAt(attemptNumber, definition.retries(), clock.instant());
         if (nextRetry.isEmpty()) {
-            failTerminally(execution, attemptNumber, firedAt, error, true);
+            failTerminally(execution, definition, attemptNumber, firedAt, error, true);
             return;
         }
         Instant retryAt = nextRetry.orElseThrow();
@@ -264,12 +287,15 @@ public final class Dispatcher {
      * disse "sem saldo"; falha terminal por natureza (pré-dispatch) publica
      * {@code false} — orçamento intacto não é orçamento esgotado.
      */
-    private void failTerminally(Execution execution, int attemptNumber, Instant firedAt, Exception error, boolean attemptsExhausted) {
+    private void failTerminally(Execution execution, @Nullable JobDefinition definition, int attemptNumber, Instant firedAt,
+            Exception error, boolean attemptsExhausted) {
         log.warn("execution {} of job '{}' failed on attempt {}", execution.id().value(),
                 execution.jobKey().value(), attemptNumber, error);
         Attempt attempt = failedAttempt(attemptNumber, firedAt, error);
+        // finishedAt do attempt é o "fim" que ancora o rearme fixed-delay (ADR-0035)
         completeOrDiscard(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED),
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED,
+                        null, null, rearmNextFireAt(execution, definition, Objects.requireNonNull(attempt.finishedAt()))),
                 () -> events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, attemptsExhausted)));
     }
 
@@ -305,12 +331,14 @@ public final class Dispatcher {
      * {@code retries} confiável pra ler, e payload ilegível não sara
      * repetindo a leitura do mesmo dado. {@code Failed.attemptsExhausted}
      * sai {@code false} — terminal por natureza, não por orçamento.
+     * {@code definition} nula quando o chamador não a tem (removida entre
+     * claim e dispatch) — sem rearme fixed-delay nesse caso (ADR-0035).
      */
-    void failBeforeDispatch(Execution execution, Exception cause) {
+    void failBeforeDispatch(Execution execution, @Nullable JobDefinition definition, Exception cause) {
         Objects.requireNonNull(execution, "execution");
         Objects.requireNonNull(cause, "cause");
         int attemptNumber = execution.attempts().size() + 1;
-        failTerminally(execution, attemptNumber, clock.instant(), cause, false);
+        failTerminally(execution, definition, attemptNumber, clock.instant(), cause, false);
     }
 
     /**

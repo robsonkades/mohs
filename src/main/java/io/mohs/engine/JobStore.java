@@ -1,5 +1,7 @@
 package io.mohs.engine;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -10,12 +12,25 @@ import io.mohs.core.job.JobKey;
 /**
  * Persistência de {@link JobDefinition} — Repository (PoEAA), porta que
  * {@code io.mohs.jdbc} implementa (Data Mapper). {@link #upsert} segue a
- * precisão da ADR-0006: só grava estado definicional, nunca
- * {@code orphaned}/{@code paused} (operacional, exclusivo de
- * {@link #markOrphaned}/{@link #pause}/{@link #resume}).
+ * precisão da ADR-0006: grava estado definicional; {@code orphaned}/
+ * {@code paused} (operacionais) têm duas exceções deliberadas — o upsert
+ * limpa {@code orphaned} (a própria fonte reaparecer é prova de vida,
+ * DUP-3) e, SÓ no primeiro registro, inicializa
+ * {@code paused = startPaused} (ADR-0037); depois do nascimento,
+ * {@code paused} é exclusivo de {@link #pause}/{@link #resume}.
  */
 public interface JobStore {
 
+    /**
+     * O upsert é o dono do estado inicial do trigger (ADR-0035): agenda
+     * nova ou alterada arma {@code nextFireAt} recalculado do relógio;
+     * agenda inalterada preserva o valor armazenado — preservar significa
+     * <b>não escrever</b> a coluna, nunca reescrever o valor lido (lost
+     * update contra o CAS do disparo e o rearme da conclusão); on-demand
+     * fica desarmado ({@code null}). Agenda recorrente inalterada com
+     * trigger desarmado é curada (rearmada) — para fixed-delay, só sem
+     * ocorrência viva do scheduler.
+     */
     JobDefinition upsert(JobDefinition definition);
 
     Optional<StoredJob> find(JobKey key);
@@ -40,6 +55,24 @@ public interface JobStore {
      * seria banda de leitura sem uso.
      */
     Stream<StoredJob> findAllAnnotationSourced();
+
+    /**
+     * Jobs recorrentes devidos (ADR-0035): {@code next_fire_at <= now},
+     * excluídos {@code paused}/{@code orphaned}/{@code retired} — pause
+     * bloqueia exatamente o trigger; on-demand continua valendo mesmo
+     * pausado. Mais antigo primeiro, no máximo {@code limit} (o excedente
+     * continua devido e drena nos próximos ticks).
+     */
+    List<StoredJob> findDueRecurring(Instant now, int limit);
+
+    /**
+     * Arma {@code next_fire_at} só se está desarmado ({@code NULL}) — as
+     * curas da corrente fixed-delay (ADR-0035): ocorrência cancelada ainda
+     * {@code ENQUEUED} não passa pelo caminho de conclusão que rearma, e
+     * este guard garante que a cura nunca clobra uma série que um upsert
+     * de mudança de agenda já rearmou.
+     */
+    void armNextFire(JobKey key, Instant nextFireAt);
 
     /** {@code ANNOTATION} presente no store, ausente do código (ADR-0006) — não dispara, não apaga histórico. */
     void markOrphaned(JobKey key);

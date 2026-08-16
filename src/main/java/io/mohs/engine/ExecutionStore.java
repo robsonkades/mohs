@@ -123,9 +123,19 @@ public interface ExecutionStore {
      * se ela ainda for a mesma (re-claim concorrente troca a lease e
      * protege a encarnação nova). {@code null} = sem fence — o caminho do
      * dispatcher, que conclui a própria encarnação que executou.
+     *
+     * <p>{@code rearmNextFireAt} rearma a corrente fixed-delay (ADR-0035):
+     * conclusão terminal de ocorrência {@code afterFinish} grava
+     * {@code next_fire_at = fim + interval} na mesma transação do CAS —
+     * mesmo racional do {@code retryAt}: escrita separada entre o CAS e um
+     * crash se perde. Quem calcula é quem tem a definição em mãos
+     * (Dispatcher/reaper); só se aplica se o CAS vencer, guardado por
+     * {@code next_fire_at IS NULL} ({@code JobStore#armNextFire}).
+     * {@code RETRY_SCHEDULED} nunca rearma — a corrente continua pelo
+     * retry.
      */
     record CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
-            @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt) {
+            @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt, @Nullable Instant rearmNextFireAt) {
 
         public CompletionRequest {
             Objects.requireNonNull(id, "id");
@@ -138,16 +148,25 @@ public interface ExecutionStore {
             if (newState != ExecutionState.RETRY_SCHEDULED && retryAt != null) {
                 throw new IllegalArgumentException("retryAt only applies to RETRY_SCHEDULED, got " + newState);
             }
+            if (newState == ExecutionState.RETRY_SCHEDULED && rearmNextFireAt != null) {
+                throw new IllegalArgumentException("rearmNextFireAt only applies to terminal states — the retry chain is still alive");
+            }
         }
 
         /** Conclusão sem retry (terminal) e sem fence — a forma do dispatcher pra sucesso/falha terminal. */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState) {
-            this(id, jobKey, attempt, newState, null, null);
+            this(id, jobKey, attempt, newState, null, null, null);
+        }
+
+        /** Forma com fence e sem rearme — quem conclui sem agenda {@code afterFinish} em mãos. */
+        public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
+                @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt) {
+            this(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt, null);
         }
 
         /** Retry sem fence — a forma do dispatcher pra falha com orçamento. */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, @Nullable Instant retryAt) {
-            this(id, jobKey, attempt, newState, retryAt, null);
+            this(id, jobKey, attempt, newState, retryAt, null, null);
         }
     }
 

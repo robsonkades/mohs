@@ -58,10 +58,10 @@ class MohsImplTest {
 
     @BeforeEach
     void setUp() {
-        jobStore = new InMemoryJobStore();
+        MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
+        jobStore = new InMemoryJobStore(clock);
         executionStore = mock(ExecutionStore.class);
         handlerRegistry = new HandlerRegistry();
-        MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
         mohs = new MohsImpl(jobStore, executionStore, handlerRegistry, clock, mock(MohsLifecycle.class));
     }
 
@@ -126,6 +126,40 @@ class MohsImplTest {
         assertThat(mohs.cancel(id)).isEmpty();
     }
 
+    /** ADR-0035: ocorrência do scheduler cancelada ainda pendente não passa pelo caminho de conclusão que rearma — o cancel cura a corrente fixed-delay aqui. */
+    @Test
+    void cancelOfAPendingSchedulerOccurrenceRearmsTheAfterFinishChain() {
+        JobStore jobStoreMock = mock(JobStore.class);
+        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, handlerRegistry,
+                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class));
+        ExecutionId id = ExecutionId.of("exec-1");
+        JobDefinition afterFinish = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
+        when(jobStoreMock.find(JobKey.of("poll"))).thenReturn(Optional.of(new StoredJob(afterFinish, false, false, 0, null)));
+        when(executionStore.cancelIfPending(id)).thenReturn(true);
+        when(executionStore.find(id)).thenReturn(Optional.of(
+                new Execution(id, JobKey.of("poll"), ExecutionState.CANCELLED, NOW, null, List.of(), "scheduler")));
+
+        mohsWithMockedJobStore.cancel(id);
+
+        verify(jobStoreMock).armNextFire(JobKey.of("poll"), NOW.plus(Duration.ofMinutes(5)));
+    }
+
+    /** Execução manual cancelada não é a corrente — nada a rearmar. */
+    @Test
+    void cancelOfAPendingManualExecutionDoesNotTouchTheChain() {
+        JobStore jobStoreMock = mock(JobStore.class);
+        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, handlerRegistry,
+                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class));
+        ExecutionId id = ExecutionId.of("exec-1");
+        when(executionStore.cancelIfPending(id)).thenReturn(true);
+        when(executionStore.find(id)).thenReturn(Optional.of(
+                new Execution(id, JobKey.of("poll"), ExecutionState.CANCELLED, NOW, null, List.of(), "api:user")));
+
+        mohsWithMockedJobStore.cancel(id);
+
+        verify(jobStoreMock, never()).armNextFire(any(), any());
+    }
+
     @Test
     void findJobReturnsTheStoredDefinition() {
         jobStore.upsert(onDemand("welcome-email"));
@@ -144,8 +178,9 @@ class MohsImplTest {
         assertThat(mohs.findJob(JobKey.of("welcome-email")).orElseThrow().nextFireAt()).isNull();
     }
 
+    /** ADR-0035: o snapshot lê o estado REAL do trigger (armado no upsert), não um recálculo por cima do relógio a cada leitura. */
     @Test
-    void intervalJobsComputeNextFireAtFromNow() {
+    void intervalJobsExposeTheStoredNextFireAt() {
         jobStore.upsert(everyMinute("digest"));
 
         Instant nextFireAt = mohs.findJob(JobKey.of("digest")).orElseThrow().nextFireAt();

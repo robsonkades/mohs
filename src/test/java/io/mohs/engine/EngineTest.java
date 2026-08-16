@@ -57,6 +57,7 @@ import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.jdbc.JdbcNodeStore;
 import io.mohs.jdbc.JdbcReaper;
 import io.mohs.jdbc.JdbcTimestamps;
+import io.mohs.jdbc.JdbcTriggerFirer;
 import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
@@ -122,8 +123,8 @@ class EngineTest {
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
-        return new Engine(claimer, dispatcher, executionStore, jobStore, nodeStoreOverride, reaper, clock,
-                settings, tickScheduler, runnerRegistry);
+        return new Engine(claimer, dispatcher, executionStore, jobStore, nodeStoreOverride, reaper,
+                new JdbcTriggerFirer(dataSource, executionStore), clock, settings, tickScheduler, runnerRegistry);
     }
 
     private static RunnerRegistry defaultRunnerRegistry() {
@@ -142,7 +143,8 @@ class EngineTest {
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
-        return new Engine(claimer, dispatcher, executionStoreOverride, jobStoreOverride, nodeStoreOverride, reaper, clock,
+        return new Engine(claimer, dispatcher, executionStoreOverride, jobStoreOverride, nodeStoreOverride, reaper,
+                new JdbcTriggerFirer(dataSource, executionStore), clock,
                 new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), tickScheduler, defaultRunnerRegistry());
     }
 
@@ -189,6 +191,41 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+    }
+
+    /** ADR-0035, ponta a ponta: trigger devido materializa a ocorrência no tick, o claim do MESMO tick reivindica e o dispatch executa — e o trigger avança na série. */
+    @Test
+    void recurringJobFiresWhenDueAndAdvancesTheTrigger() throws Exception {
+        jobStore.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofSeconds(10))));
+        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> {
+        });
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        // o disparo armado no upsert (NOW+10s) fica devido, 5s de atraso — dentro do threshold, dispara normal
+        clock.advance(Duration.ofSeconds(15));
+        Engine engine = newEngine(nodeStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(succeeded.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+
+        // exatamente uma ocorrência (relógio congelado em NOW+15s: a próxima, NOW+20s, ainda não é devida)
+        String actor = rawJdbcTemplate.queryForObject(
+                "SELECT actor FROM mohs_executions WHERE job_key = 'poll'", String.class);
+        assertThat(actor).isEqualTo(Execution.SCHEDULER_ACTOR);
+        Instant scheduledAt = JdbcTimestamps.fromUtcTimestamp(rawJdbcTemplate.queryForObject(
+                "SELECT scheduled_at FROM mohs_executions WHERE job_key = 'poll'", Timestamp.class));
+        assertThat(scheduledAt).isEqualTo(NOW.plusSeconds(10)); // identidade da ocorrência, não o instante da inserção
+        Instant nextFireAt = JdbcTimestamps.fromUtcTimestamp(rawJdbcTemplate.queryForObject(
+                "SELECT next_fire_at FROM mohs_job_definitions WHERE job_key = 'poll'", Timestamp.class));
+        assertThat(nextFireAt).isEqualTo(NOW.plusSeconds(20));
     }
 
     @Test
@@ -990,6 +1027,16 @@ class EngineTest {
         @Override
         public Stream<StoredJob> findAllAnnotationSourced() {
             return delegate.findAllAnnotationSourced();
+        }
+
+        @Override
+        public List<StoredJob> findDueRecurring(Instant now, int limit) {
+            return delegate.findDueRecurring(now, limit);
+        }
+
+        @Override
+        public void armNextFire(JobKey key, Instant nextFireAt) {
+            delegate.armNextFire(key, nextFireAt);
         }
 
         @Override

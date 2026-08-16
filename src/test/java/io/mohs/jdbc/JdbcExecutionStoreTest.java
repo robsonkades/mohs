@@ -12,7 +12,10 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -23,6 +26,7 @@ import java.util.stream.IntStream;
 import javax.sql.DataSource;
 
 import org.h2.jdbcx.JdbcDataSource;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
@@ -104,6 +108,15 @@ class JdbcExecutionStoreTest {
         Optional<Execution> found = store.find(ExecutionId.of("019abc-1"));
 
         assertThat(found).contains(execution);
+    }
+
+    /** Caracterização: o shape que o REST envia hoje pra job sem payload — Collections.unmodifiableMap — round-tripa? */
+    @Test
+    void findPayloadRoundTripsAnUnmodifiableMapPayload() {
+        store.insert(execution("019abc-wrap", "welcome-email"),
+                Collections.unmodifiableMap(new LinkedHashMap<String, Object>()));
+
+        assertThat(store.findPayload(ExecutionId.of("019abc-wrap"))).contains(Map.of());
     }
 
     @Test
@@ -497,6 +510,78 @@ class JdbcExecutionStoreTest {
                 ExecutionId.of("x"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, clock.instant()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("only applies to RETRY_SCHEDULED");
+    }
+
+    /** ADR-0035: rearme fixed-delay só em estado terminal — com retry a corrente ainda está viva. */
+    @Test
+    void completionRequestRejectsRearmOnARetry() {
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+
+        assertThatThrownBy(() -> new ExecutionStore.CompletionRequest(
+                ExecutionId.of("x"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_SCHEDULED,
+                clock.instant(), null, clock.instant()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("rearmNextFireAt");
+    }
+
+    /** ADR-0035: o rearme da corrente fixed-delay aterrissa na mesma transação do CAS de conclusão. */
+    @Test
+    void completeRearmsAnUnarmedTriggerWhenRequested() {
+        JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
+        disarmTrigger("welcome-email");
+        seedRunningExecution("019abc-rearm-1", "welcome-email");
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.SUCCEEDED, null);
+        Instant rearmAt = clock.instant().plusSeconds(300);
+
+        boolean completed = store.complete(new ExecutionStore.CompletionRequest(
+                ExecutionId.of("019abc-rearm-1"), JobKey.of("welcome-email"), attempt, ExecutionState.SUCCEEDED,
+                null, null, rearmAt), jobStore);
+
+        assertThat(completed).isTrue();
+        assertThat(nextFireAtOf("welcome-email")).isEqualTo(rearmAt);
+    }
+
+    /** Guard IS NULL do rearme: um trigger já armado (upsert de mudança de agenda no meio do voo) nunca é clobrado pela conclusão. */
+    @Test
+    void completeDoesNotOverwriteAnAlreadyArmedTrigger() {
+        JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Instant armedAt = clock.instant().plusSeconds(60);
+        new JdbcTemplate(dataSource).update("UPDATE mohs_job_definitions SET next_fire_at = ? WHERE job_key = ?",
+                JdbcTimestamps.toUtcTimestamp(armedAt), "welcome-email");
+        seedRunningExecution("019abc-rearm-2", "welcome-email");
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.SUCCEEDED, null);
+
+        store.complete(new ExecutionStore.CompletionRequest(
+                ExecutionId.of("019abc-rearm-2"), JobKey.of("welcome-email"), attempt, ExecutionState.SUCCEEDED,
+                null, null, clock.instant().plusSeconds(300)), jobStore);
+
+        assertThat(nextFireAtOf("welcome-email")).isEqualTo(armedAt);
+    }
+
+    /** O caminho em lote do reaper rearma do mesmo jeito que o unitário. */
+    @Test
+    void completeAllRearmsWhenRequested() {
+        JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
+        disarmTrigger("welcome-email");
+        seedRunningExecution("019abc-rearm-3", "welcome-email");
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+        Instant rearmAt = clock.instant().plusSeconds(300);
+
+        store.completeAll(List.of(new ExecutionStore.CompletionRequest(
+                ExecutionId.of("019abc-rearm-3"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED,
+                null, null, rearmAt)), jobStore);
+
+        assertThat(nextFireAtOf("welcome-email")).isEqualTo(rearmAt);
+    }
+
+    private void disarmTrigger(String jobKey) {
+        new JdbcTemplate(dataSource).update("UPDATE mohs_job_definitions SET next_fire_at = NULL WHERE job_key = ?", jobKey);
+    }
+
+    private @Nullable Instant nextFireAtOf(String jobKey) {
+        Timestamp stored = new JdbcTemplate(dataSource).queryForObject(
+                "SELECT next_fire_at FROM mohs_job_definitions WHERE job_key = ?", Timestamp.class, jobKey);
+        return stored == null ? null : JdbcTimestamps.fromUtcTimestamp(stored);
     }
 
     /** ADR-0025: liberar a vaga de concorrência é parte da mesma operação, não um passo separado que o chamador pode esquecer. */

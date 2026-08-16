@@ -215,4 +215,45 @@ class JdbcReaperTest {
         assertThat(reclaimed.get(0).attemptsExhausted()).isTrue();
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
     }
+
+    /** ADR-0035: reclaim terminal de ocorrência do scheduler em job fixed-delay rearma a corrente — sem isto, morte de nó mataria a série em silêncio. */
+    @Test
+    void terminalReclaimOfASchedulerOccurrenceRearmsTheAfterFinishChain() {
+        jobStore.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5))));
+        rawJdbcTemplate.update("UPDATE mohs_job_definitions SET next_fire_at = NULL WHERE job_key = 'poll'");
+        seedRunningSchedulerOccurrence("exec-1", "poll", NOW.minusSeconds(1));
+
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
+
+        assertThat(reclaimed).hasSize(1);
+        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.FAILED);
+        Timestamp rearmedAt = rawJdbcTemplate.queryForObject(
+                "SELECT next_fire_at FROM mohs_job_definitions WHERE job_key = ?", Timestamp.class, "poll");
+        assertThat(JdbcTimestamps.fromUtcTimestamp(rearmedAt)).isEqualTo(NOW.plus(Duration.ofMinutes(5)));
+    }
+
+    /** Reclaim com orçamento não rearma — a corrente continua viva pelo retry (mesma regra do Dispatcher). */
+    @Test
+    void aBudgetedReclaimOfASchedulerOccurrenceDoesNotRearm() {
+        jobStore.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)).retries(2)));
+        rawJdbcTemplate.update("UPDATE mohs_job_definitions SET next_fire_at = NULL WHERE job_key = 'poll'");
+        seedRunningSchedulerOccurrence("exec-1", "poll", NOW.minusSeconds(1));
+
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
+
+        assertThat(reclaimed).hasSize(1);
+        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        Timestamp nextFireAt = rawJdbcTemplate.queryForObject(
+                "SELECT next_fire_at FROM mohs_job_definitions WHERE job_key = ?", Timestamp.class, "poll");
+        assertThat(nextFireAt).isNull();
+    }
+
+    private void seedRunningSchedulerOccurrence(String id, String jobKey, Instant leaseExpiresAt) {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_executions (
+                    id, job_key, state, scheduled_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
+                VALUES (?, ?, 'RUNNING', ?, 'scheduler', 'node-a', ?, '{}', 'java.lang.Object', ?)
+                """, id, jobKey, JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(60)),
+                JdbcTimestamps.toUtcTimestamp(leaseExpiresAt), JdbcTimestamps.toUtcTimestamp(NOW.minusSeconds(60)));
+    }
 }

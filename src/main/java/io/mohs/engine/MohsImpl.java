@@ -1,7 +1,6 @@
 package io.mohs.engine;
 
 import java.time.Clock;
-import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -20,6 +19,7 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.job.JobRef;
+import io.mohs.core.schedule.IntervalSpec;
 
 /**
  * {@link Mohs} sobre {@link JobStore}/{@link ExecutionStore} — {@code
@@ -45,7 +45,6 @@ public final class MohsImpl implements Mohs {
     private final HandlerRegistry handlerRegistry;
     private final Clock clock;
     private final MohsLifecycle lifecycle;
-    private final NextFireCalculator nextFireCalculator = new NextFireCalculator();
 
     public MohsImpl(JobStore jobStore, ExecutionStore executionStore, HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
@@ -143,11 +142,43 @@ public final class MohsImpl implements Mohs {
     @Override
     public Optional<Execution> cancel(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
-        if (!executionStore.cancelIfPending(executionId) && !executionStore.requestCancellation(executionId)
-                && !executionStore.cancelIfPending(executionId)) {
-            executionStore.requestCancellation(executionId);
+        boolean cancelledPending = executionStore.cancelIfPending(executionId);
+        if (!cancelledPending && !executionStore.requestCancellation(executionId)) {
+            cancelledPending = executionStore.cancelIfPending(executionId);
+            if (!cancelledPending) {
+                executionStore.requestCancellation(executionId);
+            }
         }
-        return executionStore.find(executionId);
+        Optional<Execution> result = executionStore.find(executionId);
+        if (cancelledPending) {
+            result.ifPresent(this::rearmAfterFinishChain);
+        }
+        return result;
+    }
+
+    /**
+     * ADR-0035 — cura da corrente fixed-delay: ocorrência do scheduler
+     * cancelada ainda pendente não passa pelo caminho de conclusão que
+     * rearma o trigger; sem isto a corrente morreria em silêncio (o
+     * {@code next_fire_at} ficou {@code NULL} aguardando um fim que nunca
+     * vem). Só ocorrência do scheduler — execução manual cancelada não é
+     * a corrente. O guard {@code IS NULL} de {@link JobStore#armNextFire}
+     * protege contra rearmar uma série já viva.
+     *
+     * <p>Janela residual aceita: crash entre {@code cancelIfPending} e este
+     * rearme deixa a corrente desarmada — a cura de {@code NULL} do upsert
+     * (boot/define) rearma; mesma postura da janela residual documentada na
+     * ADR-0033. Transacionar exigiria vazar a fronteira de storage pra cá.
+     */
+    private void rearmAfterFinishChain(Execution execution) {
+        if (!Execution.SCHEDULER_ACTOR.equals(execution.actor())) {
+            return;
+        }
+        jobStore.find(execution.jobKey()).ifPresent(stored -> {
+            if (stored.definition().schedule() instanceof IntervalSpec interval && interval.afterFinish()) {
+                jobStore.armNextFire(execution.jobKey(), clock.instant().plus(interval.interval()));
+            }
+        });
     }
 
     @Override
@@ -170,8 +201,13 @@ public final class MohsImpl implements Mohs {
         return lifecycle;
     }
 
+    /**
+     * {@code nextFireAt} é o estado real do trigger (ADR-0035), não um
+     * recálculo por cima do relógio — que mentia pra fixed-delay (o
+     * próximo disparo é desconhecido até a execução terminar) e ignorava
+     * misfire. Pausado exibe {@code null}: pausa bloqueia o trigger.
+     */
     private JobSnapshot toSnapshot(StoredJob stored) {
-        Instant nextFireAt = stored.paused() ? null : nextFireCalculator.nextFireAfter(stored.definition().schedule(), clock.instant()).orElse(null);
-        return new JobSnapshot(stored.definition(), stored.paused(), nextFireAt);
+        return new JobSnapshot(stored.definition(), stored.paused(), stored.paused() ? null : stored.nextFireAt());
     }
 }

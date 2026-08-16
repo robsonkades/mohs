@@ -2,7 +2,9 @@ package io.mohs.engine;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -36,6 +38,8 @@ import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.execution.Priority;
+import io.mohs.core.job.JobKey;
 
 /**
  * O motor: liga {@link Claimer}, {@link Dispatcher}, {@link NodeStore} e
@@ -82,12 +86,23 @@ public final class Engine implements MohsLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(Engine.class);
 
+    /**
+     * Teto de triggers disparados por tick — mesma razão do
+     * {@code RECLAIM_LIMIT} do reaper: um boot depois de downtime longo
+     * não vira uma varredura sem limite; o excedente continua devido e
+     * drena nos ticks seguintes, mais antigo primeiro
+     * ({@code findDueRecurring} ordena por {@code next_fire_at}).
+     */
+    static final int FIRE_LIMIT = 500;
+
     private final Claimer claimer;
     private final Dispatcher dispatcher;
     private final ExecutionStore executionStore;
     private final JobStore jobStore;
     private final NodeStore nodeStore;
     private final Reaper reaper;
+    private final TriggerFirer triggerFirer;
+    private final FiringPlanner firingPlanner;
     private final Clock clock;
     private final EngineSettings settings;
     private final String nodeId;
@@ -122,6 +137,7 @@ public final class Engine implements MohsLifecycle {
             JobStore jobStore,
             NodeStore nodeStore,
             Reaper reaper,
+            TriggerFirer triggerFirer,
             Clock clock,
             EngineSettings settings,
             TaskScheduler tickScheduler,
@@ -133,8 +149,10 @@ public final class Engine implements MohsLifecycle {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
         this.reaper = Objects.requireNonNull(reaper, "reaper");
+        this.triggerFirer = Objects.requireNonNull(triggerFirer, "triggerFirer");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.settings = Objects.requireNonNull(settings, "settings");
+        this.firingPlanner = new FiringPlanner(new NextFireCalculator(), settings.misfireThreshold());
         this.tickScheduler = Objects.requireNonNull(tickScheduler, "tickScheduler");
         this.runnerRegistry = Objects.requireNonNull(runnerRegistry, "runnerRegistry");
         this.nodeId = UUIDv7.randomUUID().toString();
@@ -291,6 +309,7 @@ public final class Engine implements MohsLifecycle {
             for (Reaper.Reclaimed reclaimed : reaper.reclaimExpired()) {
                 publishReclaimOutcome(reclaimed);
             }
+            fireDueTriggers();
             List<Execution> claimed = claimer.claim(nodeId, settings.batchSize());
             for (Execution execution : claimed) {
                 submitDispatch(execution);
@@ -298,6 +317,72 @@ public final class Engine implements MohsLifecycle {
         } catch (RuntimeException e) {
             log.error("engine tick failed — will retry next tick", e);
         }
+    }
+
+    /**
+     * ADR-0035: a etapa "trigger devido → aquisição" — ANTES do claim, no
+     * mesmo tick, pra ocorrência recém-materializada já ser reivindicável
+     * sem esperar o próximo poll. {@link FiringPlanner} decide o que a
+     * política de misfire do job dispara; {@link TriggerFirer#fire} é o
+     * CAS transacional que resolve a corrida entre nós — perder é rotina,
+     * não erro. Falha de um job (ex.: cron irrealizável) não derruba a
+     * varredura dos demais — mesma postura de {@link #submitDispatch}.
+     */
+    private void fireDueTriggers() {
+        Instant now = clock.instant();
+        for (StoredJob job : jobStore.findDueRecurring(now, FIRE_LIMIT)) {
+            JobDefinition definition = job.definition();
+            try {
+                // dentro do try: contrato violado por um store custom falha SÓ este job, não a varredura nem o claim do tick
+                Instant observed = Objects.requireNonNull(job.nextFireAt(), "findDueRecurring returned an unarmed trigger");
+                fireTrigger(definition, observed, now);
+            } catch (RuntimeException e) {
+                log.error("firing job '{}' failed — will retry next tick", definition.key().value(), e);
+            }
+        }
+    }
+
+    /** Um trigger devido: o plano da política de misfire vira ocorrências materializadas pelo CAS — perder o CAS sai calado (ver {@link #fireDueTriggers}). */
+    private void fireTrigger(JobDefinition definition, Instant observed, Instant now) {
+        FiringPlanner.Plan plan = firingPlanner.plan(definition.schedule(), definition.misfire(), observed, now);
+        List<Execution> occurrences = plan.occurrences().stream()
+                .map(occurrenceAt -> newOccurrence(definition.key(), occurrenceAt))
+                .toList();
+        if (!triggerFirer.fire(definition.key(), observed, plan.nextFireAt(), occurrences, emptyPayload())) {
+            return;
+        }
+        if (plan.misfired()) {
+            log.warn("job '{}' missed occurrence(s) — next_fire_at was {} at tick time {}; misfire policy {} applied: "
+                    + "{} occurrence(s) materialized, next fire at {}",
+                    definition.key().value(), observed, now, definition.misfire(), occurrences.size(), plan.nextFireAt());
+        } else {
+            log.debug("job '{}' fired {} occurrence(s), next fire at {}",
+                    definition.key().value(), occurrences.size(), plan.nextFireAt());
+        }
+    }
+
+    /**
+     * O payload vazio das ocorrências do scheduler — classe concreta de
+     * propósito, nunca {@code Map.of()}: {@code payload_type} persiste a
+     * classe exata do payload, e a releitura
+     * ({@code ExecutionStore#findPayload}) precisa de um tipo que o Jackson
+     * instancie de volta.
+     */
+    private static LinkedHashMap<String, Object> emptyPayload() {
+        return new LinkedHashMap<>();
+    }
+
+    /**
+     * Ocorrência materializada pelo trigger: {@code scheduled_at} = o
+     * instante da ocorrência (identidade do disparo, não o instante da
+     * inserção), {@code actor} distingue a corrente do scheduler de
+     * disparos manuais, payload vazio — job recorrente não tem fonte de
+     * payload (validação de boot pra handler que exige um: §5.13,
+     * pendente).
+     */
+    private static Execution newOccurrence(JobKey jobKey, Instant occurrenceAt) {
+        return new Execution(ExecutionId.of(UUIDv7.randomUUIDString()), jobKey, ExecutionState.ENQUEUED,
+                occurrenceAt, null, List.of(), Execution.SCHEDULER_ACTOR, Priority.NORMAL, null);
     }
 
     /**
@@ -525,7 +610,7 @@ public final class Engine implements MohsLifecycle {
             return;
         }
         if (storedJob.isEmpty()) {
-            failBeforeDispatchGuarded(execution, new IllegalStateException(
+            failBeforeDispatchGuarded(execution, null, new IllegalStateException(
                     "job definition for " + execution.jobKey() + " was removed after this execution was claimed (e.g. Mohs.remove between claim and dispatch)"));
             return;
         }
@@ -535,7 +620,7 @@ public final class Engine implements MohsLifecycle {
         try {
             executor = runnerRegistry.resolve(definition.runner());
         } catch (NoSuchElementException e) {
-            failBeforeDispatchGuarded(execution, new IllegalStateException(
+            failBeforeDispatchGuarded(execution, definition, new IllegalStateException(
                     "runner could not be resolved: " + Objects.requireNonNullElse(e.getMessage(), e.toString()), e));
             return;
         }
@@ -618,9 +703,9 @@ public final class Engine implements MohsLifecycle {
      * o resto do lote ainda precisa ser despachado — loga e deixa esta
      * execução RUNNING pro {@link Reaper} reclamá-la na expiração da lease.
      */
-    private void failBeforeDispatchGuarded(Execution execution, IllegalStateException error) {
+    private void failBeforeDispatchGuarded(Execution execution, @Nullable JobDefinition definition, IllegalStateException error) {
         try {
-            dispatcher.failBeforeDispatch(execution, error);
+            dispatcher.failBeforeDispatch(execution, definition, error);
         } catch (RuntimeException e) {
             log.warn("could not record the terminal failure of execution {} ({}) — will sit RUNNING until the reaper reclaims it on lease expiry",
                     execution.id(), error.getMessage(), e);
@@ -642,7 +727,7 @@ public final class Engine implements MohsLifecycle {
                     .findPayload(execution.id())
                     .orElseThrow(() -> new IllegalStateException("execution " + execution.id() + " vanished before payload could be read — should be unreachable"));
         } catch (RuntimeException e) {
-            failUnreadablePayload(execution, e);
+            failUnreadablePayload(execution, definition, e);
             return;
         }
         dispatcher.dispatch(execution, definition, payload, signal);
@@ -659,9 +744,9 @@ public final class Engine implements MohsLifecycle {
      * {@code Attempt}/publicado no evento, contexto que só {@link Engine}
      * tem (não é falha de handler nem de interceptor).
      */
-    private void failUnreadablePayload(Execution execution, RuntimeException cause) {
+    private void failUnreadablePayload(Execution execution, JobDefinition definition, RuntimeException cause) {
         String message = "payload could not be read: " + Objects.requireNonNullElse(cause.getMessage(), cause.toString());
-        dispatcher.failBeforeDispatch(execution, new IllegalStateException(message, cause));
+        dispatcher.failBeforeDispatch(execution, definition, new IllegalStateException(message, cause));
     }
 
     /** Package-private — só {@code EngineTest} usa isto pra confirmar a identidade do node por trás de heartbeat/claim. */

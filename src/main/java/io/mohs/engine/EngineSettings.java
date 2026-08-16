@@ -18,12 +18,21 @@ import org.jspecify.annotations.Nullable;
  * submit→agora em tempo monotônico: espera na fila de um runner CPU
  * conta como runtime — semântica deliberada até o interrupt por
  * timeout de job (próximo ciclo) trazer um carimbo do início real.
+ * {@code misfireThreshold} (ADR-0035) separa disparo atrasado de disparo
+ * perdido: ocorrência devida dentro do threshold dispara atrasada em
+ * qualquer política; mais velha que ele responde ao {@code Misfire} do
+ * job.
  */
-public record EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl, @Nullable Duration watchdogTimeout) {
+public record EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl, @Nullable Duration watchdogTimeout,
+        Duration misfireThreshold) {
+
+    /** Mesmo default de {@code mohs.engine.misfire-threshold} ({@code MohsProperties}) — precedente Quartz. */
+    public static final Duration DEFAULT_MISFIRE_THRESHOLD = Duration.ofSeconds(60);
 
     public EngineSettings {
         Objects.requireNonNull(pollInterval, "pollInterval");
         Objects.requireNonNull(leaseTtl, "leaseTtl");
+        Objects.requireNonNull(misfireThreshold, "misfireThreshold");
         if (batchSize <= 0) {
             throw new IllegalArgumentException("batchSize must be positive");
         }
@@ -39,9 +48,18 @@ public record EngineSettings(Duration pollInterval, int batchSize, Duration leas
                     + ") must be greater than mohs.engine.lease-ttl (" + leaseTtl
                     + ") — the bound is the ceiling ON TOP of renewal (ADR-0012), not a shorter lease");
         }
+        if (!misfireThreshold.isPositive()) {
+            throw new IllegalArgumentException("mohs.engine.misfire-threshold must be positive, got " + misfireThreshold
+                    + " — a non-positive threshold turns every normally-late fire into a misfire");
+        }
     }
 
-    /** Sem Watchdog Bound — renovação sem teto (default da ADR-0012). */
+    /** Threshold de misfire default (ADR-0035). */
+    public EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl, @Nullable Duration watchdogTimeout) {
+        this(pollInterval, batchSize, leaseTtl, watchdogTimeout, DEFAULT_MISFIRE_THRESHOLD);
+    }
+
+    /** Sem Watchdog Bound — renovação sem teto (default da ADR-0012) — e threshold de misfire default (ADR-0035). */
     public EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl) {
         this(pollInterval, batchSize, leaseTtl, null);
     }

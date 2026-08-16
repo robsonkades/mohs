@@ -37,12 +37,14 @@ import io.mohs.engine.MohsImpl;
 import io.mohs.engine.NodeStore;
 import io.mohs.engine.Reaper;
 import io.mohs.engine.RunnerRegistry;
+import io.mohs.engine.TriggerFirer;
 import io.mohs.jdbc.DatabaseClock;
 import io.mohs.jdbc.JdbcClaimer;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.jdbc.JdbcNodeStore;
 import io.mohs.jdbc.JdbcReaper;
+import io.mohs.jdbc.JdbcTriggerFirer;
 import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.jdbc.dialect.JdbcDialect;
 import io.mohs.jdbc.dialect.MySqlJdbcDialect;
@@ -132,8 +134,7 @@ public class MohsAutoConfiguration {
          */
         @Bean(defaultCandidate = false)
         @Qualifier("mohsClock")
-        Clock mohsClock(MohsProperties properties, DataSource dataSource,
-                @Qualifier("mohsClockSyncScheduler") ThreadPoolTaskScheduler mohsClockSyncScheduler) {
+        Clock mohsClock(MohsProperties properties, DataSource dataSource, @Qualifier("mohsClockSyncScheduler") ThreadPoolTaskScheduler mohsClockSyncScheduler) {
             DatabaseClock clock = new DatabaseClock(dataSource, properties.time().skewWarnThreshold());
             clock.sync();
             mohsClockSyncScheduler.scheduleWithFixedDelay(clock::sync, properties.time().syncInterval());
@@ -211,6 +212,11 @@ public class MohsAutoConfiguration {
         return new JdbcReaper(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore);
     }
 
+    @Bean
+    public TriggerFirer mohsTriggerFirer(DataSource dataSource, ExecutionStore mohsExecutionStore) {
+        return new JdbcTriggerFirer(dataSource, mohsExecutionStore);
+    }
+
     /** Nasce vazio — {@link MohsJobScanner} povoa em {@code afterSingletonsInstantiated}, antes do {@link Engine} iniciar. */
     @Bean
     public HandlerRegistry mohsHandlerRegistry() {
@@ -238,14 +244,17 @@ public class MohsAutoConfiguration {
             JobStore mohsJobStore,
             NodeStore mohsNodeStore,
             Reaper mohsReaper,
+            TriggerFirer mohsTriggerFirer,
             @Qualifier("mohsClock") Clock mohsClock,
             MohsProperties properties,
             @Qualifier("mohsTickScheduler") ThreadPoolTaskScheduler mohsTickScheduler,
             RunnerRegistry mohsRunnerRegistry
     ) {
-        return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper, mohsClock,
+        return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper,
+                mohsTriggerFirer, mohsClock,
                 new EngineSettings(properties.engine().pollInterval(), properties.engine().batchSize(),
-                        properties.engine().leaseTtl(), properties.engine().watchdogTimeout()),
+                        properties.engine().leaseTtl(), properties.engine().watchdogTimeout(),
+                        properties.engine().misfireThreshold()),
                 mohsTickScheduler, mohsRunnerRegistry);
     }
 
