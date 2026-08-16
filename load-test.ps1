@@ -7,7 +7,7 @@ $headers = @{
 $body = '{"payload":{}}'
 
 $totalRequests = 10000
-$maxConcurrency = 500
+$maxConcurrency = 1000
 
 $results = 1..$totalRequests | ForEach-Object -Parallel {
 

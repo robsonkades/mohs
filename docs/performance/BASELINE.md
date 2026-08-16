@@ -492,6 +492,78 @@ fim-a-fim nessa escala não foi medido nesta rodada (o throughput de
 jobs completos depende também do caminho de dispatch, fora do escopo
 deste harness).
 
+## Tuning fim a fim no Postgres (DBTUNE-17/18 + ADR-0039) — 2026-08-16
+
+Primeira medição de vazão FIM A FIM (schedule → claim → dispatch →
+conclusão persistida), meta declarada de 4.000 exec/s. Ambiente: node
+único no host (Windows), Postgres 18.4 `postgres:latest` em Docker
+Desktop, handler trivial (log). Cenário: 10k invocações via REST
+(`load-test.ps1`, pwsh, 500 conexões) e drains de 50k linhas ENQUEUED
+semeadas por SQL (forma idêntica à do REST). Medição pela janela de
+timestamps de `mohs_attempts` (`min(started_at) → max(finished_at)` do
+seed), nunca por latência de cliente; atribuição por amostragem de
+`pg_stat_activity` (wait events) durante drain ativo, deltas de
+`pg_stat_database`/`pg_stat_wal`, EXPLAIN ANALYZE dos statements
+quentes e pgbench de controle na mesma instância.
+
+### Rodadas (drains de 50k, exceto onde indicado)
+
+| Rodada | Mudança | Vazão (exec/s) |
+|---|---|---:|
+| 0 | defaults (`poll=5s`, `batch=50`) | **10,0** (teto aritmético da config) |
+| 1 | config: `poll=100ms`, `batch=500`, `dispatch=256`, Hikari 100 | 985,9 · 1106,2 |
+| 1b | + DBTUNE-17 (índice, abaixo), mesmo código | 1243,0 · 1297,7 |
+| 2 | + DBTUNE-18 (memoização de definição por tick) | claim 3,3k/s, mas **56.187 rejeições** do runner e 11.666 re-execuções via reaper — vazão efetiva ~1.839 com churn |
+| 3 | + ADR-0039 (claim limitado pela folga de dispatch) | 1878,1 — **zero rejeição, zero retry** |
+| 4 | config: `poll=50ms`, `dispatch=768`, eventos 128, Hikari 250 | 3830,9 |
+| 5 | config: `dispatch=1024`, `batch=1000`, eventos 256, Hikari 300 | **4023,2 · 4221,8** ✅ meta |
+
+Validação com o cenário real: `load-test.ps1` (10k via REST) termina em
+~13,3s (~750 req/s, limitado pelo cliente pwsh; latência média do POST
+7,8ms estável com o engine drenando simultaneamente) e o backlog zera
+junto com o fim do script — o sistema ficou ingest-bound.
+
+### O que mudou
+
+- **DBTUNE-17 (banco)**: o índice parcial do reaper
+  (`WHERE state = 'RUNNING'`) capturava o plano do CAS de conclusão por
+  id (implicação de predicado + estatísticas de repouso): 8,4ms e 5.958
+  buffers por conclusão varrendo as entradas RUNNING, 149.085 `idx_scan`
+  no índice errado. Predicado novo:
+  `WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL` — o CAS por
+  id cai na PK (0,105ms), o reaper continua elegível (operador estrito
+  implica IS NOT NULL). Trocado ao vivo com CREATE/DROP INDEX
+  CONCURRENTLY; plano bruto antes/depois em
+  `explain-postgresql-completion-cas.txt`. O índice filtrado do SQL
+  Server tem o mesmo shape — investigar lá antes de mexer.
+- **DBTUNE-18 (código)**: as 500 consultas de definição POR EXECUÇÃO,
+  seriais na thread do tick (57% de um ciclo de 454ms — o lote inteiro
+  gotejava pro dispatch a ~0,5ms por round trip), viraram uma consulta
+  por `job_key` distinto do lote, memoizada num mapa que vive só dentro
+  do tick (`Engine.submitDispatch`). Falha de consulta não é memoizada —
+  caminho de recuperação preservado.
+- **ADR-0039 (código)**: o claim rápido pós-DBTUNE-18 reivindicava além
+  da capacidade de dispatch; a rejeição do runner deixava execução
+  RUNNING presa até o reaper (56k rejeições/11,6k duplicatas num drain).
+  O claim agora pede `min(batch-size, dispatch-concurrency − in-flight)`.
+- **Config** (rodadas 4-5): ver tabela — nenhum desses valores é
+  recomendação universal; são o ponto de operação desta máquina/carga.
+
+### Limitações declaradas
+
+- Node único, handler trivial, Postgres local em Docker Desktop — os
+  números medem o overhead do motor, não uma instalação de produção.
+- A ingestão REST está limitada pelo cliente de teste (~750 req/s);
+  o servidor respondia a 7,8ms de média sob o drain a 4k/s.
+- Variância run-to-run real (~±10%): comparar sempre com duas rodadas
+  e com a perícia de ciclo (spread de `fired_at` por `lease_expires_at`),
+  não só com a taxa bruta.
+- Latência de commit domina o custo por execução (2 commits síncronos:
+  `markFired` + conclusão; `LWLock:WALWrite` no topo do perfil de waits).
+  As alavancas seguintes (fusão do `markFired`, conclusão em lote,
+  `synchronous_commit` por sessão, fillfactor) mudam semântica ou
+  fronteira de transação — registradas como propostas, não aplicadas.
+
 ## Como reproduzir
 
 ```
