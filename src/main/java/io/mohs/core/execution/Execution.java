@@ -28,6 +28,17 @@ public record Execution(
         Priority priority,
         @Nullable String idempotencyKey) {
 
+    /**
+     * O actor das ocorrências materializadas pelo trigger recorrente
+     * (ADR-0035) — como se distingue um disparo do próprio motor de um
+     * agendamento manual/programático. Nome <b>reservado</b>: além de
+     * trilha de auditoria, ele carrega decisão de motor (o rearme da
+     * corrente fixed-delay só acontece em ocorrência do scheduler), então
+     * {@code ScheduleCommand.as} e a API REST o rejeitam — um agendamento
+     * manual jamais pode se passar pelo motor.
+     */
+    public static final String SCHEDULER_ACTOR = "scheduler";
+
     public Execution {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(jobKey, "jobKey");

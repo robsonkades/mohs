@@ -2,6 +2,7 @@ package io.mohs.rest;
 
 import jakarta.servlet.http.HttpServletRequest;
 
+import io.mohs.core.execution.Execution;
 import io.mohs.rest.error.InvalidActorException;
 
 /**
@@ -26,6 +27,14 @@ public final class HeaderActorResolver implements ActorResolver {
         if (actor.length() > MAX_ACTOR_LENGTH) {
             throw new InvalidActorException(
                     ACTOR_HEADER + " must be at most " + MAX_ACTOR_LENGTH + " characters, got " + actor.length());
+        }
+        // validado aqui pelo mesmo motivo do teto de tamanho: 400 que ensina, não o
+        // IllegalArgumentException de ScheduleCommand.as virando 500 no handler genérico.
+        // Case/espaço-insensível pela mesma razão do guard de as(): a cura do upsert
+        // compara actor no banco, cuja collation default pode ser case-insensitive
+        if (Execution.SCHEDULER_ACTOR.equalsIgnoreCase(actor.strip())) {
+            throw new InvalidActorException(ACTOR_HEADER + " must not be '" + Execution.SCHEDULER_ACTOR
+                    + "' — reserved for engine-fired occurrences (ADR-0035); identify the real caller or omit the header");
         }
         return actor;
     }

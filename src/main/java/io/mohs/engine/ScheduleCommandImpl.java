@@ -58,6 +58,15 @@ final class ScheduleCommandImpl implements ScheduleCommand {
         if (actor.isBlank()) {
             throw new IllegalArgumentException("actor must not be blank");
         }
+        // o actor do scheduler é load-bearing (rearme fixed-delay, cura do upsert —
+        // ADR-0035): forjá-lo faria um agendamento manual dirigir a corrente do trigger.
+        // Case/espaço-insensível porque o predicado da cura roda no banco, e a collation
+        // default de MySQL/SQL Server é case-insensitive — os dois avaliadores do mesmo
+        // predicado precisam de uma única semântica, normalizada na borda de entrada
+        if (Execution.SCHEDULER_ACTOR.equalsIgnoreCase(actor.strip())) {
+            throw new IllegalArgumentException("actor '" + Execution.SCHEDULER_ACTOR
+                    + "' is reserved for engine-fired occurrences (ADR-0035) — identify the real caller");
+        }
         this.actor = actor;
         return this;
     }

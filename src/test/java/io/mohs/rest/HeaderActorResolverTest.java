@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import io.mohs.core.execution.Execution;
 import io.mohs.rest.error.InvalidActorException;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -56,5 +57,18 @@ class HeaderActorResolverTest {
         Mockito.when(request.getHeader("X-Mohs-Actor")).thenReturn(actor);
 
         assertThat(resolver.resolve(request)).isEqualTo(actor);
+    }
+
+    /** ADR-0035: 'scheduler' é reservado do motor (load-bearing no rearme fixed-delay) — forjá-lo via header, em qualquer caixa, vira 400 que ensina. */
+    @Test
+    void rejectsTheReservedSchedulerActorInAnyCase() {
+        for (String forged : new String[] {Execution.SCHEDULER_ACTOR, "Scheduler", "SCHEDULER"}) {
+            HttpServletRequest request = Mockito.mock(HttpServletRequest.class);
+            Mockito.when(request.getHeader("X-Mohs-Actor")).thenReturn(forged);
+
+            assertThatThrownBy(() -> resolver.resolve(request))
+                    .isInstanceOf(InvalidActorException.class)
+                    .hasMessageContaining("reserved for engine-fired occurrences");
+        }
     }
 }

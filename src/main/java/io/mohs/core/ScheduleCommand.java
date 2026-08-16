@@ -7,6 +7,7 @@ import org.springframework.lang.CheckReturnValue;
 
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.event.Enqueued;
+import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.Priority;
 
 /**
@@ -23,6 +24,14 @@ public interface ScheduleCommand {
     @CheckReturnValue
     ScheduleCommand priority(Priority priority);
 
+    /**
+     * A trilha de auditoria da execução ({@code Execution.actor}).
+     *
+     * @throws IllegalArgumentException se {@code actor} for em branco ou
+     * {@link Execution#SCHEDULER_ACTOR} — nome reservado do motor
+     * (ADR-0035): agendamento manual jamais pode se passar por ocorrência
+     * do trigger.
+     */
     @CheckReturnValue
     ScheduleCommand as(String actor);
 

@@ -16,5 +16,13 @@ public interface ActorResolver {
 
     String ANONYMOUS = "anonymous";
 
+    /**
+     * Nunca devolva {@link io.mohs.core.execution.Execution#SCHEDULER_ACTOR}
+     * (nem variação de caixa): é nome reservado do motor (ADR-0035) —
+     * {@code ScheduleCommand.as} o rejeita, e a rejeição de um valor vindo
+     * desta SPI aparece como 500 genérico, não o 400 que a borda dá. Um
+     * principal autenticado com esse nome (ex.: service account
+     * "scheduler") precisa ser mapeado para outro identificador aqui.
+     */
     String resolve(HttpServletRequest request);
 }

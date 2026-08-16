@@ -26,6 +26,7 @@ import io.mohs.core.MohsLifecycle;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.JobSpec;
 import io.mohs.core.event.Enqueued;
+import io.mohs.core.execution.Execution;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.jdbc.dialect.H2JdbcDialect;
@@ -80,6 +81,23 @@ class ScheduleCommandImplTest {
         assertThatThrownBy(() -> mohs.schedule("ghost", "payload").now())
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Mohs.define");
+    }
+
+    /**
+     * ADR-0035: o actor do scheduler é load-bearing (rearme fixed-delay, cura
+     * do upsert) — agendamento manual jamais pode se passar pelo motor. A
+     * rejeição é case/espaço-insensível porque a cura compara actor no BANCO,
+     * cuja collation default (MySQL/SQL Server) é case-insensitive: "Scheduler"
+     * passaria por um guard exato e ainda contaria como ocorrência do scheduler
+     * no predicado SQL.
+     */
+    @Test
+    void reservedSchedulerActorIsRejectedInAnyCaseWithAnErrorThatTeaches() {
+        for (String forged : new String[] {Execution.SCHEDULER_ACTOR, "Scheduler", " scheduler ", "SCHEDULER"}) {
+            assertThatThrownBy(() -> mohs.schedule("welcome-email", "hello").as(forged))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("reserved for engine-fired occurrences");
+        }
     }
 
     /** O caso de uso do header: cliente reenvia o POST após timeout de rede — mesmo recibo, zero duplicação. */
