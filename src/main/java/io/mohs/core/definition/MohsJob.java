@@ -24,8 +24,14 @@ import io.mohs.core.schedule.Misfire;
  * dashboard). Os parâmetros do método seguem a mesma convenção
  * independente do gatilho: até um payload e um {@link JobContext},
  * opcionais, em qualquer ordem.
+ *
+ * <p>Componível como meta-anotação ({@code ANNOTATION_TYPE} no target,
+ * mesmo desenho do {@code @Scheduled} do Spring): {@link RecurringJob} e
+ * {@link OnDemandJob} são estereótipos sobre esta anotação (ADR-0038), e
+ * o consumidor pode compor os próprios — o scanner resolve via
+ * merged annotations, com {@code @AliasFor} honrado.
  */
-@Target(ElementType.METHOD)
+@Target({ElementType.METHOD, ElementType.ANNOTATION_TYPE})
 @Retention(RetentionPolicy.RUNTIME)
 public @interface MohsJob {
 
@@ -55,6 +61,15 @@ public @interface MohsJob {
 
     /** Política de misfire. Default {@link Misfire#IGNORE}. */
     Misfire misfire() default Misfire.IGNORE;
+
+    /**
+     * Nasce pausado no PRIMEIRO registro da definição (ADR-0037): a agenda
+     * fica declarada e desarmada até um {@code POST /jobs/{id}/resume} (ou
+     * {@code Mohs.resume}); execução manual sob demanda continua valendo
+     * mesmo pausado. Depois do nascimento, {@code paused} é decisão de
+     * operador — redeploy nunca re-pausa.
+     */
+    boolean startPaused() default false;
 
     /**
      * Impede que mais de uma execução deste job fique {@code RUNNING} ao

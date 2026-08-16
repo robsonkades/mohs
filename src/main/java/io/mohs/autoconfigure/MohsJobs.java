@@ -6,6 +6,7 @@ import java.lang.reflect.Parameter;
 import java.lang.reflect.RecordComponent;
 import java.time.Duration;
 import java.time.ZoneId;
+import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.StringJoiner;
 
@@ -139,43 +140,79 @@ final class MohsJobs {
         Objects.requireNonNull(annotation, "annotation");
         Objects.requireNonNull(handlerType, "handlerType");
 
-        Schedule schedule = schedule(annotation);
-        String name = annotation.name().isBlank() ? null : annotation.name();
-        String runner = annotation.runner().isBlank() ? null : annotation.runner();
-        String window = annotation.window().isBlank() ? null : annotation.window();
-        String retryPolicy = annotation.retryPolicy().isBlank() ? null : annotation.retryPolicy();
-        Duration timeout = annotation.timeout().isBlank() ? null : Duration.parse(annotation.timeout());
+        Schedule declaredTrigger = triggerOrNull("@MohsJob(id=\"" + annotation.id() + "\")",
+                annotation.cron(), annotation.zone(), annotation.every(), annotation.everyAfterFinish());
+        Schedule schedule = Objects.requireNonNullElse(declaredTrigger, new OnDemandSpec());
         int maxConcurrentExecutions = annotation.allowConcurrentExecutions() ? 0 : annotation.maxConcurrentExecutions();
 
-        return new JobDefinition(key, name, handlerType, schedule, runner, window, annotation.misfire(),
-                annotation.allowConcurrentExecutions(), maxConcurrentExecutions, annotation.retries(), timeout,
-                retryPolicy, DefinitionSource.ANNOTATION);
+        return new JobDefinition(key, blankToNull(annotation.name()), handlerType, schedule,
+                blankToNull(annotation.runner()), blankToNull(annotation.window()), annotation.misfire(),
+                annotation.startPaused(), annotation.allowConcurrentExecutions(), maxConcurrentExecutions,
+                annotation.retries(), parseDurationOrNull(annotation.timeout()), blankToNull(annotation.retryPolicy()),
+                DefinitionSource.ANNOTATION);
     }
 
-    private static Schedule schedule(MohsJob annotation) {
-        boolean hasCron = !annotation.cron().isBlank();
-        boolean hasEvery = !annotation.every().isBlank();
-        boolean hasEveryAfterFinish = !annotation.everyAfterFinish().isBlank();
+    /**
+     * §5.13 (ADR-0038): job recorrente não tem fonte de payload — o disparo
+     * automático entrega mapa vazio. Handler cujo parâmetro não pode
+     * recebê-lo falharia TODA ocorrência em runtime; falha o boot em vez
+     * disso. {@code Map}/{@code Object} passam de propósito: invocação
+     * manual avulsa do mesmo job pode entregar dados (padrão "parâmetro
+     * opcional"). Cobre qualquer anotação (a decisão é pela
+     * {@link JobDefinition}); registro manual via {@code HandlerRegistry}
+     * (test kit) não passa por aqui — a validação pertence ao scan de boot.
+     */
+    static void requireRecurringHandlerAcceptsAutomaticPayload(JobDefinition definition, AdaptedHandler handler, String declaringMethod) {
+        if (definition.schedule() instanceof OnDemandSpec) {
+            return;
+        }
+        Class<?> payloadType = handler.payloadType();
+        if (payloadType == null || payloadType.isAssignableFrom(LinkedHashMap.class)) {
+            return;
+        }
+        throw new IllegalStateException("job '" + definition.key().value() + "' (" + declaringMethod
+                + ") has a recurring schedule but its handler declares a payload parameter of type "
+                + payloadType.getName() + " — automatic occurrences carry no payload (an empty map). "
+                + "Drop the parameter, accept java.util.Map, or make the job on-demand (@OnDemandJob)");
+    }
+
+    /**
+     * O gatilho declarado, ou {@code null} quando nenhum foi — quem chama
+     * decide o significado da ausência ({@code @MohsJob} → on-demand;
+     * {@code @RecurringJob} → erro de boot). {@code label} nomeia a
+     * anotação e o id nas mensagens — erro de boot que não diz ONDE
+     * corrigir não ensina nada.
+     */
+    private static @Nullable Schedule triggerOrNull(String label, String cron, String zone, String every, String everyAfterFinish) {
+        boolean hasCron = !cron.isBlank();
+        boolean hasEvery = !every.isBlank();
+        boolean hasEveryAfterFinish = !everyAfterFinish.isBlank();
         int triggerCount = (hasCron ? 1 : 0) + (hasEvery ? 1 : 0) + (hasEveryAfterFinish ? 1 : 0);
         if (triggerCount > 1) {
-            throw new IllegalStateException(
-                    "@MohsJob(id=\"" + annotation.id() + "\") sets more than one trigger — "
-                            + "cron/every/everyAfterFinish are mutually exclusive");
+            throw new IllegalStateException(label + " sets more than one trigger — "
+                    + "cron/every/everyAfterFinish are mutually exclusive");
         }
         if (hasCron) {
-            if (annotation.zone().isBlank()) {
-                throw new IllegalStateException(
-                        "@MohsJob(id=\"" + annotation.id() + "\") sets cron() without zone() — zone is required for cron");
+            if (zone.isBlank()) {
+                throw new IllegalStateException(label + " sets cron() without zone() — zone is required for cron");
             }
-            return new CronSpec(annotation.cron(), ZoneId.of(annotation.zone()));
+            return new CronSpec(cron, ZoneId.of(zone));
         }
         if (hasEvery) {
-            return new IntervalSpec(Duration.parse(annotation.every()), false);
+            return new IntervalSpec(Duration.parse(every), false);
         }
         if (hasEveryAfterFinish) {
-            return new IntervalSpec(Duration.parse(annotation.everyAfterFinish()), true);
+            return new IntervalSpec(Duration.parse(everyAfterFinish), true);
         }
-        return new OnDemandSpec();
+        return null;
+    }
+
+    private static @Nullable String blankToNull(String value) {
+        return value.isBlank() ? null : value;
+    }
+
+    private static @Nullable Duration parseDurationOrNull(String value) {
+        return value.isBlank() ? null : Duration.parse(value);
     }
 
     /** Só os componentes do record que mudaram — formato "campo: antigo -> novo" (ADR-0006). */

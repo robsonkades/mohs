@@ -19,13 +19,17 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.MergedAnnotations;
 import org.springframework.util.ReflectionUtils;
 
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.MohsJob;
+import io.mohs.core.definition.RecurringJob;
 import io.mohs.core.event.OnExecution;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.schedule.OnDemandSpec;
 import io.mohs.engine.HandlerRegistry;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.StoredJob;
@@ -112,26 +116,61 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
                     + " is not supported yet — the engine does not deliver filtered events to annotated"
                     + " methods in this milestone; register an ExecutionListener bean instead");
         }
-        MohsJob annotation = targetMethod.getAnnotation(MohsJob.class);
+        // merged, não getAnnotation cru: os estereótipos da ADR-0038 (@RecurringJob/
+        // @OnDemandJob — e composições do consumidor sobre eles) carregam @MohsJob como
+        // meta-anotação com @AliasFor, que só a resolução de merged annotations honra.
+        MohsJob annotation = AnnotatedElementUtils.findMergedAnnotation(targetMethod, MohsJob.class);
         if (annotation == null) {
             return;
+        }
+        String declaringMethod = describe(targetMethod);
+        requireSingleJobForm(targetMethod, declaringMethod);
+        if (annotation.id().isBlank()) {
+            // só alcançável pelos estereótipos (o id da forma geral é obrigatório em compilação)
+            throw new IllegalStateException("job annotation on " + declaringMethod
+                    + " has a blank id — set value/id (e.g. @OnDemandJob(\"my-job\"))");
         }
         // getTargetClass, não bean.getClass(): o proxy CGLIB não deveria virar handlerType
         // persistido (nome sintético, não resolve de forma estável entre restarts).
         Method invocable = AopUtils.selectInvocableMethod(targetMethod, bean.getClass());
         JobKey key = JobKey.of(annotation.id());
-        String declaringMethod = describe(targetMethod);
 
         synchronized (scanned) {
             ScannedJob already = scanned.get(key);
             if (already != null) {
-                throw new IllegalStateException("duplicate @MohsJob id '" + annotation.id() + "' — "
+                throw new IllegalStateException("duplicate job id '" + annotation.id() + "' — "
                         + already.declaringMethod() + " and " + declaringMethod + " both declare it");
             }
 
             JobDefinition definition = MohsJobs.toDefinition(key, annotation, targetClass);
+            if (definition.schedule() instanceof OnDemandSpec
+                    && AnnotatedElementUtils.hasAnnotation(targetMethod, RecurringJob.class)) {
+                throw new IllegalStateException("@RecurringJob(id=\"" + annotation.id() + "\") on " + declaringMethod
+                        + " declares no trigger — set cron/every/everyAfterFinish, or use @OnDemandJob for a job without a schedule");
+            }
             MohsJobs.AdaptedHandler handler = MohsJobs.adaptHandler(bean, invocable);
+            MohsJobs.requireRecurringHandlerAcceptsAutomaticPayload(definition, handler, declaringMethod);
             scanned.put(key, new ScannedJob(definition, handler, declaringMethod));
+        }
+    }
+
+    /**
+     * Um método é exatamente um job — colisão de formas é da mesma família
+     * do "duplicate id": falha sempre, incondicional. Conta aparições de
+     * {@code @MohsJob} no grafo de merged annotations (cada forma direta —
+     * geral, estereótipo ou composição do consumidor — contribui exatamente
+     * uma), porque contar só as três formas diretas deixava "composto +
+     * direto" passar e resolver em silêncio pela ORDEM DE DECLARAÇÃO no
+     * fonte (comportamento verificado do Spring — não é a forma direta que
+     * vence), a arbitrariedade que este scanner existe pra impedir (review
+     * ADR-0038).
+     */
+    private static void requireSingleJobForm(Method method, String declaringMethod) {
+        long declaredForms = MergedAnnotations.from(method).stream(MohsJob.class).count();
+        if (declaredForms > 1) {
+            throw new IllegalStateException(declaringMethod
+                    + " declares more than one job annotation (@MohsJob/@RecurringJob/@OnDemandJob, "
+                    + "directly or through a composed stereotype) — a method is exactly one job");
         }
     }
 
