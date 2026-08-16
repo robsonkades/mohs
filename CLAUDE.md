@@ -279,6 +279,13 @@ when it is exactly what the code does:
 **ALWAYS:**
 - Every "when" comes from the injected `Clock`; every duration uses monotonic
   time (`System.nanoTime`). Verified by ArchUnit.
+- Every generated PK is UUIDv7 (`io.github.robsonkades:uuidv7`), on every
+  dialect — client-side generation (no allocation round trip), time-ordered
+  (inserts stay localized at the index tail), lexicographically sortable as
+  a string (keyset-able if ever needed, ADR-0040). Applies to future tables
+  too (e.g. `mohs_batches`). Natural keys (`job_key`, `rate_limits.name`,
+  per-aggregate counters like `attempts.number`) are fine — what is banned
+  is the database-sequential surrogate.
 - Refactoring preserves observable behavior; behavior changes only with my
   explicit approval.
 - Performance claims come with before/after benchmarks. Without a number,
@@ -287,6 +294,9 @@ when it is exactly what the code does:
 **NEVER:**
 - Read time directly in the engine (`Instant.now()`,
   `System.currentTimeMillis()`).
+- Sequential/auto-generated numeric PKs — no `IDENTITY`, `SERIAL`,
+  `AUTO_INCREMENT`, or `SEQUENCE` in any schema, and no `java.util.UUID`
+  v4 for ids (unordered — shatters insert locality on the hottest table).
 - Break the public API without consulting me first.
 - Commit with a red suite.
 - Introduce a new dependency without asking.
