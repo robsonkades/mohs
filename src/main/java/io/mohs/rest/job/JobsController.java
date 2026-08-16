@@ -78,10 +78,16 @@ public class JobsController {
         Object payload = convertPayload(key, body.payload());
 
         var command = mohs.schedule(key.value(), payload).as(actorResolver.resolve(request));
+        if (body.priority() != null) {
+            command = command.priority(body.priority());
+        }
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             command = command.idempotencyKey(idempotencyKey);
         }
-        Enqueued enqueued = body.at() != null ? command.at(body.at()) : command.now();
+        // os três terminais de ScheduleCommand — at/delay já validados como exclusivos no record
+        Enqueued enqueued = body.at() != null ? command.at(body.at())
+                : body.delay() != null ? command.after(body.delay())
+                : command.now();
 
         AcceptedExecutionResponse accepted = AcceptedExecutionResponse.from(enqueued);
         URI location = URI.create(basePath + "/executions/" + accepted.executionId());

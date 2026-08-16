@@ -1,5 +1,6 @@
 package io.mohs.rest.job;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -24,11 +25,13 @@ import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
 import io.mohs.rest.ActorResolver;
 import io.mohs.rest.ApiPaths;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -124,6 +127,39 @@ class JobsControllerContractTest {
                 .andExpect(status().isAccepted())
                 .andExpect(header().string("Location", ApiPaths.V1 + "/executions/exec-1"))
                 .andExpect(jsonPath("$.executionId").value("exec-1"));
+    }
+
+    /** Invocação completa: delay (computado no servidor) e priority chegam ao ScheduleCommand — os três terminais do core na borda REST. */
+    @Test
+    void scheduleAcceptsDelayAndPriority() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
+        when(mohs.payloadType(key)).thenReturn(Optional.empty());
+        when(actorResolver.resolve(any())).thenReturn("tester");
+        ScheduleCommand command = mock(ScheduleCommand.class);
+        when(mohs.schedule(eq("welcome-email"), any())).thenReturn(command);
+        when(command.as("tester")).thenReturn(command);
+        when(command.priority(Priority.HIGH)).thenReturn(command);
+        when(command.after(Duration.ofMinutes(5))).thenReturn(new Enqueued(ExecutionId.of("exec-2"), key, NOW.plusSeconds(300), "tester"));
+
+        mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"payload\":{},\"delay\":\"PT5M\",\"priority\":\"HIGH\"}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.executionId").value("exec-2"));
+    }
+
+    /** at × delay são exclusivos — a validação do record dispara na desserialização e vira 422 que ensina. */
+    @Test
+    void scheduleRejectsAtAndDelayTogether() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
+
+        mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"payload\":{},\"at\":\"2026-08-15T13:00:00Z\",\"delay\":\"PT5M\"}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.detail").value(containsString("mutually exclusive")));
     }
 
     @Test
