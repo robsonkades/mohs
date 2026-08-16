@@ -96,6 +96,16 @@ public final class Engine implements MohsLifecycle {
      */
     static final int FIRE_LIMIT = 500;
 
+    /**
+     * Retention da linha de heartbeat (ADR-0041), em múltiplos de
+     * {@code lease-ttl} — derivada de propósito, nenhum knob novo (CLAUDE.md:
+     * sem configuração para cenário hipotético). 10 leases (5 min no default)
+     * mantém o node morto VISÍVEL como stale por tempo de sobra para
+     * {@code GET /nodes} e alertas; depois disso a linha é lixo — cada boot
+     * gera {@code node_id} novo, então ela nunca seria reutilizada.
+     */
+    static final int STALE_NODE_RETENTION_LEASES = 10;
+
     private final Claimer claimer;
     private final Dispatcher dispatcher;
     private final ExecutionStore executionStore;
@@ -225,6 +235,49 @@ public final class Engine implements MohsLifecycle {
             handle.cancel(false);
         }
         state.set(EngineState.STOPPED);
+        writeFinalStoppedHeartbeat();
+    }
+
+    /**
+     * ADR-0041: o último heartbeat do shutdown gracioso grava STOPPED — sem
+     * ele, stop limpo e crash ficam indistinguíveis no banco (a linha para
+     * no último estado tickado, tipicamente RUNNING/DRAINING, para sempre).
+     * Best-effort de propósito: shutdown nunca falha por banco fora — quem
+     * morre sem conseguir escrever fica coberto pela staleness (ADR-0012) e
+     * pelo purge (ver {@link #purgeStaleNodeRows}).
+     *
+     * <p>Corrida aceita de propósito (review ADR-0041): um tick que leu o
+     * estado antes do {@code state.set(STOPPED)} pode commitar seu heartbeat
+     * DEPOIS deste — a linha fica RUNNING/DRAINING apesar do stop limpo.
+     * Fechar isso exigiria o stop esperar o tick em curso (lock
+     * compartilhado; até {@code leaseTtl/4} de claim rounds), acoplando a
+     * latência de shutdown a um cosmético autocurável: staleness + purge
+     * cobrem a linha do mesmo jeito que cobririam um crash.
+     */
+    private void writeFinalStoppedHeartbeat() {
+        try {
+            nodeStore.heartbeat(nodeId, EngineState.STOPPED, clock.instant());
+        } catch (RuntimeException e) {
+            log.warn("could not write the final STOPPED heartbeat for node {} — the row will read as its last "
+                    + "ticked state until the stale purge collects it", nodeId, e);
+        }
+    }
+
+    /**
+     * ADR-0041: recolhe heartbeats mais velhos que
+     * {@code lease-ttl × }{@link #STALE_NODE_RETENTION_LEASES} — de carona
+     * no tick, como o reaper. Não é detecção de morte (essa é derivada na
+     * LEITURA pela staleness, ADR-0012 — crash não escreve nada): é só
+     * recolher linhas que nenhum leitor tem mais uso, porque cada boot gera
+     * {@code node_id} novo e a tabela cresceria para sempre.
+     */
+    private void purgeStaleNodeRows() {
+        Instant cutoff = clock.instant().minus(settings.leaseTtl().multipliedBy(STALE_NODE_RETENTION_LEASES));
+        int purged = nodeStore.deleteHeartbeatsBefore(cutoff);
+        if (purged > 0) {
+            log.info("purged {} stale node heartbeat row(s) — instances dead or restarted more than {} lease TTLs ago",
+                    purged, STALE_NODE_RETENTION_LEASES);
+        }
     }
 
     /**
@@ -310,6 +363,7 @@ public final class Engine implements MohsLifecycle {
             for (Reaper.Reclaimed reclaimed : reaper.reclaimExpired()) {
                 publishReclaimOutcome(reclaimed);
             }
+            purgeStaleNodeRows();
             fireDueTriggers();
             claimAndDispatch();
         } catch (RuntimeException e) {

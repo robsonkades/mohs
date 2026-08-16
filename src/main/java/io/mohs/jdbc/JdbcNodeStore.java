@@ -56,6 +56,13 @@ public final class JdbcNodeStore implements NodeStore {
         return jdbcTemplate.query("SELECT * FROM mohs_nodes", (rs, _) -> mapRow(rs));
     }
 
+    @Override
+    public int deleteHeartbeatsBefore(Instant cutoff) {
+        Objects.requireNonNull(cutoff, "cutoff");
+        return jdbcTemplate.update("DELETE FROM mohs_nodes WHERE last_heartbeat_at < :cutoff",
+                new MapSqlParameterSource().addValue("cutoff", JdbcTimestamps.toUtcTimestamp(cutoff)));
+    }
+
     private static StoredNode mapRow(ResultSet rs) throws SQLException {
         return new StoredNode(rs.getString("node_id"), EngineState.valueOf(rs.getString("state")), JdbcTimestamps.fromUtcTimestamp(rs.getTimestamp("last_heartbeat_at")));
     }

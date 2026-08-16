@@ -167,6 +167,11 @@ class EngineTest {
             public List<StoredNode> findAll() {
                 return counting.findAll();
             }
+
+            @Override
+            public int deleteHeartbeatsBefore(Instant cutoff) {
+                return counting.deleteHeartbeatsBefore(cutoff);
+            }
         };
         return assembleEngine(tracingClaimer, tracingNodeStore, listeners, defaultRunnerRegistry(), settings);
     }
@@ -441,6 +446,64 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(countByState(ExecutionState.SUCCEEDED)).isEqualTo(5);
+    }
+
+    /**
+     * ADR-0041: shutdown gracioso escreve o último heartbeat como STOPPED —
+     * sem ele, stop limpo e crash ficavam indistinguíveis no banco (linha
+     * RUNNING para sempre). Poll inalcançável de propósito: o primeiro tick
+     * roda imediatamente e é o ÚNICO — determinístico contra a corrida
+     * (aceita e documentada) de um tick em voo commitar depois do write
+     * final.
+     */
+    @Test
+    void stopWritesAFinalStoppedHeartbeat() throws Exception {
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(1));
+        Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
+                new EngineSettings(Duration.ofMinutes(5), BATCH_SIZE, LEASE_TTL));
+        engine.start();
+        assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+
+        engine.stop(Duration.ofSeconds(5));
+
+        assertThat(nodeStore.findAll()).singleElement()
+                .extracting(StoredNode::state).isEqualTo(EngineState.STOPPED);
+    }
+
+    /** ADR-0041: o heartbeat final é best-effort — banco fora no shutdown vira WARN, nunca falha o stop. */
+    @Test
+    void stopCompletesEvenWhenTheFinalHeartbeatWriteFails() throws Exception {
+        NodeStore blinkingStore = mock(NodeStore.class, delegatesTo(nodeStore));
+        CountingNodeStore counting = new CountingNodeStore(blinkingStore, new CountDownLatch(1));
+        Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
+                new EngineSettings(Duration.ofMinutes(5), BATCH_SIZE, LEASE_TTL));
+        engine.start();
+        assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+        doThrow(new DataAccessResourceFailureException("database down during shutdown"))
+                .when(blinkingStore).heartbeat(any(), any(), any());
+
+        engine.stop(Duration.ofSeconds(5));
+
+        assertThat(engine.state()).isEqualTo(EngineState.STOPPED);
+    }
+
+    /** ADR-0041: heartbeat mais velho que 10× lease-ttl é purgado de carona no tick — cada boot gera node_id novo, e sem purge cada instância morta deixava uma linha órfã para sempre. */
+    @Test
+    void tickPurgesNodeRowsWithStaleHeartbeats() throws Exception {
+        nodeStore.heartbeat("dead-node", EngineState.RUNNING, NOW.minus(LEASE_TTL.multipliedBy(10)).minusSeconds(1));
+        nodeStore.heartbeat("recent-node", EngineState.RUNNING, NOW.minusSeconds(1));
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = newEngine(counting, List.of());
+
+        engine.start();
+        try {
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(nodeStore.findAll()).extracting(StoredNode::nodeId)
+                    .doesNotContain("dead-node")
+                    .contains("recent-node");
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
     }
 
     /**
@@ -1387,6 +1450,11 @@ class EngineTest {
         @Override
         public List<StoredNode> findAll() {
             return delegate.findAll();
+        }
+
+        @Override
+        public int deleteHeartbeatsBefore(Instant cutoff) {
+            return delegate.deleteHeartbeatsBefore(cutoff);
         }
     }
 }

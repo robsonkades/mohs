@@ -26,4 +26,16 @@ public interface NodeStore {
      * Execution}.
      */
     List<StoredNode> findAll();
+
+    /**
+     * Remove heartbeats estritamente mais velhos que {@code cutoff}
+     * (ADR-0041) — cada boot gera um {@code node_id} novo, então linha de
+     * instância morta/reiniciada só sai por aqui; morte NÃO é escrita por
+     * quem morreu (crash não avisa — ADR-0012 deriva "morto" da staleness
+     * na leitura), o purge apenas recolhe o que já ficou ilegível de tão
+     * velho.
+     *
+     * @return quantas linhas saíram
+     */
+    int deleteHeartbeatsBefore(Instant cutoff);
 }
