@@ -28,9 +28,24 @@ import org.jspecify.annotations.Nullable;
  * ({@code mohs.engine.dispatch-concurrency}); o claim de cada tick é
  * limitado pela folga em relação a ele, para o node nunca reivindicar o
  * que não tem capacidade de despachar.
+ *
+ * <p>{@code claimRounds} (ADR-0040) é quantos claims um MESMO tick pode
+ * encadear enquanto o lote voltar cheio e houver folga de dispatch —
+ * relaxa o acoplamento da vazão com o {@code poll-interval} sob backlog
+ * (medição na ADR-0040; o teto por ciclo continua sendo a folga de
+ * dispatch); {@code 1} (default) preserva o formato clássico de um claim
+ * por tick. Um lote que volta menor que o pedido encerra os rounds (a
+ * fila drenou — o round seguinte seria um SELECT vazio).
+ * Dimensionamento: o tick renova as leases UMA vez, antes dos rounds —
+ * por isso os rounds carregam um orçamento monotônico de
+ * {@code leaseTtl/4} além do contador; sem ele, {@code claimRounds ×
+ * latência-de-claim} perto do TTL faria um handler longo de tick anterior
+ * perder a renovação no meio dos rounds e ser duplicado pelo reaper de
+ * outro node. O alongamento do tick também adia heartbeat e os sinais de
+ * timeout/cancel (ADR-0034) — mais um motivo para rounds serem poucos.
  */
-public record EngineSettings(Duration pollInterval, int batchSize, int dispatchConcurrency, Duration leaseTtl,
-        @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
+public record EngineSettings(Duration pollInterval, int batchSize, int dispatchConcurrency, int claimRounds,
+        Duration leaseTtl, @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
 
     /** Mesmo default de {@code mohs.engine.misfire-threshold} ({@code MohsProperties}) — precedente Quartz. */
     public static final Duration DEFAULT_MISFIRE_THRESHOLD = Duration.ofSeconds(60);
@@ -53,6 +68,10 @@ public record EngineSettings(Duration pollInterval, int batchSize, int dispatchC
         if (dispatchConcurrency <= 0) {
             throw new IllegalArgumentException("mohs.engine.dispatch-concurrency must be positive, got " + dispatchConcurrency);
         }
+        if (claimRounds <= 0) {
+            throw new IllegalArgumentException("mohs.engine.claim-rounds must be positive, got " + claimRounds
+                    + " — 1 is the classic one-claim-per-tick shape, not zero");
+        }
         if (!pollInterval.isPositive()) {
             throw new IllegalArgumentException("mohs.engine.poll-interval must be positive, got " + pollInterval);
         }
@@ -71,12 +90,18 @@ public record EngineSettings(Duration pollInterval, int batchSize, int dispatchC
         }
     }
 
-    /** Threshold de misfire default (ADR-0035) e claim sem teto de dispatch (pré-ADR-0039) — conveniência de teste. */
+    /** Um claim por tick (pré-ADR-0040) — conveniência para quem só configura o teto de dispatch. */
+    public EngineSettings(Duration pollInterval, int batchSize, int dispatchConcurrency, Duration leaseTtl,
+            @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
+        this(pollInterval, batchSize, dispatchConcurrency, 1, leaseTtl, watchdogTimeout, misfireThreshold);
+    }
+
+    /** Threshold de misfire default (ADR-0035), claim sem teto de dispatch (pré-ADR-0039) e um claim por tick — conveniência de teste. */
     public EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl, @Nullable Duration watchdogTimeout) {
         this(pollInterval, batchSize, UNBOUNDED_DISPATCH, leaseTtl, watchdogTimeout, DEFAULT_MISFIRE_THRESHOLD);
     }
 
-    /** Sem Watchdog Bound (default da ADR-0012), threshold de misfire default (ADR-0035) e claim sem teto de dispatch (pré-ADR-0039) — conveniência de teste. */
+    /** Sem Watchdog Bound (default da ADR-0012), threshold de misfire default (ADR-0035), claim sem teto de dispatch (pré-ADR-0039) e um claim por tick — conveniência de teste. */
     public EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl) {
         this(pollInterval, batchSize, leaseTtl, null);
     }

@@ -50,16 +50,18 @@ public record MohsProperties(
 
     /**
      * @param pollInterval intervalo entre ticks do poll loop do engine
-     * @param batchSize máximo de execuções reclamadas por tick
+     * @param batchSize máximo de execuções reclamadas por claim
+     * @param claimRounds ADR-0040: quantos claims um mesmo tick encadeia enquanto o lote voltar cheio e houver folga de dispatch — relaxa o acoplamento da vazão com o {@code poll-interval} sob backlog (medição na ADR); 1 (default) = formato clássico de um claim por tick
      * @param leaseTtl ADR-0012: alimenta {@code lease_expires_at} no claim e na renovação por tick; o reaper reclama execuções cuja lease já expirou
      * @param watchdogTimeout Watchdog Bound (ADR-0012): teto da renovação de lease — atingido, o node para de renovar e o reaper reclama na expiração; {@code null} (default) = sem teto; quando presente, deve ser maior que {@code lease-ttl} (validado na montagem do engine)
      * @param misfireThreshold ADR-0035: separa disparo atrasado de perdido — ocorrência devida dentro do threshold dispara atrasada em qualquer política; mais velha responde ao {@code Misfire} do job
-     * @param dispatchConcurrency teto real de concorrência do executor de dispatch (nunca por tamanho de pool — CLAUDE.md)
+     * @param dispatchConcurrency teto real de concorrência do executor de dispatch (nunca por tamanho de pool — CLAUDE.md); também limita o claim (ADR-0039)
      * @param eventConcurrency teto real de concorrência do executor de publicação de eventos
      */
     public record Engine(
             @DefaultValue("5s") Duration pollInterval,
             @DefaultValue("50") int batchSize,
+            @DefaultValue("1") int claimRounds,
             @DefaultValue("30s") Duration leaseTtl,
             @Nullable Duration watchdogTimeout,
             @DefaultValue("60s") Duration misfireThreshold,

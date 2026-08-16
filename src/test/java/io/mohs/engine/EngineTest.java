@@ -4,6 +4,8 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -119,7 +121,12 @@ class EngineTest {
 
     /** O claimer nasce com o MESMO {@code leaseTtl} das settings — lease de claim e de renovação nunca divergem, igual à auto-config real. */
     private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings) {
-        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, settings.leaseTtl(), new ExecutionWindowRegistry(List.of()));
+        return assembleEngine(newClaimer(settings.leaseTtl()), nodeStoreOverride, listeners, runnerRegistry, settings);
+    }
+
+    /** Montagem comum aos helpers que só variam claimer/node store: reaper, dispatcher e tick scheduler reais sobre as portas do fixture. */
+    private Engine assembleEngine(Claimer claimer, NodeStore nodeStoreOverride, List<ExecutionListener> listeners,
+            RunnerRegistry runnerRegistry, EngineSettings settings) {
         JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor);
@@ -128,8 +135,62 @@ class EngineTest {
                 new JdbcTriggerFirer(dataSource, executionStore), clock, settings, tickScheduler, runnerRegistry);
     }
 
+    private JdbcClaimer newClaimer(Duration leaseTtl) {
+        return new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, leaseTtl, new ExecutionWindowRegistry(List.of()));
+    }
+
     private static RunnerRegistry defaultRunnerRegistry() {
         return new RunnerRegistry(List.of(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(BATCH_SIZE).build()));
+    }
+
+    /**
+     * Engine com claimer e node store gravando uma trilha única de
+     * {@code tick}/{@code claim:N} — como os dois só rodam na thread do
+     * tick, a ordem da trilha É a estrutura do tick, e prova quantos
+     * rounds de claim aconteceram DENTRO de cada um (ADR-0040).
+     */
+    private Engine newEngineWithTickTrace(List<String> trace, CountingNodeStore counting, List<ExecutionListener> listeners, EngineSettings settings) {
+        JdbcClaimer realClaimer = newClaimer(settings.leaseTtl());
+        Claimer tracingClaimer = (nodeId, batchSize) -> {
+            List<Execution> claimed = realClaimer.claim(nodeId, batchSize);
+            trace.add("claim:" + claimed.size());
+            return claimed;
+        };
+        NodeStore tracingNodeStore = new NodeStore() {
+            @Override
+            public void heartbeat(String nodeId, EngineState state, Instant at) {
+                trace.add("tick");
+                counting.heartbeat(nodeId, state, at);
+            }
+
+            @Override
+            public List<StoredNode> findAll() {
+                return counting.findAll();
+            }
+        };
+        return assembleEngine(tracingClaimer, tracingNodeStore, listeners, defaultRunnerRegistry(), settings);
+    }
+
+    /** Janelas completas da trilha: claims agrupados por tick, descartando a janela ainda aberta no fim. */
+    private static List<List<Integer>> claimsPerTick(List<String> trace) {
+        List<String> snapshot;
+        synchronized (trace) {
+            snapshot = List.copyOf(trace);
+        }
+        List<List<Integer>> ticks = new ArrayList<>();
+        List<Integer> current = null;
+        for (String entry : snapshot) {
+            if (entry.equals("tick")) {
+                current = new ArrayList<>();
+                ticks.add(current);
+            } else if (current != null) {
+                current.add(Integer.parseInt(entry.substring("claim:".length())));
+            }
+        }
+        if (!ticks.isEmpty()) {
+            ticks.removeLast();
+        }
+        return ticks;
     }
 
     /** Claim/reclaim usam as portas reais (o claim precisa funcionar); os overrides simulam falha só no caminho do dispatch. */
@@ -139,7 +200,7 @@ class EngineTest {
 
     private Engine newEngineWith(JobStore jobStoreOverride, ExecutionStore executionStoreOverride, List<ExecutionListener> listeners,
             NodeStore nodeStoreOverride) {
-        JdbcClaimer claimer = new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
+        JdbcClaimer claimer = newClaimer(LEASE_TTL);
         JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor);
@@ -380,6 +441,85 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(countByState(ExecutionState.SUCCEEDED)).isEqualTo(5);
+    }
+
+    /**
+     * ADR-0040: com {@code claimRounds > 1}, um MESMO tick encadeia claims
+     * enquanto o lote voltar cheio — limitado pelo número de rounds e pela
+     * folga de dispatch (ADR-0039), que encolhe a cada round. A trilha
+     * tick/claim gravada pelos wrappers prova o formato por dentro:
+     * [2,2] no tick saturador, [2] quando só resta folga pra um round,
+     * [] com o node cheio.
+     */
+    @Test
+    void aFullBatchChainsAnotherClaimRoundWithinTheSameTick() throws Exception {
+        for (int i = 1; i <= 6; i++) {
+            seedEnqueuedExecution("exec-" + i, "welcome-email", "hello");
+        }
+        CountDownLatch releaseHandlers = new CountDownLatch(1);
+        CountDownLatch allSucceeded = new CountDownLatch(6);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseHandlers.await(10, TimeUnit.SECONDS));
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                allSucceeded.countDown();
+            }
+        };
+        List<String> trace = Collections.synchronizedList(new ArrayList<>());
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(4));
+        Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
+                new EngineSettings(POLL_INTERVAL, 2, 6, 2, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+
+        engine.start();
+        try {
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+            List<List<Integer>> ticks = claimsPerTick(trace);
+
+            assertThat(ticks.get(0)).containsExactly(2, 2); // rounds encadeados no mesmo tick, teto claimRounds=2
+            assertThat(ticks.get(1)).containsExactly(2);    // folga de dispatch (6−4) limita o round único
+            assertThat(ticks.get(2)).isEmpty();             // node cheio: tick sem claim (ADR-0039)
+
+            releaseHandlers.countDown();
+            assertThat(allSucceeded.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseHandlers.countDown();
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(countByState(ExecutionState.SUCCEEDED)).isEqualTo(6);
+    }
+
+    /** ADR-0040: lote que volta menor que o pedido encerra os rounds — o round seguinte seria um SELECT de fila já drenada. */
+    @Test
+    void aShortBatchEndsTheClaimRoundsEarly() throws Exception {
+        for (int i = 1; i <= 3; i++) {
+            seedEnqueuedExecution("exec-" + i, "welcome-email", "hello");
+        }
+        CountDownLatch releaseHandlers = new CountDownLatch(1);
+        CountDownLatch allSucceeded = new CountDownLatch(3);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseHandlers.await(10, TimeUnit.SECONDS));
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                allSucceeded.countDown();
+            }
+        };
+        List<String> trace = Collections.synchronizedList(new ArrayList<>());
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
+                new EngineSettings(POLL_INTERVAL, 2, 10, 3, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+
+        engine.start();
+        try {
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+            List<List<Integer>> ticks = claimsPerTick(trace);
+
+            assertThat(ticks.get(0)).containsExactly(2, 1); // 3º round não acontece apesar de claimRounds=3
+
+            releaseHandlers.countDown();
+            assertThat(allSucceeded.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseHandlers.countDown();
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(countByState(ExecutionState.SUCCEEDED)).isEqualTo(3);
     }
 
     /** Posse perdida (reclaim externo) é detectada pela renovação: WARN de zumbi, e o resultado tardio do handler é descartado pelo CAS de conclusão. */

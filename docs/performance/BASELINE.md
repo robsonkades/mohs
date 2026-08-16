@@ -605,6 +605,35 @@ apenas no in-flight. Postgres/H2/MySQL não têm o fenômeno (Postgres
 replaneja por execução; H2/MySQL usam composto cheio e o UPDATE por id
 cai trivialmente na PK) — nenhuma mudança fora do SQL Server.
 
+## Rounds de claim por tick (ADR-0040) — 2026-08-16
+
+A proposta (e) da rodada de tuning, aprovada e implementada a partir do
+padrão de outbox worker do autor (`mohs.engine.claim-rounds`, default 1 =
+comportamento clássico). A metade "cursor por id sequencial" do padrão
+foi rejeitada com argumentos registrados na ADR-0040 (fila de prioridade
+≠ FIFO; o CAS de estado já é o cursor físico; UUIDv7 é keyset-ável se um
+dia precisar). Mesma máquina/metodologia das rodadas anteriores, drains
+de 50k, config base da rodada 5 (`batch=1000`, `dispatch=1024`,
+`events=256`, Hikari 300), variando só poll e rounds:
+
+| Poll | Rounds | Vazão (exec/s) |
+|---|---|---:|
+| 50ms | 1 (rodada 5, referência) | 4.023 · 4.222 |
+| 250ms | 1 (controle) | 2.277,0 |
+| 250ms | 8 | **3.604,6 · 3.739,0** (+58–64% vs controle) |
+| 1s | 8 | 2.134,3 |
+
+Leitura honesta: rounds **relaxam** o acoplamento da vazão com o
+`poll-interval` (5x mais poll custou ~10% da vazão da rodada 5, em vez
+dos ~45% do controle), mas **não o eliminam** — o tick enche o tanque de
+in-flight (`dispatch-concurrency`, clamp da ADR-0039, recomputado a cada
+round) e, com poll maior que o tempo de drenagem do tanque, o node ocioso
+espera o próximo tick: a 1s o teto efetivo vira
+`dispatch-concurrency / ciclo`. Zero retries e zero rejeições em todas as
+rodadas — a interação rounds × clamp segurou a patologia pré-ADR-0039.
+Formato do tick pinado por teste com trilha tick/claim
+(`EngineTest#aFullBatchChainsAnotherClaimRoundWithinTheSameTick`).
+
 ## Como reproduzir
 
 ```

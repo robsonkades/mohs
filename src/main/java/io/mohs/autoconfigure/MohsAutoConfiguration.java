@@ -252,7 +252,7 @@ public class MohsAutoConfiguration {
     ) {
         MohsProperties.Engine engineProperties = properties.engine();
         EngineSettings settings = new EngineSettings(engineProperties.pollInterval(), engineProperties.batchSize(),
-                engineProperties.dispatchConcurrency(), engineProperties.leaseTtl(),
+                engineProperties.dispatchConcurrency(), engineProperties.claimRounds(), engineProperties.leaseTtl(),
                 engineProperties.watchdogTimeout(), engineProperties.misfireThreshold());
         return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper,
                 mohsTriggerFirer, mohsClock, settings, mohsTickScheduler, mohsRunnerRegistry);

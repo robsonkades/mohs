@@ -318,24 +318,59 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * A etapa "aquisição → dispatch" do tick. ADR-0039: o claim é limitado
-     * pela folga de dispatch — reivindicar além dela só produzia rejeição
-     * do runner e execução RUNNING presa até o reaper (medido: 56k
-     * rejeições e 11,6k execuções duplicadas num drain de 50k). Node
+     * A etapa "aquisição → dispatch" do tick. ADR-0039: cada claim é
+     * limitado pela folga de dispatch — reivindicar além dela só produzia
+     * rejeição do runner e execução RUNNING presa até o reaper (medido:
+     * 56k rejeições e 11,6k execuções duplicadas num drain de 50k). Node
      * saturado não reivindica; o excedente fica ENQUEUED no banco,
-     * reivindicável por qualquer node com folga. DBTUNE-18: uma consulta
-     * de definição por job_key DISTINTO do lote, não por execução — o mapa
-     * de memoização vive só neste tick (ver {@link #submitDispatch}).
+     * reivindicável por qualquer node com folga.
+     *
+     * <p>ADR-0040: sob backlog, um tick encadeia até {@code claimRounds}
+     * claims — a folga é recomputada a cada round (o dispatch é assíncrono,
+     * mas {@code inFlight} cresce sincronamente aqui na thread do tick),
+     * então os rounds param sozinhos quando o node satura; lote que volta
+     * menor que o pedido encerra também (a fila drenou — o round seguinte
+     * seria um SELECT vazio). Não há cursor: o CAS de estado do próprio
+     * claim tira a linha reivindicada do predicado (e do índice parcial)
+     * no commit — o SELECT do round seguinte já começa na cabeça real da
+     * fila de prioridade.
+     *
+     * <p>Dois guards entre rounds (review ADR-0040): (1) {@code drain()}/
+     * {@code pause()} no meio dos rounds interrompe o encadeamento — a
+     * partir do sinal, o node para de ACEITAR trabalho novo (ADR-0007;
+     * Burns, shutdown coordenado), mesma janela de 1 lote de antes; (2) um
+     * orçamento monotônico de {@code leaseTtl/4} limita a duração total dos
+     * rounds — a renovação de lease roda UMA vez por tick, antes daqui, e
+     * rounds que se aproximassem do TTL fariam um handler longo de tick
+     * anterior perder a renovação e ser duplicado pelo reaper de outro node
+     * (lease é detecção de falha — DDIA; tick longo vira "node morto" para
+     * o cluster). Duração por {@code System.nanoTime}, nunca pelo
+     * {@code Clock} injetado, que pode saltar no resync.
+     *
+     * <p>DBTUNE-18: uma consulta de definição por job_key DISTINTO do
+     * tick, não por execução — o mapa de memoização atravessa os rounds de
+     * propósito (mesma janela de staleness de um tick só; ver
+     * {@link #submitDispatch}).
      */
     private void claimAndDispatch() {
-        int claimLimit = Math.min(settings.batchSize(), settings.dispatchConcurrency() - inFlight.size());
-        if (claimLimit <= 0) {
-            return;
-        }
-        List<Execution> claimed = claimer.claim(nodeId, claimLimit);
         Map<JobKey, Optional<StoredJob>> definitionsByKey = new HashMap<>();
-        for (Execution execution : claimed) {
-            submitDispatch(execution, definitionsByKey);
+        long roundsBudgetNanos = settings.leaseTtl().toNanos() / 4;
+        long startNanos = System.nanoTime();
+        for (int round = 0; round < settings.claimRounds(); round++) {
+            if (round > 0 && (state.get() != EngineState.RUNNING || System.nanoTime() - startNanos >= roundsBudgetNanos)) {
+                return;
+            }
+            int claimLimit = Math.min(settings.batchSize(), settings.dispatchConcurrency() - inFlight.size());
+            if (claimLimit <= 0) {
+                return;
+            }
+            List<Execution> claimed = claimer.claim(nodeId, claimLimit);
+            for (Execution execution : claimed) {
+                submitDispatch(execution, definitionsByKey);
+            }
+            if (claimed.size() < claimLimit) {
+                return;
+            }
         }
     }
 
@@ -434,7 +469,8 @@ public final class Engine implements MohsLifecycle {
      * próprio in-flight e levanta {@code MANUAL} como flag pura, sem
      * interrupt: cancel é cooperativo por contrato; quem força é o timeout
      * do job e o Watchdog, que continuam valendo. Staleness efetiva ≤ 1
-     * poll-interval. Ids já sinalizados saem da consulta — o SELECT
+     * poll-interval + duração do tick (limitada pelo orçamento de rounds
+     * da ADR-0040). Ids já sinalizados saem da consulta — o SELECT
      * encolhe enquanto o handler ainda não respondeu, e o INFO sai uma vez
      * só. Ativo também em PAUSED/DRAINING, como o resto da varredura.
      */
