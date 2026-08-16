@@ -2,12 +2,16 @@ package io.mohs;
 
 import java.time.Instant;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import com.tngtech.archunit.base.DescribedPredicate;
+import com.tngtech.archunit.core.domain.JavaAccess;
 import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.domain.JavaModifier;
+import com.tngtech.archunit.core.domain.properties.HasName;
+import com.tngtech.archunit.core.domain.properties.HasOwner;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
@@ -106,6 +110,30 @@ class ArchitectureTest {
     static final ArchRule no_thread_local_in_concurrency_critical_code =
         noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..")
             .should().dependOnClassesThat().belongToAnyOf(ThreadLocal.class, InheritableThreadLocal.class);
+
+    /**
+     * "Todo PK gerado é UUIDv7, nunca sequencial nem v4" (CLAUDE.md,
+     * invariante) — o v4 do JDK é aleatório puro: espalha pelo índice
+     * inteiro os inserts que o v7 manteria localizados na cauda, e não é
+     * ordenável no tempo (o que mantém keyset possível — ADR-0040). A
+     * regra proíbe a GERAÇÃO, não o tipo:
+     * {@code io.github.robsonkades.uuidv7.UUIDv7} devolve
+     * {@code java.util.UUID} legitimamente e não dispara (o matching é
+     * pelo owner do alvo). {@code accessTargetWhere} em vez de
+     * {@code callMethod} de propósito: cobre também method reference
+     * ({@code UUID::randomUUID} é {@code JavaMethodReference}, não
+     * {@code JavaMethodCall} — escaparia do {@code callMethod}; review
+     * desta regra). A metade dos schemas (nenhum {@code IDENTITY}/
+     * {@code SERIAL}/{@code AUTO_INCREMENT}/{@code SEQUENCE}) fica em
+     * prosa no CLAUDE.md — ArchUnit não lê SQL, mesma lacuna registrada
+     * na regra de {@code synchronized} acima.
+     */
+    @ArchTest
+    static final ArchRule ids_are_generated_as_uuidv7_never_v4 =
+        noClasses().should().accessTargetWhere(
+                JavaAccess.Predicates.target(HasOwner.Predicates.With.owner(JavaClass.Predicates.type(UUID.class)))
+                        .and(JavaAccess.Predicates.target(HasName.Predicates.name("randomUUID"))))
+                .as("no classes should call or reference java.util.UUID.randomUUID()");
 
     /**
      * Todo pacote de produção precisa do próprio {@code package-info.java}
