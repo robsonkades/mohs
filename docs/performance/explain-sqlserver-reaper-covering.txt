@@ -1,0 +1,56 @@
+Reaper no SQL Server — instabilidade de plano e covering index (DBTUNE-19, 2026-08-16)
+Ambiente: SQL Server 2022 CU26 em Docker, tabela com 150.000 linhas terminais +
+500 RUNNING; statements na forma exata do JDBC (sp_executesql, state literal,
+demais parâmetros). Ver BASELINE.md, seção DBTUNE-19.
+
+== Pergunta original (herdada do DBTUNE-17/Postgres) ==
+O CAS de conclusão é capturado pelo índice filtrado do reaper?
+
+NÃO no SQL Server — medido nos dois regimes de estatística (em repouso e
+frescas), o CAS por id sempre cai na PK clusterizada:
+
+  COMPLETE_CAS         (WHERE id = @id AND state = 'RUNNING'):            Scan count 0, logical reads 5
+  COMPLETE_CAS_FENCED  (... AND lease_expires_at = @expectedLease):       Scan count 0, logical reads 3
+
+Resultado negativo registrado: o predicado do índice NÃO precisa do
+IS NOT NULL do Postgres aqui.
+
+== Achado real: o plano do reaper é instável sob parameter sniffing ==
+Query (JdbcReaper.selectExpiredCandidates):
+  SELECT TOP (500) e.id, e.job_key, e.lease_expires_at, e.cancel_requested, j.retries, ...
+  FROM mohs_executions e JOIN mohs_job_definitions j ON j.job_key = e.job_key
+  WHERE e.state = 'RUNNING' AND e.lease_expires_at < @now ORDER BY e.id
+
+Com o índice antigo — (lease_expires_at) WHERE state = 'RUNNING' —
+o caminho do índice paga 1 key lookup por candidato, e o custo estimado
+empata com o clustered scan quando o @now farejado casa muitos expirados:
+
+  compilado com 0 expirados  → Index Seek (filtrado):        4-5 logical reads   (plano bom)
+  compilado com 500 expirados → Clustered Index Scan:        3.549 logical reads
+  tick seguinte, 0 expirados, MESMO texto → plano do cache:  3.549 logical reads
+
+Ou seja: um único compile durante uma "tempestade" (morte de nó, boot após
+downtime — exatamente quando o reaper tem trabalho) prende o full scan no
+plan cache, e TODO tick posterior varre a tabela inteira à toa até o plano
+ser despejado.
+
+== Fix: covering filtered index ==
+  CREATE INDEX idx_mohs_executions_reaper ON mohs_executions (lease_expires_at)
+    INCLUDE (job_key, cancel_requested) WHERE state = 'RUNNING';
+(id não entra no INCLUDE: chave clusterizada vem implícita em todo índice.)
+
+Sem lookups, o caminho do índice domina o scan em QUALQUER compile:
+
+  compilado com 500 expirados (tempestade): 3.549 → 6 logical reads
+  tick seguinte, 0 expirados (cache):       3.549 → 3 logical reads
+
+CAS de conclusão re-verificado com o índice novo: inalterado (PK, 5/3 reads).
+
+Custo do INCLUDE: só linhas RUNNING carregam o índice (filtrado) — as duas
+colunas extras pesam apenas no in-flight, não nas terminais.
+
+Reprodução: docker compose up -d sqlserver (raiz), schema aplicado com
+sqlcmd -I (filtered index exige QUOTED_IDENTIFIER ON), 150k SUCCEEDED +
+UPDATE STATISTICS FULLSCAN + 500 RUNNING pós-coleta; planos via
+SET STATISTICS XML/IO ON com sp_executesql e DBCC FREEPROCCACHE entre os
+cenários de sniffing.

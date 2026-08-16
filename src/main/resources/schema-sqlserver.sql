@@ -82,8 +82,19 @@ CREATE INDEX idx_mohs_executions_claim ON mohs_executions (priority, scheduled_a
 -- Índice filtrado pro reaper (DBTUNE-10): só a execução RUNNING é
 -- candidata a reclaim — mesmo raciocínio da DBTUNE-5, WHERE em vez de
 -- coluna porque o predicado já fixa o state.
+-- INCLUDE (DBTUNE-19): sem covering, o custo do caminho do índice
+-- (seek + key lookup por candidato) empata com o clustered scan quando o
+-- parâmetro farejado casa muitos expirados (morte de nó, boot pós-
+-- downtime) — o otimizador compila o SCAN da tabela inteira e o plano
+-- fica preso no cache: TODO tick seguinte paga o scan mesmo com zero
+-- expirado (medido: 3.549 logical reads/tick com 150k linhas → 3-6 com
+-- o covering, nos dois regimes — explain-sqlserver-reaper-covering.txt).
+-- id fica de fora do INCLUDE: chave clusterizada já vem em todo índice.
+-- O trap do DBTUNE-17 (Postgres) NÃO se manifesta aqui: o CAS de
+-- conclusão por id sempre cai na PK no SQL Server (medido, 5 reads) —
+-- por isso o predicado não ganhou IS NOT NULL como lá.
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_reaper' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_reaper ON mohs_executions (lease_expires_at) WHERE state = 'RUNNING';
+CREATE INDEX idx_mohs_executions_reaper ON mohs_executions (lease_expires_at) INCLUDE (job_key, cancel_requested) WHERE state = 'RUNNING';
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_job_key' AND object_id = OBJECT_ID('mohs_executions'))
 CREATE INDEX idx_mohs_executions_job_key ON mohs_executions (job_key);
 -- Idempotent Receiver (EIP, DBTUNE-8) — ver schema-h2.sql. Filtrado:

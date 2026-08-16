@@ -564,6 +564,47 @@ junto com o fim do script — o sistema ficou ingest-bound.
   `synchronous_commit` por sessão, fillfactor) mudam semântica ou
   fronteira de transação — registradas como propostas, não aplicadas.
 
+## Reaper no SQL Server: covering index (DBTUNE-19) — 2026-08-16
+
+Fechamento da pendência declarada no DBTUNE-17 ("o índice filtrado do SQL
+Server tem o mesmo shape — medir lá antes de mexer"). Bancada: SQL Server
+2022 CU26 em Docker, 150k linhas terminais + 500 RUNNING, estatísticas
+controladas, statements na forma exata do JDBC (`sp_executesql`, `state`
+literal); planos e IO em `explain-sqlserver-reaper-covering.txt`.
+
+**Resultado negativo primeiro (igualmente registrado):** o trap do
+DBTUNE-17 NÃO se manifesta no SQL Server — o CAS de conclusão por id caiu
+na PK clusterizada nos dois regimes de estatística (5 reads; fenced 3).
+O predicado do índice não precisa do `IS NOT NULL` do Postgres.
+
+**Achado real, diferente do procurado:** o plano do *reaper* é instável
+sob parameter sniffing. Com o índice antigo (não-covering), o caminho do
+índice paga 1 key lookup por candidato e empata em custo com o clustered
+scan quando o `@now` farejado casa muitos expirados — exatamente os
+momentos de tempestade (morte de nó, boot pós-downtime) em que o reaper
+compila com trabalho na fila. O scan então fica preso no plan cache:
+
+| Cenário (índice antigo) | logical reads |
+|---|---:|
+| compilado com 0 expirados (seek filtrado) | 4-5 |
+| compilado com 500 expirados (clustered scan) | 3.549 |
+| tick seguinte, 0 expirados, plano do cache | **3.549 por tick, à toa** |
+
+**Fix aplicado:** covering — `INCLUDE (job_key, cancel_requested)` no
+índice filtrado (`id` é chave clusterizada, implícita). Sem lookups, o
+caminho do índice domina o scan em qualquer compile:
+
+| Cenário (covering) | logical reads |
+|---|---:|
+| compilado com 500 expirados | 6 |
+| tick seguinte, 0 expirados (cache) | 3 |
+
+CAS re-verificado com o índice novo: inalterado (PK). Custo do INCLUDE:
+só linhas RUNNING carregam o índice filtrado — as colunas extras pesam
+apenas no in-flight. Postgres/H2/MySQL não têm o fenômeno (Postgres
+replaneja por execução; H2/MySQL usam composto cheio e o UPDATE por id
+cai trivialmente na PK) — nenhuma mudança fora do SQL Server.
+
 ## Como reproduzir
 
 ```
