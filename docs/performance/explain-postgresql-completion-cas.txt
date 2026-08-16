@@ -1,0 +1,41 @@
+CAS de conclusão no Postgres — antes/depois da troca do índice parcial do reaper
+(DBTUNE-17, 2026-08-16; ver BASELINE.md, seção "Tuning fim a fim no Postgres").
+
+Statement (JdbcExecutionStore.complete):
+  UPDATE mohs_executions SET state = :new, scheduled_at = COALESCE(:retryAt, scheduled_at)
+  WHERE id = :id AND state = 'RUNNING'
+
+== ANTES (capturado ao vivo durante drain de 50k, pelo db-tuner) ==
+Índice parcial idx_mohs_executions_reaper era (lease_expires_at) WHERE state = 'RUNNING';
+o predicado do CAS implica o do índice e o planner o preferia à PK com estatísticas
+coletadas em repouso (0 linhas RUNNING no ANALYZE):
+
+ Update on mohs_executions (actual time=8.388)
+   -> Index Scan using idx_mohs_executions_reaper
+      Filter: id = '...' AND state = 'RUNNING'
+      Rows Removed by Filter: 453   Buffers: shared hit=5958
+ Execution Time: 8.398 ms
+
+Confirmação em escala: idx_scan = 149.085 no índice do reaper (esperado ~1/tick);
+o CAS de conclusão era o maior consumidor de CPU do banco no perfil de amostragem.
+
+== DEPOIS (recapturado após a troca; linha terminal, CAS não casa — o ponto é o plano) ==
+Predicado novo: (lease_expires_at) WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL
+— o CAS por id não implica mais o predicado do parcial e cai na PK; o reaper
+(lease_expires_at <= :now, operador estrito) continua elegível.
+
+ Update on mohs_executions  (cost=0.42..8.45 rows=0 width=0) (actual time=0.017..0.018 rows=0.00 loops=1)
+   Buffers: shared hit=4
+   ->  Index Scan using mohs_executions_pkey on mohs_executions  (cost=0.42..8.45 rows=1 width=72) (actual time=0.017..0.017 rows=0.00 loops=1)
+         Index Cond: ((id)::text = 'seedH-0000001'::text)
+         Filter: ((state)::text = 'RUNNING'::text)
+         Rows Removed by Filter: 1
+         Index Searches: 1
+         Buffers: shared hit=4
+ Planning Time: 0.320 ms
+ Execution Time: 0.105 ms
+
+Troca aplicada ao vivo sem janela de descoberto:
+CREATE INDEX CONCURRENTLY (novo predicado) -> DROP INDEX CONCURRENTLY (antigo) -> RENAME.
+Perfil pós-fix: 880 -> 19 amostras de CPU no CAS; claim->primeiro fired 84,9 -> 17,4 ms.
+schema-sqlserver.sql tem índice filtrado do mesmo shape — mesmo trap possível lá; medir antes.

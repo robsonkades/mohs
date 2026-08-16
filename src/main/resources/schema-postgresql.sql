@@ -72,7 +72,22 @@ CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (priorit
 -- Índice parcial pro reaper (DBTUNE-10): só a execução RUNNING é
 -- candidata a reclaim — mesmo raciocínio da DBTUNE-5, WHERE em vez de
 -- coluna porque o predicado já fixa o state.
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_reaper ON mohs_executions (lease_expires_at) WHERE state = 'RUNNING';
+-- lease_expires_at IS NOT NULL no predicado (DBTUNE-17): sem ele, todo
+-- UPDATE com "WHERE id = ? AND state = 'RUNNING'" (CAS de conclusão,
+-- renovação de lease, cancel-request) implica o predicado do índice e o
+-- planner o escolhe no lugar do PK — full scan das entradas RUNNING por
+-- statement (medido: 8.4 ms/conclusão vs 0.05 ms pelo PK, com o índice
+-- inchado pelo churn claim→conclusão). Com IS NOT NULL, só quem restringe
+-- lease_expires_at (o reaper, operador estrito ⇒ IS NOT NULL provado)
+-- continua elegível; os CAS por id SEM fence caem no PK. O CAS fenced do
+-- reclaim (lease_expires_at = :expectedLease, anti-ABA da ADR-0033) ainda
+-- implica o predicado — caminho frio em operação normal, mas quente em
+-- reclaim em massa: medir (EXPLAIN) antes de confiar que o planner
+-- escolhe o PK ali. Bases existentes precisam
+-- recriar: CREATE INDEX CONCURRENTLY com o predicado novo, DROP
+-- CONCURRENTLY do antigo, RENAME — CREATE IF NOT EXISTS não altera
+-- índice já existente.
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_reaper ON mohs_executions (lease_expires_at) WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_job_key ON mohs_executions (job_key);
 -- Idempotent Receiver (EIP, DBTUNE-8) — ver schema-h2.sql. Parcial: só
 -- linhas com chave entram no índice (NULL nunca colide e não pesa aqui).
