@@ -4,9 +4,11 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -14,7 +16,6 @@ import java.util.stream.Collectors;
 import javax.sql.DataSource;
 
 import org.springframework.dao.PessimisticLockingFailureException;
-import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -48,7 +49,7 @@ import io.mohs.jdbc.dialect.SqlServerJdbcDialect;
  * otimização (reduz quantos candidatos perdedores fazem trabalho à toa)
  * — a garantia de corretude real vem inteiramente de uma cadeia de
  * {@code UPDATE} guardados ({@link JobStore#tryIncrementRunningExecutions},
- * {@link #tryTransitionToRunning}), cada um atômico por construção
+ * {@link JdbcDialect#transitionToRunning}), cada um atômico por construção
  * porque é uma escrita simples, não uma leitura com lock especializado.
  * Motivo: {@code SELECT ... FOR UPDATE SKIP LOCKED} do H2 2.4.240 tem
  * uma corrida real sob contenção genuína — confirmado empiricamente
@@ -172,68 +173,59 @@ public final class JdbcClaimer implements Claimer {
         }
     }
 
+    /**
+     * Janela de exclusão é a primeira guarda, antes de reservar qualquer
+     * vaga de concorrência: candidato excluído nunca chega a disputar o
+     * mutex do job nem o CAS pra {@code RUNNING}. Depois dela o lote se
+     * parte em dois (DBTUNE-16): candidato sem mutex de job só precisa do
+     * CAS — acumulado e resolvido numa única chamada de {@link
+     * JdbcDialect#transitionToRunning} (1 statement no Postgres, N no
+     * default); candidato com mutex mantém a cadeia guardada da
+     * ADR-0018/0020 ({@link #tryClaimWithJobSlot}), que precisa do
+     * veredito individual na hora pra desfazer a reserva do slot em caso
+     * de derrota. O resultado é remontado na ordem dos candidatos
+     * (prioridade, {@code scheduled_at}) — a mesma que o linha-a-linha
+     * produzia.
+     */
     private List<String> claimWithinTransaction(String nodeId, int batchSize) {
         Instant now = clock.instant();
         Instant leaseExpiresAt = now.plus(leaseTtl);
         List<Candidate> candidates = selectCandidates(now, batchSize);
 
-        List<String> claimedIds = new ArrayList<>(candidates.size());
+        Set<String> claimedIds = new HashSet<>();
+        List<String> concurrentAllowedIds = new ArrayList<>(candidates.size());
         for (Candidate candidate : candidates) {
-            if (tryClaimCandidate(candidate, nodeId, now, leaseExpiresAt)) {
+            if (windowRegistry.excludes(candidate.windowName(), now)) {
+                continue;
+            }
+            if (candidate.allowConcurrentExecutions()) {
+                concurrentAllowedIds.add(candidate.id());
+            } else if (tryClaimWithJobSlot(candidate, nodeId, now, leaseExpiresAt)) {
                 claimedIds.add(candidate.id());
             }
         }
-        return claimedIds;
+        if (!concurrentAllowedIds.isEmpty()) {
+            claimedIds.addAll(dialect.transitionToRunning(jdbcTemplate, concurrentAllowedIds, nodeId, now, leaseExpiresAt));
+        }
+        return candidates.stream().map(Candidate::id).filter(claimedIds::contains).toList();
     }
 
     /**
-     * Reivindica um candidato através da cadeia completa de guardas
-     * atômicas, desfazendo qualquer reserva parcial se um passo posterior
-     * falhar — nunca deixa mutex de job preso por um candidato que no fim
-     * não foi reivindicado. Janela de exclusão é a primeira guarda, antes
-     * de reservar qualquer vaga de concorrência: candidato excluído nunca
-     * chega a disputar o mutex do job nem o CAS pra {@code RUNNING}.
+     * Reivindica um candidato com mutex de job através da cadeia completa
+     * de guardas atômicas (ADR-0018/0020), desfazendo a reserva do slot se
+     * o CAS perder — nunca deixa mutex de job preso por um candidato que
+     * no fim não foi reivindicado.
      */
-    private boolean tryClaimCandidate(Candidate candidate, String nodeId, Instant now, Instant leaseExpiresAt) {
-        if (windowRegistry.excludes(candidate.windowName(), now)) {
+    private boolean tryClaimWithJobSlot(Candidate candidate, String nodeId, Instant now, Instant leaseExpiresAt) {
+        JobKey jobKey = JobKey.of(candidate.jobKey());
+        if (!jobStore.tryIncrementRunningExecutions(jobKey)) {
             return false;
         }
-        boolean acquiredJobSlot = false;
-        if (!candidate.allowConcurrentExecutions()) {
-            if (!jobStore.tryIncrementRunningExecutions(JobKey.of(candidate.jobKey()))) {
-                return false;
-            }
-            acquiredJobSlot = true;
-        }
-
-        boolean claimed = tryTransitionToRunning(candidate.id(), nodeId, now, leaseExpiresAt);
-        if (!claimed && acquiredJobSlot) {
-            jobStore.decrementRunningExecutions(JobKey.of(candidate.jobKey()));
+        boolean claimed = !dialect.transitionToRunning(jdbcTemplate, List.of(candidate.id()), nodeId, now, leaseExpiresAt).isEmpty();
+        if (!claimed) {
+            jobStore.decrementRunningExecutions(jobKey);
         }
         return claimed;
-    }
-
-    /**
-     * CAS final pra RUNNING — a garantia real contra double-claim,
-     * independente do lock do SELECT. Os dois estados claimáveis, mesmo par
-     * do template de candidatos (ADR-0033). {@code scheduled_at <= :now}
-     * reverificado aqui porque o retry o tornou mutável: entre o SELECT e
-     * este CAS, outro nó pode reivindicar o candidato, falhar rápido e
-     * reagendá-lo pro futuro — sem a guarda, o backoff seria furado
-     * (ADR-0018: toda condição de elegibilidade que muda entre SELECT e
-     * CAS pertence ao CAS).
-     */
-    private boolean tryTransitionToRunning(String executionId, String nodeId, Instant now, Instant leaseExpiresAt) {
-        int updated = jdbcTemplate.update("""
-                UPDATE mohs_executions
-                SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId
-                WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND scheduled_at <= :now
-                """, new MapSqlParameterSource()
-                .addValue("leaseExpiresAt", JdbcTimestamps.toUtcTimestamp(leaseExpiresAt))
-                .addValue("nodeId", nodeId)
-                .addValue("now", JdbcTimestamps.toUtcTimestamp(now))
-                .addValue("id", executionId));
-        return updated == 1;
     }
 
     private List<Candidate> selectCandidates(Instant now, int batchSize) {

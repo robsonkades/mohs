@@ -21,6 +21,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 
@@ -40,6 +41,7 @@ import io.mohs.core.execution.Priority;
 import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.jdbc.dialect.JdbcDialect;
 import io.mohs.jdbc.dialect.MySqlJdbcDialect;
+import io.mohs.jdbc.dialect.PostgresJdbcDialect;
 import io.mohs.test.MutableClock;
 
 /**
@@ -121,6 +123,7 @@ class ClaimQueryExplainHarness {
         // mohs_job_definitions — as estatísticas das DUAS tabelas entram no plano
         captureExplain("h2", ClaimQueryExplainHarness::freshH2DataSource, "ANALYZE", H2_EXPLAIN_SQL);
         captureExplain("postgresql", PostgresTestSupport::freshSchema, "ANALYZE mohs_executions, mohs_job_definitions", POSTGRES_EXPLAIN_SQL);
+        capturePostgresBatchCasExplain();
         captureExplain("mysql", MySqlTestSupport::freshSchema, "ANALYZE TABLE mohs_executions, mohs_job_definitions", MYSQL_EXPLAIN_SQL);
         captureShowplanSqlServer();
         investigateMySqlRowLockContention();
@@ -132,6 +135,34 @@ class ClaimQueryExplainHarness {
         seedBacklog(dataSource);
         new JdbcTemplate(dataSource).execute(statsSql);
         writeFile(label, runExplain(dataSource, explainSql));
+    }
+
+    /**
+     * DBTUNE-16: plano do CAS em lote do Postgres ({@code UPDATE ... IN
+     * (...) ... RETURNING}) — capturado com os mesmos 20 ids que a claim
+     * query selecionaria, sobre o mesmo seed e estatísticas do plano do
+     * SELECT. {@code EXPLAIN ANALYZE} de UPDATE executa o UPDATE de
+     * verdade — schema próprio desta captura, nada compartilhado. O SQL
+     * com literais é derivado da constante do dialeto, nunca copiado
+     * (mesma regra do {@link #ANSI_LITERAL_SQL}).
+     */
+    private void capturePostgresBatchCasExplain() throws SQLException, IOException {
+        DataSource dataSource = PostgresTestSupport.freshSchema();
+        seedBacklog(dataSource);
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+        jdbcTemplate.execute("ANALYZE mohs_executions, mohs_job_definitions");
+        List<String> ids = jdbcTemplate.queryForList("""
+                SELECT id FROM mohs_executions
+                WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND scheduled_at <= TIMESTAMP '2026-08-14 12:00:00'
+                ORDER BY priority ASC, scheduled_at ASC
+                LIMIT 20
+                """, String.class);
+        String literalSql = PostgresJdbcDialect.BATCH_TRANSITION_TO_RUNNING
+                .replace(":leaseExpiresAt", "TIMESTAMP '2026-08-14 12:00:30'")
+                .replace(":nodeId", "'explain-node'")
+                .replace(":now", "TIMESTAMP '2026-08-14 12:00:00'")
+                .replace(":ids", ids.stream().map(id -> "'" + id + "'").collect(Collectors.joining(", ")));
+        writeFile("postgresql-batch-cas", runExplain(dataSource, "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)\n" + literalSql));
     }
 
     /** {@code SET SHOWPLAN_ALL} precisa ser o único statement do batch (T-SQL) — duas chamadas separadas na mesma conexão. Estatísticas ANTES do showplan (sob showplan nada executa de verdade). */

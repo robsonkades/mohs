@@ -413,6 +413,85 @@ plano bruto de toda candidata medida é preservado em arquivo sufixado
 *antes* de decidir/reverter — a evidência primária do achado central de
 um ciclo não pode depender de reimplementar a candidata.
 
+## CAS do claim em lote no Postgres (DBTUNE-16) — 2026-08-16
+
+Motivação: o claim fazia 1 SELECT + **um UPDATE guardado por candidato**
+dentro da mesma transação — com `batchSize` N, 1+N round trips segurando
+os row locks do `SKIP LOCKED` o tempo inteiro. A mudança: candidato sem
+mutex de job atravessa o CAS numa única chamada de
+`JdbcDialect.transitionToRunning` — default continua linha a linha
+(comportamento anterior, todos os dialetos), `PostgresJdbcDialect`
+sobrescreve com `UPDATE ... WHERE id IN (...) ... RETURNING id` (mesmas
+guardas por linha da ADR-0018; o `RETURNING` devolve quem venceu). Round
+trips por claim no Postgres: 1+N → 2. Candidato com mutex mantém a
+cadeia guardada (o slot precisa do veredito individual pra desfazer).
+Semântica preservada: ordem por (prioridade, `scheduled_at`), janela de
+exclusão, mutex — pinada por 2 testes novos em
+`JdbcClaimerPostgresTest` (verdes antes E depois da mudança).
+
+Alternativa considerada e rejeitada sem medir: lock-and-fetch em
+statement única (estilo db-scheduler, `UPDATE ... WHERE id IN (SELECT
+... FOR UPDATE SKIP LOCKED)`) — exigiria tirar mutex/janela do caminho
+único de candidatos, mudando a fairness de prioridade entre jobs simples
+e com mutex (mudança de comportamento observável, fora do escopo de uma
+otimização).
+
+Metodologia idêntica à rodada 08-15 (seed misto ~20% `RETRY_SCHEDULED`),
+mesma máquina, mesmas imagens. **Duas rodadas "depois"** para variância
+run-to-run. As três rodadas desta seção são do mesmo dia, em sequência.
+
+### Resultados (ClaimQueryLoadHarness, batchSize=20)
+
+| Dialeto    | antes p50/p99 (ms) | antes (rows/s) | depois-1 (rows/s) | depois-2 (rows/s) | depois p50 (ms) |
+|------------|-------------------:|---------------:|------------------:|------------------:|----------------:|
+| H2         |        2.81 / 4.96 |         9031.9 |            9005.2 |            8112.5 |     2.98 / 3.02 |
+| PostgreSQL |       7.61 / 25.76 |         9947.4 |       **23453.8** |       **22010.2** | **4.90 / 3.90** |
+| MySQL      |      24.30 / 37.06 |          880.5 |            2273.2 |            2340.5 |   23.81 / 23.39 |
+| SQL Server |      14.69 / 26.11 |         1825.5 |            3882.3 |            1966.3 |   14.63 / 22.96 |
+
+(coluna "depois p50" traz as duas rodadas: depois-1 / depois-2.)
+
+### Atribuição
+
+- **PostgreSQL — atribuível**: throughput ~2.2x (9947 → 22010–23454
+  rows/s), p50 caindo de 7.61 pra 3.90–4.90 ms, estável entre as duas
+  rodadas "depois". O mecanismo explica: por claim de 20 linhas, 21
+  statements viraram 2. O "antes" desta rodada é consistente com o
+  baseline 08-15 (11299.6) — não estava deprimido.
+- **H2 — controle**: caminho inalterado (default linha a linha,
+  in-process, imune a variância de Docker) e números estáveis
+  (9032 → 9005/8113) — evidência de que as condições de JVM/máquina
+  eram comparáveis entre as rodadas.
+- **MySQL e SQL Server — não atribuível**: caminho de código inalterado.
+  O MySQL subiu ~2.6x com a mesma sequência de statements — o "antes"
+  (880.5, abaixo do próprio baseline 08-15 de 1429.8) foi a primeira
+  sessão Testcontainers do dia (aquecimento de container/volume). SQL
+  Server oscilou ±50% entre as duas rodadas "depois" (3882 → 1966) —
+  ruído puro. Nenhuma conclusão sobre esses dois nesta rodada.
+
+### Planos desta rodada
+
+- `explain-postgresql-batch-cas.txt` (**novo**): o CAS em lote —
+  `Bitmap Index Scan` na PK pros 20 ids → um único nó `Update`, guardas
+  de estado/`scheduled_at` como `Filter` por linha; 20 linhas em
+  0.414 ms de execução. Nenhum scan/sort.
+- `explain-postgresql.txt` (recapturado): SELECT de candidatos idêntico
+  ao da rodada 08-15 — `Index Scan using idx_mohs_executions_claim`,
+  sem Sort. A mudança não toca a query de candidatos.
+- `explain-h2.txt`, `explain-mysql.txt`, `explain-sqlserver.txt`,
+  `explain-mysql-lock-investigation.txt`: recapturados como efeito
+  colateral do harness completo — mesma query, planos equivalentes aos
+  da rodada 08-15 (a mudança não toca esses dialetos).
+
+### Limitação declarada
+
+O harness mede `batchSize = 20`. O cenário que motivou a mudança
+(`mohs.engine.batch-size = 500`, 4 nós) tem N maior — a redução
+estrutural 1+N → 2 round trips vale para qualquer N, mas o ganho
+fim-a-fim nessa escala não foi medido nesta rodada (o throughput de
+jobs completos depende também do caminho de dispatch, fora do escopo
+deste harness).
+
 ## Como reproduzir
 
 ```

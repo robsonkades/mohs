@@ -1,9 +1,13 @@
 package io.mohs.jdbc.dialect;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+
+import io.mohs.jdbc.JdbcTimestamps;
 
 /**
  * As poucas divergências reais de dialeto que {@code io.mohs.jdbc}
@@ -59,6 +63,54 @@ public interface JdbcDialect {
             """;
 
     List<Candidate> selectCandidates(NamedParameterJdbcTemplate jdbcTemplate, Instant now, int batchSize);
+
+    /**
+     * CAS final pra {@code RUNNING} — a garantia real da ADR-0018 contra
+     * double-claim, independente do lock de {@link #selectCandidates}. Os
+     * dois estados claimáveis são o mesmo par do template de candidatos
+     * (ADR-0033). {@code scheduled_at <= :now} reverificado aqui porque o
+     * retry o tornou mutável: entre o SELECT e este CAS, outro nó pode
+     * reivindicar o candidato, falhar rápido e reagendá-lo pro futuro —
+     * sem a guarda, o backoff seria furado (ADR-0018: toda condição de
+     * elegibilidade que muda entre SELECT e CAS pertence ao CAS).
+     * {@code UPDATE} simples, sem sintaxe divergente — compartilhado pelos
+     * 4 dialetos via {@link #transitionToRunning}.
+     */
+    String ANSI_TRANSITION_TO_RUNNING = """
+            UPDATE mohs_executions
+            SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId
+            WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND scheduled_at <= :now
+            """;
+
+    /**
+     * Terceira divergência real de dialeto (DBTUNE-16): executa o CAS de
+     * {@link #ANSI_TRANSITION_TO_RUNNING} pra cada id e devolve os que
+     * venceram — subconjunto de {@code ids}, <b>ordem não garantida</b>
+     * ({@code io.mohs.jdbc.JdbcClaimer} reordena pela ordem dos
+     * candidatos). {@code ids} nunca pode ser vazio: a expansão de
+     * {@code IN (:ids)} do override do Postgres não aceita coleção vazia
+     * — o chamador guarda, e é quem deve continuar guardando. Default:
+     * um {@code UPDATE} por id, atômico por
+     * construção em qualquer banco — o comportamento que todos os dialetos
+     * tinham antes. Postgres sobrescreve com um único
+     * {@code UPDATE ... RETURNING}: mesmas guardas por linha, N round
+     * trips viram 1.
+     */
+    default List<String> transitionToRunning(NamedParameterJdbcTemplate jdbcTemplate, List<String> ids, String nodeId,
+            Instant now, Instant leaseExpiresAt) {
+        List<String> claimed = new ArrayList<>(ids.size());
+        for (String id : ids) {
+            int updated = jdbcTemplate.update(ANSI_TRANSITION_TO_RUNNING, new MapSqlParameterSource()
+                    .addValue("leaseExpiresAt", JdbcTimestamps.toUtcTimestamp(leaseExpiresAt))
+                    .addValue("nodeId", nodeId)
+                    .addValue("now", JdbcTimestamps.toUtcTimestamp(now))
+                    .addValue("id", id));
+            if (updated == 1) {
+                claimed.add(id);
+            }
+        }
+        return claimed;
+    }
 
     /**
      * Segunda divergência real de dialeto (a primeira é {@link #selectCandidates}):
