@@ -106,6 +106,25 @@ class InMemoryJobStoreTest {
                 .containsExactly("due-late");
     }
 
+    /** ADR-0036 no test kit: mesma semântica do adapter JDBC — agenda trocada, trigger recomputado, políticas e estado operacional intactos. */
+    @Test
+    void rescheduleSwapsTheScheduleAndRearmsTheTrigger() {
+        MutableClock clock = MutableClock.startingAt(Instant.parse("2026-08-15T12:00:00Z"));
+        InMemoryJobStore clocked = new InMemoryJobStore(clock);
+        clocked.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofMinutes(5)).retries(3)));
+        clocked.pause(JobKey.of("poll"));
+
+        boolean rescheduled = clocked.reschedule(JobKey.of("poll"), new CronSpec("0 0 2 * * *", ZoneId.of("UTC")));
+
+        assertThat(rescheduled).isTrue();
+        StoredJob stored = clocked.find(JobKey.of("poll")).orElseThrow();
+        assertThat(stored.definition().schedule()).isEqualTo(new CronSpec("0 0 2 * * *", ZoneId.of("UTC")));
+        assertThat(stored.definition().retries()).isEqualTo(3);
+        assertThat(stored.paused()).isTrue(); // estado operacional não é agenda
+        assertThat(stored.nextFireAt()).isEqualTo(Instant.parse("2026-08-16T02:00:00Z"));
+        assertThat(clocked.reschedule(JobKey.of("ghost"), new OnDemandSpec())).isFalse();
+    }
+
     @Test
     void armNextFireOnlyArmsAnUnarmedTrigger() {
         store.upsert(definition("import-file")); // on-demand: nasce desarmado

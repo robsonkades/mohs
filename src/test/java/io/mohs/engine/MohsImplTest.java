@@ -20,6 +20,7 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.schedule.Misfire;
 import io.mohs.core.schedule.OnDemandSpec;
 import io.mohs.test.InMemoryJobStore;
@@ -203,6 +204,23 @@ class MohsImplTest {
 
         assertThat(mohs.jobs()).extracting(s -> s.definition().key().value())
                 .containsExactlyInAnyOrder("welcome-email", "digest");
+    }
+
+    /** ADR-0036: reschedule delega pra porta e devolve o snapshot já com a agenda nova e o trigger recomputado. */
+    @Test
+    void rescheduleReturnsTheFreshSnapshot() {
+        jobStore.upsert(everyMinute("digest"));
+
+        Optional<JobSnapshot> snapshot = mohs.reschedule(JobKey.of("digest"), new IntervalSpec(Duration.ofMinutes(5), false));
+
+        assertThat(snapshot).isPresent();
+        assertThat(snapshot.get().definition().schedule()).isEqualTo(new IntervalSpec(Duration.ofMinutes(5), false));
+        assertThat(snapshot.get().nextFireAt()).isEqualTo(NOW.plus(Duration.ofMinutes(5)));
+    }
+
+    @Test
+    void rescheduleOfAnUnknownJobIsEmpty() {
+        assertThat(mohs.reschedule(JobKey.of("ghost"), new OnDemandSpec())).isEmpty();
     }
 
     @Test

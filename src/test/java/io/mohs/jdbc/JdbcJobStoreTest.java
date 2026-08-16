@@ -703,6 +703,64 @@ class JdbcJobStoreTest {
             return (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class}, onDataSource);
         }
 
+        /** ADR-0036: agenda nova e trigger recomputado aterrissam no MESMO UPDATE; políticas (retries etc.) intactas. */
+        @Test
+        void rescheduleSwapsTheScheduleAndRearmsTheTrigger() {
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
+
+            boolean rescheduled = store.reschedule(JobKey.of("poll"), new IntervalSpec(Duration.ofMinutes(1), false));
+
+            assertThat(rescheduled).isTrue();
+            StoredJob stored = store.find(JobKey.of("poll")).orElseThrow();
+            assertThat(stored.definition().schedule()).isEqualTo(new IntervalSpec(Duration.ofMinutes(1), false));
+            assertThat(stored.definition().retries()).isEqualTo(3); // política não é agenda — intacta
+            assertThat(stored.nextFireAt()).isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
+        }
+
+        /** Desligar a recorrência em runtime é um caso válido do mesmo endpoint (ADR-0036). */
+        @Test
+        void rescheduleToOnDemandDisarmsTheTrigger() {
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
+
+            store.reschedule(JobKey.of("poll"), new OnDemandSpec());
+
+            assertThat(store.find(JobKey.of("poll")).orElseThrow().definition().schedule()).isEqualTo(new OnDemandSpec());
+            assertThat(nextFireAtOf("poll")).isNull();
+        }
+
+        @Test
+        void rescheduleOfARetiredOrUnknownJobReturnsFalse() {
+            assertThat(store.reschedule(JobKey.of("ghost"), new OnDemandSpec())).isFalse();
+
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
+            store.remove(JobKey.of("poll"));
+            assertThat(store.reschedule(JobKey.of("poll"), new OnDemandSpec())).isFalse();
+        }
+
+        /** ADR-0036 × ADR-0035: corrente fixed-delay em voo (trigger desarmado) reagendada — a série nova vence; o rearme atrasado da conclusão no-opa no guard IS NULL. */
+        @Test
+        void rescheduleArmsTheNewSeriesAndTheLateCompletionRearmLoses() {
+            store.upsert(definition("chain", new IntervalSpec(Duration.ofMinutes(5), true)));
+            disarm("chain"); // ocorrência em voo: next_fire_at = NULL, como o fire deixa
+
+            store.reschedule(JobKey.of("chain"), new IntervalSpec(Duration.ofMinutes(1), true));
+            store.armNextFire(JobKey.of("chain"), clock.instant().plus(Duration.ofMinutes(5))); // conclusão chega atrasada
+
+            assertThat(nextFireAtOf("chain")).isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
+        }
+
+        /** Cron irrealizável falha ANTES de qualquer escrita — a agenda antiga fica intacta. */
+        @Test
+        void rescheduleWithAnImpossibleCronFailsWithoutWriting() {
+            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
+
+            assertThatThrownBy(() -> store.reschedule(JobKey.of("poll"), new CronSpec("0 0 0 30 2 *", ZoneId.of("UTC"))))
+                    .isInstanceOf(IllegalArgumentException.class);
+
+            assertThat(store.find(JobKey.of("poll")).orElseThrow().definition().schedule())
+                    .isEqualTo(new IntervalSpec(Duration.ofMinutes(5), false));
+        }
+
         @Test
         void armNextFireOnlyArmsAnUnarmedTrigger() {
             store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), true)));

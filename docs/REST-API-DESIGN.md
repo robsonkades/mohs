@@ -40,6 +40,7 @@ v0.5: `GET/PATCH /queues` removido — `JobQueue` foi removida por completo (ADR
 | `GET /overview` | Âncora de polling do dashboard: contagens por status, throughput da janela recente — barato por construção |
 | `GET /jobs` · `GET /jobs/{jobKey}` | Definições registradas: agenda, políticas, estado, próximo fire |
 | `POST /jobs/{jobKey}/schedule` | Invoca. Body: `{ "payload": {...}, "at"?, "delay"?, "priority"? }` — `at` (absoluto) × `delay` (ISO-8601, computado no servidor) exclusivos; ambos ausentes = agora; `priority` ausente = `NORMAL`. → 202 |
+| `PATCH /jobs/{jobKey}/schedule` | Muda a agenda em runtime (ADR-0036). Body: `ScheduleView` (`CRON`/`INTERVAL`/`ON_DEMAND`; `ON_DEMAND` desarma a recorrência). Emergência: boot reverte sob `on-conflict=override` (aviso no envelope). Cron irrealizável → 422 |
 | `POST /jobs/{jobKey}/pause` · `/resume` | Suspende/retoma disparos automáticos (schedule manual segue permitido) |
 | `GET /jobs/{jobKey}/executions` | Histórico do job (cursor) |
 | `GET /executions?status=&jobKey=&from=&to=` | Busca global (cursor) |

@@ -13,6 +13,7 @@ import java.util.stream.Stream;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.schedule.Schedule;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.NextFireCalculator;
 import io.mohs.engine.StoredJob;
@@ -110,6 +111,22 @@ public final class InMemoryJobStore implements JobStore {
         jobs.computeIfPresent(key, (_, stored) -> stored.nextFireAt() != null
                 ? stored
                 : new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), stored.runningExecutionCount(), nextFireAt));
+    }
+
+    @Override
+    public boolean reschedule(JobKey key, Schedule schedule) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(schedule, "schedule");
+        // o remapeamento nunca devolve null, então computeIfPresent não-null ⟺ o job existia
+        return jobs.computeIfPresent(key, (_, stored) -> {
+            JobDefinition current = stored.definition();
+            JobDefinition redefined = new JobDefinition(current.key(), current.name(), current.handlerType(), schedule,
+                    current.runner(), current.window(), current.misfire(), current.startPaused(),
+                    current.allowConcurrentExecutions(), current.maxConcurrentExecutions(), current.retries(),
+                    current.timeout(), current.retryPolicy(), current.source());
+            Instant nextFireAt = nextFireCalculator.nextFireAfter(schedule, clock.instant()).orElse(null);
+            return new StoredJob(redefined, stored.orphaned(), stored.paused(), stored.runningExecutionCount(), nextFireAt);
+        }) != null;
     }
 
     @Override

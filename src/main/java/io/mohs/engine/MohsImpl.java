@@ -20,6 +20,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.job.JobRef;
 import io.mohs.core.schedule.IntervalSpec;
+import io.mohs.core.schedule.Schedule;
 
 /**
  * {@link Mohs} sobre {@link JobStore}/{@link ExecutionStore} — {@code
@@ -118,6 +119,16 @@ public final class MohsImpl implements Mohs {
     public void resume(JobKey jobKey) {
         Objects.requireNonNull(jobKey, "jobKey");
         jobStore.resume(jobKey);
+    }
+
+    @Override
+    public Optional<JobSnapshot> reschedule(JobKey jobKey, Schedule schedule) {
+        Objects.requireNonNull(jobKey, "jobKey");
+        Objects.requireNonNull(schedule, "schedule");
+        if (!jobStore.reschedule(jobKey, schedule)) {
+            return Optional.empty();
+        }
+        return findJob(jobKey);
     }
 
     @Override

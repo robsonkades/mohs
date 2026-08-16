@@ -9,8 +9,11 @@ import java.util.Optional;
 import jakarta.servlet.http.HttpServletRequest;
 
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -32,6 +35,7 @@ import io.mohs.rest.AcceptedExecutionResponse;
 import io.mohs.rest.ActorResolver;
 import io.mohs.rest.ApiPaths;
 import io.mohs.rest.CursorPage;
+import io.mohs.rest.RuntimePatchResponse;
 import io.mohs.rest.error.JobNotFoundException;
 import io.mohs.rest.error.PayloadValidationException;
 import io.mohs.rest.execution.ExecutionResponse;
@@ -39,11 +43,15 @@ import io.mohs.rest.execution.ExecutionResponse;
 /**
  * Área de recurso "jobs" (ver {@code docs/REST-API-DESIGN.md}). Definição
  * de job é código, não API — não há {@code POST}/{@code PUT}/{@code DELETE}
- * aqui, só leitura e invocação sobre definição existente.
+ * de definição aqui, só leitura e invocação sobre definição existente; o
+ * {@code PATCH .../schedule} (ADR-0036) é ajuste runtime de emergência
+ * sobre a agenda, não definição.
  */
 @RestController
 @RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/jobs")
 public class JobsController {
+
+    private static final Logger log = LoggerFactory.getLogger(JobsController.class);
 
     /** Distância de edição máxima para sugerir um {@code jobKey} vizinho num 404 (§5.13 do documento mestre). */
     private static final int NEARBY_THRESHOLD = 2;
@@ -104,6 +112,47 @@ public class JobsController {
     public JobResponse resume(@PathVariable String jobKey) {
         mohs.resume(requireJob(jobKey).definition().key());
         return JobResponse.from(requireJob(jobKey));
+    }
+
+    /**
+     * ADR-0036 — muda a agenda em runtime, sob o contrato de PATCH de
+     * emergência da casa: a resposta avisa que a mudança vale até o próximo
+     * boot ({@code on-conflict=override} restaura o código com diff
+     * logado). Corpo é {@link ScheduleView} ({@code CRON}/{@code INTERVAL}/
+     * {@code ON_DEMAND}); agenda irrealizável (cron que nunca dispara) vira
+     * 422 que ensina, nunca 500.
+     */
+    @PatchMapping("/{jobKey}/schedule")
+    public RuntimePatchResponse<JobResponse> reschedule(@PathVariable String jobKey, @RequestBody ScheduleView body,
+            HttpServletRequest request) {
+        JobKey key = requireJob(jobKey).definition().key();
+        // actor validado ANTES da mutação (review ADR-0036): 4xx é contrato de "nada
+        // mudou" — resolver depois deixava a agenda alterada com 400 na mão do cliente
+        // e SEM a trilha de auditoria (actor é inegociável em mutação, ADR-0010)
+        String actor = actorResolver.resolve(request);
+        JobSnapshot snapshot = rescheduleOrReject(key, body)
+                .orElseThrow(() -> new JobNotFoundException(key, nearbyJobKeys(key)));
+        // loga o que ESTE actor pediu (o body), não o snapshot pós-escrita — trilha de
+        // auditoria registra intenção; dois PATCHes concorrentes nunca trocam de autoria
+        log.info("job '{}' rescheduled at runtime by '{}' to {} — emergency change (ADR-0036), reverts on next boot under on-conflict=override",
+                key.value(), actor, body);
+        return RuntimePatchResponse.of(JobResponse.from(snapshot));
+    }
+
+    /**
+     * Toda IAE deste escopo é validação de agenda por construção
+     * ({@code jobKey} já passou por {@code requireJob}): os compact
+     * constructors dos specs em {@code toSchedule()} (interval não
+     * positivo, cron em branco) e o {@code NextFireCalculator} (cron
+     * irrealizável) — o 422 do contrato cobre as duas fontes; fora deste
+     * escopo, IAE alheia nunca é traduzida.
+     */
+    private Optional<JobSnapshot> rescheduleOrReject(JobKey key, ScheduleView body) {
+        try {
+            return mohs.reschedule(key, body.toSchedule());
+        } catch (IllegalArgumentException e) {
+            throw new PayloadValidationException("schedule", Objects.requireNonNullElse(e.getMessage(), e.toString()));
+        }
     }
 
     /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. */

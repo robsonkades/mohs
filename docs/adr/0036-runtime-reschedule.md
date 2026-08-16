@@ -1,8 +1,9 @@
 # ADR-0036: Mudança de agenda em runtime (`PATCH /jobs/{jobKey}/schedule`)
 
 ## Status
-Proposed — 2026-08-15, aguardando aprovação. Depende da ADR-0035 (materialização de
-disparos; é a maquinaria de "agenda alterada → recalcula o trigger" que esta ADR reusa).
+Decided — 2026-08-15 (aprovada pelo autor junto com "a API deve suportar todos os tipos de
+agendamento"). Depende da ADR-0035 (materialização de disparos; é a maquinaria de "agenda
+alterada → recalcula o trigger" que esta ADR reusa).
 
 ## Context
 A agenda de um job nasce na definição (`@MohsJob`/`Mohs.define`) e, desde a ADR-0035,
@@ -63,8 +64,18 @@ com o vocabulário de "override operacional" já esboçado aqui.
   a série nova; o rearme da conclusão perde no guard `IS NULL` (série única, janela de
   sobreposição pontual aceita e já documentada).
 - Job pausado pode ser reagendado (o trigger recomputado segue bloqueado pelo filtro de
-  `paused` até o resume). Job aposentado não: o guard `retired = FALSE` no UPDATE faz o
-  PATCH devolver 404 — mesma invisibilidade de `retired` do resto da API.
+  `paused` até o resume). Job **órfão** idem, de propósito — mesma família do paused:
+  a agenda nova destrava sozinha quando a fonte da anotação voltar; o snapshot não expõe
+  `orphaned` (decisão registrada em `JobSnapshot`), o sinal do operador é o log de órfã
+  do scanner. Job aposentado não: o guard `retired = FALSE` no UPDATE faz o PATCH
+  devolver 404 — mesma invisibilidade de `retired` do resto da API.
+- Dois cantos documentados do review: (1) o CAS do disparo compara `next_fire_at` por
+  VALOR — um reschedule que aterrisse entre o SELECT do tick e o CAS com um valor
+  exatamente igual ao observado deixa aquele disparo sair com o plano da agenda antiga;
+  o drift se auto-cura no disparo seguinte (janela ínfima, mesma família aceita na
+  ADR-0035, não é classe nova de lost update). (2) Re-emitir o mesmo PATCH `INTERVAL`
+  re-ancora a fase da série (`próximo = now + interval` a cada chamada); cron é
+  idempotente — retry de operador em intervalo desloca a fase, nunca duplica disparo.
 - Misfire, retries, runner, window, timeout: **fora do PATCH** — só a agenda tem caso de
   uso de emergência declarado; cada outro campo entra quando tiver o seu (YAGNI).
 

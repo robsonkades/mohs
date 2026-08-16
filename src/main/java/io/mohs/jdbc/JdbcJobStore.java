@@ -336,6 +336,40 @@ public final class JdbcJobStore implements JobStore {
                         .addValue("nextFireAt", JdbcTimestamps.toUtcTimestamp(nextFireAt)));
     }
 
+    /**
+     * ADR-0036: agenda e trigger recomputado aterrissam num único UPDATE —
+     * mesma disciplina do upsert de agenda alterada ("reconfiguração
+     * explícita vence disparo concorrente", ADR-0035). Cron irrealizável
+     * falha AQUI, antes de qualquer escrita ({@code IllegalArgumentException}
+     * do {@link NextFireCalculator}).
+     */
+    @Override
+    public boolean reschedule(JobKey key, Schedule schedule) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(schedule, "schedule");
+        ScheduleColumns columns = ScheduleColumns.of(schedule);
+        Instant now = clock.instant();
+        Instant nextFireAt = initialNextFire(schedule, now);
+        int updated = jdbcTemplate.update("""
+                UPDATE mohs_job_definitions SET
+                    schedule_type = :scheduleType, cron_expression = :cronExpression, cron_zone = :cronZone,
+                    interval_duration = :intervalDuration, interval_after_finish = :intervalAfterFinish,
+                    next_fire_at = :nextFireAt, updated_at = :updatedAt
+                WHERE job_key = :jobKey AND retired = :retired
+                """,
+                new MapSqlParameterSource()
+                        .addValue("jobKey", key.value())
+                        .addValue("scheduleType", scheduleType(schedule))
+                        .addValue("cronExpression", columns.cronExpression())
+                        .addValue("cronZone", columns.cronZone())
+                        .addValue("intervalDuration", columns.intervalDuration())
+                        .addValue("intervalAfterFinish", columns.intervalAfterFinish())
+                        .addValue("nextFireAt", nextFireAt == null ? null : JdbcTimestamps.toUtcTimestamp(nextFireAt))
+                        .addValue("updatedAt", JdbcTimestamps.toUtcTimestamp(now))
+                        .addValue("retired", false));
+        return updated == 1;
+    }
+
     private Stream<StoredJob> queryForJobStream(String sql, MapSqlParameterSource params) {
         List<String> unresolvedHandlerJobKeys = new ArrayList<>();
         return jdbcTemplate.queryForStream(sql, params,

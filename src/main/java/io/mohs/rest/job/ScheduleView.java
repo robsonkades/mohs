@@ -29,7 +29,16 @@ public sealed interface ScheduleView permits CronView, IntervalView, OnDemandVie
         return switch (schedule) {
             case CronSpec cron -> new CronView(cron.expression(), cron.zone());
             case IntervalSpec interval -> new IntervalView(interval.interval(), interval.afterFinish());
-            case OnDemandSpec onDemand -> new OnDemandView();
+            case OnDemandSpec _ -> new OnDemandView();
+        };
+    }
+
+    /** Inverso de {@link #from} — corpo de request do {@code PATCH .../schedule} (ADR-0036) de volta ao domínio. */
+    default Schedule toSchedule() {
+        return switch (this) {
+            case CronView cron -> new CronSpec(cron.expression(), cron.zone());
+            case IntervalView interval -> new IntervalSpec(interval.interval(), interval.afterFinish());
+            case OnDemandView _ -> new OnDemandSpec();
         };
     }
 }

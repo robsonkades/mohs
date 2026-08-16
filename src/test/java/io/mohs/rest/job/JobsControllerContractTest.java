@@ -27,16 +27,21 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.rest.ActorResolver;
 import io.mohs.rest.ApiPaths;
+import io.mohs.rest.error.InvalidActorException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -160,6 +165,80 @@ class JobsControllerContractTest {
                         .content("{\"payload\":{},\"at\":\"2026-08-15T13:00:00Z\",\"delay\":\"PT5M\"}"))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.detail").value(containsString("mutually exclusive")));
+    }
+
+    /** ADR-0036: PATCH da agenda devolve o envelope de emergência com o aviso de reversão no boot. */
+    @Test
+    void reschedulePatchesTheScheduleUnderTheEmergencyContract() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
+        when(actorResolver.resolve(any())).thenReturn("ana.ops");
+        when(mohs.reschedule(key, new IntervalSpec(Duration.ofSeconds(30), false)))
+                .thenReturn(Optional.of(snapshot("welcome-email", false)));
+
+        mockMvc.perform(patch(ApiPaths.V1 + "/jobs/welcome-email/schedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"INTERVAL\",\"interval\":\"PT30S\",\"afterFinish\":false}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.resource.jobKey").value("welcome-email"))
+                .andExpect(jsonPath("$.notice").value(containsString("boot")));
+    }
+
+    @Test
+    void rescheduleOfUnknownJobReturns404() throws Exception {
+        when(mohs.findJob(JobKey.of("ghost"))).thenReturn(Optional.empty());
+        when(mohs.jobs()).thenReturn(List.of());
+
+        mockMvc.perform(patch(ApiPaths.V1 + "/jobs/ghost/schedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"ON_DEMAND\"}"))
+                .andExpect(status().isNotFound());
+    }
+
+    /** O fix do 🔴 do review pinado: actor inválido rejeita ANTES de qualquer efeito — 4xx é contrato de "nada mudou". */
+    @Test
+    void rescheduleWithAnInvalidActorMutatesNothing() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
+        when(actorResolver.resolve(any())).thenThrow(new InvalidActorException("X-Mohs-Actor must not be 'scheduler'"));
+
+        mockMvc.perform(patch(ApiPaths.V1 + "/jobs/welcome-email/schedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"ON_DEMAND\"}"))
+                .andExpect(status().isBadRequest());
+
+        verify(mohs, never()).reschedule(any(), any());
+    }
+
+    /** IAE do compact constructor do spec (interval não positivo) também é 422 com field "schedule" — nunca 500. */
+    @Test
+    void rescheduleRejectsANonPositiveInterval() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
+        when(actorResolver.resolve(any())).thenReturn("ana.ops");
+
+        mockMvc.perform(patch(ApiPaths.V1 + "/jobs/welcome-email/schedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"INTERVAL\",\"interval\":\"PT0S\",\"afterFinish\":false}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.field").value("schedule"))
+                .andExpect(jsonPath("$.detail").value(containsString("positive")));
+    }
+
+    /** Agenda irrealizável (cron que nunca dispara) é 422 que ensina — a IAE do cálculo do trigger nunca vira 500. */
+    @Test
+    void rescheduleRejectsAnImpossibleCron() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
+        when(mohs.reschedule(eq(key), any()))
+                .thenThrow(new IllegalArgumentException("Cron expression never fires within the search bound: 0 0 0 30 2 *"));
+
+        mockMvc.perform(patch(ApiPaths.V1 + "/jobs/welcome-email/schedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"CRON\",\"expression\":\"0 0 0 30 2 *\",\"zone\":\"UTC\"}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.field").value("schedule"))
+                .andExpect(jsonPath("$.detail").value(containsString("never fires")));
     }
 
     @Test

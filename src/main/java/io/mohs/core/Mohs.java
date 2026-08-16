@@ -11,6 +11,7 @@ import org.springframework.lang.CheckReturnValue;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.schedule.Schedule;
 
 /**
  * Fachada pública do Mohs — um verbo por operação, sempre sobre definição
@@ -77,6 +78,22 @@ public interface Mohs {
     void pause(JobKey jobKey);
 
     void resume(JobKey jobKey);
+
+    /**
+     * Muda a agenda armazenada do job em runtime (ADR-0036) — mudança de
+     * emergência sob o contrato de PATCH runtime: num job {@code ANNOTATION}
+     * vale até o próximo boot sob {@code on-conflict=override} (o scanner
+     * restaura a versão do código com diff logado); {@code preserve} a
+     * mantém; num job {@code PROGRAMMATIC} dura até a aplicação redefinir.
+     * O trigger é recomputado do relógio na mesma escrita —
+     * {@code ON_DEMAND} desarma a recorrência.
+     *
+     * @return o snapshot já com a agenda nova; vazio se o job não existe
+     *         (ou está aposentado)
+     * @throws IllegalArgumentException se a agenda for irrealizável
+     *         (ex.: cron sintaticamente válido que nunca dispara)
+     */
+    Optional<JobSnapshot> reschedule(JobKey jobKey, Schedule schedule);
 
     /**
      * Tipo real do parâmetro de payload do handler de {@code jobKey}, ou

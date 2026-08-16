@@ -51,6 +51,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.resource.MohsRunner;
+import io.mohs.core.schedule.Schedule;
 import io.mohs.jdbc.JdbcClaimer;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
@@ -1037,6 +1038,11 @@ class EngineTest {
         @Override
         public void armNextFire(JobKey key, Instant nextFireAt) {
             delegate.armNextFire(key, nextFireAt);
+        }
+
+        @Override
+        public boolean reschedule(JobKey key, Schedule schedule) {
+            return delegate.reschedule(key, schedule);
         }
 
         @Override

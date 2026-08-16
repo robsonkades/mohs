@@ -8,6 +8,7 @@ import java.util.stream.Stream;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.schedule.Schedule;
 
 /**
  * Persistência de {@link JobDefinition} — Repository (PoEAA), porta que
@@ -73,6 +74,18 @@ public interface JobStore {
      * de mudança de agenda já rearmou.
      */
     void armNextFire(JobKey key, Instant nextFireAt);
+
+    /**
+     * Reescreve a agenda e rearma o trigger recomputado do relógio na
+     * MESMA escrita (ADR-0036) — a única outra escrita legítima de agenda
+     * além do {@link #upsert}; escrita incondicional de {@code next_fire_at}
+     * de propósito: "reconfiguração explícita vence disparo concorrente"
+     * (ADR-0035). Guardada por {@code retired} — job aposentado é
+     * invisível pra toda a API.
+     *
+     * @return {@code true} se a linha existia (e não aposentada)
+     */
+    boolean reschedule(JobKey key, Schedule schedule);
 
     /** {@code ANNOTATION} presente no store, ausente do código (ADR-0006) — não dispara, não apaga histórico. */
     void markOrphaned(JobKey key);
