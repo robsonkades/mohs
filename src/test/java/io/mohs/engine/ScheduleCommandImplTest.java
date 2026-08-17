@@ -29,6 +29,7 @@ import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
+import io.mohs.jdbc.JdbcNodeStore;
 import io.mohs.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
@@ -58,7 +59,7 @@ class ScheduleCommandImplTest {
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
         JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
-        mohs = new MohsImpl(jobStore, executionStore, new HandlerRegistry(), clock, mock(MohsLifecycle.class));
+        mohs = new MohsImpl(jobStore, executionStore, new JdbcNodeStore(dataSource), new HandlerRegistry(), clock, mock(MohsLifecycle.class));
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));
     }
 

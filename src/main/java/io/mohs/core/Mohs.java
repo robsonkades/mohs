@@ -94,6 +94,16 @@ public interface Mohs {
     /** Todos os jobs registrados — cardinalidade limitada (definição, não execução), sem paginação. */
     List<JobSnapshot> jobs();
 
+    /**
+     * Os nodes do cluster com heartbeat registrado (ADR-0012/0041), mais
+     * recente primeiro — cardinalidade limitada (tamanho do cluster + o
+     * resíduo que o purge da ADR-0041 ainda não recolheu), sem
+     * paginação, como {@link #jobs()}. Morte não é campo: deriva da idade
+     * de {@link NodeSnapshot#lastHeartbeatAt()} na leitura; {@code STOPPED}
+     * é o único desfecho auto-reportado (shutdown limpo).
+     */
+    List<NodeSnapshot> nodes();
+
     /** Suspende disparos automáticos; schedule manual continua permitido (espelha o motor). Sem efeito se {@code jobKey} não existir. */
     void pause(JobKey jobKey);
 

@@ -17,6 +17,7 @@ import io.mohs.rest.HeaderActorResolver;
 import io.mohs.rest.error.RestExceptionHandler;
 import io.mohs.rest.execution.ExecutionsController;
 import io.mohs.rest.job.JobsController;
+import io.mohs.rest.node.NodesController;
 
 /**
  * Liga o contrato REST v1 ({@code io.mohs.rest}) à {@link Mohs} pública —
@@ -39,8 +40,8 @@ import io.mohs.rest.job.JobsController;
  * alternativa, {@code @ConditionalOnBean(Mohs.class)}, esconderia também
  * misconfiguração genuína que deveria estourar).
  *
- * <p>Só {@code jobs}/{@code executions} têm {@code @Bean} aqui — os
- * demais controllers (overview, batches, rate-limits, runners, nodes)
+ * <p>Só {@code jobs}/{@code executions}/{@code nodes} têm {@code @Bean}
+ * aqui — os demais controllers (overview, batches, rate-limits, runners)
  * continuam contrato M2 sem implementação por trás; registrá-los antes
  * do tempo só exporia rotas que respondem 501 ({@code RestExceptionHandler}
  * traduz o {@code UnsupportedOperationException} dos stubs), sem ganho
@@ -82,5 +83,10 @@ public class MohsRestAutoConfiguration {
     @Bean
     public ExecutionsController mohsExecutionsController(Mohs mohs) {
         return new ExecutionsController(mohs);
+    }
+
+    @Bean
+    public NodesController mohsNodesController(Mohs mohs) {
+        return new NodesController(mohs);
     }
 }

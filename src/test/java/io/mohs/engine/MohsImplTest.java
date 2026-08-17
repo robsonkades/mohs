@@ -9,10 +9,12 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import io.mohs.core.EngineState;
 import io.mohs.core.ExecutionQuery;
 import io.mohs.core.JobSnapshot;
 import io.mohs.core.Mohs;
 import io.mohs.core.MohsLifecycle;
+import io.mohs.core.NodeSnapshot;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.JobSpec;
@@ -54,6 +56,7 @@ class MohsImplTest {
 
     private InMemoryJobStore jobStore;
     private ExecutionStore executionStore;
+    private NodeStore nodeStore;
     private HandlerRegistry handlerRegistry;
     private MohsImpl mohs;
 
@@ -62,8 +65,9 @@ class MohsImplTest {
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
         jobStore = new InMemoryJobStore(clock);
         executionStore = mock(ExecutionStore.class);
+        nodeStore = mock(NodeStore.class);
         handlerRegistry = new HandlerRegistry();
-        mohs = new MohsImpl(jobStore, executionStore, handlerRegistry, clock, mock(MohsLifecycle.class));
+        mohs = new MohsImpl(jobStore, executionStore, nodeStore, handlerRegistry, clock, mock(MohsLifecycle.class));
     }
 
     private static JobDefinition onDemand(String key) {
@@ -125,6 +129,20 @@ class MohsImplTest {
         when(executionStore.find(id)).thenReturn(Optional.empty());
 
         assertThat(mohs.cancel(id)).isEmpty();
+    }
+
+    /** GET /nodes por baixo: heartbeat mais recente primeiro, empate por nodeId — ordem exposta em API é contrato, nunca a ordem física da tabela (ADR-0012). */
+    @Test
+    void nodesAreListedMostRecentHeartbeatFirstWithAStableTiebreak() {
+        when(nodeStore.findAll()).thenReturn(List.of(
+                new StoredNode("node-old", EngineState.RUNNING, NOW.minusSeconds(120)),
+                new StoredNode("node-tie-b", EngineState.RUNNING, NOW.minusSeconds(30)),
+                new StoredNode("node-fresh", EngineState.RUNNING, NOW),
+                new StoredNode("node-tie-a", EngineState.STOPPED, NOW.minusSeconds(30))));
+
+        assertThat(mohs.nodes())
+                .extracting(NodeSnapshot::nodeId)
+                .containsExactly("node-fresh", "node-tie-a", "node-tie-b", "node-old");
     }
 
     /** ADR-0033/M3: retry manual — o CAS da porta arma com o "agora" do Clock injetado e o retorno é a execução já RETRY_SCHEDULED. */
@@ -191,7 +209,7 @@ class MohsImplTest {
     @Test
     void cancelOfAPendingSchedulerOccurrenceRearmsTheAfterFinishChain() {
         JobStore jobStoreMock = mock(JobStore.class);
-        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, handlerRegistry,
+        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, nodeStore, handlerRegistry,
                 new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class));
         ExecutionId id = ExecutionId.of("exec-1");
         JobDefinition afterFinish = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
@@ -209,7 +227,7 @@ class MohsImplTest {
     @Test
     void cancelOfAPendingManualExecutionDoesNotTouchTheChain() {
         JobStore jobStoreMock = mock(JobStore.class);
-        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, handlerRegistry,
+        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, nodeStore, handlerRegistry,
                 new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class));
         ExecutionId id = ExecutionId.of("exec-1");
         when(executionStore.cancelIfPending(id)).thenReturn(true);

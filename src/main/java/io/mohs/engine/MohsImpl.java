@@ -1,6 +1,7 @@
 package io.mohs.engine;
 
 import java.time.Clock;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -15,6 +16,7 @@ import io.mohs.core.ExecutionQuery;
 import io.mohs.core.JobSnapshot;
 import io.mohs.core.Mohs;
 import io.mohs.core.MohsLifecycle;
+import io.mohs.core.NodeSnapshot;
 import io.mohs.core.ScheduleCommand;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
@@ -48,13 +50,15 @@ public final class MohsImpl implements Mohs {
 
     private final JobStore jobStore;
     private final ExecutionStore executionStore;
+    private final NodeStore nodeStore;
     private final HandlerRegistry handlerRegistry;
     private final Clock clock;
     private final MohsLifecycle lifecycle;
 
-    public MohsImpl(JobStore jobStore, ExecutionStore executionStore, HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle) {
+    public MohsImpl(JobStore jobStore, ExecutionStore executionStore, NodeStore nodeStore, HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
+        this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
@@ -242,6 +246,16 @@ public final class MohsImpl implements Mohs {
         String rawCursor = query.cursor();
         ExecutionId cursor = rawCursor == null || rawCursor.isBlank() ? null : ExecutionId.of(rawCursor);
         return executionStore.findPage(query.jobKey(), query.status(), query.from(), query.to(), cursor, query.limit());
+    }
+
+    /** Mais recente primeiro (empate por nodeId — ordem exposta em API é contrato, nunca a ordem física da tabela): o vivo interessa antes do suspeito — a idade do heartbeat É a informação (ADR-0012). */
+    @Override
+    public List<NodeSnapshot> nodes() {
+        return nodeStore.findAll().stream()
+                .sorted(Comparator.comparing(StoredNode::lastHeartbeatAt).reversed()
+                        .thenComparing(StoredNode::nodeId))
+                .map(stored -> new NodeSnapshot(stored.nodeId(), stored.state(), stored.lastHeartbeatAt()))
+                .toList();
     }
 
     @Override

@@ -267,9 +267,9 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    public Mohs mohs(JobStore mohsJobStore, ExecutionStore mohsExecutionStore, HandlerRegistry mohsHandlerRegistry,
-            @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine) {
-        return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsHandlerRegistry, mohsClock, mohsEngine);
+    public Mohs mohs(JobStore mohsJobStore, ExecutionStore mohsExecutionStore, NodeStore mohsNodeStore,
+            HandlerRegistry mohsHandlerRegistry, @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine) {
+        return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsNodeStore, mohsHandlerRegistry, mohsClock, mohsEngine);
     }
 
     /**
