@@ -21,7 +21,7 @@ import io.mohs.core.job.JobKey;
  * a corrigir" (ver {@code docs/adr/0010-rest-api-v1.md}). Estende
  * {@link ResponseEntityExceptionHandler} pra herdar de graça a tradução de
  * erros de framework (JSON malformado, parâmetro ausente) via
- * {@code spring.mvc.problemdetails} — só precisa tratar as 3 exceções de
+ * {@code spring.mvc.problemdetails} — só precisa tratar as exceções de
  * domínio abaixo. Sem estado, sem dependência de construtor.
  *
  * <p>{@code type} fica no default RFC 7807 ({@code about:blank}) — o
@@ -48,6 +48,13 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     public ProblemDetail handleExecutionNotFound(ExecutionNotFoundException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
         problem.setTitle("Execution not found");
+        return problem;
+    }
+
+    @ExceptionHandler(ExecutionNotRetryableException.class)
+    public ProblemDetail handleExecutionNotRetryable(ExecutionNotRetryableException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        problem.setTitle("Execution not retryable");
         return problem;
     }
 
@@ -97,8 +104,8 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     /**
-     * Operação do contrato v1 ainda sem implementação (ex.: {@code cancel}/
-     * {@code retry} de {@code ExecutionsController}) — 501 honesto em vez de
+     * Operação do contrato v1 ainda sem implementação (ex.:
+     * {@code OverviewController}, {@code BatchesController}) — 501 honesto em vez de
      * o {@code UnsupportedOperationException} virar 500 "unexpected error"
      * com stack trace no log: é exatamente o racional que
      * {@code MohsRestAutoConfiguration} usa pra nem registrar os

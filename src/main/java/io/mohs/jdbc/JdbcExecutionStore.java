@@ -340,6 +340,37 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 """, new MapSqlParameterSource().addValue("id", id.value()).addValue("requested", true)) > 0;
     }
 
+    /**
+     * Dois guards além do estado (review deste ciclo): (1) job aposentado
+     * não rearma — a claim query filtra {@code retired}, o reaper só vê
+     * RUNNING, e a linha rearmada ficaria presa pra sempre com um 202
+     * mentiroso (o estado que a ADR-0033 lista como inaceitável); o EXISTS
+     * no próprio CAS ESTREITA a janela contra um {@code remove} concorrente
+     * (commitou antes: o guard barra; começou depois: o sweep dele apanha a
+     * linha) — não a fecha: sob READ COMMITTED, um rearm que commita entre
+     * o sweep e o commit do remove deixa RETRY_SCHEDULED de job aposentado
+     * (janela sub-ms; {@code cancelIfPending} é o remédio do operador —
+     * predicado só estreita, quem fecha janela é lock).
+     * (2) {@code cancel_requested} stale é LIMPO no mesmo UPDATE — o retry
+     * manual é ordem MAIS NOVA do mesmo operador; sem a limpeza, um cancel
+     * antigo que nunca foi observado assassinaria o retry no primeiro tick.
+     */
+    @Override
+    public boolean rearmForManualRetry(ExecutionId id, Instant scheduledAt) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(scheduledAt, "scheduledAt");
+        return jdbcTemplate.update("""
+                UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', scheduled_at = :scheduledAt, cancel_requested = :cancelRequested
+                WHERE id = :id AND state = 'FAILED'
+                  AND EXISTS (SELECT 1 FROM mohs_job_definitions j
+                              WHERE j.job_key = mohs_executions.job_key AND j.retired = :retired)
+                """, new MapSqlParameterSource()
+                .addValue("id", id.value())
+                .addValue("scheduledAt", JdbcTimestamps.toUtcTimestamp(scheduledAt))
+                .addValue("cancelRequested", false)
+                .addValue("retired", false)) > 0;
+    }
+
     @Override
     public Set<ExecutionId> findCancelRequested(List<ExecutionId> ids) {
         Objects.requireNonNull(ids, "ids");

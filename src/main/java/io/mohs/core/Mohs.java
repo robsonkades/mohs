@@ -69,6 +69,26 @@ public interface Mohs {
      */
     Optional<Execution> cancel(ExecutionId executionId);
 
+    /**
+     * Retry manual de uma execução {@code FAILED} (M3 sobre a ADR-0033):
+     * rearma a MESMA linha como {@code RETRY_SCHEDULED} devida agora — a
+     * nova tentativa viaja pelo caminho normal do claim, disputando como
+     * qualquer candidato. Bypassa o orçamento de {@code retries} de
+     * propósito: a política protege o sistema de loops automáticos; aqui a
+     * decisão é do operador. Não passa pela dedupe de Idempotency-Key
+     * (nada novo é inserido — ADR-0030/0033); a idempotência natural é o
+     * próprio CAS: repetir a chamada encontra a execução já rearmada e
+     * falha com a exceção de estado.
+     *
+     * @return a execução já rearmada ({@code RETRY_SCHEDULED}); vazio se o
+     *         id não existe
+     * @throws IllegalStateException se a execução existe mas não está
+     *         {@code FAILED} (cancelada foi decisão explícita; os demais
+     *         estados têm dono — o motor) ou pertence a um job aposentado
+     *         (a linha rearmada nunca seria reivindicada — ADR-0033)
+     */
+    Optional<Execution> retry(ExecutionId executionId);
+
     Optional<JobSnapshot> findJob(JobKey jobKey);
 
     /** Todos os jobs registrados — cardinalidade limitada (definição, não execução), sem paginação. */

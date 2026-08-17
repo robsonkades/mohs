@@ -4,6 +4,7 @@ import java.net.URI;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -12,7 +13,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -27,6 +27,7 @@ import io.mohs.rest.AcceptedExecutionResponse;
 import io.mohs.rest.ApiPaths;
 import io.mohs.rest.CursorPage;
 import io.mohs.rest.error.ExecutionNotFoundException;
+import io.mohs.rest.error.ExecutionNotRetryableException;
 
 /**
  * Área de recurso "executions" (ver {@code docs/REST-API-DESIGN.md}). Busca
@@ -72,27 +73,55 @@ public class ExecutionsController {
      * puro) pelo mesmo motivo de {@link #retry}: é onde o header
      * {@code Location: /executions/{id}} do princípio 1 do design REST é
      * anexado — {@code @ResponseStatus} não teria efeito aqui (REST-1).
-     * O {@code Location} deriva da própria URI da requisição (o prefixo já
-     * honra {@code mohs.api.base-path}), só removendo o sufixo da ação.
      */
     @PostMapping("/{id}/cancel")
     public ResponseEntity<ExecutionResponse> cancel(@PathVariable String id, HttpServletRequest request) {
         ExecutionId executionId = ExecutionId.of(id);
         Execution execution = mohs.cancel(executionId)
                 .orElseThrow(() -> new ExecutionNotFoundException(executionId));
-        URI location = URI.create(request.getRequestURI().replaceFirst("/cancel$", ""));
+        URI location = executionDetailLocation(request, "/cancel");
         return ResponseEntity.accepted().location(location).body(ExecutionResponse.from(execution));
     }
 
     /**
-     * Retry manual bypassa política de retry exaurida — mesmo contrato de
-     * aceite de {@code schedule}. Status 202 vem de
-     * {@link ResponseEntity#getStatusCode()} no corpo do método —
-     * {@code @ResponseStatus} não tem efeito sobre {@code ResponseEntity} (REST-1).
+     * Retry manual (M3 sobre a ADR-0033): rearma a MESMA execução
+     * {@code FAILED} como {@code RETRY_SCHEDULED} devida agora — bypassa o
+     * orçamento de retries; a nova tentativa disputa o claim como qualquer
+     * candidato. Sem {@code Idempotency-Key} de propósito (o header do stub
+     * M2 saiu): retry não passa pela dedupe — nada novo é inserido
+     * (ADR-0030/0033); a idempotência é o próprio CAS, e repetir o POST
+     * vira 409 nomeando o estado atual. Status 202 via
+     * {@code ResponseEntity} — {@code @ResponseStatus} não tem efeito sobre
+     * {@code ResponseEntity} (REST-1).
      */
     @PostMapping("/{id}/retry")
-    public ResponseEntity<AcceptedExecutionResponse> retry(
-            @PathVariable String id, @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey, HttpServletRequest request) {
-        throw new UnsupportedOperationException("M3: ainda não implementado");
+    public ResponseEntity<AcceptedExecutionResponse> retry(@PathVariable String id, HttpServletRequest request) {
+        ExecutionId executionId = ExecutionId.of(id);
+        Execution rearmed = retryOrConflict(executionId)
+                .orElseThrow(() -> new ExecutionNotFoundException(executionId));
+        URI location = executionDetailLocation(request, "/retry");
+        return ResponseEntity.accepted().location(location).body(AcceptedExecutionResponse.from(rearmed));
+    }
+
+    /**
+     * {@code Location: /executions/{id}} deriva da própria URI da requisição
+     * (o prefixo já honra {@code mohs.api.base-path}), só removendo o sufixo
+     * da ação ({@code /cancel}, {@code /retry}).
+     */
+    private static URI executionDetailLocation(HttpServletRequest request, String actionSuffix) {
+        return URI.create(request.getRequestURI().replaceFirst(actionSuffix + "$", ""));
+    }
+
+    /**
+     * Toda ISE deste escopo é o guard de estado do retry (contrato
+     * documentado em {@code Mohs#retry}) — fora dele, ISE alheia nunca é
+     * traduzida pra 409.
+     */
+    private Optional<Execution> retryOrConflict(ExecutionId executionId) {
+        try {
+            return mohs.retry(executionId);
+        } catch (IllegalStateException e) {
+            throw new ExecutionNotRetryableException(Objects.requireNonNullElse(e.getMessage(), e.toString()));
+        }
     }
 }

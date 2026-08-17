@@ -46,7 +46,7 @@ v0.5: `GET/PATCH /queues` removido — `JobQueue` foi removida por completo (ADR
 | `GET /executions?status=&jobKey=&from=&to=` | Busca global (cursor) |
 | `GET /executions/{id}` | Detalhe: attempts, timestamps, erro, actor |
 | `POST /executions/{id}/cancel` | Cancelamento cooperativo |
-| `POST /executions/{id}/retry` | Retry manual de ops (bypassa política exaurida) |
+| `POST /executions/{id}/retry` | Retry manual de uma execução `FAILED` (ADR-0033): a MESMA linha rearma como `RETRY_SCHEDULED` devida agora e disputa o claim normal — bypassa a política exaurida. Sem `Idempotency-Key` (retry não deduplica; a idempotência é o CAS). → 202; estado ≠ `FAILED` → 409 |
 | `GET /rate-limits` · `PATCH /rate-limits/{name}` | Estado e ajuste runtime de vazão (cluster-wide) |
 | `GET /runners` | Visão por nó: modo, max, em execução (node-local por natureza) |
 | `GET /nodes` | Visão de cluster: nodes com heartbeat recente, last-seen |

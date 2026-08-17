@@ -449,6 +449,47 @@ class EngineTest {
     }
 
     /**
+     * ADR-0033/M3, o caminho de falha do caminho de falha, de ponta a ponta:
+     * execução FAILED com attempts 1..2 já gravados é rearmada manualmente,
+     * o claim a reivindica, o attempt 3 grava SEM colisão de PK
+     * (execution_id, number) e, com o orçamento já exaurido, a nova falha
+     * termina FAILED terminal — o retry manual compra exatamente uma
+     * tentativa, nunca um loop.
+     */
+    @Test
+    void aManuallyRearmedExecutionRunsOnceMoreAndFailsTerminally() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            throw new RuntimeException("still broken");
+        });
+        rawJdbcTemplate.update("UPDATE mohs_executions SET state = 'FAILED' WHERE id = 'exec-1'");
+        for (int number = 1; number <= 2; number++) {
+            rawJdbcTemplate.update(
+                    "INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error) VALUES (?, ?, ?, ?, 'FAILED', 'boom')",
+                    "exec-1", number, JdbcTimestamps.toUtcTimestamp(NOW), JdbcTimestamps.toUtcTimestamp(NOW));
+        }
+        CountDownLatch failedTerminally = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Failed failed && failed.attemptsExhausted()) {
+                failedTerminally.countDown();
+            }
+        };
+        assertThat(executionStore.rearmForManualRetry(ExecutionId.of("exec-1"), NOW)).isTrue();
+        Engine engine = newEngine(nodeStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(failedTerminally.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        Integer attempts = rawJdbcTemplate.queryForObject("SELECT count(*) FROM mohs_attempts WHERE execution_id = 'exec-1'", Integer.class);
+        assertThat(attempts).isEqualTo(3);
+    }
+
+    /**
      * ADR-0041: shutdown gracioso escreve o último heartbeat como STOPPED —
      * sem ele, stop limpo e crash ficavam indistinguíveis no banco (linha
      * RUNNING para sempre). Poll inalcançável de propósito: o primeiro tick
@@ -1365,6 +1406,11 @@ class EngineTest {
         @Override
         public boolean requestCancellation(ExecutionId id) {
             return delegate.requestCancellation(id);
+        }
+
+        @Override
+        public boolean rearmForManualRetry(ExecutionId id, Instant scheduledAt) {
+            return delegate.rearmForManualRetry(id, scheduledAt);
         }
 
         @Override

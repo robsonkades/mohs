@@ -20,6 +20,7 @@ import io.mohs.core.job.JobKey;
 import io.mohs.rest.ApiPaths;
 import io.mohs.rest.error.RestExceptionHandler;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -128,10 +129,38 @@ class ExecutionsControllerContractTest {
                 .andExpect(status().isNotFound());
     }
 
+    /** ADR-0033/M3: retry manual — 202 com o recibo da MESMA execução rearmada (actor original) e Location pro detalhe. */
     @Test
-    void retryIsNotImplementedYet() throws Exception {
+    void retryReturns202WithTheRearmedExecutionAndALocationHeader() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        Execution rearmed = new Execution(ExecutionId.of("exec-1"), key, ExecutionState.RETRY_SCHEDULED, NOW, null, List.of(), "tester");
+        when(mohs.retry(ExecutionId.of("exec-1"))).thenReturn(Optional.of(rearmed));
+
         mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/retry"))
-                .andExpect(status().isNotImplemented())
-                .andExpect(jsonPath("$.title").value("Not implemented"));
+                .andExpect(status().isAccepted())
+                .andExpect(header().string("Location", ApiPaths.V1 + "/executions/exec-1"))
+                .andExpect(jsonPath("$.executionId").value("exec-1"))
+                .andExpect(jsonPath("$.jobKey").value("welcome-email"))
+                .andExpect(jsonPath("$.actor").value("tester"));
+    }
+
+    @Test
+    void retryOfAnUnknownExecutionReturns404() throws Exception {
+        when(mohs.retry(ExecutionId.of("ghost"))).thenReturn(Optional.empty());
+
+        mockMvc.perform(post(ApiPaths.V1 + "/executions/ghost/retry"))
+                .andExpect(status().isNotFound());
+    }
+
+    /** Estado ≠ FAILED vira 409 que ensina — a ISE do guard de estado da fachada nunca escapa como 500. */
+    @Test
+    void retryOfANonFailedExecutionReturns409NamingTheState() throws Exception {
+        when(mohs.retry(ExecutionId.of("exec-1")))
+                .thenThrow(new IllegalStateException("execution exec-1 is RUNNING — only FAILED executions can be manually retried"));
+
+        mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/retry"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.title").value("Execution not retryable"))
+                .andExpect(jsonPath("$.detail").value(containsString("RUNNING")));
     }
 }

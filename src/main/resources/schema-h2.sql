@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     priority         INT          NOT NULL DEFAULT 20, -- Priority.value(); 20 = NORMAL
     node_id          VARCHAR(255),  -- claim, etapa 3 (ADR-0016)
     lease_expires_at TIMESTAMP,     -- claim, etapa 3 (ADR-0012/0016)
-    cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE, -- cancel cooperativo (ADR-0034): setado em RUNNING, polled pelo node dono a cada tick; fica TRUE em SUCCEEDED que venceu a corrida (histórico)
+    cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE, -- cancel cooperativo (ADR-0034): setado em RUNNING, polled pelo node dono a cada tick; fica TRUE em SUCCEEDED que venceu a corrida (histórico); limpo APENAS pelo rearm de retry manual (ordem mais nova do operador)
     batch_id         VARCHAR(255) REFERENCES mohs_batches(id),
     payload          TEXT         NOT NULL, -- não CLOB: não existe em Postgres, TEXT funciona em H2 e Postgres (DB-3)
     payload_type     VARCHAR(500) NOT NULL,

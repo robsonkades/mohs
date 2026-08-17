@@ -127,6 +127,66 @@ class MohsImplTest {
         assertThat(mohs.cancel(id)).isEmpty();
     }
 
+    /** ADR-0033/M3: retry manual — o CAS da porta arma com o "agora" do Clock injetado e o retorno é a execução já RETRY_SCHEDULED. */
+    @Test
+    void retryOfAFailedExecutionRearmsThroughTheStore() {
+        ExecutionId id = ExecutionId.of("exec-1");
+        Execution rearmed = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RETRY_SCHEDULED, NOW, null, List.of(), "test");
+        when(executionStore.rearmForManualRetry(id, NOW)).thenReturn(true);
+        when(executionStore.find(id)).thenReturn(Optional.of(rearmed));
+
+        assertThat(mohs.retry(id)).contains(rearmed);
+    }
+
+    @Test
+    void retryOfAnUnknownExecutionIsEmpty() {
+        ExecutionId id = ExecutionId.of("ghost");
+        when(executionStore.rearmForManualRetry(id, NOW)).thenReturn(false);
+        when(executionStore.find(id)).thenReturn(Optional.empty());
+
+        assertThat(mohs.retry(id)).isEmpty();
+    }
+
+    /** CAS derrotado com a linha ainda FAILED = o guard de retired barrou — a mensagem aponta o job removido, não o estado. */
+    @Test
+    void retryOfARetiredJobsExecutionThrowsNamingTheRemovedJob() {
+        ExecutionId id = ExecutionId.of("exec-1");
+        Execution failed = new Execution(id, JobKey.of("welcome-email"), ExecutionState.FAILED, NOW, null, List.of(), "test");
+        when(executionStore.rearmForManualRetry(id, NOW)).thenReturn(false);
+        when(executionStore.find(id)).thenReturn(Optional.of(failed));
+
+        assertThatThrownBy(() -> mohs.retry(id))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("removed job");
+    }
+
+    /** POST duplicado (202 perdido, script reenviou): a execução já está rearmada — o 409 ensina a causa provável, não a lição errada. */
+    @Test
+    void retryOfAnAlreadyRearmedExecutionThrowsNamingTheDuplicate() {
+        ExecutionId id = ExecutionId.of("exec-1");
+        Execution rearmed = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RETRY_SCHEDULED, NOW, null, List.of(), "test");
+        when(executionStore.rearmForManualRetry(id, NOW)).thenReturn(false);
+        when(executionStore.find(id)).thenReturn(Optional.of(rearmed));
+
+        assertThatThrownBy(() -> mohs.retry(id))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("already rearmed");
+    }
+
+    /** Estado ≠ FAILED: a exceção nomeia o estado atual — às 3h ninguém deveria adivinhar por que o retry "não pegou". */
+    @Test
+    void retryOfANonFailedExecutionThrowsNamingTheState() {
+        ExecutionId id = ExecutionId.of("exec-1");
+        Execution running = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RUNNING, NOW, null, List.of(), "test");
+        when(executionStore.rearmForManualRetry(id, NOW)).thenReturn(false);
+        when(executionStore.find(id)).thenReturn(Optional.of(running));
+
+        assertThatThrownBy(() -> mohs.retry(id))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("RUNNING")
+                .hasMessageContaining("only FAILED");
+    }
+
     /** ADR-0035: ocorrência do scheduler cancelada ainda pendente não passa pelo caminho de conclusão que rearma — o cancel cura a corrente fixed-delay aqui. */
     @Test
     void cancelOfAPendingSchedulerOccurrenceRearmsTheAfterFinishChain() {

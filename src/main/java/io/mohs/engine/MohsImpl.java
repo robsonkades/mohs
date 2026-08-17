@@ -6,6 +6,9 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import io.mohs.core.Batch;
 import io.mohs.core.BatchBuilder;
 import io.mohs.core.ExecutionQuery;
@@ -37,6 +40,8 @@ import io.mohs.core.schedule.Schedule;
  * {@code io.mohs.autoconfigure}.
  */
 public final class MohsImpl implements Mohs {
+
+    private static final Logger log = LoggerFactory.getLogger(MohsImpl.class);
 
     /** Actor de quem chama {@link Mohs#schedule}/{@link Mohs#batch} sem {@link ScheduleCommand#as(String)} explícito — o próprio processo, não um usuário identificável. */
     static final String DEFAULT_ACTOR = "application";
@@ -196,6 +201,38 @@ public final class MohsImpl implements Mohs {
     public Optional<Execution> findExecution(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
         return executionStore.find(executionId);
+    }
+
+    /**
+     * O CAS da porta é a autoridade; a leitura só distingue os motivos de
+     * derrota (inexistente × job aposentado × estado errado) — nunca
+     * decide. Derrota com a linha ainda {@code FAILED} = o guard de
+     * {@code retired} barrou (o CAS só recusa FAILED por essa via);
+     * {@code RETRY_SCHEDULED} = provável POST duplicado. Perder a corrida
+     * pra outra mutação entre o CAS e a leitura muda a mensagem, não o
+     * desfecho: quem venceu o CAS foi ela.
+     */
+    @Override
+    public Optional<Execution> retry(ExecutionId executionId) {
+        Objects.requireNonNull(executionId, "executionId");
+        if (executionStore.rearmForManualRetry(executionId, clock.instant())) {
+            log.info("execution {} manually rearmed for retry — rejoins the claim path bypassing the retries budget (ADR-0033)",
+                    executionId.value());
+            return executionStore.find(executionId);
+        }
+        Execution current = executionStore.find(executionId).orElse(null);
+        if (current == null) {
+            return Optional.empty();
+        }
+        throw switch (current.state()) {
+            case FAILED -> new IllegalStateException("execution " + executionId + " belongs to a removed job — "
+                    + "a retried execution of a retired job would never be claimed (ADR-0033)");
+            case RETRY_SCHEDULED -> new IllegalStateException("execution " + executionId
+                    + " is already rearmed for retry — likely a duplicate retry request");
+            default -> new IllegalStateException("execution " + executionId + " is " + current.state()
+                    + " — only FAILED executions can be manually retried (a cancelled execution was an explicit "
+                    + "decision; the other states are owned by the engine)");
+        };
     }
 
     @Override

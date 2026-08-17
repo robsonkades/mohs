@@ -100,6 +100,66 @@ class JdbcExecutionStoreTest {
         new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET state = 'RUNNING' WHERE id = ?", id);
     }
 
+    /** Insere ENQUEUED e leva a FAILED via SQL cru — o retry manual só reconhece esse estado. */
+    private void seedFailedExecution(String id, String jobKey) {
+        store.insert(execution(id, jobKey), new WelcomeEmail("a", 1));
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET state = 'FAILED' WHERE id = ?", id);
+    }
+
+    /** ADR-0033/M3: retry manual rearma FAILED como RETRY_SCHEDULED com o scheduled_at reescrito — o claim faz o resto. */
+    @Test
+    void rearmForManualRetryFlipsAFailedExecution() {
+        seedFailedExecution("019abc-retry-1", "welcome-email");
+        Instant retryAt = clock.instant().plusSeconds(1);
+
+        boolean armed = store.rearmForManualRetry(ExecutionId.of("019abc-retry-1"), retryAt);
+
+        assertThat(armed).isTrue();
+        Execution found = store.find(ExecutionId.of("019abc-retry-1")).orElseThrow();
+        assertThat(found.state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(found.scheduledAt()).isEqualTo(retryAt);
+    }
+
+    /** Guard de retired no próprio CAS: job removido não rearma — a linha ficaria presa pra sempre (claim filtra retired, reaper só vê RUNNING — ADR-0033). */
+    @Test
+    void rearmForManualRetryRefusesAnExecutionOfARetiredJob() {
+        seedFailedExecution("019abc-retry-3", "welcome-email");
+        new JdbcTemplate(dataSource).update("UPDATE mohs_job_definitions SET retired = TRUE WHERE job_key = 'welcome-email'");
+
+        boolean armed = store.rearmForManualRetry(ExecutionId.of("019abc-retry-3"), clock.instant().plusSeconds(1));
+
+        assertThat(armed).isFalse();
+        assertThat(store.find(ExecutionId.of("019abc-retry-3")).orElseThrow().state()).isEqualTo(ExecutionState.FAILED);
+    }
+
+    /** cancel_requested stale é limpo no rearme — retry manual é ordem mais nova do operador; sem a limpeza, o cancel antigo assassinaria o retry no primeiro tick. */
+    @Test
+    void rearmForManualRetryClearsAStaleCancelRequest() {
+        seedFailedExecution("019abc-retry-4", "welcome-email");
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET cancel_requested = TRUE WHERE id = '019abc-retry-4'");
+
+        boolean armed = store.rearmForManualRetry(ExecutionId.of("019abc-retry-4"), clock.instant().plusSeconds(1));
+
+        assertThat(armed).isTrue();
+        Boolean flag = new JdbcTemplate(dataSource).queryForObject(
+                "SELECT cancel_requested FROM mohs_executions WHERE id = '019abc-retry-4'", Boolean.class);
+        assertThat(flag).isFalse();
+    }
+
+    /** Estado ≠ FAILED não é rearmável — RUNNING tem dono (o node executor), e o CAS devolve false sem tocar a linha. */
+    @Test
+    void rearmForManualRetryRefusesANonFailedExecution() {
+        seedRunningExecution("019abc-retry-2", "welcome-email");
+        Instant before = store.find(ExecutionId.of("019abc-retry-2")).orElseThrow().scheduledAt();
+
+        boolean armed = store.rearmForManualRetry(ExecutionId.of("019abc-retry-2"), clock.instant().plusSeconds(1));
+
+        assertThat(armed).isFalse();
+        Execution found = store.find(ExecutionId.of("019abc-retry-2")).orElseThrow();
+        assertThat(found.state()).isEqualTo(ExecutionState.RUNNING);
+        assertThat(found.scheduledAt()).isEqualTo(before);
+    }
+
     @Test
     void insertPersistsAndRoundTripsAnExecution() {
         Execution execution = execution("019abc-1", "welcome-email");

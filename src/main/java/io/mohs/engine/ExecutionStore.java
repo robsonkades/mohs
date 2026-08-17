@@ -201,12 +201,31 @@ public interface ExecutionStore {
      * em outro processo (ADR-0034). O node dono observa via
      * {@link #findCancelRequested} a cada tick e levanta o sinal
      * {@code MANUAL}; nada é interrompido — cancel é cooperativo por
-     * contrato. A flag não é limpa nunca: sobrevive como registro histórico
-     * mesmo se a conclusão vencer a corrida.
+     * contrato. A flag sobrevive à conclusão como registro histórico; a
+     * única escrita que a limpa é {@link #rearmForManualRetry} — retry
+     * manual é ordem MAIS NOVA do operador e vence a antiga.
      *
      * @return {@code true} se havia uma linha {@code RUNNING} pra marcar
      */
     boolean requestCancellation(ExecutionId id);
+
+    /**
+     * Retry manual do operador (M3 sobre a ADR-0033): CAS
+     * {@code FAILED → RETRY_SCHEDULED} reescrevendo {@code scheduled_at} —
+     * dali em diante a execução viaja pelo caminho normal do claim, como
+     * qualquer retry. Bypassa o orçamento de {@code retries} de propósito:
+     * a política protege o sistema de loops automáticos; aqui quem decide é
+     * o operador. Só {@code FAILED}: cancelada foi decisão explícita
+     * ("des-cancelar" é outro caso de uso, quando existir), e os demais
+     * estados têm dono — o motor. Job aposentado não rearma (a linha
+     * ficaria presa pra sempre — ADR-0033), e {@code cancel_requested}
+     * stale é limpo na mesma escrita (a ordem mais nova vence).
+     *
+     * @return {@code true} se ESTA chamada armou; {@code false} = id
+     *         inexistente, estado ≠ {@code FAILED} ou job aposentado — o
+     *         chamador distingue com uma leitura
+     */
+    boolean rearmForManualRetry(ExecutionId id, Instant scheduledAt);
 
     /**
      * Os ids de {@code ids} com {@code cancel_requested} ligado — o poll em
