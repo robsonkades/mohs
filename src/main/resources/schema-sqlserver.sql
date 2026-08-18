@@ -115,6 +115,9 @@ CREATE TABLE mohs_attempts (
     error        NVARCHAR(MAX), -- não CLOB/TEXT: deprecado em SQL Server
     PRIMARY KEY (execution_id, number)
 );
+-- Janela de vazão do GET /overview — ver schema-postgresql.sql pro raciocínio.
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_attempts_throughput' AND object_id = OBJECT_ID('mohs_attempts'))
+CREATE INDEX idx_mohs_attempts_throughput ON mohs_attempts (finished_at, outcome);
 
 IF OBJECT_ID('mohs_rate_limits', 'U') IS NULL
 CREATE TABLE mohs_rate_limits (

@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -15,6 +16,7 @@ import io.mohs.core.JobSnapshot;
 import io.mohs.core.Mohs;
 import io.mohs.core.MohsLifecycle;
 import io.mohs.core.NodeSnapshot;
+import io.mohs.core.OverviewSnapshot;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.JobSpec;
@@ -31,12 +33,14 @@ import io.mohs.test.MutableClock;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -394,5 +398,31 @@ class MohsImplTest {
         mohs.executions(new ExecutionQuery(null, null, null, null, "", 10));
 
         verify(executionStore).findPage(null, null, null, null, null, 10);
+    }
+
+    /** Item 49: janela inválida falha ANTES das duas queries — é o comportamento que justifica duplicar o predicado do record na fachada. */
+    @Test
+    void aNonPositiveWindowFailsBeforeTouchingTheStore() {
+        assertThatThrownBy(() -> mohs.overview(Duration.ZERO)).isInstanceOf(IllegalArgumentException.class);
+
+        verifyNoInteractions(executionStore);
+    }
+
+    /** GET /overview — composição pura: o `since` sai do Clock injetado (nunca do relógio da máquina) e a normalização (zeros dos estados vivos) é do OverviewSnapshot. */
+    @Test
+    void overviewComposesActiveCountsAndTheWindowedThroughput() {
+        when(executionStore.countActiveByState()).thenReturn(Map.of(ExecutionState.ENQUEUED, 7L));
+        when(executionStore.countTerminalOutcomesSince(NOW.minusSeconds(60)))
+                .thenReturn(Map.of(ExecutionState.SUCCEEDED, 41L));
+
+        OverviewSnapshot overview = mohs.overview(Duration.ofSeconds(60));
+
+        assertThat(overview.executionCountsByState()).containsOnly(
+                entry(ExecutionState.ENQUEUED, 7L),
+                entry(ExecutionState.RUNNING, 0L),
+                entry(ExecutionState.RETRY_SCHEDULED, 0L));
+        assertThat(overview.throughputWindow()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(overview.succeededInWindow()).isEqualTo(41L);
+        assertThat(overview.failedInWindow()).isZero();
     }
 }

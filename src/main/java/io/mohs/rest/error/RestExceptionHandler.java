@@ -68,7 +68,7 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(PayloadValidationException.class)
     public ProblemDetail handlePayloadValidation(PayloadValidationException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, ex.getMessage());
-        problem.setTitle("Payload validation failed");
+        problem.setTitle("Request validation failed");
         problem.setProperty("field", ex.field());
         return problem;
     }
@@ -99,7 +99,7 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
             return super.handleHttpMessageNotReadable(ex, headers, status, request);
         }
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, cause.getMessage());
-        problem.setTitle("Payload validation failed");
+        problem.setTitle("Request validation failed");
         return new ResponseEntity<>(problem, HttpStatus.UNPROCESSABLE_CONTENT);
     }
 

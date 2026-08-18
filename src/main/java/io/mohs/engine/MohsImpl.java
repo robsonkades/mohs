@@ -1,8 +1,10 @@
 package io.mohs.engine;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -17,11 +19,13 @@ import io.mohs.core.JobSnapshot;
 import io.mohs.core.Mohs;
 import io.mohs.core.MohsLifecycle;
 import io.mohs.core.NodeSnapshot;
+import io.mohs.core.OverviewSnapshot;
 import io.mohs.core.ScheduleCommand;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.job.JobRef;
 import io.mohs.core.schedule.IntervalSpec;
@@ -256,6 +260,27 @@ public final class MohsImpl implements Mohs {
                         .thenComparing(StoredNode::nodeId))
                 .map(stored -> new NodeSnapshot(stored.nodeId(), stored.state(), stored.lastHeartbeatAt()))
                 .toList();
+    }
+
+    /**
+     * Pura composição das duas contagens da porta — a normalização (zeros,
+     * só estados vivos) é do próprio {@link OverviewSnapshot}. A janela é
+     * validada ANTES de tocar o banco (Effective Java, Item 49): com
+     * {@code ?window=} exposto na REST, deixar o snapshot rejeitar no fim
+     * custaria duas queries com {@code since} no futuro pra chegar na
+     * mesma IAE — a regra continua uma só, a do record.
+     */
+    @Override
+    public OverviewSnapshot overview(Duration throughputWindow) {
+        Objects.requireNonNull(throughputWindow, "throughputWindow");
+        if (throughputWindow.isNegative() || throughputWindow.isZero()) {
+            throw new IllegalArgumentException("throughputWindow must be positive, got " + throughputWindow);
+        }
+        Map<ExecutionState, Long> outcomes =
+                executionStore.countTerminalOutcomesSince(clock.instant().minus(throughputWindow));
+        return new OverviewSnapshot(executionStore.countActiveByState(), throughputWindow,
+                outcomes.getOrDefault(ExecutionState.SUCCEEDED, 0L),
+                outcomes.getOrDefault(ExecutionState.FAILED, 0L));
     }
 
     @Override

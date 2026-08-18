@@ -2,6 +2,7 @@ package io.mohs.engine;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -266,7 +267,36 @@ public interface ExecutionStore {
      * limit} não — quem chama decide se pede {@code size + 1} pra
      * detectar se há próxima página (esta porta não sabe de {@code
      * CursorPage}, isso é decisão de {@code io.mohs.rest}).
+     *
+     * <p>SUMÁRIO por contrato: {@code attempts()} volta VAZIO em toda
+     * linha — listagem é leitura de dashboard; o detalhe com attempts é
+     * {@link #find}. Não confundir com "nenhum attempt ocorreu".
      */
     List<Execution> findPage(@Nullable JobKey jobKey, @Nullable ExecutionState status, @Nullable Instant from,
             @Nullable Instant to, @Nullable ExecutionId cursor, int limit);
+
+    /**
+     * Contagem por estado do trabalho vivo — {@code ENQUEUED}, {@code
+     * RUNNING} e {@code RETRY_SCHEDULED}; estado sem linha pode ficar fora
+     * do mapa OU vir presente com zero — ausente e zero são a mesma
+     * informação, quem normaliza é o chamador ({@code OverviewSnapshot});
+     * nenhuma implementação deve tratar as duas formas como distintas. Alimenta
+     * {@code GET /overview}, que é âncora de polling: o custo tem que ser
+     * proporcional ao trabalho vivo, nunca ao histórico — por isso estados
+     * terminais ficam de fora por contrato (contá-los é varrer a tabela
+     * inteira a cada poll; a atividade terminal recente sai de
+     * {@link #countTerminalOutcomesSince}).
+     */
+    Map<ExecutionState, Long> countActiveByState();
+
+    /**
+     * Contagem de attempts terminais ({@code SUCCEEDED}/{@code FAILED})
+     * com {@code finished_at >= since} — a vazão da janela recente de
+     * {@code GET /overview}. Outcome {@code RETRY_SCHEDULED} não conta
+     * (não é desfecho, a execução continua viva no backlog), e attempt sem
+     * {@code finished_at} (reclaim do reaper sem hora de fim conhecida)
+     * fica fora da janela por construção. Ausente = zero, como em
+     * {@link #countActiveByState}.
+     */
+    Map<ExecutionState, Long> countTerminalOutcomesSince(Instant since);
 }

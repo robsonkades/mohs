@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS mohs_attempts (
     error        TEXT, -- não CLOB: MySQL não tem
     PRIMARY KEY (execution_id, number)
 ) DEFAULT CHARACTER SET utf8mb4;
+-- Janela de vazão do GET /overview — ver schema-postgresql.sql pro raciocínio.
+CREATE INDEX idx_mohs_attempts_throughput ON mohs_attempts (finished_at, outcome);
 
 CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     name            VARCHAR(255) PRIMARY KEY,

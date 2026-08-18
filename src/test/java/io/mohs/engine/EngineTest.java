@@ -7,6 +7,7 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -1466,6 +1467,16 @@ class EngineTest {
         @Override
         public List<Execution> findPage(JobKey jobKey, ExecutionState status, Instant from, Instant to, ExecutionId cursor, int limit) {
             return delegate.findPage(jobKey, status, from, to, cursor, limit);
+        }
+
+        @Override
+        public Map<ExecutionState, Long> countActiveByState() {
+            return delegate.countActiveByState();
+        }
+
+        @Override
+        public Map<ExecutionState, Long> countTerminalOutcomesSince(Instant since) {
+            return delegate.countTerminalOutcomesSince(since);
         }
     }
 

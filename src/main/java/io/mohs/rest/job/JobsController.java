@@ -38,7 +38,7 @@ import io.mohs.rest.CursorPage;
 import io.mohs.rest.RuntimePatchResponse;
 import io.mohs.rest.error.JobNotFoundException;
 import io.mohs.rest.error.PayloadValidationException;
-import io.mohs.rest.execution.ExecutionResponse;
+import io.mohs.rest.execution.ExecutionSummaryResponse;
 
 /**
  * Área de recurso "jobs" (ver {@code docs/REST-API-DESIGN.md}). Definição
@@ -155,15 +155,15 @@ public class JobsController {
         }
     }
 
-    /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. */
+    /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. Lista é sumário ({@link ExecutionSummaryResponse}) — attempts moram no detalhe. */
     @GetMapping("/{jobKey}/executions")
-    public CursorPage<ExecutionResponse> executions(
+    public CursorPage<ExecutionSummaryResponse> executions(
             @PathVariable String jobKey, @RequestParam(required = false) @Nullable String cursor, @RequestParam(required = false) @Nullable Integer size) {
         JobKey key = requireJob(jobKey).definition().key();
         int pageSize = CursorPage.clampSize(size);
         List<Execution> fetched = mohs.executions(new ExecutionQuery(key, null, null, null, cursor, pageSize + 1));
-        List<ExecutionResponse> responses = fetched.stream().map(ExecutionResponse::from).toList();
-        return CursorPage.of(responses, pageSize, ExecutionResponse::executionId);
+        List<ExecutionSummaryResponse> responses = fetched.stream().map(ExecutionSummaryResponse::from).toList();
+        return CursorPage.of(responses, pageSize, ExecutionSummaryResponse::executionId);
     }
 
     private JobSnapshot requireJob(String jobKeyValue) {

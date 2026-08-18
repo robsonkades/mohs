@@ -49,6 +49,7 @@ import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -829,5 +830,61 @@ class JdbcExecutionStoreTest {
                 Instant.parse("2026-08-05T00:00:00Z"), Instant.parse("2026-08-15T00:00:00Z"), null, 10);
 
         assertThat(page).extracting(e -> e.id().value()).containsExactly("019abc-range-2");
+    }
+
+    /** DBTUNE-21: página é SUMÁRIO — attempts existentes NÃO são hidratados (pertencem ao detalhe {@code find}); listagem de dashboard não paga a segunda query nem carrega {@code error} de tamanho arbitrário. */
+    @Test
+    void findPageIsASummaryAndDoesNotHydrateAttempts() {
+        store.insert(execution("019abc-summary-1", "welcome-email"), new WelcomeEmail("a", 1));
+        insertAttempt("019abc-summary-1", 1, clock.instant(), "SUCCEEDED");
+
+        List<Execution> page = store.findPage(null, null, null, null, null, 10);
+
+        assertThat(page).extracting(e -> e.id().value()).containsExactly("019abc-summary-1");
+        assertThat(page.getFirst().attempts()).isEmpty();
+        assertThat(store.find(ExecutionId.of("019abc-summary-1")).orElseThrow().attempts()).hasSize(1);
+    }
+
+    /** GET /overview: só o trabalho vivo conta — terminal fica de fora por contrato; RUNNING carrega o predicado da lease (DBTUNE-17), que o claim sempre grava na mesma escrita. */
+    @Test
+    void countActiveByStateCountsOnlyLiveWork() {
+        store.insert(execution("019abc-count-1", "welcome-email"), new WelcomeEmail("a", 1));
+        store.insert(execution("019abc-count-2", "welcome-email"), new WelcomeEmail("a", 1));
+        seedRunningExecution("019abc-count-3", "welcome-email");
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET lease_expires_at = ? WHERE id = ?",
+                JdbcTimestamps.toUtcTimestamp(clock.instant().plusSeconds(30)), "019abc-count-3");
+        store.insert(execution("019abc-count-4", "welcome-email"), new WelcomeEmail("a", 1));
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET state = 'RETRY_SCHEDULED' WHERE id = ?", "019abc-count-4");
+        seedFailedExecution("019abc-count-5", "welcome-email");
+
+        assertThat(store.countActiveByState()).containsOnly(
+                entry(ExecutionState.ENQUEUED, 2L),
+                entry(ExecutionState.RUNNING, 1L),
+                entry(ExecutionState.RETRY_SCHEDULED, 1L));
+    }
+
+    /** GET /overview: a vazão conta só desfechos terminais DENTRO da janela — RETRY_SCHEDULED não é desfecho (a execução segue viva no backlog) e attempt sem finished_at fica fora por construção. */
+    @Test
+    void countTerminalOutcomesSinceCountsOnlyWindowedTerminalAttempts() {
+        store.insert(execution("019abc-tput-1", "welcome-email"), new WelcomeEmail("a", 1));
+        Instant since = clock.instant().minusSeconds(60);
+        insertAttempt("019abc-tput-1", 1, since.minusSeconds(1), "SUCCEEDED");
+        insertAttempt("019abc-tput-1", 2, since, "SUCCEEDED");
+        insertAttempt("019abc-tput-1", 3, since.plusSeconds(10), "SUCCEEDED");
+        insertAttempt("019abc-tput-1", 4, since.plusSeconds(20), "FAILED");
+        insertAttempt("019abc-tput-1", 5, since.plusSeconds(30), "RETRY_SCHEDULED");
+        insertAttempt("019abc-tput-1", 6, null, "FAILED");
+
+        assertThat(store.countTerminalOutcomesSince(since)).containsOnly(
+                entry(ExecutionState.SUCCEEDED, 2L),
+                entry(ExecutionState.FAILED, 1L));
+    }
+
+    private void insertAttempt(String executionId, int number, @Nullable Instant finishedAt, String outcome) {
+        new JdbcTemplate(dataSource).update("""
+                INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome)
+                VALUES (?, ?, ?, ?, ?)
+                """, executionId, number, JdbcTimestamps.toUtcTimestamp(clock.instant().minusSeconds(120)),
+                finishedAt == null ? null : JdbcTimestamps.toUtcTimestamp(finishedAt), outcome);
     }
 }

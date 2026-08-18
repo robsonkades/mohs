@@ -1,5 +1,6 @@
 package io.mohs.core;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -140,7 +141,28 @@ public interface Mohs {
 
     Optional<Execution> findExecution(ExecutionId executionId);
 
-    /** Até {@code query.limit()} execuções, ordenadas por id (UUIDv7) decrescente — ver {@link ExecutionQuery}. */
+    /**
+     * A visão agregada do dashboard ({@code GET /overview}): contagens do
+     * trabalho vivo e a vazão terminal da última {@code throughputWindow}
+     * — ver {@link OverviewSnapshot} pro contrato (e pro porquê de não
+     * haver contagem all-time de estados terminais). Quem escolhe a
+     * janela é o chamador: ela é parte da resposta, não política do motor.
+     *
+     * <p>As contagens saem de leituras independentes, não de um corte
+     * transacional — execuções que transitam durante a consulta podem
+     * divergir entre os números (read skew, DDIA cap. 7): aceitável para
+     * polling, e o preço de um corte serializável aqui seria custo sem
+     * benefício.
+     */
+    OverviewSnapshot overview(Duration throughputWindow);
+
+    /**
+     * Até {@code query.limit()} execuções, ordenadas por id (UUIDv7)
+     * decrescente — ver {@link ExecutionQuery}. SUMÁRIO: {@code attempts()}
+     * volta vazio em listagem (leitura de dashboard — uma query, sem a
+     * coluna {@code error} de tamanho arbitrário); o detalhe com attempts
+     * é {@link #findExecution}.
+     */
     List<Execution> executions(ExecutionQuery query);
 
     MohsLifecycle lifecycle();

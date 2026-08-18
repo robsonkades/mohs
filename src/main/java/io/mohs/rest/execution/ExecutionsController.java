@@ -43,9 +43,9 @@ public class ExecutionsController {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
     }
 
-    /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. */
+    /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. Lista é sumário ({@link ExecutionSummaryResponse}) — attempts moram no detalhe. */
     @GetMapping
-    public CursorPage<ExecutionResponse> search(
+    public CursorPage<ExecutionSummaryResponse> search(
             @RequestParam(required = false) @Nullable ExecutionState status,
             @RequestParam(required = false) @Nullable String jobKey,
             @RequestParam(required = false) @Nullable Instant from,
@@ -55,8 +55,8 @@ public class ExecutionsController {
         int pageSize = CursorPage.clampSize(size);
         JobKey key = jobKey == null ? null : JobKey.of(jobKey);
         List<Execution> fetched = mohs.executions(new ExecutionQuery(key, status, from, to, cursor, pageSize + 1));
-        List<ExecutionResponse> responses = fetched.stream().map(ExecutionResponse::from).toList();
-        return CursorPage.of(responses, pageSize, ExecutionResponse::executionId);
+        List<ExecutionSummaryResponse> responses = fetched.stream().map(ExecutionSummaryResponse::from).toList();
+        return CursorPage.of(responses, pageSize, ExecutionSummaryResponse::executionId);
     }
 
     @GetMapping("/{id}")

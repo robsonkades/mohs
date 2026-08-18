@@ -49,4 +49,22 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
     public String limitClause() {
         return "";
     }
+
+    /**
+     * {@code NOLOCK} (read uncommitted), não {@code READPAST}: skip de
+     * linha lockada subconta sistematicamente sob carga. O erro aceito é o
+     * do pior caso do mecanismo, não só "±1 em transição": sem ordem
+     * exigida ({@code COUNT}/{@code GROUP BY}) o otimizador pode escolher
+     * allocation-order scan, que sob page split concorrente conta linha
+     * duas vezes ou perde — erro proporcional ao churn de escrita; e o
+     * scan pode falhar com o erro 601 ("data movement"), que aqui vira
+     * falha transitória da leitura (500 no GET; WARN + retry no próximo
+     * tick no stream) — aceito, sem retry automático. Deployment com RCSI
+     * ({@code READ_COMMITTED_SNAPSHOT ON}) torna o hint redundante —
+     * decisão do operador, não da biblioteca.
+     */
+    @Override
+    public String lockFreeCountHint() {
+        return "WITH (NOLOCK) ";
+    }
 }

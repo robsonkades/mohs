@@ -95,6 +95,8 @@ CREATE TABLE IF NOT EXISTS mohs_attempts (
     error        TEXT, -- não CLOB: não existe em Postgres, TEXT funciona em H2 e Postgres (DB-3)
     PRIMARY KEY (execution_id, number)
 );
+-- Janela de vazão do GET /overview — ver schema-postgresql.sql pro raciocínio.
+CREATE INDEX IF NOT EXISTS idx_mohs_attempts_throughput ON mohs_attempts (finished_at, outcome);
 
 CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     name            VARCHAR(255) PRIMARY KEY,

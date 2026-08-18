@@ -1,7 +1,10 @@
 package io.mohs.autoconfigure;
 
+import java.time.Clock;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -18,6 +21,8 @@ import io.mohs.rest.error.RestExceptionHandler;
 import io.mohs.rest.execution.ExecutionsController;
 import io.mohs.rest.job.JobsController;
 import io.mohs.rest.node.NodesController;
+import io.mohs.rest.overview.OverviewController;
+import io.mohs.rest.overview.OverviewStreamBroadcaster;
 
 /**
  * Liga o contrato REST v1 ({@code io.mohs.rest}) à {@link Mohs} pública —
@@ -40,12 +45,12 @@ import io.mohs.rest.node.NodesController;
  * alternativa, {@code @ConditionalOnBean(Mohs.class)}, esconderia também
  * misconfiguração genuína que deveria estourar).
  *
- * <p>Só {@code jobs}/{@code executions}/{@code nodes} têm {@code @Bean}
- * aqui — os demais controllers (overview, batches, rate-limits, runners)
- * continuam contrato M2 sem implementação por trás; registrá-los antes
- * do tempo só exporia rotas que respondem 501 ({@code RestExceptionHandler}
- * traduz o {@code UnsupportedOperationException} dos stubs), sem ganho
- * nenhum.
+ * <p>Só {@code jobs}/{@code executions}/{@code nodes}/{@code overview}
+ * têm {@code @Bean} aqui — os demais controllers (batches, rate-limits,
+ * runners) continuam contrato M2 sem implementação por trás; registrá-los
+ * antes do tempo só exporia rotas que respondem 501
+ * ({@code RestExceptionHandler} traduz o
+ * {@code UnsupportedOperationException} dos stubs), sem ganho nenhum.
  *
  * <p>{@link ActorResolver} é {@link ConditionalOnMissingBean}: a 1.x
  * troca {@link HeaderActorResolver} (atribuição declarativa, não
@@ -88,5 +93,16 @@ public class MohsRestAutoConfiguration {
     @Bean
     public NodesController mohsNodesController(Mohs mohs) {
         return new NodesController(mohs);
+    }
+
+    /** {@code AutoCloseable}: o container chama {@code close()} no shutdown — timer parado, streams SSE completados (fim de stream limpo, não conexão morta). */
+    @Bean
+    public OverviewStreamBroadcaster mohsOverviewStreamBroadcaster(Mohs mohs, @Qualifier("mohsClock") Clock mohsClock) {
+        return OverviewStreamBroadcaster.start(mohs, mohsClock);
+    }
+
+    @Bean
+    public OverviewController mohsOverviewController(Mohs mohs, OverviewStreamBroadcaster mohsOverviewStreamBroadcaster) {
+        return new OverviewController(mohs, mohsOverviewStreamBroadcaster);
     }
 }

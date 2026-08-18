@@ -8,6 +8,7 @@ import java.sql.Types;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -550,8 +551,12 @@ public final class JdbcExecutionStore implements ExecutionStore {
 
     /**
      * Sem lock, sem cursor aberto (ao contrário de {@link #findAll}/
-     * {@link #findByJobKey}) — resultado limitado por {@code limit},
-     * então batch de attempts como {@link #findByIds} (DBTUNE-3), não N+1.
+     * {@link #findByJobKey}) — resultado limitado por {@code limit}.
+     * SUMÁRIO de propósito (DBTUNE-21): attempts NÃO são hidratados —
+     * pertencem ao detalhe ({@link #find}), como a tabela do design REST
+     * sempre disse. Hidratar aqui custava uma segunda query em lote POR
+     * PÁGINA e punha {@code error} (TEXT de tamanho arbitrário) viajando
+     * em toda listagem e em todo tick do stream do dashboard.
      */
     @Override
     public List<Execution> findPage(@Nullable JobKey jobKey, @Nullable ExecutionState status, @Nullable Instant from,
@@ -584,7 +589,53 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 + " ORDER BY id DESC " + dialect.limitClause();
 
         List<ExecutionRow> rows = jdbcTemplate.query(sql, params, (rs, _) -> mapRow(rs));
-        return hydrateAll(rows);
+        return rows.stream().map(row -> hydrate(row, List.of())).toList();
+    }
+
+    /**
+     * Duas queries, não uma com {@code IN} dos três estados: o predicado
+     * {@code state IN ('ENQUEUED', 'RETRY_SCHEDULED')} é EXATAMENTE o do
+     * índice parcial de claim (implicação trivial — a mesma regra de
+     * elegibilidade da DBTUNE-5/ADR-0033), e {@code RUNNING} entra pelo
+     * índice parcial do reaper; juntar os três num {@code IN} só não
+     * implica predicado nenhum e degrada pra scan da tabela inteira.
+     * {@code lease_expires_at IS NOT NULL} no predicado de {@code RUNNING}
+     * é o que torna o índice do reaper elegível (DBTUNE-17) — não filtra
+     * nada de verdade: toda linha {@code RUNNING} chegou lá pelo UPDATE de
+     * claim, que grava a lease na mesma escrita ({@code JdbcDialect}).
+     * Os literais de estado inlinados (não bind) são deliberados: no SQL
+     * Server, índice filtrado só casa com predicado de literal — trocar
+     * por parâmetro "por limpeza" degrada o plano em silêncio.
+     */
+    @Override
+    public Map<ExecutionState, Long> countActiveByState() {
+        Map<ExecutionState, Long> counts = countGroupedBy("state",
+                "SELECT state, COUNT(*) AS total FROM mohs_executions " + dialect.lockFreeCountHint()
+                        + "WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') GROUP BY state",
+                new MapSqlParameterSource());
+        Long running = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM mohs_executions " + dialect.lockFreeCountHint()
+                        + "WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL",
+                new MapSqlParameterSource(), Long.class);
+        counts.put(ExecutionState.RUNNING, Objects.requireNonNull(running, "COUNT(*) never returns NULL"));
+        return counts;
+    }
+
+    /** Range curto em {@code idx_mohs_attempts_throughput} — custo proporcional à atividade da janela, nunca ao histórico. Mesmo hint sem lock das outras contagens ({@code JdbcDialect#lockFreeCountHint}). */
+    @Override
+    public Map<ExecutionState, Long> countTerminalOutcomesSince(Instant since) {
+        Objects.requireNonNull(since, "since");
+        return countGroupedBy("outcome",
+                "SELECT outcome, COUNT(*) AS total FROM mohs_attempts " + dialect.lockFreeCountHint()
+                        + "WHERE finished_at >= :since AND outcome IN ('SUCCEEDED', 'FAILED') GROUP BY outcome",
+                new MapSqlParameterSource("since", JdbcTimestamps.toUtcTimestamp(since)));
+    }
+
+    private Map<ExecutionState, Long> countGroupedBy(String column, String sql, MapSqlParameterSource params) {
+        Map<ExecutionState, Long> counts = new EnumMap<>(ExecutionState.class);
+        jdbcTemplate.query(sql, params,
+                rs -> { counts.put(ExecutionState.valueOf(rs.getString(column)), rs.getLong("total")); });
+        return counts;
     }
 
     /** DBTUNE-3: attempts de todas as linhas numa segunda consulta em lote — nunca uma query de attempts por linha (N+1). */

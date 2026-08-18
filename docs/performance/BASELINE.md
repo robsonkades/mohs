@@ -634,6 +634,45 @@ rodadas — a interação rounds × clamp segurou a patologia pré-ADR-0039.
 Formato do tick pinado por teste com trilha tick/claim
 (`EngineTest#aFullBatchChainsAnotherClaimRoundWithinTheSameTick`).
 
+## Queries do GET /overview (DBTUNE-20) — 2026-08-17
+
+A promessa do endpoint é "barato por construção": custo proporcional ao
+trabalho vivo e à janela de vazão, nunca ao histórico — é a razão de o
+contrato NÃO ter contagem all-time de estados terminais (REST-API-DESIGN
+v0.6). Três queries: backlog (`state IN (ENQUEUED, RETRY_SCHEDULED)
+GROUP BY state`), RUNNING (`state = 'RUNNING' AND lease_expires_at IS
+NOT NULL` — o predicado extra não filtra nada, existe só pra tornar o
+índice parcial do reaper elegível, DBTUNE-17), e janela de attempts
+(`finished_at >= :since AND outcome IN (SUCCEEDED, FAILED) GROUP BY
+outcome`) sobre o índice novo `idx_mohs_attempts_throughput
+(finished_at, outcome)` — criado nos 4 dialetos nesta rodada.
+
+Cenário do harness: 100k execuções terminais (95/5 SUCCEEDED/FAILED),
+cada uma com seu attempt espalhado ~28h (janela de 60s cobre ~61), 550
+ENQUEUED, 50 RETRY_SCHEDULED, 100 RUNNING com lease — histórico
+dominante, trabalho vivo pequeno. Estatísticas atualizadas após o seed.
+
+| Dialeto | backlog | RUNNING | janela de vazão |
+|---|---|---|---|
+| Postgres | Index Scan `idx_claim`, 550 rows, 14 buffers, 0.15 ms | Index Only Scan `idx_reaper`, 0.04 ms | Index Only Scan `idx_throughput`, 61/100k rows, 0.06 ms |
+| MySQL | Covering index range scan `idx_claim` (state líder) | Covering index range scan `idx_reaper` | Covering index range scan `idx_throughput`, 61 rows |
+| SQL Server | Index Scan no filtrado `idx_claim` + key lookup (550) | Index Seek no filtrado `idx_reaper` | Index Seek `idx_throughput`, ~64 rows est. |
+| H2 | `idx` de claim/reaper | `idx_reaper` | `idx_throughput` |
+
+Leitura honesta: em Postgres/SQL Server a elegibilidade vem da implicação
+de predicado dos índices parciais/filtrados (por isso os literais de
+estado inlinados — bind quebraria o match do filtered index no SQL
+Server); em MySQL/H2 não há índice parcial e quem serve é o prefixo
+`state` dos compostos — mecanismo diferente, mesmo resultado. O key
+lookup do backlog no SQL Server (o filtrado de claim não carrega `state`)
+custa 1 lookup/linha de backlog — proporcional ao trabalho vivo,
+aceitável; um `INCLUDE (state)` é alavanca futura SE o backlog crescer.
+Todas as formas sub-ms no volume do cenário. O plano do SQL Server foi
+capturado com o `WITH (NOLOCK)` de produção (dialeto: monitoramento não
+adquire lock; anomalias aceitas documentadas no REST-API-DESIGN v0.7).
+
+Planos completos: `explain-overview-{postgresql,mysql,sqlserver,h2}.txt`.
+
 ## Como reproduzir
 
 ```
@@ -641,6 +680,7 @@ mvn test -Dtest=ClaimQueryLoadHarness
 mvn test -Dtest=ClaimQueryExplainHarness
 mvn test -Dtest=ClaimIndexTuningHarness#postgres
 mvn test -Dtest=ClaimIndexTuningHarness#sqlServer
+mvn test -Dtest=OverviewQueryExplainHarness            # ou #postgres/#mySql/#sqlServer/#h2
 ```
 
 Requer Docker local (Testcontainers sobe Postgres/MySQL/SQL Server).

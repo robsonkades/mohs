@@ -1,0 +1,25 @@
+=== backlog (ENQUEUED + RETRY_SCHEDULED, indice parcial de claim) ===
+SELECT state, COUNT(*) AS total FROM mohs_executions WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') GROUP BY state
+
+-> Group aggregate: count(0)  (cost=182 rows=4) (actual time=0.314..0.335 rows=2 loops=1)
+    -> Filter: (mohs_executions.state in ('ENQUEUED','RETRY_SCHEDULED'))  (cost=127 rows=550) (actual time=0.115..0.278 rows=550 loops=1)
+        -> Covering index range scan on mohs_executions using idx_mohs_executions_claim over (state = 'ENQUEUED') OR (state = 'RETRY_SCHEDULED')  (cost=127 rows=550) (actual time=0.106..0.206 rows=550 loops=1)
+
+
+=== RUNNING (indice parcial do reaper via IS NOT NULL) ===
+SELECT COUNT(*) FROM mohs_executions WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL
+
+-> Aggregate: count(0)  (cost=33.4 rows=1) (actual time=0.0532..0.0532 rows=1 loops=1)
+    -> Filter: ((mohs_executions.state = 'RUNNING') and (mohs_executions.lease_expires_at is not null))  (cost=23.4 rows=100) (actual time=0.026..0.0492 rows=100 loops=1)
+        -> Covering index range scan on mohs_executions using idx_mohs_executions_reaper over (state = 'RUNNING' AND NULL < lease_expires_at)  (cost=23.4 rows=100) (actual time=0.0188..0.0347 rows=100 loops=1)
+
+
+=== janela de vazao (idx_mohs_attempts_throughput) ===
+SELECT outcome, COUNT(*) AS total FROM mohs_attempts WHERE finished_at >= TIMESTAMP '2026-08-17 11:59:00' AND outcome IN ('SUCCEEDED', 'FAILED') GROUP BY outcome
+
+-> Table scan on <temporary>  (actual time=0.097..0.0974 rows=2 loops=1)
+    -> Aggregate using temporary table  (actual time=0.0906..0.0906 rows=2 loops=1)
+        -> Filter: ((mohs_attempts.finished_at >= TIMESTAMP'2026-08-17 11:59:00') and (mohs_attempts.outcome in ('SUCCEEDED','FAILED')))  (cost=14.3 rows=12.2) (actual time=0.00792..0.0267 rows=61 loops=1)
+            -> Covering index range scan on mohs_attempts using idx_mohs_attempts_throughput over ('2026-08-17 11:59:00.000000' <= finished_at AND 'FAILED' <= outcome)  (cost=14.3 rows=61) (actual time=0.00695..0.0167 rows=61 loops=1)
+
+

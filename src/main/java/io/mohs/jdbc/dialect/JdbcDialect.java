@@ -129,4 +129,22 @@ public interface JdbcDialect {
     default String limitClause() {
         return "LIMIT :limit";
     }
+
+    /**
+     * Hint de tabela pras contagens de monitoramento do {@code GET
+     * /overview} ({@code JdbcExecutionStore#countActiveByState}/{@code
+     * countTerminalOutcomesSince}) — o contrato do endpoint é não adquirir
+     * lock nenhum: monitoramento jamais disputa com o caminho quente do
+     * claim/conclusão. Default vazio: em H2/Postgres/MySQL um {@code
+     * SELECT} MVCC já não toma lock de linha (leitura consistente).
+     * SQL Server sobrescreve — sob {@code READ COMMITTED} default (sem
+     * RCSI) todo {@code SELECT} toma shared locks que bloqueiam e são
+     * bloqueados pelos {@code UPDATE}s do motor. Só pra contagem — as
+     * anomalias aceitas (linha em transição, dupla contagem/perda sob page
+     * split, erro 601 como falha transitória) estão no Javadoc do override
+     * do SQL Server; nunca usar em leitura que hidrata entidade.
+     */
+    default String lockFreeCountHint() {
+        return "";
+    }
 }

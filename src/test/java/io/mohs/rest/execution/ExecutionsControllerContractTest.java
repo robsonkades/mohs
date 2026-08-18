@@ -67,6 +67,8 @@ class ExecutionsControllerContractTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items.length()").value(1))
                 .andExpect(jsonPath("$.items[0].executionId").value("exec-2"))
+                // lista é sumário (v0.9): attempts moram no detalhe GET /executions/{id}
+                .andExpect(jsonPath("$.items[0].attempts").doesNotExist())
                 .andExpect(jsonPath("$.nextCursor").value("exec-2"));
     }
 

@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS mohs_attempts (
     error        TEXT, -- não CLOB: não existe em Postgres (DB-3)
     PRIMARY KEY (execution_id, number)
 );
+-- Janela de vazão do GET /overview (âncora de polling): COUNT por outcome
+-- com finished_at >= agora - janela. finished_at líder = range scan curto,
+-- custo proporcional à atividade da janela, nunca ao histórico ("barato
+-- por construção", REST-API-DESIGN); outcome na segunda coluna serve o
+-- GROUP BY sem heap fetch (index-only). finished_at cresce monotônico —
+-- inserts no fim do índice, mesma localidade do UUIDv7 (ADR-0040).
+CREATE INDEX IF NOT EXISTS idx_mohs_attempts_throughput ON mohs_attempts (finished_at, outcome);
 
 CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     name            VARCHAR(255) PRIMARY KEY,
