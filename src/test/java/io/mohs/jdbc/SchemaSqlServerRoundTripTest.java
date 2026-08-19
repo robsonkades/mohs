@@ -131,4 +131,36 @@ class SchemaSqlServerRoundTripTest {
 
         assertThat(store.find("smtp").map(RateLimitSnapshot::rateLimit)).contains(rateLimit);
     }
+
+    /**
+     * O balde da ADR-0042 vive em duas colunas, e {@code refilled_at} é a que
+     * carrega a fração: o refill conta tokens pelo tempo decorrido desde ela e
+     * grava de volta o instante avançado pelo que converteu — nunca "agora".
+     * Se o dialeto engolir a fração sub-segundo desse instante, o balde acorda
+     * com a idade errada: mais velho libera token a mais e estoura justamente o
+     * limite que protege o recurso externo; mais novo segura job sem um erro
+     * sequer no log. Até aqui o caminho de {@code charge} só rodava em H2.
+     *
+     * <p>A aritmética é escolhida para não absorver o erro. Com 100/min sai um
+     * token a cada 600ms, a linha nasce em {@code .500} e a segunda cobrança vem
+     * 1s depois: com a fração intacta o decorrido rende exatamente 1 token e
+     * sobram 50. O que este teste pega é desvio de {@code refilled_at} a partir
+     * de 200ms para o passado (dá 51) ou acima de 400ms para o futuro (dá 49) —
+     * coluna de segundo cheio cai fora dos dois lados: trunca, 51; arredonda,
+     * 49, medido degradando o MySQL para {@code DATETIME} sem precisão
+     * declarada. Perda mais fina passa aqui, e é inofensiva no intervalo por
+     * token de qualquer limite real.
+     */
+    @Test
+    void chargingAcrossATokenBoundaryProvesRefilledAtKeepsItsFraction() {
+        clock.advance(Duration.ofMillis(500));
+        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, clock);
+        store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
+
+        assertThat(store.charge("smtp", 50, clock.instant())).isTrue();
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(store.charge("smtp", 1, clock.instant())).isTrue();
+
+        assertThat(store.available("smtp", clock.instant())).isEqualTo(50);
+    }
 }
