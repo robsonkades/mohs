@@ -1,4 +1,4 @@
-$uri = 'http://localhost:8080/api/mohs/v1/jobs/every-job/schedule'
+$uri = 'http://localhost:8080/api/mohs/v1/jobs/every-job2/schedule'
 
 $headers = @{
     'Content-Type' = 'application/json'
