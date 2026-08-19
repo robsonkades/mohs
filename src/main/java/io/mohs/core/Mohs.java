@@ -105,6 +105,25 @@ public interface Mohs {
      */
     List<NodeSnapshot> nodes();
 
+    /**
+     * Os limites de vazão declarados e o saldo corrente do balde de cada um
+     * (ADR-0042), por nome — cardinalidade limitada, sem paginação, como
+     * {@link #jobs()}. Leitura pura: consultar o saldo não consome token.
+     */
+    List<RateLimitSnapshot> rateLimits();
+
+    /**
+     * Ajusta {@code max}/{@code window} de um limite JÁ declarado, em
+     * runtime e cluster-wide — mudança de emergência sob o mesmo contrato
+     * de PATCH do {@link #reschedule}: o boot reaplica o valor do código no
+     * próximo start sob o default {@code on-conflict: override}. O balde
+     * sobrevive ao ajuste (saldo clampado ao novo teto): baixar o limite
+     * corta a vazão futura, não devolve o que já foi consumido.
+     *
+     * @return o limite ajustado, ou vazio se {@code name} não existir — declarar limite novo é ato de boot, não de emergência
+     */
+    Optional<RateLimitSnapshot> adjustRateLimit(String name, int max, Duration window);
+
     /** Suspende disparos automáticos; schedule manual continua permitido (espelha o motor). Sem efeito se {@code jobKey} não existir. */
     void pause(JobKey jobKey);
 

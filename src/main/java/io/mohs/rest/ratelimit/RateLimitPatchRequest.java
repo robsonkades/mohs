@@ -1,18 +1,20 @@
 package io.mohs.rest.ratelimit;
 
 import java.time.Duration;
-import java.util.Objects;
 
-/** Corpo de {@code PATCH /rate-limits/{name}} — mesmo invariante de {@link io.mohs.core.resource.RateLimit}. */
+import io.mohs.core.resource.RateLimit;
+
+/**
+ * Corpo de {@code PATCH /rate-limits/{name}} — valida pela MESMA regra de
+ * {@link RateLimit#requireRefillable}, não por uma cópia: a divergência
+ * entre a validação de wire e a do domínio é o que deixaria um
+ * {@code window} curto demais atravessar a API e derrubar a rodada de
+ * claim (ADR-0042). Aqui a falha é 422 na cara do cliente, no boot é erro
+ * de startup.
+ */
 public record RateLimitPatchRequest(int max, Duration window) {
 
     public RateLimitPatchRequest {
-        if (max < 1) {
-            throw new IllegalArgumentException("max must be at least 1");
-        }
-        Objects.requireNonNull(window, "window");
-        if (!window.isPositive()) {
-            throw new IllegalArgumentException("window must be positive");
-        }
+        RateLimit.requireRefillable(max, window);
     }
 }

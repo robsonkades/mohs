@@ -72,19 +72,28 @@ For any task that changes code:
 2. **Small steps, green suite after each one.** Uncovered code → write the
    test first, show it, then touch the code.
 3. **End-of-task pipeline (Definition of Done)** — mandatory whenever `.java`
-   files changed, in this order:
+   or persistence files changed, in this order:
   1. Subagent **`java-refactorer`** on the touched files — explicit path
      list in the prompt; behavior preserved.
-  2. Subagent **`java-code-reviewer`** on `git diff HEAD` — same file list
+  2. Subagent **`db-tuner`** — only when the change touched persistence: any
+     `.sql` file or code under `io.mohs.jdbc`. It applies result-equivalent
+     rewrites and index migrations on its own; what it flags for approval
+     comes to me, it does not land in the tree. A `.sql`-only change runs
+     this step alone.
+  3. Subagent **`java-code-reviewer`** on `git diff HEAD` — same file list
      plus the task's intent in the prompt.
-  3. Gate: 🔴 critical → fix and re-review (max 2 cycles; if it persists,
+  4. Gate: 🔴 critical → fix and re-review (max 2 cycles; if it persists,
      stop and ask me). 🟡 → fix now or list with justification.
-  4. Only then report done: the final summary includes what was built, the
-     refactorings applied, and the review verdict (✅/⚠️/❌).
+  5. Only then report done: the final summary includes what was built, the
+     refactorings applied, the tuning outcome, and the review verdict
+     (✅/⚠️/❌).
 
    Subagents do not see this conversation: pass paths, intent, and
-   constraints in each prompt. `/finalizar` runs this same pipeline — don't
-   run it twice. Skip the pipeline only when no `.java` changed (and say so).
+   constraints in each prompt. `/finalizar` runs this same pipeline and
+   `/tune` runs step 2 on demand — don't run either twice. Skip the pipeline
+   only when neither `.java` nor persistence files changed (and say so).
+   The `Stop` hook `.claude/hooks/require-pipeline.mjs` enforces this, scoped
+   to the files this session actually edited and left uncommitted.
 
 ## Document map
 - `docs/MOHS-DOCUMENTO-MESTRE.md` — product vision and vocabulary.
@@ -92,6 +101,8 @@ For any task that changes code:
 - `docs/REST-API-DESIGN.md` — endpoint ↔ controller table (M2).
 - `docs/adr/` — architecture decisions; an ADR outranks opinions in chat.
 - `BASELINE.md` — reference performance numbers.
+- `docs/RATE-LIMIT-EVOLUTION.md` — deferred rate-limit improvements, each with
+  its measured trigger (companion to ADR-0042).
 - `PLAN.md` — current refactor steps; one step per commit/PR.
 
 ## Identity and naming

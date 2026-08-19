@@ -51,11 +51,11 @@ class MohsJobScannerTest {
     }
 
     static class StereotypedJobs {
-        @RecurringJob(id = "auto-sync", every = "PT30S")
+        @RecurringJob(id = "auto-sync", every = "PT30S", rateLimit = "sync-api")
         void autoSync() {
         }
 
-        @OnDemandJob("import-file")
+        @OnDemandJob(value = "import-file", rateLimit = "smtp")
         void importFile(Map<String, Object> payload) {
         }
     }
@@ -141,7 +141,7 @@ class MohsJobScannerTest {
                 new MohsProperties.Time(MohsProperties.Time.Mode.APPLICATION, Duration.ofSeconds(1), Duration.ofSeconds(30)),
                 new MohsProperties.Registration(onConflict),
                 new MohsProperties.Api(false, "/api/mohs/v1"),
-                Map.of());
+                Map.of(), Map.of());
         MohsJobScanner scanner = new MohsJobScanner(providerOf(handlerRegistry), providerOf(jobStore), providerOf(properties));
         scanner.setBeanFactory(beanFactory);
         return scanner;
@@ -235,6 +235,11 @@ class MohsJobScannerTest {
         assertThat(recurring.definition().source()).isEqualTo(DefinitionSource.ANNOTATION);
         StoredJob onDemand = jobStore.find(JobKey.of("import-file")).orElseThrow(); // id veio do value() conciso
         assertThat(onDemand.definition().schedule()).isEqualTo(new OnDemandSpec());
+        // ADR-0042: o limite de vazão atravessa os DOIS estereótipos — sem o
+        // alias, quem declara pelo estereótipo (a forma recomendada da
+        // ADR-0038) não teria como pedir rate limit nenhum.
+        assertThat(recurring.definition().rateLimit()).isEqualTo("sync-api");
+        assertThat(onDemand.definition().rateLimit()).isEqualTo("smtp");
         assertThat(handlerRegistry.find(JobKey.of("auto-sync"))).isPresent();
         assertThat(handlerRegistry.find(JobKey.of("import-file"))).isPresent();
     }

@@ -9,6 +9,7 @@ import org.springframework.core.annotation.AliasFor;
 
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
+import io.mohs.core.resource.RateLimit;
 import io.mohs.core.schedule.Misfire;
 
 /**
@@ -68,6 +69,10 @@ public @interface RecurringJob {
     /** {@link ExecutionWindow} nomeada que exclui horários de disparo. */
     @AliasFor(annotation = MohsJob.class, attribute = "window")
     String window() default "";
+
+    /** {@link RateLimit} nomeado que limita a vazão de disparos deste job, cluster-wide (ADR-0042). */
+    @AliasFor(annotation = MohsJob.class, attribute = "rateLimit")
+    String rateLimit() default "";
 
     /** Política de misfire. Default {@link Misfire#IGNORE}. */
     @AliasFor(annotation = MohsJob.class, attribute = "misfire")

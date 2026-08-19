@@ -24,6 +24,7 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     private @Nullable Schedule schedule;
     private @Nullable String runner;
     private @Nullable String window;
+    private @Nullable String rateLimit;
     private Misfire misfire = Misfire.IGNORE;
     private boolean startPaused;
     private boolean allowConcurrentExecutions = true;
@@ -88,6 +89,12 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     }
 
     @Override
+    public PolicySpec rateLimit(String name) {
+        this.rateLimit = name;
+        return this;
+    }
+
+    @Override
     public PolicySpec misfire(Misfire policy) {
         this.misfire = Objects.requireNonNull(policy, "policy");
         return this;
@@ -137,7 +144,7 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
                     "JobSpec configurer must call cron(...), every(...), everyAfterFinish(...) "
                             + "or onDemand() before JobDefinition.of returns");
         }
-        return new JobDefinition(key, null, handlerType, schedule, runner, window, misfire, startPaused,
+        return new JobDefinition(key, null, handlerType, schedule, runner, window, rateLimit, misfire, startPaused,
                 allowConcurrentExecutions, maxConcurrentExecutions, retries, timeout, retryPolicy, DefinitionSource.PROGRAMMATIC);
     }
 }

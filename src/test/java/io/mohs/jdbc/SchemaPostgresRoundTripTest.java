@@ -1,5 +1,6 @@
 package io.mohs.jdbc;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -21,6 +22,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.RateLimitSnapshot;
 import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.BatchCounters;
 import io.mohs.engine.StoredJob;
@@ -122,11 +124,11 @@ class SchemaPostgresRoundTripTest {
 
     @Test
     void rateLimitStoreRoundTripsAgainstPostgres() {
-        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource);
+        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, Clock.systemUTC());
         RateLimit rateLimit = new RateLimit("smtp", 100, Duration.ofMinutes(1));
 
         store.upsert(rateLimit);
 
-        assertThat(store.find("smtp")).contains(rateLimit);
+        assertThat(store.find("smtp").map(RateLimitSnapshot::rateLimit)).contains(rateLimit);
     }
 }

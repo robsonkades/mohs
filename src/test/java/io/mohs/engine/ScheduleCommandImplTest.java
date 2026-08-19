@@ -59,7 +59,7 @@ class ScheduleCommandImplTest {
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
         JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
-        mohs = new MohsImpl(jobStore, executionStore, new JdbcNodeStore(dataSource), new HandlerRegistry(), clock, mock(MohsLifecycle.class));
+        mohs = new MohsImpl(jobStore, executionStore, new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock, mock(MohsLifecycle.class));
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));
     }
 

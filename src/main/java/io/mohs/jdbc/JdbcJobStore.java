@@ -90,6 +90,7 @@ public final class JdbcJobStore implements JobStore {
                 .addValue("intervalAfterFinish", scheduleColumns.intervalAfterFinish())
                 .addValue("runner", definition.runner())
                 .addValue("windowName", definition.window())
+                .addValue("rateLimit", definition.rateLimit())
                 .addValue("misfire", definition.misfire().name())
                 .addValue("startPaused", definition.startPaused())
                 .addValue("allowConcurrentExecutions", definition.allowConcurrentExecutions())
@@ -132,7 +133,7 @@ public final class JdbcJobStore implements JobStore {
                     name = :name, handler_type = :handlerType, schedule_type = :scheduleType,
                     cron_expression = :cronExpression, cron_zone = :cronZone,
                     interval_duration = :intervalDuration, interval_after_finish = :intervalAfterFinish,
-                    runner = :runner, window_name = :windowName,
+                    runner = :runner, window_name = :windowName, rate_limit = :rateLimit,
                     misfire = :misfire, start_paused = :startPaused,
                     allow_concurrent_executions = :allowConcurrentExecutions,
                     max_concurrent_executions = :maxConcurrentExecutions,
@@ -156,13 +157,13 @@ public final class JdbcJobStore implements JobStore {
                 jdbcTemplate.update("""
                         INSERT INTO mohs_job_definitions (
                             id, job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
-                            interval_duration, interval_after_finish, runner, window_name,
+                            interval_duration, interval_after_finish, runner, window_name, rate_limit,
                             misfire, start_paused, allow_concurrent_executions, max_concurrent_executions, retries,
                             timeout, retry_policy, source,
                             orphaned, retired, paused, running_execution_count, next_fire_at, created_at, updated_at)
                         VALUES (
                             :id, :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
-                            :intervalDuration, :intervalAfterFinish, :runner, :windowName,
+                            :intervalDuration, :intervalAfterFinish, :runner, :windowName, :rateLimit,
                             :misfire, :startPaused, :allowConcurrentExecutions, :maxConcurrentExecutions, :retries,
                             :timeout, :retryPolicy, :source,
                             :orphaned, :retired, :paused, :runningExecutionCount, :nextFireAt, :createdAt, :updatedAt)
@@ -516,7 +517,7 @@ public final class JdbcJobStore implements JobStore {
 
         JobDefinition definition = new JobDefinition(
                 JobKey.of(jobKey), rs.getString("name"), handlerType, schedule,
-                rs.getString("runner"), rs.getString("window_name"),
+                rs.getString("runner"), rs.getString("window_name"), rs.getString("rate_limit"),
                 Misfire.valueOf(rs.getString("misfire")), rs.getBoolean("start_paused"),
                 rs.getBoolean("allow_concurrent_executions"), rs.getInt("max_concurrent_executions"),
                 rs.getInt("retries"), timeout, rs.getString("retry_policy"),

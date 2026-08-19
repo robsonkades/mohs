@@ -212,7 +212,7 @@ class ClaimIndexTuningHarness {
         List<Future<?>> nodes = new ArrayList<>();
         long start = System.nanoTime();
         for (int i = 0; i < CONCURRENT_NODES; i++) {
-            JdbcClaimer nodeClaimer = new JdbcClaimer(pool, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
+            JdbcClaimer nodeClaimer = new JdbcClaimer(pool, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()), new JdbcRateLimitStore(pool, clock));
             String nodeId = "index-tuning-node-" + i;
             nodes.add(executor.submit(() -> {
                 List<Execution> claimed;

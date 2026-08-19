@@ -10,6 +10,7 @@ import org.springframework.core.annotation.AliasFor;
 import io.mohs.core.Mohs;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
+import io.mohs.core.resource.RateLimit;
 
 /**
  * Estereótipo de {@link MohsJob} para o job <b>sob demanda</b> (ADR-0038):
@@ -48,6 +49,10 @@ public @interface OnDemandJob {
     /** {@link ExecutionWindow} nomeada que exclui horários de disparo. */
     @AliasFor(annotation = MohsJob.class, attribute = "window")
     String window() default "";
+
+    /** {@link RateLimit} nomeado que limita a vazão de disparos deste job, cluster-wide (ADR-0042). */
+    @AliasFor(annotation = MohsJob.class, attribute = "rateLimit")
+    String rateLimit() default "";
 
     /** Ver {@link MohsJob#allowConcurrentExecutions()}. */
     @AliasFor(annotation = MohsJob.class, attribute = "allowConcurrentExecutions")

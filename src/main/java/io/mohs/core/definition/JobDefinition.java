@@ -29,6 +29,7 @@ import org.jspecify.annotations.Nullable;
  * @param schedule quando o job dispara — {@code CronSpec}/{@code IntervalSpec}/{@code OnDemandSpec}
  * @param runner nome do {@code MohsRunner} que executa as invocações; {@code null} usa o runner default
  * @param window nome da {@code ExecutionWindow} que restringe quando o job pode rodar; {@code null} = sem restrição
+ * @param rateLimit nome do {@code RateLimit} que limita a vazão de disparos deste job, cluster-wide (ADR-0042); {@code null} = sem limite
  * @param misfire política aplicada quando um disparo é perdido
  * @param startPaused nasce pausado no PRIMEIRO registro da definição (ADR-0037) — a agenda fica declarada e desarmada até um {@code resume}; depois do nascimento, {@code paused} é decisão de operador e redeploy nunca re-pausa
  * @param allowConcurrentExecutions se {@code true}, sem teto de execuções concorrentes deste job — {@code maxConcurrentExecutions} deve ser {@code 0}
@@ -45,6 +46,7 @@ public record JobDefinition(
         Schedule schedule,
         @Nullable String runner,
         @Nullable String window,
+        @Nullable String rateLimit,
         Misfire misfire,
         boolean startPaused,
         boolean allowConcurrentExecutions,
@@ -54,12 +56,12 @@ public record JobDefinition(
         @Nullable String retryPolicy,
         DefinitionSource source) {
 
-    /** Assinatura pré-ADR-0037 — {@code startPaused = false}, o job nasce armado (comportamento de sempre). */
+    /** Assinatura pré-ADR-0037 — {@code startPaused = false} (job nasce armado) e {@code rateLimit = null} (sem limite de vazão). */
     public JobDefinition(JobKey key, @Nullable String name, Class<?> handlerType, Schedule schedule,
             @Nullable String runner, @Nullable String window, Misfire misfire, boolean allowConcurrentExecutions,
             int maxConcurrentExecutions, int retries, @Nullable Duration timeout, @Nullable String retryPolicy,
             DefinitionSource source) {
-        this(key, name, handlerType, schedule, runner, window, misfire, false, allowConcurrentExecutions,
+        this(key, name, handlerType, schedule, runner, window, null, misfire, false, allowConcurrentExecutions,
                 maxConcurrentExecutions, retries, timeout, retryPolicy, source);
     }
 
@@ -84,6 +86,7 @@ public record JobDefinition(
         }
         requireNotBlankIfPresent(runner, "runner");
         requireNotBlankIfPresent(window, "window");
+        requireNotBlankIfPresent(rateLimit, "rateLimit");
         requireNotBlankIfPresent(retryPolicy, "retryPolicy");
     }
 

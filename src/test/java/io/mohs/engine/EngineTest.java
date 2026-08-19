@@ -57,6 +57,7 @@ import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.schedule.Schedule;
 import io.mohs.jdbc.JdbcClaimer;
 import io.mohs.jdbc.JdbcExecutionStore;
+import io.mohs.jdbc.JdbcRateLimitStore;
 import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.jdbc.JdbcNodeStore;
 import io.mohs.jdbc.JdbcReaper;
@@ -137,7 +138,7 @@ class EngineTest {
     }
 
     private JdbcClaimer newClaimer(Duration leaseTtl) {
-        return new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, leaseTtl, new ExecutionWindowRegistry(List.of()));
+        return new JdbcClaimer(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, leaseTtl, new ExecutionWindowRegistry(List.of()), new JdbcRateLimitStore(dataSource, clock));
     }
 
     private static RunnerRegistry defaultRunnerRegistry() {

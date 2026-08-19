@@ -127,7 +127,7 @@ class ClaimQueryLoadHarness {
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
         JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), dialect);
-        JdbcClaimer claimer = new JdbcClaimer(dataSource, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
+        JdbcClaimer claimer = new JdbcClaimer(dataSource, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()), new JdbcRateLimitStore(dataSource, clock));
         seedBacklog(rawJdbcTemplate, jobStore, "latency", LATENCY_JOB_COUNT, LATENCY_EXECUTIONS_PER_JOB);
 
         for (int i = 0; i < LATENCY_WARMUP; i++) {
@@ -154,7 +154,7 @@ class ClaimQueryLoadHarness {
         List<Future<?>> nodes = new ArrayList<>();
         long start = System.nanoTime();
         for (int i = 0; i < THROUGHPUT_NODES; i++) {
-            JdbcClaimer nodeClaimer = new JdbcClaimer(dataSource, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
+            JdbcClaimer nodeClaimer = new JdbcClaimer(dataSource, dialect, clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()), new JdbcRateLimitStore(dataSource, clock));
             String nodeId = "throughput-node-" + i;
             nodes.add(executor.submit(() -> {
                 List<Execution> claimed;

@@ -22,6 +22,11 @@ default — o tick é compartilhado, janela por assinante quebraria o modelo de 
 v0.9: listas de execuções viram SUMÁRIO sem `attempts` (alinha o wire ao que a
 tabela sempre disse: attempts são do detalhe); eventos do stream envelopados em
 `{asOf, data}` — o carimbo do retrato pro frontend ordenar/distribuir [DECIDIDO].
+v0.10: `GET/PATCH /rate-limits` implementados sobre o enforcement da ADR-0042 —
+`currentCount` do contrato M2 vira `available` (tokens no balde; "usado" não é
+grandeza de balde, o refill é contínuo e não tem virada de janela onde zerar).
+PATCH em nome não declarado é 404, nunca criação implícita: declarar é ato de
+boot [DECIDIDO].
 
 ## Princípios
 
@@ -56,7 +61,7 @@ tabela sempre disse: attempts são do detalhe); eventos do stream envelopados em
 | `GET /executions/{id}` | Detalhe: attempts, timestamps, erro, actor |
 | `POST /executions/{id}/cancel` | Cancelamento cooperativo |
 | `POST /executions/{id}/retry` | Retry manual de uma execução `FAILED` (ADR-0033): a MESMA linha rearma como `RETRY_SCHEDULED` devida agora e disputa o claim normal — bypassa a política exaurida. Sem `Idempotency-Key` (retry não deduplica; a idempotência é o CAS). → 202; estado ≠ `FAILED` → 409 |
-| `GET /rate-limits` · `PATCH /rate-limits/{name}` | Estado e ajuste runtime de vazão (cluster-wide) |
+| `GET /rate-limits` · `PATCH /rate-limits/{name}` | Estado (`max`, `window`, `available`) e ajuste runtime de vazão, cluster-wide (ADR-0042). PATCH em limite não declarado → 404: declarar é ato de boot |
 | `GET /runners` | Visão por nó: modo, max, em execução (node-local por natureza) |
 | `GET /nodes` | Visão de cluster: nodes com heartbeat recente, last-seen |
 | `GET /batches/{id}` | Contadores agregados e estado do lote |

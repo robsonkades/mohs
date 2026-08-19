@@ -61,6 +61,7 @@ class MohsImplTest {
     private InMemoryJobStore jobStore;
     private ExecutionStore executionStore;
     private NodeStore nodeStore;
+    private RateLimitStore rateLimitStore;
     private HandlerRegistry handlerRegistry;
     private MohsImpl mohs;
 
@@ -70,8 +71,9 @@ class MohsImplTest {
         jobStore = new InMemoryJobStore(clock);
         executionStore = mock(ExecutionStore.class);
         nodeStore = mock(NodeStore.class);
+        rateLimitStore = mock(RateLimitStore.class);
         handlerRegistry = new HandlerRegistry();
-        mohs = new MohsImpl(jobStore, executionStore, nodeStore, handlerRegistry, clock, mock(MohsLifecycle.class));
+        mohs = new MohsImpl(jobStore, executionStore, nodeStore, rateLimitStore, handlerRegistry, clock, mock(MohsLifecycle.class));
     }
 
     private static JobDefinition onDemand(String key) {
@@ -213,7 +215,7 @@ class MohsImplTest {
     @Test
     void cancelOfAPendingSchedulerOccurrenceRearmsTheAfterFinishChain() {
         JobStore jobStoreMock = mock(JobStore.class);
-        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, nodeStore, handlerRegistry,
+        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, nodeStore, rateLimitStore, handlerRegistry,
                 new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class));
         ExecutionId id = ExecutionId.of("exec-1");
         JobDefinition afterFinish = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
@@ -231,7 +233,7 @@ class MohsImplTest {
     @Test
     void cancelOfAPendingManualExecutionDoesNotTouchTheChain() {
         JobStore jobStoreMock = mock(JobStore.class);
-        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, nodeStore, handlerRegistry,
+        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, nodeStore, rateLimitStore, handlerRegistry,
                 new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class));
         ExecutionId id = ExecutionId.of("exec-1");
         when(executionStore.cancelIfPending(id)).thenReturn(true);

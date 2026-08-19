@@ -6,6 +6,7 @@ import java.util.List;
 import javax.sql.DataSource;
 
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -24,6 +25,7 @@ import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
+import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.Dispatcher;
 import io.mohs.engine.Engine;
@@ -35,6 +37,7 @@ import io.mohs.engine.JobStore;
 import io.mohs.engine.MohsExecutors;
 import io.mohs.engine.MohsImpl;
 import io.mohs.engine.NodeStore;
+import io.mohs.engine.RateLimitStore;
 import io.mohs.engine.Reaper;
 import io.mohs.engine.RunnerRegistry;
 import io.mohs.engine.TriggerFirer;
@@ -43,6 +46,7 @@ import io.mohs.jdbc.JdbcClaimer;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.jdbc.JdbcNodeStore;
+import io.mohs.jdbc.JdbcRateLimitStore;
 import io.mohs.jdbc.JdbcReaper;
 import io.mohs.jdbc.JdbcTriggerFirer;
 import io.mohs.jdbc.dialect.H2JdbcDialect;
@@ -196,9 +200,28 @@ public class MohsAutoConfiguration {
     @Bean
     public Claimer mohsClaimer(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock,
             ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsProperties properties,
-            ExecutionWindowRegistry mohsExecutionWindowRegistry) {
+            ExecutionWindowRegistry mohsExecutionWindowRegistry, RateLimitStore mohsRateLimitStore) {
         return new JdbcClaimer(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore,
-                properties.engine().leaseTtl(), mohsExecutionWindowRegistry);
+                properties.engine().leaseTtl(), mohsExecutionWindowRegistry, mohsRateLimitStore);
+    }
+
+    @Bean
+    public RateLimitStore mohsRateLimitStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock) {
+        return new JdbcRateLimitStore(dataSource, mohsClock);
+    }
+
+    /**
+     * Registro dos limites declarados DEPOIS de todos os singletons, como
+     * {@link MohsJobScanner} faz com as definições: escrita em banco no
+     * boot só é segura quando a inicialização de schema do Boot já
+     * aconteceu. A montagem, essa sim, roda na criação do bean — property
+     * malformada derruba o boot cedo, com o nome da propriedade que falta.
+     */
+    @Bean
+    public SmartInitializingSingleton mohsRateLimitRegistrar(RateLimitStore mohsRateLimitStore, MohsProperties properties,
+            List<RateLimit> mohsRateLimitBeans) {
+        List<RateLimit> declared = MohsRateLimits.assemble(properties, mohsRateLimitBeans);
+        return () -> MohsRateLimits.register(mohsRateLimitStore, properties.registration().onConflict(), declared);
     }
 
     /** Sem caminho via propriedade — {@link ExecutionWindow} só existe via {@code @Bean} (ver Javadoc da classe). */
@@ -268,8 +291,10 @@ public class MohsAutoConfiguration {
 
     @Bean
     public Mohs mohs(JobStore mohsJobStore, ExecutionStore mohsExecutionStore, NodeStore mohsNodeStore,
-            HandlerRegistry mohsHandlerRegistry, @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine) {
-        return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsNodeStore, mohsHandlerRegistry, mohsClock, mohsEngine);
+            RateLimitStore mohsRateLimitStore, HandlerRegistry mohsHandlerRegistry,
+            @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine) {
+        return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsNodeStore, mohsRateLimitStore, mohsHandlerRegistry,
+                mohsClock, mohsEngine);
     }
 
     /**

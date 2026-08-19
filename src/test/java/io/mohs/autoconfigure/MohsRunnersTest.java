@@ -35,7 +35,7 @@ class MohsRunnersTest {
                 new MohsProperties.Time(MohsProperties.Time.Mode.APPLICATION, Duration.ofSeconds(1), Duration.ofSeconds(30)),
                 new MohsProperties.Registration(MohsProperties.Registration.OnConflict.OVERRIDE),
                 new MohsProperties.Api(false, "/api/mohs/v1"),
-                runners);
+                runners, Map.of());
     }
 
     private static MohsProperties.Runner runnerSpec(RunnerMode mode) {

@@ -23,6 +23,7 @@ import io.mohs.rest.job.JobsController;
 import io.mohs.rest.node.NodesController;
 import io.mohs.rest.overview.OverviewController;
 import io.mohs.rest.overview.OverviewStreamBroadcaster;
+import io.mohs.rest.ratelimit.RateLimitsController;
 
 /**
  * Liga o contrato REST v1 ({@code io.mohs.rest}) à {@link Mohs} pública —
@@ -45,9 +46,9 @@ import io.mohs.rest.overview.OverviewStreamBroadcaster;
  * alternativa, {@code @ConditionalOnBean(Mohs.class)}, esconderia também
  * misconfiguração genuína que deveria estourar).
  *
- * <p>Só {@code jobs}/{@code executions}/{@code nodes}/{@code overview}
- * têm {@code @Bean} aqui — os demais controllers (batches, rate-limits,
- * runners) continuam contrato M2 sem implementação por trás; registrá-los
+ * <p>Só {@code jobs}/{@code executions}/{@code nodes}/{@code overview}/
+ * {@code rate-limits} têm {@code @Bean} aqui — os demais controllers
+ * (batches, runners) continuam contrato M2 sem implementação por trás; registrá-los
  * antes do tempo só exporia rotas que respondem 501
  * ({@code RestExceptionHandler} traduz o
  * {@code UnsupportedOperationException} dos stubs), sem ganho nenhum.
@@ -93,6 +94,11 @@ public class MohsRestAutoConfiguration {
     @Bean
     public NodesController mohsNodesController(Mohs mohs) {
         return new NodesController(mohs);
+    }
+
+    @Bean
+    public RateLimitsController mohsRateLimitsController(Mohs mohs, ActorResolver mohsActorResolver) {
+        return new RateLimitsController(mohs, mohsActorResolver);
     }
 
     /** {@code AutoCloseable}: o container chama {@code close()} no shutdown — timer parado, streams SSE completados (fim de stream limpo, não conexão morta). */

@@ -26,6 +26,7 @@ import io.mohs.rest.ApiPaths;
  *
  * @param enabled gate mestre — desligar remove todos os beans do Mohs do contexto
  * @param runners runners nomeados adicionais aos built-in — ver {@link Runner}
+ * @param rateLimits limites de vazão cluster-wide por nome ({@code mohs.rate-limits.smtp.max=100}) — ver {@link RateLimitSpec}
  */
 @ConfigurationProperties("mohs")
 public record MohsProperties(
@@ -36,7 +37,8 @@ public record MohsProperties(
         @DefaultValue Time time,
         @DefaultValue Registration registration,
         @DefaultValue Api api,
-        @DefaultValue Map<String, Runner> runners) {
+        @DefaultValue Map<String, Runner> runners,
+        @DefaultValue Map<String, RateLimitSpec> rateLimits) {
 
     /**
      * @param dialect ADR-0023: escolha explícita, nunca auto-detecção via {@code DataSource}. Sem default — obrigatório.
@@ -161,5 +163,17 @@ public record MohsProperties(
             @Nullable Integer maxSize,
             @Nullable Integer queueCapacity,
             @Nullable Duration keepAlive) {
+    }
+
+    /**
+     * Um valor de {@code mohs.rate-limits.<nome>} — ADR-0042. O nome é a
+     * chave do mapa (como em {@link #runners()}), então não se repete aqui.
+     * Ambos obrigatórios: um limite pela metade não tem valor default
+     * defensável — {@code max} sem {@code window} não é vazão.
+     *
+     * @param max disparos permitidos por janela, cluster-wide
+     * @param window janela sobre a qual {@code max} vale ({@code 1m}, {@code PT30S})
+     */
+    public record RateLimitSpec(@Nullable Integer max, @Nullable Duration window) {
     }
 }

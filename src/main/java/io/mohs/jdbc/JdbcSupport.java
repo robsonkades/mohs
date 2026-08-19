@@ -28,7 +28,7 @@ final class JdbcSupport {
      * fecha a lacuna entre o Javadoc de {@code ExecutionStore#findAll} e o
      * que os drivers realmente fazem sem isto configurado.
      */
-    private static final int STREAM_FETCH_SIZE = 200;
+    static final int STREAM_FETCH_SIZE = 200;
 
     private JdbcSupport() {
     }

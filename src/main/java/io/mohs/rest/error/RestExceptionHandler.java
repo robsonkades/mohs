@@ -2,6 +2,9 @@ package io.mohs.rest.error;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.dao.TransientDataAccessException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -33,6 +36,15 @@ import io.mohs.core.job.JobKey;
 public class RestExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(RestExceptionHandler.class);
+
+    @ExceptionHandler(RateLimitNotFoundException.class)
+    public ProblemDetail handleRateLimitNotFound(RateLimitNotFoundException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND,
+                ex.getMessage() + " — declare it with mohs.rate-limits." + ex.rateLimitName()
+                        + ".max/.window (or a @Bean RateLimit) and restart; PATCH only adjusts what boot declared");
+        problem.setTitle("Rate limit not found");
+        return problem;
+    }
 
     @ExceptionHandler(JobNotFoundException.class)
     public ProblemDetail handleJobNotFound(JobNotFoundException ex) {
@@ -101,6 +113,25 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, cause.getMessage());
         problem.setTitle("Request validation failed");
         return new ResponseEntity<>(problem, HttpStatus.UNPROCESSABLE_CONTENT);
+    }
+
+    /**
+     * Linha disputada pelo caminho quente do motor — hoje só o balde de
+     * {@code mohs_rate_limits} (ADR-0042), cujo lock tem teto de tempo
+     * ({@code JdbcRateLimitStore#BUCKET_LOCK_TIMEOUT}). 503 com "nada mudou",
+     * não 500 genérico: sob contenção o {@code PATCH} é justamente a alavanca
+     * de emergência que o operador está puxando, e "unexpected error" o
+     * deixaria sem saber se aplicou — retentando por cima da linha já
+     * saturada. Transiente por definição ({@code TransientDataAccessException}):
+     * a mesma requisição repetida depois tende a passar.
+     */
+    @ExceptionHandler({QueryTimeoutException.class, PessimisticLockingFailureException.class})
+    public ProblemDetail handleContention(TransientDataAccessException ex) {
+        log.warn("a database row is under contention — the requested change did not apply", ex);
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                "A database row is under contention and nothing changed — retry in a few seconds");
+        problem.setTitle("Resource busy");
+        return problem;
     }
 
     /**

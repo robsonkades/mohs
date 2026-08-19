@@ -146,7 +146,8 @@ final class MohsJobs {
         int maxConcurrentExecutions = annotation.allowConcurrentExecutions() ? 0 : annotation.maxConcurrentExecutions();
 
         return new JobDefinition(key, blankToNull(annotation.name()), handlerType, schedule,
-                blankToNull(annotation.runner()), blankToNull(annotation.window()), annotation.misfire(),
+                blankToNull(annotation.runner()), blankToNull(annotation.window()),
+                blankToNull(annotation.rateLimit()), annotation.misfire(),
                 annotation.startPaused(), annotation.allowConcurrentExecutions(), maxConcurrentExecutions,
                 annotation.retries(), parseDurationOrNull(annotation.timeout()), blankToNull(annotation.retryPolicy()),
                 DefinitionSource.ANNOTATION);

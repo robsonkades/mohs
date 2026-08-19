@@ -10,6 +10,7 @@ import io.mohs.core.Mohs;
 import io.mohs.core.execution.JobContext;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
+import io.mohs.core.resource.RateLimit;
 import io.mohs.core.schedule.Misfire;
 
 /**
@@ -58,6 +59,13 @@ public @interface MohsJob {
 
     /** {@link ExecutionWindow} nomeada que exclui horários de disparo. */
     String window() default "";
+
+    /**
+     * {@link RateLimit} nomeado que limita a vazão de disparos deste job —
+     * cluster-wide, não por nó (ADR-0042). Nome inexistente bloqueia o job,
+     * de propósito: rodar sem o limite que alguém pediu é pior que parar.
+     */
+    String rateLimit() default "";
 
     /** Política de misfire. Default {@link Misfire#IGNORE}. */
     Misfire misfire() default Misfire.IGNORE;

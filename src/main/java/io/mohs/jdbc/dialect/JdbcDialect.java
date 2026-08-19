@@ -50,7 +50,8 @@ public interface JdbcDialect {
     String ANSI_SKIP_LOCKED_CANDIDATES = """
             SELECT e.id AS id, e.job_key AS job_key,
                    j.allow_concurrent_executions AS allow_concurrent_executions,
-                   j.window_name AS window_name
+                   j.window_name AS window_name,
+                   j.rate_limit AS rate_limit
             FROM mohs_executions e
             JOIN mohs_job_definitions j ON j.job_key = e.job_key
             WHERE e.state IN ('ENQUEUED', 'RETRY_SCHEDULED')

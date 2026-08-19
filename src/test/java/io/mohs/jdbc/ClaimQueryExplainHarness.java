@@ -106,7 +106,8 @@ class ClaimQueryExplainHarness {
     private static final String SQLSERVER_SELECT_SQL = """
             SELECT TOP (20) e.id AS id, e.job_key AS job_key,
                    j.allow_concurrent_executions AS allow_concurrent_executions,
-                   j.window_name AS window_name
+                   j.window_name AS window_name,
+                   j.rate_limit AS rate_limit
             FROM mohs_executions e WITH (UPDLOCK, ROWLOCK, READPAST)
             JOIN mohs_job_definitions j ON j.job_key = e.job_key
             WHERE e.state IN ('ENQUEUED', 'RETRY_SCHEDULED')
@@ -215,7 +216,7 @@ class ClaimQueryExplainHarness {
             List<Future<?>> nodes = new ArrayList<>();
             long start = System.nanoTime();
             for (int i = 0; i < CONCURRENT_NODES; i++) {
-                JdbcClaimer nodeClaimer = new JdbcClaimer(pool, new MySqlJdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
+                JdbcClaimer nodeClaimer = new JdbcClaimer(pool, new MySqlJdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()), new JdbcRateLimitStore(pool, clock));
                 String nodeId = "lock-investigation-node-" + i;
                 nodes.add(executor.submit(() -> {
                     List<Execution> claimed;

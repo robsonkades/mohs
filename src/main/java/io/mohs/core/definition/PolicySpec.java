@@ -16,6 +16,9 @@ public sealed interface PolicySpec permits JobSpecImpl {
 
     PolicySpec window(String name);
 
+    /** Nome do {@code RateLimit} que limita a vazão de disparos deste job, cluster-wide (ADR-0042). */
+    PolicySpec rateLimit(String name);
+
     PolicySpec misfire(Misfire policy);
 
     /**

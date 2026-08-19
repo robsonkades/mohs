@@ -20,6 +20,7 @@ import io.mohs.core.Mohs;
 import io.mohs.core.MohsLifecycle;
 import io.mohs.core.NodeSnapshot;
 import io.mohs.core.OverviewSnapshot;
+import io.mohs.core.RateLimitSnapshot;
 import io.mohs.core.ScheduleCommand;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
@@ -28,6 +29,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.job.JobRef;
+import io.mohs.core.resource.RateLimit;
 import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.schedule.Schedule;
 
@@ -55,14 +57,17 @@ public final class MohsImpl implements Mohs {
     private final JobStore jobStore;
     private final ExecutionStore executionStore;
     private final NodeStore nodeStore;
+    private final RateLimitStore rateLimitStore;
     private final HandlerRegistry handlerRegistry;
     private final Clock clock;
     private final MohsLifecycle lifecycle;
 
-    public MohsImpl(JobStore jobStore, ExecutionStore executionStore, NodeStore nodeStore, HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle) {
+    public MohsImpl(JobStore jobStore, ExecutionStore executionStore, NodeStore nodeStore, RateLimitStore rateLimitStore,
+            HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
+        this.rateLimitStore = Objects.requireNonNull(rateLimitStore, "rateLimitStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
@@ -260,6 +265,32 @@ public final class MohsImpl implements Mohs {
                         .thenComparing(StoredNode::nodeId))
                 .map(stored -> new NodeSnapshot(stored.nodeId(), stored.state(), stored.lastHeartbeatAt()))
                 .toList();
+    }
+
+    /** Ordenado por nome: a lista é lida por gente, e ordem estável entre chamadas é o mínimo pra comparar dois retratos. */
+    @Override
+    public List<RateLimitSnapshot> rateLimits() {
+        try (var declared = rateLimitStore.findAll()) {
+            return declared.sorted(Comparator.comparing(snapshot -> snapshot.rateLimit().name())).toList();
+        }
+    }
+
+    /**
+     * Ajuste em duas etapas deliberadamente: {@link RateLimitStore#upsert}
+     * criaria o limite se ele não existisse, e criar limite não é ato de
+     * PATCH (ADR-0042/ADR-0006 — declarar é boot). A corrida entre o find e
+     * o upsert é aceita: dois operadores ajustando o MESMO limite no mesmo
+     * instante é "última escrita vence", que é o que um PATCH promete.
+     */
+    @Override
+    public Optional<RateLimitSnapshot> adjustRateLimit(String name, int max, Duration window) {
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(window, "window");
+        if (rateLimitStore.find(name).isEmpty()) {
+            return Optional.empty();
+        }
+        rateLimitStore.upsert(new RateLimit(name, max, window));
+        return rateLimitStore.find(name);
     }
 
     /**

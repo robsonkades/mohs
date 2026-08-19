@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     interval_after_finish  BOOLEAN,
     runner          VARCHAR(255),
     window_name     VARCHAR(255),
+    rate_limit      VARCHAR(255), -- nome do RateLimit cluster-wide (ADR-0042)
     misfire         VARCHAR(20)  NOT NULL,
     start_paused    BOOLEAN      NOT NULL DEFAULT FALSE, -- definicional (ADR-0037) — ver schema-h2.sql
     allow_concurrent_executions BOOLEAN NOT NULL DEFAULT TRUE,
@@ -115,7 +116,10 @@ CREATE INDEX IF NOT EXISTS idx_mohs_attempts_throughput ON mohs_attempts (finish
 CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     name            VARCHAR(255) PRIMARY KEY,
     max_count       INT NOT NULL,
-    window_duration VARCHAR(50) NOT NULL
+    window_duration VARCHAR(50) NOT NULL,
+    -- balde de tokens (ADR-0042): capacidade = max_count, um token a cada window/max
+    tokens          INT NOT NULL,
+    refilled_at     TIMESTAMP NOT NULL
 );
 
 -- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma

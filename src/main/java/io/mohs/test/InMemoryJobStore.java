@@ -121,7 +121,7 @@ public final class InMemoryJobStore implements JobStore {
         return jobs.computeIfPresent(key, (_, stored) -> {
             JobDefinition current = stored.definition();
             JobDefinition redefined = new JobDefinition(current.key(), current.name(), current.handlerType(), schedule,
-                    current.runner(), current.window(), current.misfire(), current.startPaused(),
+                    current.runner(), current.window(), current.rateLimit(), current.misfire(), current.startPaused(),
                     current.allowConcurrentExecutions(), current.maxConcurrentExecutions(), current.retries(),
                     current.timeout(), current.retryPolicy(), current.source());
             Instant nextFireAt = nextFireCalculator.nextFireAfter(schedule, clock.instant()).orElse(null);

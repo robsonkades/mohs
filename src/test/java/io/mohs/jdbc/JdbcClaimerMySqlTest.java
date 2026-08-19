@@ -67,7 +67,7 @@ class JdbcClaimerMySqlTest {
     }
 
     private JdbcClaimer newClaimer() {
-        return new JdbcClaimer(dataSource, new MySqlJdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()));
+        return new JdbcClaimer(dataSource, new MySqlJdbcDialect(), clock, executionStore, jobStore, LEASE_TTL, new ExecutionWindowRegistry(List.of()), new JdbcRateLimitStore(dataSource, clock));
     }
 
     private void seedJob(String jobKey, Consumer<PolicySpec> policyConfigurer) {

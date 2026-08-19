@@ -25,6 +25,7 @@ CREATE TABLE mohs_job_definitions (
     interval_after_finish  BIT,
     runner          NVARCHAR(255),
     window_name     NVARCHAR(255),
+    rate_limit      NVARCHAR(255), -- nome do RateLimit cluster-wide (ADR-0042)
     misfire         NVARCHAR(20)  NOT NULL,
     start_paused    BIT           NOT NULL DEFAULT 0, -- definicional (ADR-0037) — ver schema-h2.sql
     allow_concurrent_executions BIT NOT NULL DEFAULT 1,
@@ -123,7 +124,10 @@ IF OBJECT_ID('mohs_rate_limits', 'U') IS NULL
 CREATE TABLE mohs_rate_limits (
     name            NVARCHAR(255) PRIMARY KEY,
     max_count       INT NOT NULL,
-    window_duration NVARCHAR(50) NOT NULL
+    window_duration NVARCHAR(50) NOT NULL,
+    -- balde de tokens (ADR-0042): capacidade = max_count, um token a cada window/max
+    tokens          INT NOT NULL,
+    refilled_at     DATETIME2 NOT NULL
 );
 
 -- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma
