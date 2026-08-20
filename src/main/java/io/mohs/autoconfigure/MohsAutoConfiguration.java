@@ -26,10 +26,10 @@ import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.resource.RateLimit;
-import io.mohs.engine.Claimer;
-import io.mohs.engine.Dispatcher;
 import io.mohs.engine.BatchCompletionCallbacks;
 import io.mohs.engine.BatchStore;
+import io.mohs.engine.Claimer;
+import io.mohs.engine.Dispatcher;
 import io.mohs.engine.Engine;
 import io.mohs.engine.EngineSettings;
 import io.mohs.engine.ExecutionStore;
@@ -44,8 +44,8 @@ import io.mohs.engine.Reaper;
 import io.mohs.engine.RunnerRegistry;
 import io.mohs.engine.TriggerFirer;
 import io.mohs.jdbc.DatabaseClock;
-import io.mohs.jdbc.JdbcClaimer;
 import io.mohs.jdbc.JdbcBatchStore;
+import io.mohs.jdbc.JdbcClaimer;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.jdbc.JdbcNodeStore;
@@ -298,9 +298,10 @@ public class MohsAutoConfiguration {
     }
 
     /**
-     * Entra na lista de {@code ExecutionListener} como qualquer outro: e assim
-     * que {@code Batch.onCompletion} recebe o {@code BatchCompleted} que o
-     * dispatcher publica (ADR-0043), sem caminho de entrega paralelo.
+     * Entra na lista de {@code ExecutionListener} do {@link #mohsDispatcher}
+     * como qualquer outro: é assim que {@code Batch.onCompletion} recebe o
+     * {@code BatchCompleted} que o dispatcher publica (ADR-0043), sem
+     * caminho de entrega paralelo.
      */
     @Bean
     public BatchCompletionCallbacks mohsBatchCompletionCallbacks() {

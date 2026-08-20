@@ -53,18 +53,17 @@ public record Execution(
         attempts = List.copyOf(attempts); // cópia defensiva (Effective Java, Item 50)
     }
 
-    /** {@link Priority#NORMAL}, sem {@code idempotencyKey} — mesmo default do schema (`DEFAULT 20`). */
+    /** {@link Priority#NORMAL}, sem {@code idempotencyKey} e fora de lote — mesmo default do schema (`DEFAULT 20`). */
     public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
             @Nullable Instant firedAt, List<Attempt> attempts, String actor) {
         this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, Priority.NORMAL, null, null);
     }
 
     /**
-     * Fora de lote, que é o caso da esmagadora maioria das execuções —
-     * {@code batchId} nulo. Existe para o agendamento avulso não ter que
-     * dizer "não pertenço a lote nenhum" em toda chamada, e porque
-     * {@code batchId} entrou depois (ADR-0043): sem esta forma, todo
-     * construtor posicional já escrito quebraria para declarar uma ausência.
+     * Fora de lote, que é o caso da esmagadora maioria das execuções: só o
+     * agendamento em lote preenche {@code batchId} (ADR-0043). Existe para o
+     * agendamento avulso não ter que dizer "não pertenço a lote nenhum" em
+     * toda chamada.
      */
     public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
             @Nullable Instant firedAt, List<Attempt> attempts, String actor, Priority priority,

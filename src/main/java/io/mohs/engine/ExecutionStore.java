@@ -86,24 +86,33 @@ public interface ExecutionStore {
      * conclusão concorrente (outro caminho já mudou o estado) não deixa
      * Attempt órfão.
      *
-     * @return {@code true} se a transição ocorreu; {@code false} se a
-     *         execução já não estava mais {@code RUNNING}.
+     * @return o veredito do CAS e, quando esta conclusão fechou o lote, o
+     *         saldo que elege quem publica {@code BatchCompleted}
+     *         ({@link Completion}).
      */
     Completion complete(CompletionRequest request, JobStore jobStore);
 
     /**
-     * O que a conclusao produziu. {@code applied} e o veredito do CAS de
-     * estado — falso quando outra conclusao (reaper, ou concorrente) ja
-     * moveu a execucao. {@code closedBatch} so vem preenchido para a UNICA
-     * conclusao que levou o lote a zero pendentes (ADR-0043): e ela que
+     * O que a conclusão produziu. {@code applied} é o veredito do CAS de
+     * estado — falso quando outra conclusão (reaper, ou concorrente) já
+     * moveu a execução. {@code closedBatch} só vem preenchido para a ÚNICA
+     * conclusão que levou o lote a zero pendentes (ADR-0043): é ela que
      * publica {@code BatchCompleted}, e por isso o saldo sobe daqui em vez
-     * de ser relido depois — reler deixaria duas conclusoes concorrentes
+     * de ser relido depois — reler deixaria duas conclusões concorrentes
      * verem o mesmo saldo final e as duas se acharem a fechadora.
      */
     record Completion(boolean applied, @Nullable BatchCounters closedBatch) {
 
-        /** O CAS perdeu: outra conclusao ja moveu a execucao, e nada foi contado. */
+        /** O CAS perdeu: outra conclusão já moveu a execução, e nada foi contado. */
         public static final Completion NOT_APPLIED = new Completion(false, null);
+
+        /**
+         * O CAS venceu. {@code closedBatch} nulo é o caso comum — execução
+         * fora de lote, ou lote que ainda tem membro pendente.
+         */
+        public static Completion applied(@Nullable BatchCounters closedBatch) {
+            return new Completion(true, closedBatch);
+        }
     }
 
     /**
@@ -187,16 +196,9 @@ public interface ExecutionStore {
         }
 
         /**
-         * O mesmo pedido, agora sabendo a que lote o membro pertence
-         * (ADR-0043). Wither em vez de mais uma sobrecarga: cada ponto de
-         * conclusao ja escolhe uma forma diferente entre as tres acima, e
-         * repetir todas com {@code batchId} daria seis construtores para um
-         * campo que quase sempre e nulo.
-         */
-        /**
-         * Sem lote, que e o caso da esmagadora maioria das conclusoes.
-         * Existe para {@code batchId} ter entrado depois (ADR-0043) sem
-         * obrigar todo ponto de conclusao ja escrito a declarar a ausencia.
+         * Forma com fence e rearme, sem lote — que é o caso da esmagadora
+         * maioria das conclusões. {@code batchId} entrou depois (ADR-0043)
+         * e chega pelo {@link #inBatch}, não por aqui.
          */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
                 @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt,
@@ -204,6 +206,13 @@ public interface ExecutionStore {
             this(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt, rearmNextFireAt, null);
         }
 
+        /**
+         * O mesmo pedido, agora sabendo a que lote o membro pertence
+         * (ADR-0043). Wither em vez de mais uma sobrecarga: cada ponto de
+         * conclusão já escolhe uma forma diferente entre as quatro acima, e
+         * repetir todas com {@code batchId} dobraria o número de construtores
+         * por um campo que quase sempre é nulo.
+         */
         public CompletionRequest inBatch(@Nullable String batchId) {
             return new CompletionRequest(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt,
                     rearmNextFireAt, batchId);

@@ -8,11 +8,10 @@ import java.util.Map;
 import java.util.Optional;
 
 import org.junit.jupiter.api.BeforeEach;
-import io.mohs.core.Batch;
-import io.mohs.core.job.JobRef;
-import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import io.mohs.core.Batch;
 import io.mohs.core.EngineState;
 import io.mohs.core.ExecutionQuery;
 import io.mohs.core.JobSnapshot;
@@ -27,6 +26,7 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.job.JobRef;
 import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.schedule.Misfire;
 import io.mohs.core.schedule.OnDemandSpec;
@@ -434,9 +434,9 @@ class MohsImplTest {
     }
 
     /**
-     * O total nasce fechado: os membros sao coletados antes de a linha do lote
-     * existir, entao o lote ja sabe quantas conclusoes o fecham (ADR-0043).
-     * Cada execucao sai carregando o batchId — sem isso a conclusao nao teria
+     * O total nasce fechado: os membros são coletados antes de a linha do lote
+     * existir, então o lote já sabe quantas conclusões o fecham (ADR-0043).
+     * Cada execução sai carregando o batchId — sem isso a conclusão não teria
      * como contar o membro.
      */
     @Test
@@ -458,12 +458,36 @@ class MohsImplTest {
         });
     }
 
-    /** Lote vazio nunca completaria — recusado na entrada, e nada e persistido. */
+    /** Lote vazio nunca completaria — recusado na entrada, e nada é persistido. */
     @Test
     void anEmptyBatchIsRefusedBeforeAnythingIsWritten() {
         assertThatThrownBy(() -> mohs.batch("nightly", members -> { }))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("at least one member");
+
+        verifyNoInteractions(batchStore);
+        verifyNoInteractions(executionStore);
+    }
+
+    /**
+     * Caracterização do comportamento atual: a definição de cada membro só é
+     * checada DEPOIS de a linha do lote existir, então um membro sem job
+     * registrado derruba a chamada com o lote — e os membros anteriores — já
+     * persistidos. Fixado aqui como rede de proteção; mudar a ordem de
+     * validação é decisão do time, não do refactor.
+     */
+    @Test
+    void aMemberWithoutARegisteredJobFailsBeforeAnythingIsWritten() {
+        jobStore.upsert(onDemand("welcome-email"));
+        JobRef<String> known = JobRef.of("welcome-email", String.class);
+        JobRef<String> unknown = JobRef.of("ghost", String.class);
+
+        assertThatThrownBy(() -> mohs.batch("nightly", members -> {
+            members.add(known, "ana");
+            members.add(unknown, "bob");
+        }))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("no job registered for id 'ghost'");
 
         verifyNoInteractions(batchStore);
         verifyNoInteractions(executionStore);

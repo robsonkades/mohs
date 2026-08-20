@@ -17,6 +17,12 @@ import io.mohs.engine.BatchStore;
 /** {@link BatchStore} sobre {@code mohs_batches} (Data Mapper, PoEAA). */
 public final class JdbcBatchStore implements BatchStore {
 
+    private static final String INCREMENT_SUCCEEDED =
+            "UPDATE mohs_batches SET succeeded = succeeded + 1 WHERE id = :id";
+
+    private static final String INCREMENT_FAILED =
+            "UPDATE mohs_batches SET failed = failed + 1 WHERE id = :id";
+
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final Clock clock;
 
@@ -41,20 +47,15 @@ public final class JdbcBatchStore implements BatchStore {
                 """, params);
     }
 
+    /** DBTUNE-6: colunas explícitas em vez de {@code SELECT *} — {@code created_at} é forense de operador, nunca lido aqui, e esta releitura roda em TODA conclusão de membro. */
     @Override
     public Optional<BatchCounters> find(String batchId) {
         Objects.requireNonNull(batchId, "batchId");
         return JdbcSupport.findOne(jdbcTemplate,
-                "SELECT * FROM mohs_batches WHERE id = :id",
+                "SELECT id, total, succeeded, failed FROM mohs_batches WHERE id = :id",
                 new MapSqlParameterSource("id", batchId),
                 JdbcBatchStore::mapRow);
     }
-
-    private static final String INCREMENT_SUCCEEDED =
-            "UPDATE mohs_batches SET succeeded = succeeded + 1 WHERE id = :id";
-
-    private static final String INCREMENT_FAILED =
-            "UPDATE mohs_batches SET failed = failed + 1 WHERE id = :id";
 
     @Override
     public BatchCounters incrementSucceeded(String batchId) {
@@ -83,10 +84,10 @@ public final class JdbcBatchStore implements BatchStore {
      * duas conclusões concorrentes podem ler o mesmo saldo final e as duas se
      * acharem a fechadora do lote.
      */
-    private BatchCounters incrementAndRead(String batchId, String increment) {
+    private BatchCounters incrementAndRead(String batchId, String incrementSql) {
         Objects.requireNonNull(batchId, "batchId");
         MapSqlParameterSource params = new MapSqlParameterSource("id", batchId);
-        if (jdbcTemplate.update(increment, params) == 0) {
+        if (jdbcTemplate.update(incrementSql, params) == 0) {
             // A FK de mohs_executions.batch_id torna isto impossível por construção;
             // se acontecer, contar em silêncio perderia a conclusão do lote para sempre.
             throw new IllegalStateException("no batch '" + batchId + "' to count a member into");

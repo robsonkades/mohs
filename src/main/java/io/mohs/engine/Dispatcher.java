@@ -200,7 +200,7 @@ public final class Dispatcher {
         Attempt attempt = new Attempt(attemptNumber, firedAt, finishedAt, ExecutionState.CANCELLED, null);
         completeOrDiscard(
                 new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.CANCELLED,
-                        null, null, rearmNextFireAt(execution, definition, finishedAt), execution.batchId()),
+                        null, null, rearmNextFireAt(execution, definition, finishedAt)).inBatch(execution.batchId()),
                 () -> events.publish(new Cancelled(execution.id(), execution.jobKey(), attemptNumber)));
     }
 
@@ -236,7 +236,7 @@ public final class Dispatcher {
         Attempt attempt = new Attempt(attemptNumber, firedAt, finishedAt, ExecutionState.SUCCEEDED, null);
         completeOrDiscard(
                 new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED,
-                        null, null, rearmNextFireAt(execution, definition, finishedAt), execution.batchId()),
+                        null, null, rearmNextFireAt(execution, definition, finishedAt)).inBatch(execution.batchId()),
                 () -> events.publish(new Succeeded(execution.id(), execution.jobKey(), attemptNumber)));
     }
 
@@ -296,8 +296,8 @@ public final class Dispatcher {
         // finishedAt do attempt é o "fim" que ancora o rearme fixed-delay (ADR-0035)
         completeOrDiscard(
                 new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED,
-                        null, null, rearmNextFireAt(execution, definition, Objects.requireNonNull(attempt.finishedAt())),
-                        execution.batchId()),
+                        null, null, rearmNextFireAt(execution, definition, Objects.requireNonNull(attempt.finishedAt())))
+                        .inBatch(execution.batchId()),
                 () -> events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, attemptsExhausted)));
     }
 
@@ -319,9 +319,9 @@ public final class Dispatcher {
 
     /**
      * ADR-0043: quem fechou o lote foi eleito pelo banco, dentro da
-     * transacao de conclusao; a publicacao acontece DEPOIS dela, junto dos
-     * demais eventos da conclusao, porque evento nao volta atras se a
-     * transacao abortar.
+     * transação de conclusão; a publicação acontece DEPOIS dela, junto dos
+     * demais eventos da conclusão, porque evento não volta atrás se a
+     * transação abortar.
      */
     private void publishBatchCompletedIfClosed(ExecutionStore.Completion completion) {
         BatchCounters closed = completion.closedBatch();

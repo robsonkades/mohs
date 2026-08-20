@@ -37,10 +37,15 @@ public interface Mohs {
     ScheduleCommand schedule(String jobId, Object payload);
 
     /**
-     * Agenda um lote nomeado de jobs. <b>Ainda não suportado nesta versão</b>
-     * — lança {@link UnsupportedOperationException} até os contadores de
-     * conclusão de lote serem ligados ao motor
-     * (ver {@code docs/MOHS-DOCUMENTO-MESTRE.md}).
+     * Agenda vários jobs como um lote: o {@code configurer} coleta os
+     * membros, o total é fixado na criação e cada execução já nasce
+     * carregando o {@code batchId} — é ele que faz a conclusão de cada
+     * membro contar no lote (ADR-0043). Lote vazio é recusado: sem membro
+     * nenhum ele nunca completaria, e um lote eternamente aberto é pior que
+     * um erro.
+     *
+     * @return o recibo do lote, com {@code batchId} já durável (ADR-0003,
+     *         cláusula 2)
      */
     @CheckReturnValue
     Batch batch(String name, Consumer<BatchBuilder> configurer);
@@ -162,7 +167,7 @@ public interface Mohs {
 
     /**
      * O lote pelo id devolvido por {@link #batch}. Leitura barata e plana no
-     * tamanho do lote: o contador e mantido, nao agregado dos membros
+     * tamanho do lote: o contador é mantido, não agregado dos membros
      * (ADR-0043).
      */
     Optional<BatchSnapshot> findBatch(String batchId);

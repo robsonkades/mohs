@@ -1,10 +1,10 @@
 package io.mohs.engine;
 
 import java.time.Clock;
-import java.time.Instant;
 import java.time.Duration;
-import java.util.Comparator;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -17,8 +17,8 @@ import org.slf4j.LoggerFactory;
 import io.github.robsonkades.uuidv7.UUIDv7;
 
 import io.mohs.core.Batch;
-import io.mohs.core.BatchSnapshot;
 import io.mohs.core.BatchBuilder;
+import io.mohs.core.BatchSnapshot;
 import io.mohs.core.ExecutionQuery;
 import io.mohs.core.JobSnapshot;
 import io.mohs.core.Mohs;
@@ -29,11 +29,11 @@ import io.mohs.core.RateLimitSnapshot;
 import io.mohs.core.ScheduleCommand;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
+import io.mohs.core.event.BatchCompleted;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
-import io.mohs.core.event.BatchCompleted;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.job.JobRef;
 import io.mohs.core.resource.RateLimit;
@@ -48,11 +48,9 @@ import io.mohs.core.schedule.Schedule;
  * adapter, {@code io.mohs.autoconfigure} injeta o mesmo bean nos dois
  * papéis.
  *
- * <p>{@link #batch} ainda não está ligado: contagem de conclusão
- * ({@code BatchStore.incrementSucceeded}/{@code incrementFailed}) nunca foi
- * conectada a {@link Dispatcher}/{@code ExecutionStore.complete} — feature
- * de motor ainda não construída, não coberta por esta rodada de
- * {@code io.mohs.autoconfigure}.
+ * <p>{@link #batch} escreve a linha do lote e os membros; a contagem de
+ * conclusão é do {@code ExecutionStore.complete}, na mesma transação do CAS
+ * de estado (ADR-0043) — aqui não há contador nenhum.
  */
 public final class MohsImpl implements Mohs {
 
@@ -80,9 +78,9 @@ public final class MohsImpl implements Mohs {
         this.rateLimitStore = Objects.requireNonNull(rateLimitStore, "rateLimitStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
         this.callbacks = Objects.requireNonNull(callbacks, "callbacks");
-        this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
     }
 
     @Override
@@ -100,47 +98,88 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * O total do lote e fixado na criacao, entao os membros sao coletados
-     * ANTES de a linha existir: nao ha estado "ainda aceitando membros" para
-     * rastrear, e o lote nasce ja sabendo quantas conclusoes o fecham
-     * (ADR-0043). Lote vazio e recusado na entrada — ele nunca completaria,
-     * e um lote eternamente aberto e pior que um erro.
+     * O total do lote é fixado na criação, então os membros são coletados
+     * ANTES de a linha existir: não há estado "ainda aceitando membros" para
+     * rastrear, e o lote nasce já sabendo quantas conclusões o fecham
+     * (ADR-0043). Lote vazio é recusado na entrada — ele nunca completaria,
+     * e um lote eternamente aberto é pior que um erro.
      */
     @Override
     public Batch batch(String name, Consumer<BatchBuilder> configurer) {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(configurer, "configurer");
-        List<Member> members = new ArrayList<>();
-        configurer.accept(new CollectingBatchBuilder(members));
+        List<Member> members = collectMembers(configurer);
         if (members.isEmpty()) {
             throw new IllegalArgumentException("a batch needs at least one member — an empty batch would never complete");
         }
 
+        requireAllDefined(members);
+
         String batchId = UUIDv7.randomUUIDString();
         batchStore.insert(batchId, members.size());
-        Instant now = clock.instant();
+        enqueueMembers(members, batchId);
+        return new BatchImpl(batchId, callbacks);
+    }
+
+    private static List<Member> collectMembers(Consumer<BatchBuilder> configurer) {
+        CollectingBatchBuilder collected = new CollectingBatchBuilder();
+        configurer.accept(collected);
+        return collected.members;
+    }
+
+    /**
+     * Todo membro nasce {@code ENQUEUED} carregando o {@code batchId} — é ele
+     * que faz a conclusão contar no lote, e todos compartilham o mesmo
+     * {@code scheduledAt} porque o lote foi pedido de uma vez só.
+     */
+    private void enqueueMembers(List<Member> members, String batchId) {
+        Instant scheduledAt = clock.instant();
         for (Member member : members) {
-            jobStore.find(member.key()).orElseThrow(() -> new IllegalArgumentException(
-                    "no job registered for id '" + member.key().value() + "' — call Mohs.define first"));
             executionStore.insert(new Execution(ExecutionId.of(UUIDv7.randomUUIDString()), member.key(),
-                    ExecutionState.ENQUEUED, now, null, List.of(), DEFAULT_ACTOR, Priority.NORMAL, null, batchId),
+                    ExecutionState.ENQUEUED, scheduledAt, null, List.of(), DEFAULT_ACTOR, Priority.NORMAL, null, batchId),
                     member.payload());
         }
-        return new BatchImpl(batchId, callbacks);
+    }
+
+    /**
+     * TODOS os membros são validados antes de qualquer escrita, e não um a
+     * um durante o enfileiramento: um job inexistente no meio do lote
+     * deixaria a linha do lote gravada com {@code total} cheio e só parte dos
+     * membros enfileirada — o resto nunca existiria, o lote nunca fecharia e
+     * o {@code BatchCompleted} nunca dispararia, em silêncio. É exatamente o
+     * modo de falha que a ADR-0043 existe para não ter.
+     *
+     * <p>Chaves distintas, não uma consulta por membro: um lote grande
+     * costuma apontar para poucos jobs, e validar 1.000 membros de um job só
+     * é uma pergunta, não mil.
+     */
+    private void requireAllDefined(List<Member> members) {
+        members.stream().map(Member::key).distinct().forEach(this::requireDefined);
+    }
+
+    /** Mesmo motivo de {@code ScheduleCommandImpl.at}: sem isto o chamador veria uma violação de FK crua, não uma mensagem que ensina. */
+    private void requireDefined(JobKey key) {
+        if (jobStore.find(key).isEmpty()) {
+            throw new IllegalArgumentException(
+                    "no job registered for id '" + key.value() + "' — call Mohs.define first");
+        }
     }
 
     @Override
     public Optional<BatchSnapshot> findBatch(String batchId) {
         Objects.requireNonNull(batchId, "batchId");
         return batchStore.find(batchId)
-                .map(c -> new BatchSnapshot(c.batchId(), c.total(), c.succeeded(), c.failed()));
+                .map(counters -> new BatchSnapshot(counters.batchId(), counters.total(), counters.succeeded(),
+                        counters.failed()));
     }
 
     private record Member(JobKey key, Object payload) {
     }
 
-    /** Acumula os membros; nada e persistido enquanto o total nao esta fechado. */
-    private record CollectingBatchBuilder(List<Member> members) implements BatchBuilder {
+    /** Acumula os membros; nada é persistido enquanto o total não está fechado. */
+    private static final class CollectingBatchBuilder implements BatchBuilder {
+
+        private final List<Member> members = new ArrayList<>();
 
         @Override
         public <T> void add(JobRef<T> ref, T payload) {

@@ -81,25 +81,22 @@ public final class JdbcExecutionStore implements ExecutionStore {
     private final JdbcDialect dialect;
 
     /**
-     * O {@link BatchStore} sai da mesma {@code DataSource} de proposito: o
-     * incremento do lote tem que cair na MESMA transacao do CAS de estado
-     * (ADR-0043), e e isso que o faz exatamente-uma-vez sem tabela de
-     * idempotencia. Sobrecarga em vez de parametro obrigatorio para nao
-     * obrigar todo ponto de construcao ja escrito a montar um.
+     * O {@link BatchStore} nasce aqui, da MESMA {@code DataSource}, em vez de
+     * ser injetado: o incremento do lote tem que cair na mesma transação do
+     * CAS de estado (ADR-0043) — é isso que o faz exatamente-uma-vez sem
+     * tabela de idempotência —, e a transação só é compartilhada porque
+     * ambos falam com a mesma {@code DataSource}. Um {@code BatchStore}
+     * vindo de fora poderia apontar para outra, quebrando a garantia em
+     * silêncio.
      */
     public JdbcExecutionStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper, JdbcDialect dialect) {
-        this(dataSource, clock, objectMapper, dialect, new JdbcBatchStore(dataSource, clock));
-    }
-
-    public JdbcExecutionStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper, JdbcDialect dialect,
-            BatchStore batchStore) {
         this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         // mesmo raciocínio da DBTUNE-4 em JdbcClaimer: CAS guardado assume
         // "última escrita vence" (READ COMMITTED), não herda o default do banco.
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.clock = Objects.requireNonNull(clock, "clock");
-        this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
+        this.batchStore = new JdbcBatchStore(dataSource, clock);
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.dialect = Objects.requireNonNull(dialect, "dialect");
     }
@@ -179,9 +176,9 @@ public final class JdbcExecutionStore implements ExecutionStore {
     public ExecutionStore.Completion complete(ExecutionStore.CompletionRequest request, JobStore jobStore) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(jobStore, "jobStore");
-        ExecutionStore.Completion completion = transactionTemplate.execute(_ ->
-                completeWithinTransaction(request, jobStore));
-        return completion == null ? ExecutionStore.Completion.NOT_APPLIED : completion;
+        return Objects.requireNonNullElse(
+                transactionTemplate.execute(_ -> completeWithinTransaction(request, jobStore)),
+                ExecutionStore.Completion.NOT_APPLIED);
     }
 
     /**
@@ -217,18 +214,27 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 """, attemptParams(request.id(), request.attempt()));
         jobStore.decrementRunningExecutions(request.jobKey());
         rearmIfRequested(request, jobStore);
-        return new ExecutionStore.Completion(true, countIntoBatch(request));
+        return ExecutionStore.Completion.applied(countIntoBatch(request));
     }
 
     /**
-     * O membro so conta quando ACABA: {@code RETRY_SCHEDULED} continua vivo,
-     * e conta-lo fecharia o lote antes da hora. {@code CANCELLED} entra como
-     * falha porque o lote tem duas colunas e um membro cancelado nao teve
-     * exito — a contagem responde "quantos deram certo", nao "por que os
-     * outros nao deram".
+     * O membro só conta quando ACABA: {@code RETRY_SCHEDULED} continua vivo,
+     * e contá-lo fecharia o lote antes da hora. {@code CANCELLED} entra como
+     * falha porque o lote tem duas colunas e um membro cancelado não teve
+     * êxito — a contagem responde "quantos deram certo", não "por que os
+     * outros não deram".
      *
-     * @return o saldo do lote quando ESTA conclusao o fechou, {@code null}
-     * quando nao fechou ou quando a execucao nao pertence a lote nenhum
+     * <p>O caminho em lote ({@code completeAll}, só do reaper) chama isto para
+     * CONTAR e descarta o veredito: publicar o {@code BatchCompleted} de lá
+     * exigiria o reaper ter publicador de evento, que hoje ele não tem. Não
+     * contar era pior — o membro que morre com o nó sumia do lote, {@code
+     * pending} nunca zerava e ninguém fechava, sem erro e sem varredura de
+     * reconciliação que curasse (a ADR-0043 dispensou a varredura justamente
+     * sob a premissa de que todo caminho conta).
+     *
+     * @return o saldo do lote quando ESTA conclusão o fechou; {@code null}
+     *         quando não fechou ou quando a execução não pertence a lote
+     *         nenhum
      */
     private @Nullable BatchCounters countIntoBatch(ExecutionStore.CompletionRequest request) {
         String batchId = request.batchId();
@@ -295,6 +301,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
             ExecutionStore.CompletionRequest request = byId.get(id.value());
             jobStore.decrementRunningExecutions(request.jobKey());
             rearmIfRequested(request, jobStore);
+            countIntoBatch(request);
         }
         return completedIds;
     }
@@ -364,10 +371,35 @@ public final class JdbcExecutionStore implements ExecutionStore {
     @Override
     public boolean cancelIfPending(ExecutionId id) {
         Objects.requireNonNull(id, "id");
-        return jdbcTemplate.update("""
-                UPDATE mohs_executions SET state = 'CANCELLED'
-                WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
-                """, new MapSqlParameterSource("id", id.value())) > 0;
+        MapSqlParameterSource params = new MapSqlParameterSource("id", id.value());
+        return Boolean.TRUE.equals(transactionTemplate.execute(_ -> {
+            if (jdbcTemplate.update("""
+                    UPDATE mohs_executions SET state = 'CANCELLED'
+                    WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+                    """, params) == 0) {
+                return false;
+            }
+            countCancelledIntoBatch(params);
+            return true;
+        }));
+    }
+
+    /**
+     * Cancelar é terminal: o membro acabou, e um fim que não conta deixa o
+     * lote aberto para sempre — {@code pending} nunca zera, ninguém fecha e
+     * não há varredura de reconciliação que cure (ADR-0043). Conta como falha
+     * pela mesma regra de {@link #countIntoBatch}: o lote responde quantos
+     * deram certo, e cancelado não deu.
+     *
+     * <p>Na MESMA transação do CAS de cancelamento, que é o que impede contar
+     * duas vezes: sem o CAS ter pego a linha, não se chega aqui.
+     */
+    private void countCancelledIntoBatch(MapSqlParameterSource idParam) {
+        String batchId = jdbcTemplate.queryForObject(
+                "SELECT batch_id FROM mohs_executions WHERE id = :id", idParam, String.class);
+        if (batchId != null) {
+            batchStore.incrementFailed(batchId);
+        }
     }
 
     /** Booleano por parâmetro, nunca literal — {@code TRUE} não existe no SQL Server ({@code BIT}); o driver converte. */

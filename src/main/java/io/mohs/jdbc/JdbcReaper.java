@@ -139,20 +139,25 @@ public final class JdbcReaper implements Reaper {
         Instant rearmNextFireAt = !candidate.retired() && Execution.SCHEDULER_ACTOR.equals(execution.actor())
                 ? candidate.rearmNextFireAt(now)
                 : null;
+        // ADR-0043: o membro que morre por lease expirada conta no lote como
+        // qualquer outro — quem conta é a conclusão, e este é um caminho dela.
+        String batchId = execution.batchId();
         if (candidate.cancelRequested()) {
             Attempt attempt = new Attempt(attemptNumber, startedAt, now, ExecutionState.CANCELLED, null);
             return new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.CANCELLED, null,
-                    candidate.leaseExpiresAt(), rearmNextFireAt, execution.batchId());
+                    candidate.leaseExpiresAt(), rearmNextFireAt).inBatch(batchId);
         }
         Attempt attempt = new Attempt(attemptNumber, startedAt, now, ExecutionState.FAILED, LEASE_EXPIRED_ERROR);
         if (candidate.retired()) {
             return new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.FAILED, null,
-                    candidate.leaseExpiresAt()).inBatch(execution.batchId());
+                    candidate.leaseExpiresAt()).inBatch(batchId);
         }
         return RetrySchedule.nextRetryAt(attemptNumber, candidate.retries(), now)
-                .map(retryAt -> new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.RETRY_SCHEDULED, retryAt, candidate.leaseExpiresAt()).inBatch(execution.batchId()))
+                .map(retryAt -> new ExecutionStore.CompletionRequest(id, jobKey, attempt,
+                        ExecutionState.RETRY_SCHEDULED, retryAt, candidate.leaseExpiresAt()))
                 .orElseGet(() -> new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.FAILED, null,
-                        candidate.leaseExpiresAt(), rearmNextFireAt, execution.batchId()));
+                        candidate.leaseExpiresAt(), rearmNextFireAt))
+                .inBatch(batchId);
     }
 
     /** Reconstrói o resultado localmente (sem consulta extra) — {@link ExecutionStore#completeAll} só confirma quais ids venceram o CAS. O flag de orçamento vem da mesma decisão de {@link #reclaimRequest}: terminal sem ser aposentado = orçamento esgotado. */

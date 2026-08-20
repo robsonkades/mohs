@@ -890,12 +890,12 @@ class JdbcExecutionStoreTest {
     }
 
     /**
-     * ADR-0043: o lote fecha na conclusao do ULTIMO membro, e so nela. E essa
-     * conclusao que carrega o saldo de volta, porque e ela que vai publicar
+     * ADR-0043: o lote fecha na conclusão do ÚLTIMO membro, e só nela. É essa
+     * conclusão que carrega o saldo de volta, porque é ela que vai publicar
      * {@code BatchCompleted} — relido depois, o saldo seria o mesmo para as
-     * duas conclusoes e as duas se achariam a fechadora. CANCELLED e as demais
-     * terminais nao-SUCCEEDED contam como falha: o lote responde quantos deram
-     * certo, nao por que os outros nao deram.
+     * duas conclusões e as duas se achariam a fechadora. CANCELLED e as demais
+     * terminais não-SUCCEEDED contam como falha: o lote responde quantos deram
+     * certo, não por que os outros não deram.
      */
     @Test
     void onlyTheCompletionThatEmptiesTheBatchCarriesItsCounters() {
@@ -945,5 +945,56 @@ class JdbcExecutionStoreTest {
                 outcome == ExecutionState.SUCCEEDED ? null : "boom");
         return store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of(id), JobKey.of("welcome-email"),
                 attempt, outcome).inBatch(batchId), jobStore).closedBatch();
+    }
+
+    /**
+     * O caminho do reaper conta igual ao do dispatcher. Sem isto, um membro
+     * que morre junto com o nó some do lote: {@code pending} nunca zera,
+     * ninguém fecha, e a ADR-0043 dispensou a varredura de reconciliação
+     * justamente sob a premissa de que todo caminho conta. O retry no mesmo
+     * lote continua não contando — ele ainda está vivo.
+     */
+    @Test
+    void completeAllCountsBatchMembersToo() {
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        JdbcBatchStore batches = new JdbcBatchStore(dataSource, clock);
+        batches.insert("b3", 3);
+        seedBatchMember("019abc-reclaim-1", "b3");
+        seedBatchMember("019abc-reclaim-2", "b3");
+        seedBatchMember("019abc-reclaim-3", "b3");
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "lease expired");
+
+        store.completeAll(List.of(
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-reclaim-1"), JobKey.of("welcome-email"),
+                        attempt, ExecutionState.FAILED).inBatch("b3"),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-reclaim-2"), JobKey.of("welcome-email"),
+                        attempt, ExecutionState.CANCELLED).inBatch("b3"),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-reclaim-3"), JobKey.of("welcome-email"),
+                        attempt, ExecutionState.RETRY_SCHEDULED, clock.instant().plusSeconds(30)).inBatch("b3")),
+                jobStore);
+
+        BatchCounters counters = batches.find("b3").orElseThrow();
+        assertThat(counters.failed()).isEqualTo(2);
+        assertThat(counters.succeeded()).isZero();
+        assertThat(counters.pending()).isEqualTo(1);
+    }
+
+    /**
+     * Cancelar um membro pendente é um fim como outro qualquer: se não contar,
+     * o lote nunca fecha e não há reconciliação que cure (ADR-0043). Alcançável
+     * por POST /executions/{id}/cancel, então é caminho de operador, não corrida.
+     */
+    @Test
+    void cancellingAPendingMemberCountsItIntoTheBatch() {
+        JdbcBatchStore batches = new JdbcBatchStore(dataSource, clock);
+        batches.insert("b4", 1);
+        store.insert(execution("019abc-cancel-1", "welcome-email"), new WelcomeEmail("ana", 31));
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET batch_id = ? WHERE id = ?", "b4", "019abc-cancel-1");
+
+        assertThat(store.cancelIfPending(ExecutionId.of("019abc-cancel-1"))).isTrue();
+
+        BatchCounters counters = batches.find("b4").orElseThrow();
+        assertThat(counters.failed()).isEqualTo(1);
+        assertThat(counters.pending()).isZero();
     }
 }
