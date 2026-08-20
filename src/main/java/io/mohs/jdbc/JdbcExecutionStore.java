@@ -433,7 +433,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
         Objects.requireNonNull(scheduledAt, "scheduledAt");
         return jdbcTemplate.update("""
                 UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', scheduled_at = :scheduledAt, cancel_requested = :cancelRequested
-                WHERE id = :id AND state = 'FAILED'
+                WHERE id = :id AND state = 'FAILED' AND batch_id IS NULL
                   AND EXISTS (SELECT 1 FROM mohs_job_definitions j
                               WHERE j.job_key = mohs_executions.job_key AND j.retired = :retired)
                 """, new MapSqlParameterSource()

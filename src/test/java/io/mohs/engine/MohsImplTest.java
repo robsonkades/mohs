@@ -25,6 +25,7 @@ import io.mohs.core.definition.JobSpec;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.job.JobRef;
 import io.mohs.core.schedule.IntervalSpec;
@@ -491,5 +492,20 @@ class MohsImplTest {
 
         verifyNoInteractions(batchStore);
         verifyNoInteractions(executionStore);
+    }
+
+    /** A recusa tem que ensinar o que fazer, não só dizer não (ADR-0043, opção B). */
+    @Test
+    void retryingABatchMemberExplainsWhyAndWhatToDoInstead() {
+        jobStore.upsert(onDemand("welcome-email"));
+        Execution member = new Execution(ExecutionId.of("019abc-m"), JobKey.of("welcome-email"),
+                ExecutionState.FAILED, NOW, null, List.of(), "application", Priority.NORMAL, null, "b9");
+        when(executionStore.rearmForManualRetry(any(), any())).thenReturn(false);
+        when(executionStore.find(ExecutionId.of("019abc-m"))).thenReturn(Optional.of(member));
+
+        assertThatThrownBy(() -> mohs.retry(ExecutionId.of("019abc-m")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("member of batch b9")
+                .hasMessageContaining("Schedule the job standalone");
     }
 }

@@ -173,6 +173,21 @@ public final class MohsImpl implements Mohs {
                         counters.failed()));
     }
 
+    /**
+     * O lote já contou esta falha, e o contador não tem como devolvê-la sem
+     * reabrir o lote — o que faria {@code BatchCompleted} deixar de ser
+     * terminal e, pior, o segundo evento não encontraria mais o callback
+     * one-shot de {@code onCompletion}: quem salvou o membro é justamente
+     * quem ficaria sem a notificação do fim real. Recusa explícita, então,
+     * em vez de contagem dupla silenciosa (ADR-0043).
+     */
+    private static IllegalStateException batchMemberNotRetryable(ExecutionId executionId, String batchId) {
+        return new IllegalStateException("execution " + executionId + " is a member of batch " + batchId
+                + " — a batch member is not retried individually, because the batch already counted this"
+                + " failure and counting it again would close the batch early. Schedule the job standalone"
+                + " to redo the work (ADR-0043)");
+    }
+
     private record Member(JobKey key, Object payload) {
     }
 
@@ -343,8 +358,10 @@ public final class MohsImpl implements Mohs {
             return Optional.empty();
         }
         throw switch (current.state()) {
-            case FAILED -> new IllegalStateException("execution " + executionId + " belongs to a removed job — "
-                    + "a retried execution of a retired job would never be claimed (ADR-0033)");
+            case FAILED -> current.batchId() != null
+                    ? batchMemberNotRetryable(executionId, current.batchId())
+                    : new IllegalStateException("execution " + executionId + " belongs to a removed job — "
+                            + "a retried execution of a retired job would never be claimed (ADR-0033)");
             case RETRY_SCHEDULED -> new IllegalStateException("execution " + executionId
                     + " is already rearmed for retry — likely a duplicate retry request");
             default -> new IllegalStateException("execution " + executionId + " is " + current.state()

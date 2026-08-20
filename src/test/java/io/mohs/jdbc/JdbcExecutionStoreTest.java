@@ -997,4 +997,23 @@ class JdbcExecutionStoreTest {
         assertThat(counters.failed()).isEqualTo(1);
         assertThat(counters.pending()).isZero();
     }
+
+    /**
+     * Membro de lote não entra no retry manual (ADR-0043): a falha dele já foi
+     * contada, e recontá-la fecharia o lote antes da hora — ou exigiria reabrir
+     * o lote, o que faria BatchCompleted deixar de ser terminal. A guarda mora
+     * no CAS, não no chamador, porque é o CAS que decide se a linha muda.
+     */
+    @Test
+    void aBatchMemberIsNotRearmedForManualRetry() {
+        new JdbcBatchStore(dataSource, clock).insert("b5", 1);
+        seedFailedExecution("019abc-retry-batch", "welcome-email");
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET batch_id = ? WHERE id = ?", "b5", "019abc-retry-batch");
+
+        boolean rearmed = store.rearmForManualRetry(ExecutionId.of("019abc-retry-batch"), clock.instant());
+
+        assertThat(rearmed).isFalse();
+        assertThat(store.find(ExecutionId.of("019abc-retry-batch")).orElseThrow().state())
+                .isEqualTo(ExecutionState.FAILED);
+    }
 }
