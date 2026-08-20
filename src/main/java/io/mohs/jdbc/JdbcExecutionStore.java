@@ -69,7 +69,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
     /** Bem abaixo do teto de 2100 parâmetros do SQL Server pro `IN (:ids)` de {@link #findByIds} (DB-11). Package-private pro teste de fronteira. */
     static final int MAX_IDS_PER_QUERY = 1000;
 
-    private static final String EXECUTION_COLUMNS = "id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key";
+    private static final String EXECUTION_COLUMNS = "id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key, batch_id";
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
@@ -651,7 +651,8 @@ public final class JdbcExecutionStore implements ExecutionStore {
     }
 
     private static Execution hydrate(ExecutionRow row, List<Attempt> attempts) {
-        return new Execution(row.id(), row.jobKey(), row.state(), row.scheduledAt(), row.firedAt(), attempts, row.actor(), row.priority(), row.idempotencyKey());
+        return new Execution(row.id(), row.jobKey(), row.state(), row.scheduledAt(), row.firedAt(), attempts,
+                row.actor(), row.priority(), row.idempotencyKey(), row.batchId());
     }
 
     /** DBTUNE-6: colunas explícitas em vez de {@code SELECT *} — {@code payload} sozinho é JSON de tamanho arbitrário que nenhum destes métodos lê, transferido e descartado à toa em todo poll do claim. */
@@ -665,7 +666,8 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 firedAt == null ? null : JdbcTimestamps.fromUtcTimestamp(firedAt),
                 rs.getString("actor"),
                 Priority.fromValue(rs.getInt("priority")),
-                rs.getString("idempotency_key"));
+                rs.getString("idempotency_key"),
+                rs.getString("batch_id"));
     }
 
     private List<Attempt> fetchAttempts(ExecutionId executionId) {
@@ -703,7 +705,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
 
     /** Linha crua de {@code mohs_executions}, sem attempts — hidratada por {@link #hydrate}/{@link #hydrateEagerly}. */
     private record ExecutionRow(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt, @Nullable Instant firedAt, String actor,
-                                 Priority priority, @Nullable String idempotencyKey) {
+                                 Priority priority, @Nullable String idempotencyKey, @Nullable String batchId) {
     }
 
     private record ExecutionIdAndAttempt(String executionId, Attempt attempt) {

@@ -26,7 +26,8 @@ public record Execution(
         List<Attempt> attempts,
         String actor,
         Priority priority,
-        @Nullable String idempotencyKey) {
+        @Nullable String idempotencyKey,
+        @Nullable String batchId) {
 
     /**
      * O actor das ocorrências materializadas pelo trigger recorrente
@@ -55,6 +56,19 @@ public record Execution(
     /** {@link Priority#NORMAL}, sem {@code idempotencyKey} — mesmo default do schema (`DEFAULT 20`). */
     public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
             @Nullable Instant firedAt, List<Attempt> attempts, String actor) {
-        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, Priority.NORMAL, null);
+        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, Priority.NORMAL, null, null);
+    }
+
+    /**
+     * Fora de lote, que é o caso da esmagadora maioria das execuções —
+     * {@code batchId} nulo. Existe para o agendamento avulso não ter que
+     * dizer "não pertenço a lote nenhum" em toda chamada, e porque
+     * {@code batchId} entrou depois (ADR-0043): sem esta forma, todo
+     * construtor posicional já escrito quebraria para declarar uma ausência.
+     */
+    public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
+            @Nullable Instant firedAt, List<Attempt> attempts, String actor, Priority priority,
+            @Nullable String idempotencyKey) {
+        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, priority, idempotencyKey, null);
     }
 }

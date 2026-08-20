@@ -199,7 +199,7 @@ public final class Dispatcher {
         Attempt attempt = new Attempt(attemptNumber, firedAt, finishedAt, ExecutionState.CANCELLED, null);
         completeOrDiscard(
                 new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.CANCELLED,
-                        null, null, rearmNextFireAt(execution, definition, finishedAt)),
+                        null, null, rearmNextFireAt(execution, definition, finishedAt), execution.batchId()),
                 () -> events.publish(new Cancelled(execution.id(), execution.jobKey(), attemptNumber)));
     }
 
@@ -235,7 +235,7 @@ public final class Dispatcher {
         Attempt attempt = new Attempt(attemptNumber, firedAt, finishedAt, ExecutionState.SUCCEEDED, null);
         completeOrDiscard(
                 new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED,
-                        null, null, rearmNextFireAt(execution, definition, finishedAt)),
+                        null, null, rearmNextFireAt(execution, definition, finishedAt), execution.batchId()),
                 () -> events.publish(new Succeeded(execution.id(), execution.jobKey(), attemptNumber)));
     }
 
@@ -268,7 +268,7 @@ public final class Dispatcher {
                 execution.jobKey().value(), attemptNumber, attemptNumber + 1, retryAt, error);
         Attempt attempt = failedAttempt(attemptNumber, firedAt, error);
         completeOrDiscard(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.RETRY_SCHEDULED, retryAt),
+                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.RETRY_SCHEDULED, retryAt).inBatch(execution.batchId()),
                 () -> {
                     events.publish(new AttemptFailed(execution.id(), execution.jobKey(), attemptNumber, error));
                     events.publish(new RetryScheduled(execution.id(), execution.jobKey(), attemptNumber + 1, retryAt));
@@ -295,7 +295,8 @@ public final class Dispatcher {
         // finishedAt do attempt é o "fim" que ancora o rearme fixed-delay (ADR-0035)
         completeOrDiscard(
                 new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED,
-                        null, null, rearmNextFireAt(execution, definition, Objects.requireNonNull(attempt.finishedAt()))),
+                        null, null, rearmNextFireAt(execution, definition, Objects.requireNonNull(attempt.finishedAt())),
+                        execution.batchId()),
                 () -> events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, attemptsExhausted)));
     }
 

@@ -136,7 +136,8 @@ public interface ExecutionStore {
      * retry.
      */
     record CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
-            @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt, @Nullable Instant rearmNextFireAt) {
+            @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt, @Nullable Instant rearmNextFireAt,
+            @Nullable String batchId) {
 
         public CompletionRequest {
             Objects.requireNonNull(id, "id");
@@ -156,18 +157,41 @@ public interface ExecutionStore {
 
         /** Conclusão sem retry (terminal) e sem fence — a forma do dispatcher pra sucesso/falha terminal. */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState) {
-            this(id, jobKey, attempt, newState, null, null, null);
+            this(id, jobKey, attempt, newState, null, null, null, null);
         }
 
         /** Forma com fence e sem rearme — quem conclui sem agenda {@code afterFinish} em mãos. */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
                 @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt) {
-            this(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt, null);
+            this(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt, null, null);
         }
 
         /** Retry sem fence — a forma do dispatcher pra falha com orçamento. */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, @Nullable Instant retryAt) {
-            this(id, jobKey, attempt, newState, retryAt, null, null);
+            this(id, jobKey, attempt, newState, retryAt, null, null, null);
+        }
+
+        /**
+         * O mesmo pedido, agora sabendo a que lote o membro pertence
+         * (ADR-0043). Wither em vez de mais uma sobrecarga: cada ponto de
+         * conclusao ja escolhe uma forma diferente entre as tres acima, e
+         * repetir todas com {@code batchId} daria seis construtores para um
+         * campo que quase sempre e nulo.
+         */
+        /**
+         * Sem lote, que e o caso da esmagadora maioria das conclusoes.
+         * Existe para {@code batchId} ter entrado depois (ADR-0043) sem
+         * obrigar todo ponto de conclusao ja escrito a declarar a ausencia.
+         */
+        public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
+                @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt,
+                @Nullable Instant rearmNextFireAt) {
+            this(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt, rearmNextFireAt, null);
+        }
+
+        public CompletionRequest inBatch(@Nullable String batchId) {
+            return new CompletionRequest(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt,
+                    rearmNextFireAt, batchId);
         }
     }
 
