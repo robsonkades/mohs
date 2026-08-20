@@ -105,6 +105,8 @@ For any task that changes code:
   its measured trigger (companion to ADR-0042).
 - `docs/BATCH-ARCHITECTURE-REVIEW.md` — deferred batch decisions, each with its
   trigger (companion to ADR-0043).
+- `docs/CLAIM-GRANULARITY.md` — open exploration: should the claim stay global,
+  or split per runner? Not a decision; carries the number that would settle it.
 - `PLAN.md` — current refactor steps; one step per commit/PR.
 
 ## Identity and naming
