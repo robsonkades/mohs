@@ -103,6 +103,8 @@ For any task that changes code:
 - `BASELINE.md` — reference performance numbers.
 - `docs/RATE-LIMIT-EVOLUTION.md` — deferred rate-limit improvements, each with
   its measured trigger (companion to ADR-0042).
+- `docs/BATCH-ARCHITECTURE-REVIEW.md` — deferred batch decisions, each with its
+  trigger (companion to ADR-0043).
 - `PLAN.md` — current refactor steps; one step per commit/PR.
 
 ## Identity and naming

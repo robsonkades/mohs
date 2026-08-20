@@ -171,3 +171,57 @@ ADR-0018 (UPDATE guardado em vez de lock especializado), ADR-0023 (dialetos),
 ADR-0024 (CAS de estado), ADR-0028 (`BatchCompleted`), ADR-0042 (a decisão simétrica para
 rate limit, onde derivar era impossível). Comparação com `cadrix`
 (`opentask/docs/adr/0001-batch-job-outcome-idempotency.md`).
+
+## Errata — 2026-08-19, ao implementar
+
+Duas afirmações do texto acima ficaram falsas quando o código subiu. Ficam
+aqui em vez de serem corrigidas no lugar: o que a decisão *era* quando foi
+tomada é parte do registro, e apagar o erro apagaria a lição.
+
+### 1. "Não há caminho em que um avance sem o outro" — era falso em quatro lugares
+
+A seção **Consequences** dispensou a varredura de reconciliação com essa
+premissa. Ela não se sustentou: o incremento foi ligado em `complete()`, e
+quatro transições chegam a estado terminal sem passar por lá.
+
+| caminho | como ficava |
+|---|---|
+| reaper (`completeAllWithinTransaction`) | membro morto com o nó sumia do lote |
+| `POST /executions/{id}/cancel` | cancelar membro pendente não contava |
+| `Mohs.remove` (aposentar o job) | cancelamento em massa não contava |
+| `POST /executions/{id}/retry` | recontava o membro — `succeeded + failed > total` |
+
+Os três primeiros deixavam o lote aberto para sempre. O quarto era pior:
+`BatchCompleted` disparava cedo e, no fim, o construtor de `BatchSnapshot`
+rejeitava a linha, fazendo `GET /batches/{id}` responder 500 permanentemente.
+
+Todos corrigidos (`274061b`, `3cef5cb`, `43241de`), o último pela recusa
+explícita — membro de lote não se retenta individualmente, porque devolver a
+contagem exigiria reabrir o lote e `BatchCompleted` deixaria de ser terminal.
+
+**A lição, que vale mais que a correção:** a fronteira certa não é *"quem chama
+`complete()`"*, é *"quem escreve estado terminal"*. Todo caminho novo que
+escrever `SUCCEEDED`/`FAILED`/`CANCELLED` em `mohs_executions` precisa contar,
+e não há nada hoje que force isso — só revisão. A premissa da varredura de
+reconciliação **continua sendo uma aposta**, agora com quatro precedentes
+contra ela.
+
+### 2. A justificativa do desvio do `RETURNING` cita uma medição que não cobre o desvio
+
+A seção **O que foi medido** conclui que os candidatos ficam "dentro de um round
+trip uns dos outros", e essa frase autorizou implementar `UPDATE` + `SELECT`.
+Mas os quatro braços daquela tabela — derivado, cego, `RETURNING`,
+read-decide-write — são todos de **um** statement. O que foi implementado tem
+**dois**. A conclusão descreve candidatos que não incluem o candidato escolhido,
+e a diferença esperada não é "menos que um round trip": é exatamente um.
+
+Medido no H2 ao revisar: o `SELECT` de releitura custa +22,3% sobre o `UPDATE`
+sozinho — e isso é só o custo de executar o statement, sem rede. Contra os
+1,308 ms/conclusão do braço `RETURNING` a 8 nós, um round trip de Postgres seria
+da ordem de +45%.
+
+Não muda a decisão (H2 e MySQL não têm a cláusula, e o caminho portável tinha
+que existir de qualquer forma), mas muda o **status**: `RETURNING`/`OUTPUT
+INSERTED` por dialeto via `JdbcDialect` deixa de ser generalização prematura e
+passa a ser otimização com hipótese medida esperando confirmação no Postgres.
+Ver `docs/BATCH-ARCHITECTURE-REVIEW.md`.
