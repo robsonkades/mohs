@@ -783,4 +783,27 @@ class JdbcJobStoreTest {
                     """, id, jobKey, state, now, actor, now);
         }
     }
+
+    /**
+     * Aposentar o job cancela os pendentes, e cancelar é terminal: sem contar,
+     * o membro some do lote, pending nunca zera e o lote fica aberto para
+     * sempre — não há reconciliação que cure (ADR-0043). Em bloco por lote,
+     * não uma chamada por membro.
+     */
+    @Test
+    void removeCountsCancelledBatchMembersIntoTheirBatch() {
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        store.upsert(definition("welcome-email", new OnDemandSpec()));
+        new JdbcBatchStore(dataSource, clock).insert("b6", 3);
+        seedExecution("m1", "welcome-email", "ENQUEUED");
+        seedExecution("m2", "welcome-email", "RETRY_SCHEDULED");
+        seedExecution("m3", "welcome-email", "SUCCEEDED");
+        raw.update("UPDATE mohs_executions SET batch_id = ? WHERE id IN (?, ?, ?)", "b6", "m1", "m2", "m3");
+
+        store.remove(JobKey.of("welcome-email"));
+
+        // só os dois pendentes foram cancelados agora; o SUCCEEDED já era terminal
+        assertThat(raw.queryForObject("SELECT failed FROM mohs_batches WHERE id = ?", Integer.class, "b6"))
+                .isEqualTo(2);
+    }
 }

@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -427,12 +428,15 @@ public final class JdbcJobStore implements JobStore {
     public void remove(JobKey key) {
         Objects.requireNonNull(key, "key");
         transactionTemplate.executeWithoutResult(_ -> {
+            MapSqlParameterSource jobParam = new MapSqlParameterSource("jobKey", key.value());
+            List<Map<String, Object>> membersPerBatch = pendingBatchMembers(jobParam);
             // os DOIS estados claimáveis (ADR-0033) — RETRY_SCHEDULED fora daqui
             // ficaria preso pra sempre: claim filtra retired, reaper só vê RUNNING
             jdbcTemplate.update("""
                     UPDATE mohs_executions SET state = 'CANCELLED'
                     WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
-                    """, new MapSqlParameterSource("jobKey", key.value()));
+                    """, jobParam);
+            countCancelledMembers(membersPerBatch);
             jdbcTemplate.update("UPDATE mohs_job_definitions SET retired = :retired, updated_at = :now WHERE job_key = :jobKey",
                     new MapSqlParameterSource("jobKey", key.value())
                             .addValue("retired", true)
@@ -457,6 +461,35 @@ public final class JdbcJobStore implements JobStore {
                 "UPDATE mohs_job_definitions SET running_execution_count = running_execution_count - 1 "
                       + "WHERE job_key = :jobKey AND running_execution_count > 0",
                 new MapSqlParameterSource("jobKey", key.value()));
+    }
+
+    /**
+     * Aposentar o job cancela as execuções pendentes dele, e cancelar é
+     * terminal: sem contar, o membro some do lote e {@code pending} nunca zera
+     * — o lote fica aberto para sempre, sem varredura de reconciliação que
+     * cure (ADR-0043). Contado ANTES do cancelamento porque depois já não há
+     * pendente para agrupar, e na mesma transação, que é o que impede contar
+     * duas vezes.
+     *
+     * <p>SQL de {@code mohs_batches} aqui em vez de {@code BatchStore}: o
+     * incremento é em bloco ({@code + :n} por lote, não N chamadas), forma que
+     * a porta não tem. Se um terceiro caso aparecer, vira
+     * {@code incrementFailedBy} na porta.
+     */
+    private List<Map<String, Object>> pendingBatchMembers(MapSqlParameterSource jobParam) {
+        return jdbcTemplate.queryForList("""
+                SELECT batch_id, COUNT(*) AS pending FROM mohs_executions
+                WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND batch_id IS NOT NULL
+                GROUP BY batch_id ORDER BY batch_id
+                """, jobParam);
+    }
+
+    /** Ordem estável por {@code batch_id} ({@code ORDER BY} acima): dois removes concorrentes tocando os mesmos lotes não se cruzam. */
+    private void countCancelledMembers(List<Map<String, Object>> membersPerBatch) {
+        for (Map<String, Object> row : membersPerBatch) {
+            jdbcTemplate.update("UPDATE mohs_batches SET failed = failed + :pending WHERE id = :id",
+                    new MapSqlParameterSource("id", row.get("batch_id")).addValue("pending", row.get("pending")));
+        }
     }
 
     private static String scheduleType(Schedule schedule) {
