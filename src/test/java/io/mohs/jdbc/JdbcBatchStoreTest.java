@@ -5,6 +5,7 @@ import java.time.ZoneId;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
@@ -15,7 +16,9 @@ import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.engine.BatchCounters;
 import io.mohs.test.MutableClock;
@@ -26,10 +29,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class JdbcBatchStoreTest {
 
     private JdbcBatchStore store;
+    private DataSource dataSource;
 
     @BeforeEach
     void setUp() {
-        DataSource dataSource = freshH2DataSource();
+        dataSource = freshH2DataSource();
         MutableClock clock = new MutableClock(Instant.parse("2026-08-13T00:00:00Z"), ZoneId.of("UTC"));
         store = new JdbcBatchStore(dataSource, clock);
     }
@@ -90,5 +94,44 @@ class JdbcBatchStoreTest {
 
         Optional<BatchCounters> counters = store.find("batch-1");
         assertThat(counters).map(BatchCounters::succeeded).contains(100);
+    }
+
+    /**
+     * A propriedade que a ADR-0043 compra, e a razão de o incremento devolver
+     * o saldo: com 100 membros concluindo ao mesmo tempo, UM chamador enxerga
+     * {@code pending() == 0} — é ele que dispara {@code BatchCompleted}.
+     *
+     * <p>Cada conclusão roda na própria transação porque é ela que torna a
+     * releitura estável (o row lock do UPDATE vale até o commit). Este teste
+     * falharia com DOIS fechadores se o incremento e a leitura ficassem fora
+     * de uma transação — que é exatamente o modo de falha que a ADR descreve
+     * para o desenho derivado, e que aqui não existe.
+     */
+    @Test
+    void exactlyOneConcurrentCompletionSeesTheBatchClose() throws InterruptedException {
+        store.insert("batch-1", 100);
+        TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        AtomicInteger closers = new AtomicInteger();
+
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            IntStream.range(0, 100).forEach(i -> executor.submit(() ->
+                    transaction.executeWithoutResult(status -> {
+                        if (store.incrementSucceeded("batch-1").pending() == 0) {
+                            closers.incrementAndGet();
+                        }
+                    })));
+            executor.shutdown();
+            assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
+
+        assertThat(closers).hasValue(1);
+        assertThat(store.find("batch-1").orElseThrow().succeeded()).isEqualTo(100);
+    }
+
+    @Test
+    void countingAMemberIntoAnUnknownBatchFailsLoudly() {
+        assertThatThrownBy(() -> store.incrementSucceeded("ghost"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("ghost");
     }
 }

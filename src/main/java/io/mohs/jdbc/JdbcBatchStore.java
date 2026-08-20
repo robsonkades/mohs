@@ -50,16 +50,49 @@ public final class JdbcBatchStore implements BatchStore {
                 JdbcBatchStore::mapRow);
     }
 
+    private static final String INCREMENT_SUCCEEDED =
+            "UPDATE mohs_batches SET succeeded = succeeded + 1 WHERE id = :id";
+
+    private static final String INCREMENT_FAILED =
+            "UPDATE mohs_batches SET failed = failed + 1 WHERE id = :id";
+
     @Override
-    public void incrementSucceeded(String batchId) {
-        jdbcTemplate.update("UPDATE mohs_batches SET succeeded = succeeded + 1 WHERE id = :id",
-                new MapSqlParameterSource("id", Objects.requireNonNull(batchId, "batchId")));
+    public BatchCounters incrementSucceeded(String batchId) {
+        return incrementAndRead(batchId, INCREMENT_SUCCEEDED);
     }
 
     @Override
-    public void incrementFailed(String batchId) {
-        jdbcTemplate.update("UPDATE mohs_batches SET failed = failed + 1 WHERE id = :id",
-                new MapSqlParameterSource("id", Objects.requireNonNull(batchId, "batchId")));
+    public BatchCounters incrementFailed(String batchId) {
+        return incrementAndRead(batchId, INCREMENT_FAILED);
+    }
+
+    /**
+     * {@code UPDATE} e depois {@code SELECT}, em vez do {@code UPDATE ...
+     * RETURNING} que a ADR-0043 nomeia: o H2 não suporta a cláusula (medido
+     * ao implementar) e o MySQL também não, então este é o único caminho que
+     * serve os quatro dialetos. Uma ida a mais no Postgres e no SQL Server é
+     * o preço, e a medição da ADR mostrou os candidatos separados por menos
+     * que um round trip — otimizar por dialeto antes de um número que
+     * justifique seria generalização prematura.
+     *
+     * <p>A releitura é estável porque o row lock do {@code UPDATE} é mantido
+     * até o commit: nenhuma outra transação consegue comitar sobre a linha
+     * entre os dois statements, então o que volta é exatamente o que ESTA
+     * transação escreveu. Isso depende dos dois viverem na MESMA transação —
+     * que é o que a conclusão garante (ADR-0003, cláusula 4). Fora de uma,
+     * duas conclusões concorrentes podem ler o mesmo saldo final e as duas se
+     * acharem a fechadora do lote.
+     */
+    private BatchCounters incrementAndRead(String batchId, String increment) {
+        Objects.requireNonNull(batchId, "batchId");
+        MapSqlParameterSource params = new MapSqlParameterSource("id", batchId);
+        if (jdbcTemplate.update(increment, params) == 0) {
+            // A FK de mohs_executions.batch_id torna isto impossível por construção;
+            // se acontecer, contar em silêncio perderia a conclusão do lote para sempre.
+            throw new IllegalStateException("no batch '" + batchId + "' to count a member into");
+        }
+        return find(batchId).orElseThrow(() ->
+                new IllegalStateException("batch '" + batchId + "' vanished between increment and read"));
     }
 
     private static BatchCounters mapRow(ResultSet rs) throws SQLException {
