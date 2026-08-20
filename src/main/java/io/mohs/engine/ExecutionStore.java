@@ -89,7 +89,22 @@ public interface ExecutionStore {
      * @return {@code true} se a transição ocorreu; {@code false} se a
      *         execução já não estava mais {@code RUNNING}.
      */
-    boolean complete(CompletionRequest request, JobStore jobStore);
+    Completion complete(CompletionRequest request, JobStore jobStore);
+
+    /**
+     * O que a conclusao produziu. {@code applied} e o veredito do CAS de
+     * estado — falso quando outra conclusao (reaper, ou concorrente) ja
+     * moveu a execucao. {@code closedBatch} so vem preenchido para a UNICA
+     * conclusao que levou o lote a zero pendentes (ADR-0043): e ela que
+     * publica {@code BatchCompleted}, e por isso o saldo sobe daqui em vez
+     * de ser relido depois — reler deixaria duas conclusoes concorrentes
+     * verem o mesmo saldo final e as duas se acharem a fechadora.
+     */
+    record Completion(boolean applied, @Nullable BatchCounters closedBatch) {
+
+        /** O CAS perdeu: outra conclusao ja moveu a execucao, e nada foi contado. */
+        public static final Completion NOT_APPLIED = new Completion(false, null);
+    }
 
     /**
      * Como {@link #complete}, para muitas execuções de uma vez — o

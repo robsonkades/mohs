@@ -35,6 +35,8 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
+import io.mohs.engine.BatchCounters;
+import io.mohs.engine.BatchStore;
 import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.JobStore;
 import io.mohs.jdbc.dialect.JdbcDialect;
@@ -74,16 +76,30 @@ public final class JdbcExecutionStore implements ExecutionStore {
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
     private final Clock clock;
+    private final BatchStore batchStore;
     private final ObjectMapper objectMapper;
     private final JdbcDialect dialect;
 
+    /**
+     * O {@link BatchStore} sai da mesma {@code DataSource} de proposito: o
+     * incremento do lote tem que cair na MESMA transacao do CAS de estado
+     * (ADR-0043), e e isso que o faz exatamente-uma-vez sem tabela de
+     * idempotencia. Sobrecarga em vez de parametro obrigatorio para nao
+     * obrigar todo ponto de construcao ja escrito a montar um.
+     */
     public JdbcExecutionStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper, JdbcDialect dialect) {
+        this(dataSource, clock, objectMapper, dialect, new JdbcBatchStore(dataSource, clock));
+    }
+
+    public JdbcExecutionStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper, JdbcDialect dialect,
+            BatchStore batchStore) {
         this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         // mesmo raciocínio da DBTUNE-4 em JdbcClaimer: CAS guardado assume
         // "última escrita vence" (READ COMMITTED), não herda o default do banco.
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.dialect = Objects.requireNonNull(dialect, "dialect");
     }
@@ -159,11 +175,12 @@ public final class JdbcExecutionStore implements ExecutionStore {
      * de uma execução que já tinha terminado de outro jeito.
      */
     @Override
-    public boolean complete(ExecutionStore.CompletionRequest request, JobStore jobStore) {
+    public ExecutionStore.Completion complete(ExecutionStore.CompletionRequest request, JobStore jobStore) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(jobStore, "jobStore");
-        return Boolean.TRUE.equals(transactionTemplate.execute(_ ->
-                completeWithinTransaction(request, jobStore)));
+        ExecutionStore.Completion completion = transactionTemplate.execute(_ ->
+                completeWithinTransaction(request, jobStore));
+        return completion == null ? ExecutionStore.Completion.NOT_APPLIED : completion;
     }
 
     /**
@@ -186,11 +203,11 @@ public final class JdbcExecutionStore implements ExecutionStore {
             WHERE id = :id AND state = 'RUNNING' AND lease_expires_at = :expectedLease
             """;
 
-    private boolean completeWithinTransaction(ExecutionStore.CompletionRequest request, JobStore jobStore) {
+    private ExecutionStore.Completion completeWithinTransaction(ExecutionStore.CompletionRequest request, JobStore jobStore) {
         String sql = request.expectedLeaseExpiresAt() == null ? COMPLETE_CAS : COMPLETE_CAS_FENCED;
         int updated = jdbcTemplate.update(sql, completionParams(request));
         if (updated == 0) {
-            return false;
+            return ExecutionStore.Completion.NOT_APPLIED;
         }
 
         jdbcTemplate.update("""
@@ -199,7 +216,28 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 """, attemptParams(request.id(), request.attempt()));
         jobStore.decrementRunningExecutions(request.jobKey());
         rearmIfRequested(request, jobStore);
-        return true;
+        return new ExecutionStore.Completion(true, countIntoBatch(request));
+    }
+
+    /**
+     * O membro so conta quando ACABA: {@code RETRY_SCHEDULED} continua vivo,
+     * e conta-lo fecharia o lote antes da hora. {@code CANCELLED} entra como
+     * falha porque o lote tem duas colunas e um membro cancelado nao teve
+     * exito — a contagem responde "quantos deram certo", nao "por que os
+     * outros nao deram".
+     *
+     * @return o saldo do lote quando ESTA conclusao o fechou, {@code null}
+     * quando nao fechou ou quando a execucao nao pertence a lote nenhum
+     */
+    private @Nullable BatchCounters countIntoBatch(ExecutionStore.CompletionRequest request) {
+        String batchId = request.batchId();
+        if (batchId == null || request.newState() == ExecutionState.RETRY_SCHEDULED) {
+            return null;
+        }
+        BatchCounters counters = request.newState() == ExecutionState.SUCCEEDED
+                ? batchStore.incrementSucceeded(batchId)
+                : batchStore.incrementFailed(batchId);
+        return counters.pending() == 0 ? counters : null;
     }
 
     /**

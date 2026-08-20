@@ -15,6 +15,7 @@ import org.springframework.core.task.AsyncTaskExecutor;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.event.AttemptFailed;
+import io.mohs.core.event.BatchCompleted;
 import io.mohs.core.event.Cancelled;
 import io.mohs.core.event.ExecutionInterceptor;
 import io.mohs.core.event.ExecutionListener;
@@ -306,11 +307,26 @@ public final class Dispatcher {
      * nunca publica evento de uma transição que não ocorreu.
      */
     private void completeOrDiscard(ExecutionStore.CompletionRequest request, Runnable publishEvents) {
-        if (executionStore.complete(request, jobStore)) {
+        ExecutionStore.Completion completion = executionStore.complete(request, jobStore);
+        if (completion.applied()) {
             publishEvents.run();
+            publishBatchCompletedIfClosed(completion);
         } else {
             log.warn("attempt {} of execution {} finished {} but the state had already moved on (reaper/concurrent completion) — result discarded",
                     request.attempt().number(), request.id().value(), request.attempt().outcome());
+        }
+    }
+
+    /**
+     * ADR-0043: quem fechou o lote foi eleito pelo banco, dentro da
+     * transacao de conclusao; a publicacao acontece DEPOIS dela, junto dos
+     * demais eventos da conclusao, porque evento nao volta atras se a
+     * transacao abortar.
+     */
+    private void publishBatchCompletedIfClosed(ExecutionStore.Completion completion) {
+        BatchCounters closed = completion.closedBatch();
+        if (closed != null) {
+            events.publish(new BatchCompleted(closed.batchId(), closed.total(), closed.succeeded(), closed.failed()));
         }
     }
 

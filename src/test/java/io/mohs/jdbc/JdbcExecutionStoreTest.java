@@ -41,6 +41,7 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.engine.BatchCounters;
 import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.StoredJob;
@@ -306,7 +307,7 @@ class JdbcExecutionStoreTest {
         JobStore jobStore = new JdbcJobStore(dataSource, clock);
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
-        boolean completed = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED), jobStore);
+        boolean completed = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED), jobStore).applied();
 
         assertThat(completed).isTrue();
         Execution found = store.find(ExecutionId.of("019abc-complete-1")).orElseThrow();
@@ -321,7 +322,7 @@ class JdbcExecutionStoreTest {
         JobStore jobStore = new JdbcJobStore(dataSource, clock);
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
-        boolean completed = store.complete(new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED), jobStore);
+        boolean completed = store.complete(new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED), jobStore).applied();
 
         assertThat(completed).isFalse();
         assertThat(store.find(execution.id())).contains(execution);
@@ -335,8 +336,8 @@ class JdbcExecutionStoreTest {
         Attempt firstAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.SUCCEEDED, null);
         Attempt secondAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
-        boolean first = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), firstAttempt, ExecutionState.SUCCEEDED), jobStore);
-        boolean second = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), secondAttempt, ExecutionState.FAILED), jobStore);
+        boolean first = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), firstAttempt, ExecutionState.SUCCEEDED), jobStore).applied();
+        boolean second = store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-complete-3"), JobKey.of("welcome-email"), secondAttempt, ExecutionState.FAILED), jobStore).applied();
 
         assertThat(first).isTrue();
         assertThat(second).isFalse();
@@ -354,7 +355,7 @@ class JdbcExecutionStoreTest {
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
         boolean completed = store.complete(new ExecutionStore.CompletionRequest(
-                ExecutionId.of("019abc-retry-1"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_SCHEDULED, retryAt), jobStore);
+                ExecutionId.of("019abc-retry-1"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_SCHEDULED, retryAt), jobStore).applied();
 
         assertThat(completed).isTrue();
         Execution found = store.find(ExecutionId.of("019abc-retry-1")).orElseThrow();
@@ -397,7 +398,7 @@ class JdbcExecutionStoreTest {
         Instant staleObservedLease = currentLease.minusSeconds(60);
 
         boolean completed = store.complete(new ExecutionStore.CompletionRequest(
-                ExecutionId.of("019abc-fence-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null, staleObservedLease), jobStore);
+                ExecutionId.of("019abc-fence-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null, staleObservedLease), jobStore).applied();
 
         assertThat(completed).isFalse();
         Execution untouched = store.find(ExecutionId.of("019abc-fence-1")).orElseThrow();
@@ -415,7 +416,7 @@ class JdbcExecutionStoreTest {
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "lease expired");
 
         boolean completed = store.complete(new ExecutionStore.CompletionRequest(
-                ExecutionId.of("019abc-fence-2"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null, lease), jobStore);
+                ExecutionId.of("019abc-fence-2"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null, lease), jobStore).applied();
 
         assertThat(completed).isTrue();
         assertThat(store.find(ExecutionId.of("019abc-fence-2")).orElseThrow().state()).isEqualTo(ExecutionState.FAILED);
@@ -596,7 +597,7 @@ class JdbcExecutionStoreTest {
 
         boolean completed = store.complete(new ExecutionStore.CompletionRequest(
                 ExecutionId.of("019abc-rearm-1"), JobKey.of("welcome-email"), attempt, ExecutionState.SUCCEEDED,
-                null, null, rearmAt), jobStore);
+                null, null, rearmAt), jobStore).applied();
 
         assertThat(completed).isTrue();
         assertThat(nextFireAtOf("welcome-email")).isEqualTo(rearmAt);
@@ -886,5 +887,63 @@ class JdbcExecutionStoreTest {
                 VALUES (?, ?, ?, ?, ?)
                 """, executionId, number, JdbcTimestamps.toUtcTimestamp(clock.instant().minusSeconds(120)),
                 finishedAt == null ? null : JdbcTimestamps.toUtcTimestamp(finishedAt), outcome);
+    }
+
+    /**
+     * ADR-0043: o lote fecha na conclusao do ULTIMO membro, e so nela. E essa
+     * conclusao que carrega o saldo de volta, porque e ela que vai publicar
+     * {@code BatchCompleted} — relido depois, o saldo seria o mesmo para as
+     * duas conclusoes e as duas se achariam a fechadora. CANCELLED e as demais
+     * terminais nao-SUCCEEDED contam como falha: o lote responde quantos deram
+     * certo, nao por que os outros nao deram.
+     */
+    @Test
+    void onlyTheCompletionThatEmptiesTheBatchCarriesItsCounters() {
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        new JdbcBatchStore(dataSource, clock).insert("b1", 2);
+        seedBatchMember("019abc-member-1", "b1");
+        seedBatchMember("019abc-member-2", "b1");
+
+        BatchCounters afterFirst = completeMember("019abc-member-1", "b1", ExecutionState.SUCCEEDED, jobStore);
+        BatchCounters afterLast = completeMember("019abc-member-2", "b1", ExecutionState.FAILED, jobStore);
+
+        assertThat(afterFirst).isNull();
+        assertThat(afterLast).isNotNull();
+        assertThat(afterLast.succeeded()).isEqualTo(1);
+        assertThat(afterLast.failed()).isEqualTo(1);
+        assertThat(afterLast.pending()).isZero();
+    }
+
+    /** Retry nao conta: o membro continua vivo, e conta-lo fecharia o lote antes da hora. */
+    @Test
+    void aScheduledRetryDoesNotCountTowardTheBatch() {
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        JdbcBatchStore batches = new JdbcBatchStore(dataSource, clock);
+        batches.insert("b2", 1);
+        seedBatchMember("019abc-member-3", "b2");
+
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
+        ExecutionStore.Completion completion = store.complete(new ExecutionStore.CompletionRequest(
+                ExecutionId.of("019abc-member-3"), JobKey.of("welcome-email"), attempt,
+                ExecutionState.RETRY_SCHEDULED, clock.instant()).inBatch("b2"), jobStore);
+
+        assertThat(completion.applied()).isTrue();
+        assertThat(completion.closedBatch()).isNull();
+        BatchCounters counters = batches.find("b2").orElseThrow();
+        assertThat(counters.succeeded()).isZero();
+        assertThat(counters.failed()).isZero();
+        assertThat(counters.pending()).isEqualTo(1);
+    }
+
+    private void seedBatchMember(String id, String batchId) {
+        seedRunningExecution(id, "welcome-email");
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET batch_id = ? WHERE id = ?", batchId, id);
+    }
+
+    private @Nullable BatchCounters completeMember(String id, String batchId, ExecutionState outcome, JobStore jobStore) {
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), outcome,
+                outcome == ExecutionState.SUCCEEDED ? null : "boom");
+        return store.complete(new ExecutionStore.CompletionRequest(ExecutionId.of(id), JobKey.of("welcome-email"),
+                attempt, outcome).inBatch(batchId), jobStore).closedBatch();
     }
 }

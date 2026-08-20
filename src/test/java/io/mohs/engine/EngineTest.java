@@ -1388,7 +1388,7 @@ class EngineTest {
         }
 
         @Override
-        public boolean complete(CompletionRequest request, JobStore jobStore) {
+        public Completion complete(CompletionRequest request, JobStore jobStore) {
             if (request.id().equals(failingId)) {
                 throw new RuntimeException("simulated database error completing " + request.id());
             }
