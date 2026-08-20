@@ -191,11 +191,13 @@ public final class JdbcExecutionStore implements ExecutionStore {
      * Dois templates em vez de {@code (:p IS NULL OR ...)}: parâmetro em
      * predicado de nulidade tem suporte irregular entre os 4 dialetos.
      */
+    // batch-counted: countIntoBatch, na mesma transação deste CAS
     private static final String COMPLETE_CAS = """
             UPDATE mohs_executions SET state = :newState, scheduled_at = COALESCE(:retryAt, scheduled_at)
             WHERE id = :id AND state = 'RUNNING'
             """;
 
+    // batch-counted: countIntoBatch, na mesma transação deste CAS
     private static final String COMPLETE_CAS_FENCED = """
             UPDATE mohs_executions SET state = :newState, scheduled_at = COALESCE(:retryAt, scheduled_at)
             WHERE id = :id AND state = 'RUNNING' AND lease_expires_at = :expectedLease
@@ -373,6 +375,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
         Objects.requireNonNull(id, "id");
         MapSqlParameterSource params = new MapSqlParameterSource("id", id.value());
         return Boolean.TRUE.equals(transactionTemplate.execute(_ -> {
+            // batch-counted: countCancelledIntoBatch, logo abaixo, nesta transação
             if (jdbcTemplate.update("""
                     UPDATE mohs_executions SET state = 'CANCELLED'
                     WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')

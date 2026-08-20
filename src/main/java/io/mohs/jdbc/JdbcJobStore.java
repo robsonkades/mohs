@@ -432,6 +432,7 @@ public final class JdbcJobStore implements JobStore {
             List<Map<String, Object>> membersPerBatch = pendingBatchMembers(jobParam);
             // os DOIS estados claimáveis (ADR-0033) — RETRY_SCHEDULED fora daqui
             // ficaria preso pra sempre: claim filtra retired, reaper só vê RUNNING
+            // batch-counted: countCancelledMembers, com o agrupamento colhido antes deste UPDATE
             jdbcTemplate.update("""
                     UPDATE mohs_executions SET state = 'CANCELLED'
                     WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
