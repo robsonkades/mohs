@@ -28,6 +28,8 @@ import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.Dispatcher;
+import io.mohs.engine.BatchCompletionCallbacks;
+import io.mohs.engine.BatchStore;
 import io.mohs.engine.Engine;
 import io.mohs.engine.EngineSettings;
 import io.mohs.engine.ExecutionStore;
@@ -43,6 +45,7 @@ import io.mohs.engine.RunnerRegistry;
 import io.mohs.engine.TriggerFirer;
 import io.mohs.jdbc.DatabaseClock;
 import io.mohs.jdbc.JdbcClaimer;
+import io.mohs.jdbc.JdbcBatchStore;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.jdbc.JdbcNodeStore;
@@ -290,11 +293,27 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
+    public BatchStore mohsBatchStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock) {
+        return new JdbcBatchStore(dataSource, mohsClock);
+    }
+
+    /**
+     * Entra na lista de {@code ExecutionListener} como qualquer outro: e assim
+     * que {@code Batch.onCompletion} recebe o {@code BatchCompleted} que o
+     * dispatcher publica (ADR-0043), sem caminho de entrega paralelo.
+     */
+    @Bean
+    public BatchCompletionCallbacks mohsBatchCompletionCallbacks() {
+        return new BatchCompletionCallbacks();
+    }
+
+    @Bean
     public Mohs mohs(JobStore mohsJobStore, ExecutionStore mohsExecutionStore, NodeStore mohsNodeStore,
             RateLimitStore mohsRateLimitStore, HandlerRegistry mohsHandlerRegistry,
-            @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine) {
+            @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine, BatchStore mohsBatchStore,
+            BatchCompletionCallbacks mohsBatchCompletionCallbacks) {
         return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsNodeStore, mohsRateLimitStore, mohsHandlerRegistry,
-                mohsClock, mohsEngine);
+                mohsClock, mohsEngine, mohsBatchStore, mohsBatchCompletionCallbacks);
     }
 
     /**

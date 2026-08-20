@@ -1,8 +1,10 @@
 package io.mohs.engine;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.time.Duration;
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -12,7 +14,10 @@ import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.github.robsonkades.uuidv7.UUIDv7;
+
 import io.mohs.core.Batch;
+import io.mohs.core.BatchSnapshot;
 import io.mohs.core.BatchBuilder;
 import io.mohs.core.ExecutionQuery;
 import io.mohs.core.JobSnapshot;
@@ -27,6 +32,8 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.execution.Priority;
+import io.mohs.core.event.BatchCompleted;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.job.JobRef;
 import io.mohs.core.resource.RateLimit;
@@ -61,15 +68,20 @@ public final class MohsImpl implements Mohs {
     private final HandlerRegistry handlerRegistry;
     private final Clock clock;
     private final MohsLifecycle lifecycle;
+    private final BatchStore batchStore;
+    private final BatchCompletionCallbacks callbacks;
 
     public MohsImpl(JobStore jobStore, ExecutionStore executionStore, NodeStore nodeStore, RateLimitStore rateLimitStore,
-            HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle) {
+            HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle, BatchStore batchStore,
+            BatchCompletionCallbacks callbacks) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
         this.rateLimitStore = Objects.requireNonNull(rateLimitStore, "rateLimitStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
+        this.callbacks = Objects.requireNonNull(callbacks, "callbacks");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
     }
 
@@ -87,11 +99,65 @@ public final class MohsImpl implements Mohs {
         return new ScheduleCommandImpl(jobStore, executionStore, clock, JobKey.of(jobId), payload);
     }
 
+    /**
+     * O total do lote e fixado na criacao, entao os membros sao coletados
+     * ANTES de a linha existir: nao ha estado "ainda aceitando membros" para
+     * rastrear, e o lote nasce ja sabendo quantas conclusoes o fecham
+     * (ADR-0043). Lote vazio e recusado na entrada — ele nunca completaria,
+     * e um lote eternamente aberto e pior que um erro.
+     */
     @Override
     public Batch batch(String name, Consumer<BatchBuilder> configurer) {
-        throw new UnsupportedOperationException(
-                "Mohs.batch is not wired yet — batch completion counters and Batch.onCompletion "
-                        + "still need to be connected through Dispatcher/ExecutionStore.complete");
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(configurer, "configurer");
+        List<Member> members = new ArrayList<>();
+        configurer.accept(new CollectingBatchBuilder(members));
+        if (members.isEmpty()) {
+            throw new IllegalArgumentException("a batch needs at least one member — an empty batch would never complete");
+        }
+
+        String batchId = UUIDv7.randomUUIDString();
+        batchStore.insert(batchId, members.size());
+        Instant now = clock.instant();
+        for (Member member : members) {
+            jobStore.find(member.key()).orElseThrow(() -> new IllegalArgumentException(
+                    "no job registered for id '" + member.key().value() + "' — call Mohs.define first"));
+            executionStore.insert(new Execution(ExecutionId.of(UUIDv7.randomUUIDString()), member.key(),
+                    ExecutionState.ENQUEUED, now, null, List.of(), DEFAULT_ACTOR, Priority.NORMAL, null, batchId),
+                    member.payload());
+        }
+        return new BatchImpl(batchId, callbacks);
+    }
+
+    @Override
+    public Optional<BatchSnapshot> findBatch(String batchId) {
+        Objects.requireNonNull(batchId, "batchId");
+        return batchStore.find(batchId)
+                .map(c -> new BatchSnapshot(c.batchId(), c.total(), c.succeeded(), c.failed()));
+    }
+
+    private record Member(JobKey key, Object payload) {
+    }
+
+    /** Acumula os membros; nada e persistido enquanto o total nao esta fechado. */
+    private record CollectingBatchBuilder(List<Member> members) implements BatchBuilder {
+
+        @Override
+        public <T> void add(JobRef<T> ref, T payload) {
+            Objects.requireNonNull(ref, "ref");
+            Objects.requireNonNull(payload, "payload");
+            members.add(new Member(ref.key(), payload));
+        }
+    }
+
+    /** O recibo: {@code batchId} ja e duravel quando isto volta (ADR-0003, clausula 2). */
+    private record BatchImpl(String batchId, BatchCompletionCallbacks callbacks) implements Batch {
+
+        @Override
+        public Batch onCompletion(Consumer<BatchCompleted> callback) {
+            callbacks.register(batchId, callback);
+            return this;
+        }
     }
 
     @Override

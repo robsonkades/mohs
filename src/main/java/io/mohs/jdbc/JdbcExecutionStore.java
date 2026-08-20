@@ -123,14 +123,15 @@ public final class JdbcExecutionStore implements ExecutionStore {
                 .addValue("actor", execution.actor())
                 .addValue("priority", execution.priority().value())
                 .addValue("idempotencyKey", execution.idempotencyKey())
+                .addValue("batchId", execution.batchId())
                 .addValue("payload", payloadJson)
                 .addValue("payloadType", payload.getClass().getName())
                 .addValue("createdAt", JdbcTimestamps.toUtcTimestamp(clock.instant()));
 
         jdbcTemplate.update("""
                 INSERT INTO mohs_executions (
-                    id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key, payload, payload_type, created_at)
-                VALUES (:id, :jobKey, :state, :scheduledAt, :firedAt, :actor, :priority, :idempotencyKey, :payload, :payloadType, :createdAt)
+                    id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key, batch_id, payload, payload_type, created_at)
+                VALUES (:id, :jobKey, :state, :scheduledAt, :firedAt, :actor, :priority, :idempotencyKey, :batchId, :payload, :payloadType, :createdAt)
                 """, params);
 
         return execution;

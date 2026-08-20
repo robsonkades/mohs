@@ -161,6 +161,13 @@ public interface Mohs {
     Optional<Execution> findExecution(ExecutionId executionId);
 
     /**
+     * O lote pelo id devolvido por {@link #batch}. Leitura barata e plana no
+     * tamanho do lote: o contador e mantido, nao agregado dos membros
+     * (ADR-0043).
+     */
+    Optional<BatchSnapshot> findBatch(String batchId);
+
+    /**
      * A visão agregada do dashboard ({@code GET /overview}): contagens do
      * trabalho vivo e a vazão terminal da última {@code throughputWindow}
      * — ver {@link OverviewSnapshot} pro contrato (e pro porquê de não

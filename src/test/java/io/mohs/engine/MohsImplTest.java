@@ -8,6 +8,9 @@ import java.util.Map;
 import java.util.Optional;
 
 import org.junit.jupiter.api.BeforeEach;
+import io.mohs.core.Batch;
+import io.mohs.core.job.JobRef;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 
 import io.mohs.core.EngineState;
@@ -63,6 +66,7 @@ class MohsImplTest {
     private NodeStore nodeStore;
     private RateLimitStore rateLimitStore;
     private HandlerRegistry handlerRegistry;
+    private BatchStore batchStore;
     private MohsImpl mohs;
 
     @BeforeEach
@@ -73,7 +77,8 @@ class MohsImplTest {
         nodeStore = mock(NodeStore.class);
         rateLimitStore = mock(RateLimitStore.class);
         handlerRegistry = new HandlerRegistry();
-        mohs = new MohsImpl(jobStore, executionStore, nodeStore, rateLimitStore, handlerRegistry, clock, mock(MohsLifecycle.class));
+        batchStore = mock(BatchStore.class);
+        mohs = new MohsImpl(jobStore, executionStore, nodeStore, rateLimitStore, handlerRegistry, clock, mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks());
     }
 
     private static JobDefinition onDemand(String key) {
@@ -216,7 +221,7 @@ class MohsImplTest {
     void cancelOfAPendingSchedulerOccurrenceRearmsTheAfterFinishChain() {
         JobStore jobStoreMock = mock(JobStore.class);
         MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, nodeStore, rateLimitStore, handlerRegistry,
-                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class));
+                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks());
         ExecutionId id = ExecutionId.of("exec-1");
         JobDefinition afterFinish = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
         when(jobStoreMock.find(JobKey.of("poll"))).thenReturn(Optional.of(new StoredJob(afterFinish, false, false, 0, null)));
@@ -234,7 +239,7 @@ class MohsImplTest {
     void cancelOfAPendingManualExecutionDoesNotTouchTheChain() {
         JobStore jobStoreMock = mock(JobStore.class);
         MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, executionStore, nodeStore, rateLimitStore, handlerRegistry,
-                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class));
+                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks());
         ExecutionId id = ExecutionId.of("exec-1");
         when(executionStore.cancelIfPending(id)).thenReturn(true);
         when(executionStore.find(id)).thenReturn(Optional.of(
@@ -426,5 +431,41 @@ class MohsImplTest {
         assertThat(overview.throughputWindow()).isEqualTo(Duration.ofSeconds(60));
         assertThat(overview.succeededInWindow()).isEqualTo(41L);
         assertThat(overview.failedInWindow()).isZero();
+    }
+
+    /**
+     * O total nasce fechado: os membros sao coletados antes de a linha do lote
+     * existir, entao o lote ja sabe quantas conclusoes o fecham (ADR-0043).
+     * Cada execucao sai carregando o batchId — sem isso a conclusao nao teria
+     * como contar o membro.
+     */
+    @Test
+    void batchFixesTheTotalUpFrontAndStampsEveryMemberWithTheBatchId() {
+        jobStore.upsert(onDemand("welcome-email"));
+        JobRef<String> ref = JobRef.of("welcome-email", String.class);
+
+        Batch batch = mohs.batch("nightly", members -> {
+            members.add(ref, "ana");
+            members.add(ref, "bob");
+        });
+
+        verify(batchStore).insert(batch.batchId(), 2);
+        ArgumentCaptor<Execution> inserted = ArgumentCaptor.forClass(Execution.class);
+        verify(executionStore, times(2)).insert(inserted.capture(), any());
+        assertThat(inserted.getAllValues()).allSatisfy(execution -> {
+            assertThat(execution.batchId()).isEqualTo(batch.batchId());
+            assertThat(execution.state()).isEqualTo(ExecutionState.ENQUEUED);
+        });
+    }
+
+    /** Lote vazio nunca completaria — recusado na entrada, e nada e persistido. */
+    @Test
+    void anEmptyBatchIsRefusedBeforeAnythingIsWritten() {
+        assertThatThrownBy(() -> mohs.batch("nightly", members -> { }))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("at least one member");
+
+        verifyNoInteractions(batchStore);
+        verifyNoInteractions(executionStore);
     }
 }

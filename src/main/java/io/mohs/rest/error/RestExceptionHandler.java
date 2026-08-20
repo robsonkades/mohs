@@ -56,6 +56,13 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
         return problem;
     }
 
+    @ExceptionHandler(BatchNotFoundException.class)
+    public ProblemDetail handleBatchNotFound(BatchNotFoundException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        problem.setTitle("Batch not found");
+        return problem;
+    }
+
     @ExceptionHandler(ExecutionNotFoundException.class)
     public ProblemDetail handleExecutionNotFound(ExecutionNotFoundException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
