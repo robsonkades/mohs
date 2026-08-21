@@ -114,6 +114,10 @@ For any task that changes code:
   its measured trigger (companion to ADR-0042).
 - `docs/BATCH-ARCHITECTURE-REVIEW.md` — deferred batch decisions, each with its
   trigger (companion to ADR-0043).
+- `docs/DASHBOARD-STREAM-REVIEW.md` — what stayed open in `/overview/stream`,
+  each with its trigger (companion to ADR-0046, which decided *not* to change
+  it). Read it before proposing any stream optimization: two were already
+  implemented and reverted, and nobody has measured the endpoint yet.
 - `docs/CLAIM-GRANULARITY.md` — open exploration: should the claim stay global,
   or split per runner? Not a decision; carries the number that would settle it.
 - `PLAN.md` — current refactor steps; one step per commit/PR.

@@ -54,7 +54,7 @@ function seriesWithWork(samples: ActivitySample[]): readonly ExecutionState[] {
  * recent rows (`ORDER BY id DESC`, capped by the page size), not a time window — the span those
  * 50 cover shrinks as throughput rises, so bucketing them would draw a fall in activity that is
  * really the cap sliding. The `overview` frame carries counts the server computed over the whole
- * table, on a fixed 2s cadence, which is what a time axis needs.
+ * table, on a fixed 2s cadence, carrying the instant it read — which is what a time axis needs.
  */
 export function ExecutionActivityChart() {
   const samples = useExecutionActivity();
@@ -86,8 +86,15 @@ export function ExecutionActivityChart() {
           ))}
         </defs>
         <CartesianGrid vertical={false} />
+        {/* Eixo de TEMPO, não de categoria: sem `type="number"` o recharts espaça os pontos
+            igualmente por índice, e um stall do stream some: as leituras antes e depois do buraco
+            ficariam lado a lado, com a mesma largura de dois pontos consecutivos, escondendo
+            exatamente o que vale a pena ver. */}
         <XAxis
           dataKey="at"
+          type="number"
+          scale="time"
+          domain={["dataMin", "dataMax"]}
           tickLine={false}
           axisLine={false}
           tickMargin={8}

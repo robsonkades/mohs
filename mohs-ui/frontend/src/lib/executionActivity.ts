@@ -11,11 +11,21 @@ export interface ActivitySample {
 }
 
 /**
- * ~5 minutes at the stream's 2s cadence. A cap, not a duration: if the stream stalls, the buffer
- * holds older samples rather than silently emptying — the gap in the x-axis is the honest picture
- * of a stall, and a chart that erases it would hide exactly the thing worth seeing.
+ * Five minutes of series, stated in time rather than in a count of readings. Both mean the same
+ * thing at the stream's 2s cadence, but only one of them keeps meaning it: a count is a proxy that
+ * quietly changes length whenever the cadence does, and the window is what the chart promises.
+ *
+ * <p>The cutoff is relative to the NEWEST reading, never to the wall clock. If the stream stalls,
+ * nothing new arrives, so nothing ages out: the gap in the x-axis stays as the honest picture of
+ * the stall, which a chart that erased it would hide. A stall longer than the window still clears
+ * the series on the first reading back — the window is the contract, and the gap is what fits
+ * inside it.
  */
-const MAX_SAMPLES = 150;
+const RETENTION_MS = 5 * 60_000;
+
+/** Memory ceiling, not the window — the window is {@link RETENTION_MS}. Reached only if `asOf`
+ * stops advancing the way the cutoff expects; the retention keeps the series near 150 readings. */
+const MAX_SAMPLES = 600;
 
 let samples: ActivitySample[] = [];
 let lastAsOf: string | null = null;
@@ -32,15 +42,27 @@ export function recordActivitySample(asOf: string, counts: Partial<Record<Execut
   }
   lastAsOf = asOf;
 
+  const at = Date.parse(asOf);
+  // The x axis is a time scale now, so `at` is a coordinate, not a label. An unparseable stamp
+  // (NaN) or one that moved backwards (the server's Clock may step back on an NTP resync — see
+  // REST-API-DESIGN on `asOf` informing freshness, not ordering) would either blank the series
+  // through the cutoff or draw the line zig-zagging into the past.
+  const newest = samples.at(-1);
+  if (!Number.isFinite(at) || (newest !== undefined && at <= newest.at)) {
+    return;
+  }
+
   const sample: ActivitySample = {
-    at: Date.parse(asOf),
+    at,
     ENQUEUED: counts.ENQUEUED ?? 0,
     RUNNING: counts.RUNNING ?? 0,
     RETRY_SCHEDULED: counts.RETRY_SCHEDULED ?? 0,
   };
 
-  // Nova array em vez de push: useSyncExternalStore compara o snapshot por identidade.
-  samples = [...samples, sample].slice(-MAX_SAMPLES);
+  // The retention predicate applies to what is already held, never to what is coming in — the new
+  // reading always enters. Fresh array rather than push: useSyncExternalStore compares by identity.
+  const kept = samples.filter((held) => sample.at - held.at <= RETENTION_MS);
+  samples = [...kept, sample].slice(-MAX_SAMPLES);
   listeners.forEach((listener) => listener());
 }
 
