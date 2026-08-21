@@ -1,0 +1,278 @@
+@import "tailwindcss";
+
+/* Self-hosted fonts (Fontsource) — the UI ships inside the jar, so no CDN at runtime. */
+@import "@fontsource/geist/400.css";
+@import "@fontsource/geist/500.css";
+@import "@fontsource/geist/600.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+/* shadcn plumbing: open/closed/checked/etc custom variants and animate-in/out
+   utilities that the generated ui/*.tsx components rely on (dialogs, selects,
+   accordions...). Not decorative — required for those components to work. */
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Design tokens — dark-first Mission Control
+   aesthetic. Depth comes from tonal layering (deep page → muted cards) and hard 1px
+   dividers, never soft shadows. Color is reserved for status semantics; the periwinkle
+   primary owns interactions and the lime accent marks high-visibility highlights.
+   The app never leaves dark mode — see `class="dark"` on <html> in index.html — so
+   every token below is defined once, here, rather than duplicated across a
+   light `:root` / `.dark` pair. */
+:root {
+  color-scheme: dark;
+
+  /* Tonal layers */
+  --page: #0b0c0e; /* level 0 — base canvas (surface-deep) */
+  --surface: #16171a; /* level 1 — cards and tables (surface-muted) */
+  --surface-bright: #38393b; /* hover layer inside cards */
+  --ink: #e3e2e5; /* on-surface */
+  --ink-secondary: #c5c5d8; /* on-surface-variant */
+  --ink-muted: #8f8fa1; /* outline */
+  --gridline: #1f2124; /* border-subtle */
+  --baseline: #444655; /* outline-variant */
+  --border-hairline: #1f2124;
+
+  /* Primary interaction color + lime highlight (never used for status) */
+  --brand: #bbc3ff;
+  --brand-strong: #dfe0ff; /* hover on solid primary */
+  --brand-light: #7586ff; /* primary-container — gradients, focus glow */
+  --on-brand: #001a97;
+  /* Named apart from shadcn's `--accent` (menu/sidebar hover fill, see below) —
+     this is a single high-visibility pointer color (e.g. the "now" marker on a
+     chart), a distinct concept that happens to share the word "accent". */
+  --accent-highlight: #b3f71e;
+
+  /* Status palette — the "north star" of the UI, workflow states only */
+  --status-good: #10b981; /* SUCCEEDED */
+  --status-warning: #f59e0b; /* PAUSED */
+  --status-serious: #e3711d; /* saturation / nearing limit */
+  --status-critical: #f43f5e; /* FAILED */
+  --status-info: #3b82f6; /* RUNNING */
+  --status-neutral: #94a3b8; /* WAITING */
+  --status-cancelled: #71717a; /* CANCELLED — dimmed */
+
+  /* shadcn semantic tokens — aliased onto the tones above so every generated
+     ui/*.tsx component themes correctly without introducing new colors. */
+  --background: var(--page);
+  --foreground: var(--ink);
+  --card: var(--surface);
+  --card-foreground: var(--ink);
+  --popover: var(--surface);
+  --popover-foreground: var(--ink);
+  --primary: var(--brand);
+  --primary-foreground: var(--on-brand);
+  --secondary: var(--surface);
+  --secondary-foreground: var(--ink);
+  --muted: var(--surface);
+  --muted-foreground: var(--ink-muted);
+  --accent: var(--surface-bright); /* hover/selected fill in menus, sidebar, etc. */
+  --accent-foreground: var(--ink);
+  --destructive: var(--status-critical);
+  --border: var(--gridline);
+  --input: var(--gridline);
+  --ring: var(--brand-light);
+  --chart-1: var(--status-good);
+  --chart-2: var(--status-info);
+  --chart-3: var(--status-warning);
+  --chart-4: var(--status-critical);
+  --chart-5: var(--status-neutral);
+  --radius: 0.5rem;
+  --sidebar: var(--page);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: var(--on-brand);
+  --sidebar-accent: var(--surface);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: var(--gridline);
+  --sidebar-ring: var(--brand-light);
+}
+
+@theme inline {
+  --color-surface: var(--surface);
+  --color-surface-bright: var(--surface-bright);
+  --color-page: var(--page);
+  --color-ink: var(--ink);
+  --color-ink-secondary: var(--ink-secondary);
+  --color-ink-muted: var(--ink-muted);
+  --color-gridline: var(--gridline);
+  --color-baseline: var(--baseline);
+  --color-hairline: var(--border-hairline);
+
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-light: var(--brand-light);
+  --color-on-brand: var(--on-brand);
+  --color-accent-highlight: var(--accent-highlight);
+
+  --color-good: var(--status-good);
+  --color-warning: var(--status-warning);
+  --color-serious: var(--status-serious);
+  --color-critical: var(--status-critical);
+  --color-info: var(--status-info);
+  --color-neutral: var(--status-neutral);
+  --color-cancelled: var(--status-cancelled);
+
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* Compact scale: body text is 13px to maximize information density. */
+  --text-sm: 13px;
+  --text-sm--line-height: 20px;
+
+  --text-headline: 20px;
+  --text-headline--line-height: 28px;
+  --text-headline--letter-spacing: -0.01em;
+  --text-headline--font-weight: 600;
+
+  --text-display: 30px;
+  --text-display--line-height: 36px;
+  --text-display--letter-spacing: -0.02em;
+  --text-display--font-weight: 600;
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@layer base {
+  * {
+    border-color: var(--border-hairline);
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    font-family: var(--font-sans);
+    /* Reserves the scrollbar's width on every route, so routes that don't need to scroll
+       don't shift the mx-auto-centered shell sideways relative to ones that do. */
+    scrollbar-gutter: stable;
+    @apply font-sans;
+  }
+
+  body {
+    background-color: var(--page);
+    color: var(--ink);
+    @apply bg-background text-foreground;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [role="button"][aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  /* Focus is a glow, not a shadow: 1px primary stroke plus a soft primary halo. */
+  :focus-visible {
+    outline: 1px solid var(--brand);
+    outline-offset: 1px;
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--brand-light) 25%, transparent);
+  }
+}
+
+@layer components {
+  /* "Machine data" label: JetBrains Mono 11px, wide-tracked uppercase. */
+  .mono-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 14px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  /* Slim top-of-viewport bar for route transitions / in-flight requests — see GlobalProgressBar. */
+  .progress-bar-fill {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 30%;
+    border-radius: 9999px;
+    background-image: linear-gradient(90deg, var(--brand-light), var(--brand));
+    animation: progress-slide 1s ease-in-out infinite;
+  }
+
+  @keyframes progress-slide {
+    0% {
+      left: -30%;
+    }
+    100% {
+      left: 100%;
+    }
+  }
+
+  .live-dot {
+    position: relative;
+  }
+
+  .live-dot::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 9999px;
+    background-color: currentColor;
+    opacity: 0.35;
+    animation: live-pulse 1.8s ease-out infinite;
+  }
+
+  @keyframes live-pulse {
+    0% {
+      transform: scale(0.6);
+      opacity: 0.45;
+    }
+    100% {
+      transform: scale(1.8);
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .progress-bar-fill {
+      animation: none;
+    }
+
+    .live-dot::after {
+      animation: none;
+      opacity: 0;
+    }
+  }
+}

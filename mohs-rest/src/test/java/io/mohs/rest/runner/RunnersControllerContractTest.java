@@ -1,0 +1,48 @@
+package io.mohs.rest.runner;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.test.web.servlet.MockMvc;
+
+import io.mohs.rest.ApiPaths;
+import io.mohs.rest.error.RestExceptionHandler;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+/**
+ * Ver Javadoc de {@link io.mohs.rest.job.JobsControllerContractTest} sobre
+ * o {@code @TestConfiguration}/{@code mohs.enabled=false} — mesmo motivo
+ * aqui: {@link io.mohs.rest.RestSliceConfiguration} não escaneia {@code io.mohs.rest} no
+ * component-scan, então controller e {@link RestExceptionHandler} (que
+ * converte a {@code UnsupportedOperationException} do stub em 501) entram
+ * via {@code @Bean} explícito.
+ */
+@WebMvcTest(properties = "mohs.enabled=false")
+class RunnersControllerContractTest {
+
+    @TestConfiguration
+    static class ControllerConfig {
+
+        @Bean
+        RunnersController runnersController() {
+            return new RunnersController();
+        }
+
+        @Bean
+        RestExceptionHandler restExceptionHandler() {
+            return new RestExceptionHandler();
+        }
+    }
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Test
+    void listRoutes() throws Exception {
+        mockMvc.perform(get(ApiPaths.V1 + "/runners")).andExpect(status().isNotImplemented());
+    }
+}

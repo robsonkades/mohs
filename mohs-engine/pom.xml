@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.mohs</groupId>
+        <artifactId>mohs-parent</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>mohs-engine</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Mohs :: Engine</name>
+    <description>Motor: claim, poll/dispatch, misfire, retry, reaper — e as SPIs de store que o backend implementa.</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.mohs</groupId>
+            <artifactId>mohs-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.mohs</groupId>
+            <artifactId>mohs-cron</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.robsonkades</groupId>
+            <artifactId>uuidv7</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <!-- TaskExecutor/SimpleAsyncTaskExecutor (dispatch) e as exceções de acesso a dados
+             que o motor propaga sem conhecer o backend. -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-tx</artifactId>
+        </dependency>
+    </dependencies>
+</project>

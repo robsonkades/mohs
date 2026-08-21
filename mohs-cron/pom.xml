@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.mohs</groupId>
+        <artifactId>mohs-parent</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>mohs-cron</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Mohs :: Cron</name>
+    <description>Parsing e próxima ocorrência de expressões cron seconds-first (L/W/# do Quartz).</description>
+
+    <!-- Sem dependência nenhuma além de JSpecify (herdada): o pacote é vendorizado de
+         org.springframework.scheduling.support e autocontido de propósito — não conhece
+         CronSpec nem JobDefinition (costurar ao vocabulário é trabalho do motor). -->
+</project>

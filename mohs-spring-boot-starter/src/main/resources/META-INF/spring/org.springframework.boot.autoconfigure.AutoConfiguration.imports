@@ -1,0 +1,3 @@
+io.mohs.autoconfigure.MohsAutoConfiguration
+io.mohs.autoconfigure.MohsRestAutoConfiguration
+io.mohs.autoconfigure.MohsUiAutoConfiguration

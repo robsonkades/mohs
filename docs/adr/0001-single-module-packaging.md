@@ -1,5 +1,12 @@
 # ADR-0001: Empacotamento — módulo único, full Spring Boot
 
+> **Nota (2026-08-21):** o **módulo Maven único** foi revogado pela
+> [ADR-0044](0044-multi-module-reactor-and-bom.md): o projeto passou a um
+> reator de nove módulos com BOM. O que permanece decidido aqui é a aposta
+> em full Spring Boot, e os pontos 2 (web opcional, padrão actuator) e 3
+> (test kit publicado junto) — este último agora como artefato próprio,
+> `mohs-test`, em vez de dentro do jar único.
+
 > **Nota (2026-08-13):** o ponto 1 da Decision (fronteira por pacote —
 > `io.mohs` como pacote único) foi revisado pela
 > [ADR-0013](0013-public-api-subpackaging.md): `io.mohs` deixou de ser um

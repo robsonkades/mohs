@@ -53,9 +53,18 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
 
 ## Commands
 <!-- FILL IN during the first session: validate/complete with the repo's real commands -->
-- Full build: `./mvnw clean verify` [adjust if Gradle: `./gradlew build`]
+- Full build: `./mvnw clean verify` (whole reactor, from the root)
 - Test suite: `./mvnw test`
-- Single test: `./mvnw test -Dtest=ClassNameTest`
+- Single module: `./mvnw verify -pl mohs-jdbc` (add `-am` to build what it
+  depends on; `-rf :mohs-rest` resumes the reactor from that module)
+- Backend only, no npm: `./mvnw verify -Dskip.frontend=true` — skips Node,
+  `npm ci` and the bundle. Never build a published jar with it: `mohs-ui`
+  would ship empty. Dashboard dev loop: `npm run dev` in `mohs-ui/frontend`
+  (proxies `/api/mohs` to localhost:8080, SSE included).
+- Single test: `./mvnw test -pl <module> -Dtest=ClassNameTest`
+- `mohs-jdbc`'s Testcontainers tests need Docker up (Rancher Desktop here);
+  without it they error on `Could not initialize class *TestSupport`, which
+  is environment, not regression.
 - JMH benchmarks: [fill in: benchmark module command]
 - Load harness: [fill in: how to run the macro scenario from BASELINE.md]
 - Pinning diagnostics: `-Djdk.tracePinnedThreads` was **removed in JDK 24**
@@ -111,7 +120,12 @@ For any task that changes code:
 
 ## Identity and naming
 - GitHub org: mohs-io · Maven groupId: `io.mohs` · domains: mohs.io / mohs.dev
-- Single artifact: `io.mohs:mohs` — single Maven module, full Spring Boot;
+- Multi-module reactor under `io.mohs:mohs-parent`, full Spring Boot
+  (ADR-0044, which revokes ADR-0001's single artifact): `mohs-cron`,
+  `mohs-core`, `mohs-engine`, `mohs-jdbc`, `mohs-rest`, `mohs-test`,
+  `mohs-ui`, `mohs-spring-boot-starter`, `mohs-demo` (app, never published)
+  and `mohs-bom`. An application declares `mohs-spring-boot-starter`, plus
+  `mohs-ui` if it wants the dashboard.
   REST/dashboard conditional with `<optional>` web deps (actuator pattern).
 - Java packages: `io.mohs.*` — no new code uses the old package (cadrix).
 
@@ -134,8 +148,13 @@ Public API (contracts, M1 — see
   `ExecutionInterceptor`, `@OnExecution`
 - `io.mohs.core.resource` — `MohsRunner`, `RateLimit`, `ExecutionWindow`
 
+Every package below maps 1:1 to a Maven module (ADR-0044); the module name is
+the package with `.` swapped for `-`, except `io.mohs.autoconfigure` →
+`mohs-spring-boot-starter` and the `io.mohs`/`io.mohs.demo` pair →
+`mohs-demo`.
+
 Outside `core` (not job vocabulary):
-- `io.mohs` (root) — only this module's Spring Boot bootstrap
+- `io.mohs` (root) — only `mohs-demo`'s Spring Boot bootstrap
   (`MohsApplication`), not library API
 - `io.mohs.cron` — parsing and next occurrence of seconds-first cron
   expressions (Quartz L/W/#), vendored from
@@ -157,10 +176,24 @@ Internals and infrastructure (M0 skeleton, implementation lands in M3, except
   - `error` — domain exceptions + `RestExceptionHandler` (RFC 7807)
   - `overview`/`job`/`execution`/`batch`/`ratelimit`/`runner`/`node` — one
     controller each (sealed `ScheduleView` lives in `job`)
-- `io.mohs.test` — test kit shipped inside the jar
+- `io.mohs.test` — test kit, its own artifact (`mohs-test`)
+- `mohs-ui` — the dashboard (ADR-0045). No Java at all: a jar carrying only
+  the built React/TypeScript bundle at `classpath:/mohs-ui-webapp`, served
+  under `/mohs-ui` by `MohsUiAutoConfiguration` (in the starter, gated by
+  `@ConditionalOnResource` on the bundle, not by a marker class). It consumes
+  the public REST API — it has no controllers of its own. Prose in that
+  subtree is **English**, deliberately diverging from the rule above: the
+  files came from Cadrix already in English, and one bilingual subtree is
+  worse than either language (ADR-0045 §6).
 
-Public/internal boundaries are executable:
-`src/test/java/io/mohs/ArchitectureTest.java` (ArchUnit).
+Public/internal boundaries are executable twice over: by the reactor itself
+(`mohs-core` has no `mohs-engine` on its compile classpath) and by
+`mohs-demo/src/test/java/io/mohs/ArchitectureTest.java` (ArchUnit) — the one
+module that sees every other on a single classpath. The ADR-0043 source scan
+lives apart, in
+`mohs-jdbc/src/test/java/io/mohs/jdbc/TerminalStateWriteScanTest.java`: it
+reads `src/main/java` of the module it runs in, and the SQL it guards is
+there.
 
 Job flow: due trigger → acquisition (lock/claim) → dispatch to the executor →
 execution → state transition → result persistence.

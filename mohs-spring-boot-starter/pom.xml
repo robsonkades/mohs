@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.mohs</groupId>
+        <artifactId>mohs-parent</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>mohs-spring-boot-starter</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Mohs :: Spring Boot Starter</name>
+    <description>Auto-configuration, properties e validações de boot — o único artefato que o aplicativo declara.</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.mohs</groupId>
+            <artifactId>mohs-engine</artifactId>
+        </dependency>
+        <!-- JDBC não é optional: é a única implementação de store que existe, e sem ela
+             MohsAutoConfiguration não tem o que ligar. -->
+        <dependency>
+            <groupId>io.mohs</groupId>
+            <artifactId>mohs-jdbc</artifactId>
+        </dependency>
+        <!-- REST também não é optional: MohsRestAutoConfiguration referencia os controllers
+             fora de qualquer @ConditionalOnClass deles. O que é opcional é o stack web
+             (declarado optional em mohs-rest), e é ele que a condição de ligar checa. -->
+        <dependency>
+            <groupId>io.mohs</groupId>
+            <artifactId>mohs-rest</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jackson</artifactId>
+        </dependency>
+        <!-- MohsRestAutoConfiguration compila contra DispatcherServlet; optional para que um
+             aplicativo sem web não herde o stack (a auto-config fica inerte). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <dependency>
+            <groupId>io.mohs</groupId>
+            <artifactId>mohs-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Metadata de autocomplete para MohsProperties. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.springframework.boot</groupId>
+                            <artifactId>spring-boot-configuration-processor</artifactId>
+                            <version>${spring-boot.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.mohs</groupId>
+        <artifactId>mohs-parent</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>mohs-rest</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Mohs :: REST</name>
+    <description>API REST operacional (ADR-0010): um subpacote por controller, mais error/ com o handler RFC 7807.</description>
+
+    <dependencies>
+        <!-- Só a API pública: nada daqui enxerga engine ou jdbc (regra de ArchUnit). -->
+        <dependency>
+            <groupId>io.mohs</groupId>
+            <artifactId>mohs-core</artifactId>
+        </dependency>
+        <!-- Optional, padrão actuator (ADR-0001 §2): os controllers viajam sempre no jar, mas
+             quem não quer a API operacional não herda o stack web. MohsRestAutoConfiguration
+             só liga com DispatcherServlet no classpath e mohs.api.enabled=true. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jackson</artifactId>
+        </dependency>
+        <!-- OverviewController importa DurationStyle direto. Chegaria de graça via
+             spring-boot-starter-webmvc, mas aquele é <optional> e pode ser reestruturado
+             pelo Boot: o que se importa, se declara. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot</artifactId>
+        </dependency>
+        <!-- RestExceptionHandler traduz as exceções de acesso a dados que sobem do motor
+             (PessimisticLockingFailureException, QueryTimeoutException) em ProblemDetail. -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-tx</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

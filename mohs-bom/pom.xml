@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        Sem <parent>, ao contrário de todos os outros módulos deste reator — e é o ponto da
+        BOM. Uma BOM é importada com <scope>import</scope>, e o import resolve o modelo
+        EFETIVO: tudo que ela herdasse do mohs-parent viajaria junto, inclusive o import de
+        spring-boot-dependencies que o pai faz para se construir. O aplicativo que importasse
+        mohs-bom antes da própria BOM do Spring Boot teria as versões dele fixadas nas nossas,
+        em silêncio. Uma BOM gerencia os artefatos que ela nomeia e nada mais.
+
+        O preço é a versão repetida abaixo: subir a versão do reator exige tocar aqui também.
+    -->
+    <groupId>io.mohs</groupId>
+    <artifactId>mohs-bom</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>Mohs :: BOM</name>
+    <description>Bill of Materials dos módulos publicáveis do Mohs.</description>
+
+    <!-- Só o que é publicado: mohs-demo é aplicativo de desenvolvimento e não entra. -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.mohs</groupId>
+                <artifactId>mohs-cron</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.mohs</groupId>
+                <artifactId>mohs-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.mohs</groupId>
+                <artifactId>mohs-engine</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.mohs</groupId>
+                <artifactId>mohs-jdbc</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.mohs</groupId>
+                <artifactId>mohs-rest</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.mohs</groupId>
+                <artifactId>mohs-ui</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.mohs</groupId>
+                <artifactId>mohs-test</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.mohs</groupId>
+                <artifactId>mohs-spring-boot-starter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+</project>
