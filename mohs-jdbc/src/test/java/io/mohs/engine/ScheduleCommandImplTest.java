@@ -2,6 +2,7 @@ package io.mohs.engine;
 
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CyclicBarrier;
@@ -27,6 +28,7 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.JobSpec;
 import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
+import io.mohs.core.resource.MohsRunner;
 import io.mohs.jdbc.JdbcExecutionStore;
 import io.mohs.jdbc.JdbcJobStore;
 import io.mohs.jdbc.JdbcNodeStore;
@@ -59,7 +61,7 @@ class ScheduleCommandImplTest {
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
         JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
-        mohs = new MohsImpl(jobStore, executionStore, new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock, mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks());
+        mohs = new MohsImpl(jobStore, executionStore, new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock, mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())));
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));
     }
 

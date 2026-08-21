@@ -120,6 +120,19 @@ o tick pesa. Nesse ponto a decisão é entre: (a) manter o retrato completo e
 aceitar o crescimento; (b) frames por assinatura, o cliente declara o que quer
 ao conectar; (c) só estatísticas no stream e listas por polling da página.
 
+**Estado (2026-08-21) — o gatilho disparou.** Runners é a quinta página, e o
+caso dela foi resolvido por (c): polling próprio de 2s, nada no stream.
+
+A regra que ficou **não** é "listas saem do stream" — é **dado node-local não
+entra em canal cluster-wide**. O stream promete uma visão de cluster
+(`overview`, `jobs`, `nodes` são estado no banco, iguais de qualquer nó);
+ocupação de runner é do processo. Enfiá-la ali entregaria um número cujo
+significado depende de qual nó terminou o handshake do SSE, e o operador não
+tem como saber qual foi. Não é caro — é errado.
+
+Para dado **compartilhado** (Batches, quando `GET /batches` existir) a escolha
+entre (a), (b) e (c) continua aberta, com o mesmo gatilho de antes.
+
 ---
 
 ## O que aprendemos aqui, e vale além do stream

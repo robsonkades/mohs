@@ -312,9 +312,9 @@ public class MohsAutoConfiguration {
     public Mohs mohs(JobStore mohsJobStore, ExecutionStore mohsExecutionStore, NodeStore mohsNodeStore,
             RateLimitStore mohsRateLimitStore, HandlerRegistry mohsHandlerRegistry,
             @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine, BatchStore mohsBatchStore,
-            BatchCompletionCallbacks mohsBatchCompletionCallbacks) {
+            BatchCompletionCallbacks mohsBatchCompletionCallbacks, RunnerRegistry mohsRunnerRegistry) {
         return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsNodeStore, mohsRateLimitStore, mohsHandlerRegistry,
-                mohsClock, mohsEngine, mohsBatchStore, mohsBatchCompletionCallbacks);
+                mohsClock, mohsEngine, mohsBatchStore, mohsBatchCompletionCallbacks, mohsRunnerRegistry);
     }
 
     /**

@@ -25,6 +25,7 @@ import io.mohs.rest.error.RestExceptionHandler;
 import io.mohs.rest.execution.ExecutionsController;
 import io.mohs.rest.job.JobsController;
 import io.mohs.rest.overview.OverviewController;
+import io.mohs.rest.runner.RunnersController;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -84,6 +85,7 @@ class MohsRestAutoConfigurationTest {
             assertThat(context).hasSingleBean(JobsController.class);
             assertThat(context).hasSingleBean(ExecutionsController.class);
             assertThat(context).hasSingleBean(OverviewController.class);
+            assertThat(context).hasSingleBean(RunnersController.class);
             assertThat(context).hasSingleBean(RestExceptionHandler.class);
             assertThat(context).hasSingleBean(ActorResolver.class);
             assertThat(logAppender.list)

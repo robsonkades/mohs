@@ -4,6 +4,7 @@ import { OverviewPage } from "./pages/OverviewPage";
 import { JobsPage, type JobsSearch } from "./pages/JobsPage";
 import { ExecutionsPage, type ExecutionsSearch } from "./pages/ExecutionsPage";
 import { RateLimitsPage } from "./pages/RateLimitsPage";
+import { RunnersPage } from "./pages/RunnersPage";
 import { UI_BASE } from "./lib/api";
 
 function str(value: unknown): string | undefined {
@@ -57,7 +58,13 @@ const rateLimitsRoute = createRoute({
   component: RateLimitsPage,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, jobsRoute, executionsRoute, rateLimitsRoute]);
+const runnersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/runners",
+  component: RunnersPage,
+});
+
+const routeTree = rootRoute.addChildren([indexRoute, jobsRoute, executionsRoute, rateLimitsRoute, runnersRoute]);
 
 export const router = createRouter({ routeTree, basepath: UI_BASE });
 

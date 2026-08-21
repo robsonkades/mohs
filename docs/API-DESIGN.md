@@ -19,6 +19,7 @@ v0.13: enforcement da queue em revisão — proposta contador → contagem deriv
 v0.14: liveness (lease/heartbeat/reaper) especificada como capacidade obrigatória do motor; Watchdog Bound documentado como conceito público, cluster-wide [DECIDIDO]; versionamento de payload decidido — compatibilidade é obrigação do handler [DECIDIDO].
 v0.15: renames `JobQueue`/`ExecutionWindow` aprovados pelo PO [DECIDIDO] — nenhum item aberto restante neste documento.
 v0.16: `JobQueue` removida por completo — `allowConcurrentExecutions`/`maxConcurrentExecutions` cobrem os casos reais observados (ADR-0021) [DECIDIDO].
+v0.17: `Mohs.runners()` acrescentado à fachada (leitura node-local, sem tocar o banco) — e com ele reabre um item em "Decisões em aberto": partir a fachada entre comando e leitura, com gatilho registrado [ABERTO].
 
 ## Princípios de design
 
@@ -639,6 +640,15 @@ O que substitui a disciplina que o multi-módulo dava de graça:
 2. Fora de escopo da v1: DAG/workflows (batch flat + `onCompletion` cobre
    encadeamento simples), API reativa, dialetos cron alternativos, ports
    para outros frameworks (porta fechada pela decisão de empacotamento).
+3. Partir `Mohs` entre comando e leitura. A fachada mistura escrita
+   (`schedule`, `define`, `cancel`, `retry`, `pause`…) com leitura (`jobs`,
+   `nodes`, `runners`, `overview`, `executions`, `findX`). O sinal não é o
+   número de parâmetros do construtor de `MohsImpl` — é coesão: `runners()`
+   foi a primeira leitura que **não toca o banco**, e precisou de Javadoc
+   dizendo que não obedece à física das outras.
+   **Gatilho:** o primeiro consumidor que precisa só do lado de leitura
+   (dashboard embarcado, exporter de métricas, endpoint de actuator). Até lá,
+   dividir seria quebrar API pública por estética.
 
 **Decidido (12/08/2026):**
 - Serialização e versionamento de payload — compatibilidade entre deploys é
@@ -647,4 +657,4 @@ O que substitui a disciplina que o multi-módulo dava de graça:
   Executions já persistidas contra um handler cujo payload mudou de forma.
   Quebra de contrato do lado da aplicação não tem rede de segurança do motor.
 - Renames `JobQueue` (← `Queue`) e `ExecutionWindow` (← `Calendar`) —
-  aprovados pelo PO. Nenhum item pendente restante neste documento.
+  aprovados pelo PO.

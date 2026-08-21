@@ -1,5 +1,6 @@
 package io.mohs.engine;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.CountDownLatch;
@@ -8,16 +9,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.core.task.TaskRejectedException;
 
+import io.mohs.core.RunnerSnapshot;
 import io.mohs.core.resource.MohsRunner;
+import io.mohs.core.resource.RunnerMode;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.assertj.core.api.Assertions.tuple;
 
 class RunnerRegistryTest {
 
@@ -27,6 +32,11 @@ class RunnerRegistryTest {
 
     private static MohsRunner cpu(String name) {
         return MohsRunner.cpu(name).coreSize(1).maxSize(1).build();
+    }
+
+    /** Executor de enfeite pros testes de ciclo de vida: quem importa ali é o {@code shutdown}, nunca a contagem. */
+    private static RunnerRegistry.CountingExecutor countingExecutor() {
+        return new RunnerRegistry.CountingExecutor(new SimpleAsyncTaskExecutor());
     }
 
     @Test
@@ -123,7 +133,7 @@ class RunnerRegistryTest {
         RuntimeException boom = new IllegalStateException("cpu pool failed to initialize");
         Function<MohsRunner, RunnerRegistry.LiveRunner> factory = spec -> {
             if (spec.name().equals("io")) {
-                return new RunnerRegistry.LiveRunner(new SimpleAsyncTaskExecutor(), () -> ioShutDown.set(true));
+                return new RunnerRegistry.LiveRunner(spec, countingExecutor(), () -> ioShutDown.set(true));
             }
             throw boom;
         };
@@ -139,9 +149,9 @@ class RunnerRegistryTest {
         RuntimeException ioFailure = new IllegalStateException("io refused to die");
         RuntimeException cpuFailure = new IllegalStateException("cpu refused to die");
         Function<MohsRunner, RunnerRegistry.LiveRunner> factory = spec -> switch (spec.name()) {
-            case "io" -> new RunnerRegistry.LiveRunner(new SimpleAsyncTaskExecutor(), () -> { throw ioFailure; });
-            case "cpu" -> new RunnerRegistry.LiveRunner(new SimpleAsyncTaskExecutor(), () -> { throw cpuFailure; });
-            default -> new RunnerRegistry.LiveRunner(new SimpleAsyncTaskExecutor(), () -> s3ShutDown.set(true));
+            case "io" -> new RunnerRegistry.LiveRunner(spec, countingExecutor(), () -> { throw ioFailure; });
+            case "cpu" -> new RunnerRegistry.LiveRunner(spec, countingExecutor(), () -> { throw cpuFailure; });
+            default -> new RunnerRegistry.LiveRunner(spec, countingExecutor(), () -> s3ShutDown.set(true));
         };
         RunnerRegistry registry = new RunnerRegistry(List.of(io("io"), cpu("cpu"), io("s3")), factory);
 
@@ -150,6 +160,130 @@ class RunnerRegistryTest {
         assertThat(thrown).isIn(ioFailure, cpuFailure);
         assertThat(thrown.getSuppressed()).containsExactly(thrown == ioFailure ? cpuFailure : ioFailure);
         assertThat(s3ShutDown).isTrue();
+    }
+
+    /** O que o {@code GET /runners} promete: nome, modo e teto declarado, por runner, em ordem estável. */
+    @Test
+    void snapshotsReportTheDeclaredModeAndCeiling() {
+        try (RunnerRegistry registry = new RunnerRegistry(
+                List.of(MohsRunner.io("io").maxConcurrent(200).build(), MohsRunner.cpu("crunch").coreSize(2).maxSize(8).build()))) {
+
+            assertThat(registry.snapshots())
+                    .extracting(RunnerSnapshot::name, RunnerSnapshot::mode, RunnerSnapshot::max, RunnerSnapshot::running)
+                    .containsExactly(
+                            tuple("crunch", RunnerMode.CPU, 8, 0),
+                            tuple("io", RunnerMode.IO, 200, 0));
+        }
+    }
+
+    /**
+     * A ocupação sobe enquanto a task roda e volta quando ela termina — a
+     * task segura o contador aberto num latch, senão o teste mediria o
+     * depois e passaria com o contador quebrado.
+     */
+    @Test
+    void runningCountsWhatIsInFlightAndReleasesOnCompletion() throws InterruptedException {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (RunnerRegistry registry = new RunnerRegistry(List.of(io("io")))) {
+            registry.resolve("io").execute(() -> {
+                started.countDown();
+                await(release);
+            });
+
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(runningOf(registry, "io")).isEqualTo(1);
+
+            release.countDown();
+            Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> runningOf(registry, "io") == 0);
+        }
+    }
+
+    /** Handler que estoura tem que devolver a vaga: sem isso o contador só sobe e o número vira ficção. */
+    @Test
+    void runningIsReleasedWhenTheTaskThrows() throws InterruptedException {
+        CountDownLatch ran = new CountDownLatch(1);
+        try (RunnerRegistry registry = new RunnerRegistry(List.of(io("io")))) {
+            registry.resolve("io").execute(() -> {
+                ran.countDown();
+                throw new IllegalStateException("handler blew up");
+            });
+
+            assertThat(ran.await(5, TimeUnit.SECONDS)).isTrue();
+            Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> runningOf(registry, "io") == 0);
+        }
+    }
+
+    /**
+     * A parte do contrato que só existia em prosa: no modo CPU, {@code running}
+     * inclui quem espera na fila. Medir só o que ocupa thread esconderia o
+     * acúmulo — que é exatamente o que o operador precisa ver quando o pool
+     * não vaza mas também não anda.
+     */
+    @Test
+    void cpuRunningIncludesWhatIsWaitingInTheQueue() throws InterruptedException {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MohsRunner singleThreaded = MohsRunner.cpu("crunch").coreSize(1).maxSize(1).queueCapacity(2).build();
+
+        try (RunnerRegistry registry = new RunnerRegistry(List.of(io("io"), singleThreaded))) {
+            AsyncTaskExecutor crunch = registry.resolve("crunch");
+            crunch.execute(() -> {
+                started.countDown();
+                await(release);
+            });
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+            crunch.execute(() -> await(release));
+            crunch.execute(() -> await(release));
+
+            // uma na thread, duas na fila
+            assertThat(runningOf(registry, "crunch")).isEqualTo(3);
+
+            release.countDown();
+            Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> runningOf(registry, "crunch") == 0);
+        }
+    }
+
+    /** Submissão recusada não ocupou nada: sem devolver a vaga, a fila cheia empurraria o contador para cima de vez. */
+    @Test
+    void aRejectedSubmissionDoesNotCount() throws InterruptedException {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        MohsRunner singleThreaded = MohsRunner.cpu("crunch").coreSize(1).maxSize(1).queueCapacity(1).build();
+
+        try (RunnerRegistry registry = new RunnerRegistry(List.of(io("io"), singleThreaded))) {
+            AsyncTaskExecutor crunch = registry.resolve("crunch");
+            crunch.execute(() -> {
+                started.countDown();
+                await(release);
+            });
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+            crunch.execute(() -> await(release));
+
+            assertThatThrownBy(() -> crunch.execute(() -> { })).isInstanceOf(TaskRejectedException.class);
+
+            assertThat(runningOf(registry, "crunch")).isEqualTo(2);
+            release.countDown();
+        }
+    }
+
+    private static int runningOf(RunnerRegistry registry, String name) {
+        return registry.snapshots().stream()
+                .filter(snapshot -> snapshot.name().equals(name))
+                .findFirst()
+                .orElseThrow()
+                .running();
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("latch never released");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
     }
 
     private static String threadNameOf(AsyncTaskExecutor executor) throws InterruptedException {

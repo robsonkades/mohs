@@ -2,6 +2,7 @@ package io.mohs.rest.runner;
 
 import java.util.Objects;
 
+import io.mohs.core.RunnerSnapshot;
 import io.mohs.core.resource.RunnerMode;
 
 /**
@@ -18,5 +19,10 @@ public record RunnerResponse(String name, RunnerMode mode, int max, int running)
     public RunnerResponse {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(mode, "mode");
+    }
+
+    public static RunnerResponse from(RunnerSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        return new RunnerResponse(snapshot.name(), snapshot.mode(), snapshot.max(), snapshot.running());
     }
 }

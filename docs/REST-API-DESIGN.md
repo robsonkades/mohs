@@ -62,7 +62,7 @@ boot [DECIDIDO].
 | `POST /executions/{id}/cancel` | Cancelamento cooperativo |
 | `POST /executions/{id}/retry` | Retry manual de uma execução `FAILED` (ADR-0033): a MESMA linha rearma como `RETRY_SCHEDULED` devida agora e disputa o claim normal — bypassa a política exaurida. Sem `Idempotency-Key` (retry não deduplica; a idempotência é o CAS). → 202; estado ≠ `FAILED` → 409 |
 | `GET /rate-limits` · `PATCH /rate-limits/{name}` | Estado (`max`, `window`, `available`) e ajuste runtime de vazão, cluster-wide (ADR-0042). PATCH em limite não declarado → 404: declarar é ato de boot |
-| `GET /runners` | Visão por nó: modo, max, em execução (node-local por natureza) |
+| `GET /runners` | Visão por nó: modo, max e ocupação (node-local por natureza). `running` conta o que foi ACEITO e não concluiu — no modo CPU inclui a fila, e por isso pode passar de `max`: o acúmulo é o que o operador precisa ver |
 | `GET /nodes` | Visão de cluster: nodes com heartbeat recente, last-seen |
 | `GET /batches/{id}` | Contadores agregados e estado do lote |
 
@@ -168,8 +168,12 @@ existir. O frame
 `executions` é o mesmo sumário das listas (sem `attempts`, v0.9) e usa a
 mesma primeira página do `GET /executions`. Vocabulário: `nodes` é a visão de cluster (não
 "workers" — vocabulário travado no API-DESIGN); `queues` não existe
-(ADR-0021 removeu `JobQueue` por completo); `runners` entra no stream
-quando ganhar leitura na fachada (hoje é contrato M2 sem implementação).
+(ADR-0021 removeu `JobQueue` por completo); `runners` **não** entra no
+stream, mesmo tendo ganhado leitura na fachada (ADR-0045, nota de
+2026-08-21): ocupação de runner é node-local, e um canal que promete visão
+de cluster entregaria um número cujo significado depende de qual nó atendeu
+o SSE. A página faz o próprio polling — ver
+`docs/DASHBOARD-STREAM-REVIEW.md` §5.
 SSE `/executions/stream` sobre a tabela durável de eventos continua no
 roadmap, inalterado.
 

@@ -30,6 +30,15 @@ Módulo **`mohs-ui`**: um jar que contém apenas o bundle do dashboard em
    Rate Limits. Queues e Calendars não existem no Mohs; `/runners` ainda é
    stub 501; `GET /batches` não existe (só busca por id). Página sem dado é
    dívida, não entrega — as que faltam entram quando o endpoint existir.
+
+   > **Nota (2026-08-21):** `GET /runners` foi implementado e a quinta página
+   > entrou, exatamente por essa regra. É a primeira com **cadência própria**:
+   > em vez de ser empurrada pelo stream (Overview/Jobs/Executions) ou buscada
+   > sob demanda (Rate Limits), ela faz polling de 2s enquanto está aberta.
+   > O motivo não é custo — é significado: ocupação de runner é node-local, e
+   > um canal que promete visão de cluster entregaria um número que depende de
+   > qual nó atendeu o SSE. Ver `docs/DASHBOARD-STREAM-REVIEW.md` §5.
+   > `GET /batches` continua inexistente, e a página de Batches com ele.
 3. **O gate é o bundle, não uma classe.** `MohsUiAutoConfiguration` mora no
    starter e liga por `@ConditionalOnResource` sobre o `index.html`. O starter
    **não** depende de `mohs-ui`: quem quer o dashboard declara

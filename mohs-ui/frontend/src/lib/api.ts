@@ -8,6 +8,7 @@ import type {
   NodeResponse,
   OverviewResponse,
   RateLimitResponse,
+  RunnerResponse,
   RuntimePatchResponse,
   ScheduleView,
 } from "../types/api";
@@ -162,6 +163,13 @@ export function patchRateLimit(name: string, body: { max: number; window: string
     method: "PATCH",
     body,
   });
+}
+
+// ---- Runners -----------------------------------------------------------------------------
+
+/** Node-local: describes the process that answered, not the cluster. */
+export function fetchRunners() {
+  return request<RunnerResponse[]>("/runners");
 }
 
 // ---- Nodes -------------------------------------------------------------------------------

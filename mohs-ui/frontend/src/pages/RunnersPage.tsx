@@ -1,0 +1,129 @@
+import { useQuery } from "@tanstack/react-query";
+import { fetchNodes, fetchRunners } from "../lib/api";
+import { queryKeys } from "../lib/queryKeys";
+import { EmptyState, ErrorState, Spinner } from "../components/Feedback";
+import { Panel } from "../components/Panel";
+import { StatCard } from "../components/StatCard";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { IconServer } from "../components/icons";
+import type { RunnerResponse } from "../types/api";
+
+/**
+ * How busy a runner is right now, as a percentage of its declared ceiling. Clamped because
+ * `running` counts what was accepted: a CPU runner with a queue can legitimately hold more than
+ * `max` in flight, and a bar past 100% would read as a bug rather than as a backlog.
+ */
+function loadPercent(runner: RunnerResponse): number {
+  if (runner.max <= 0) {
+    return 0;
+  }
+  return Math.min(100, Math.max(0, (runner.running / runner.max) * 100));
+}
+
+/** Past the ceiling the bar is pinned at 100%, so saturation has to be said in another channel — otherwise 8/8 and 503/8 draw the same picture, and the queue we chose to count becomes invisible. */
+const OVERLOADED = "bg-destructive/20 [&>[data-slot=progress-indicator]]:bg-destructive";
+
+function RunnerRow({ runner }: { runner: RunnerResponse }) {
+  // Fila é conceito do modo CPU. No IO não há nada entre aceitar e executar — se running
+  // passar de max ali, é a janela entre o incremento do contador e o semáforo, não acúmulo:
+  // dizer "waiting in the queue" seria inventar um sintoma.
+  const queued = runner.mode === "CPU" ? Math.max(0, runner.running - runner.max) : 0;
+
+  return (
+    <li className="flex flex-col gap-2 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="truncate font-medium">{runner.name}</span>
+          <Badge variant="outline" className="mono-label shrink-0">
+            {runner.mode}
+          </Badge>
+        </div>
+        <span className="shrink-0 font-mono text-sm tabular-nums">
+          {runner.running}
+          <span className="text-muted-foreground"> / {runner.max}</span>
+        </span>
+      </div>
+      <Progress value={loadPercent(runner)} className={queued > 0 ? OVERLOADED : undefined} />
+      {queued > 0 ? (
+        <p className="text-xs font-medium text-destructive">
+          {queued} waiting in the queue — this runner is accepting faster than it drains.
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          {runner.mode === "IO"
+            ? "Virtual threads behind a semaphore — past the cap, work is rejected, not queued."
+            : "Platform thread pool — running includes what is waiting in the queue."}
+        </p>
+      )}
+    </li>
+  );
+}
+
+/**
+ * The runners of the node that answered this request — not of the cluster.
+ *
+ * <p>A runner is a thread pool, and a thread pool lives in a process: two instances of the same
+ * runner on different nodes have independent occupancy, and there is no sum that would mean
+ * anything. Behind a load balancer, two refreshes can legitimately report different numbers. The
+ * page says so out loud, because every other screen here shows cluster-wide state and the reader
+ * has no reason to assume this one is different.
+ */
+export function RunnersPage() {
+  // Polled by the page instead of pushed by the stream, and the reason is meaning, not cost:
+  // `/overview/stream` promises a cluster-wide picture, and runner occupancy belongs to one
+  // process. In that channel the number's meaning would depend on which node answered the SSE
+  // handshake, and the reader has no way to know which. See docs/DASHBOARD-STREAM-REVIEW.md §5.
+  const runners = useQuery({
+    queryKey: queryKeys.runners(),
+    queryFn: fetchRunners,
+    refetchInterval: 2_000,
+  });
+  const nodes = useQuery({ queryKey: queryKeys.nodes(), queryFn: fetchNodes });
+
+  const data = runners.data ?? [];
+  const totalRunning = data.reduce((sum, runner) => sum + runner.running, 0);
+  const totalCapacity = data.reduce((sum, runner) => sum + runner.max, 0);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <StatCard
+          label="Runners"
+          value={runners.isPending ? "…" : data.length}
+          icon={<IconServer className="h-4 w-4" />}
+          accent
+        />
+        <StatCard label="In flight" value={runners.isPending ? "…" : totalRunning} />
+        <StatCard label="Capacity" value={runners.isPending ? "…" : totalCapacity} />
+        <StatCard
+          label="Nodes in cluster"
+          value={nodes.isPending ? "…" : (nodes.data?.length ?? 0)}
+        />
+      </div>
+
+      <Panel title="Runners on this node">
+        <p className="pb-3 text-xs text-muted-foreground">
+          A runner is a thread pool, so this page describes the single node that served the
+          request — not the cluster. With more than one node behind a load balancer, two refreshes
+          can report different numbers, and that is not a bug.
+        </p>
+        {runners.isPending && <Spinner label="Loading runners" />}
+        {runners.error && <ErrorState message={runners.error.message} onRetry={() => runners.refetch()} />}
+        {runners.data && data.length === 0 && (
+          <EmptyState
+            title="No runners registered"
+            description="Every node declares at least the default 'io' runner, so an empty list means the engine did not start."
+          />
+        )}
+        {data.length > 0 && (
+          <ul className="flex flex-col divide-y">
+            {data.map((runner) => (
+              <RunnerRow key={runner.name} runner={runner} />
+            ))}
+          </ul>
+        )}
+      </Panel>
+    </div>
+  );
+}

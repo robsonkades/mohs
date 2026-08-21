@@ -24,6 +24,7 @@ import io.mohs.rest.node.NodesController;
 import io.mohs.rest.overview.OverviewController;
 import io.mohs.rest.overview.OverviewStreamBroadcaster;
 import io.mohs.rest.ratelimit.RateLimitsController;
+import io.mohs.rest.runner.RunnersController;
 
 /**
  * Liga o contrato REST v1 ({@code io.mohs.rest}) à {@link Mohs} pública —
@@ -46,12 +47,10 @@ import io.mohs.rest.ratelimit.RateLimitsController;
  * alternativa, {@code @ConditionalOnBean(Mohs.class)}, esconderia também
  * misconfiguração genuína que deveria estourar).
  *
- * <p>Só {@code jobs}/{@code executions}/{@code nodes}/{@code overview}/
- * {@code rate-limits} têm {@code @Bean} aqui — os demais controllers
- * (batches, runners) continuam contrato M2 sem implementação por trás; registrá-los
- * antes do tempo só exporia rotas que respondem 501
- * ({@code RestExceptionHandler} traduz o
- * {@code UnsupportedOperationException} dos stubs), sem ganho nenhum.
+ * <p>{@code batches} é o único controller sem {@code @Bean} aqui: continua
+ * contrato M2 sem implementação por trás, e registrá-lo antes do tempo só
+ * exporia uma rota que responde 501 ({@code RestExceptionHandler} traduz a
+ * {@code UnsupportedOperationException} do stub), sem ganho nenhum.
  *
  * <p>{@link ActorResolver} é {@link ConditionalOnMissingBean}: a 1.x
  * troca {@link HeaderActorResolver} (atribuição declarativa, não
@@ -94,6 +93,12 @@ public class MohsRestAutoConfiguration {
     @Bean
     public NodesController mohsNodesController(Mohs mohs) {
         return new NodesController(mohs);
+    }
+
+    /** Node-local por natureza: descreve o processo que atende a requisição, não o cluster (ver {@link io.mohs.core.RunnerSnapshot}). */
+    @Bean
+    public RunnersController mohsRunnersController(Mohs mohs) {
+        return new RunnersController(mohs);
     }
 
     @Bean

@@ -10,13 +10,14 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { IconActivity, IconClock, IconGauge, IconListChecks, IconTicks } from "@/components/icons";
+import { IconActivity, IconClock, IconGauge, IconListChecks, IconServer, IconTicks } from "@/components/icons";
 
 export const NAV_ITEMS = [
   { to: "/", label: "Overview", icon: IconGauge, subtitle: "Cluster health at a glance" },
   { to: "/jobs", label: "Jobs", icon: IconListChecks, subtitle: "Definitions, schedules and state" },
   { to: "/executions", label: "Executions", icon: IconActivity, subtitle: "Every attempt, past and in flight" },
   { to: "/rate-limits", label: "Rate Limits", icon: IconClock, subtitle: "Throughput caps per window" },
+  { to: "/runners", label: "Runners", icon: IconServer, subtitle: "Thread pools on this node" },
 ] as const;
 
 export function activeNavItem(pathname: string) {

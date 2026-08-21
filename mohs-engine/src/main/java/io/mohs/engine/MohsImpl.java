@@ -26,6 +26,7 @@ import io.mohs.core.MohsLifecycle;
 import io.mohs.core.NodeSnapshot;
 import io.mohs.core.OverviewSnapshot;
 import io.mohs.core.RateLimitSnapshot;
+import io.mohs.core.RunnerSnapshot;
 import io.mohs.core.ScheduleCommand;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
@@ -68,10 +69,11 @@ public final class MohsImpl implements Mohs {
     private final MohsLifecycle lifecycle;
     private final BatchStore batchStore;
     private final BatchCompletionCallbacks callbacks;
+    private final RunnerRegistry runnerRegistry;
 
     public MohsImpl(JobStore jobStore, ExecutionStore executionStore, NodeStore nodeStore, RateLimitStore rateLimitStore,
             HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle, BatchStore batchStore,
-            BatchCompletionCallbacks callbacks) {
+            BatchCompletionCallbacks callbacks, RunnerRegistry runnerRegistry) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
@@ -81,6 +83,7 @@ public final class MohsImpl implements Mohs {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
         this.callbacks = Objects.requireNonNull(callbacks, "callbacks");
+        this.runnerRegistry = Objects.requireNonNull(runnerRegistry, "runnerRegistry");
     }
 
     @Override
@@ -387,6 +390,12 @@ public final class MohsImpl implements Mohs {
                         .thenComparing(StoredNode::nodeId))
                 .map(stored -> new NodeSnapshot(stored.nodeId(), stored.state(), stored.lastHeartbeatAt()))
                 .toList();
+    }
+
+    /** Única leitura da fachada que não toca o banco: runner é pool de threads deste processo (ver {@link RunnerSnapshot}). */
+    @Override
+    public List<RunnerSnapshot> runners() {
+        return runnerRegistry.snapshots();
     }
 
     /** Ordenado por nome: a lista é lida por gente, e ordem estável entre chamadas é o mínimo pra comparar dois retratos. */

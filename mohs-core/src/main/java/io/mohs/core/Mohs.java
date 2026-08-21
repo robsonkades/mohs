@@ -111,6 +111,18 @@ public interface Mohs {
     List<NodeSnapshot> nodes();
 
     /**
+     * Os runners DESTE node — configuração declarada e ocupação atual.
+     * Cardinalidade limitada (o que a aplicação declarou no boot), sem
+     * paginação, como {@link #jobs()}.
+     *
+     * <p>Diferente de {@link #nodes()} e {@link #jobs()}, esta leitura não
+     * toca o banco e não enxerga o cluster: pool de threads é do processo.
+     * Quem consome precisa dizer de qual node está falando — ver
+     * {@link RunnerSnapshot}.
+     */
+    List<RunnerSnapshot> runners();
+
+    /**
      * Os limites de vazão declarados e o saldo corrente do balde de cada um
      * (ADR-0042), por nome — cardinalidade limitada, sem paginação, como
      * {@link #jobs()}. Leitura pura: consultar o saldo não consome token.

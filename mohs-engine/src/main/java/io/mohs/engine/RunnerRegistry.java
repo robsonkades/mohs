@@ -1,17 +1,22 @@
 package io.mohs.engine;
 
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import io.mohs.core.RunnerSnapshot;
 import io.mohs.core.resource.MohsRunner;
 
 /**
@@ -27,6 +32,8 @@ import io.mohs.core.resource.MohsRunner;
  */
 public final class RunnerRegistry implements AutoCloseable {
 
+    private static final Logger log = LoggerFactory.getLogger(RunnerRegistry.class);
+
     /** {@code JobDefinition.runner() == null} resolve pra este nome — o único runner que esta classe exige que exista. */
     public static final String DEFAULT_RUNNER = "io";
 
@@ -37,8 +44,17 @@ public final class RunnerRegistry implements AutoCloseable {
      * dele em {@link #build} — {@link #close()} só executa
      * {@code shutdown.run()}, sem re-derivar o tipo concreto por
      * {@code instanceof}: um modo novo de runner muda um único lugar.
+     *
+     * <p>O componente é o {@link CountingExecutor}, e não a interface
+     * {@link AsyncTaskExecutor} — a exceção à regra de referir pela interface
+     * (Effective Java, Item 64) é justamente a capacidade extra do decorator:
+     * a ocupação que {@link #snapshot()} lê.
      */
-    record LiveRunner(AsyncTaskExecutor executor, Runnable shutdown) {
+    record LiveRunner(MohsRunner spec, CountingExecutor executor, Runnable shutdown) {
+
+        RunnerSnapshot snapshot() {
+            return new RunnerSnapshot(spec.name(), spec.mode(), maxOf(spec), executor.running());
+        }
     }
 
     public RunnerRegistry(List<MohsRunner> runners) {
@@ -93,12 +109,105 @@ public final class RunnerRegistry implements AutoCloseable {
         return switch (runner.mode()) {
             case IO -> {
                 SimpleAsyncTaskExecutor io = MohsExecutors.ioBoundExecutor(namePrefix, runner.maxConcurrent());
-                yield new LiveRunner(io, io::close);
+                yield new LiveRunner(runner, new CountingExecutor(io), io::close);
             }
             case CPU -> {
                 ThreadPoolTaskExecutor cpu = MohsExecutors.cpuBoundExecutor(namePrefix, runner.coreSize(), runner.maxSize(), runner.queueCapacity(), runner.keepAlive());
-                yield new LiveRunner(cpu, cpu::destroy);
+                yield new LiveRunner(runner, new CountingExecutor(cpu), cpu::destroy);
             }
+        };
+    }
+
+    /**
+     * Decorator (GoF) que conta a ocupação onde ela acontece, em vez de
+     * perguntá-la ao pool: {@code SimpleAsyncTaskExecutor} (modo IO) não
+     * expõe seu contador de ativos, e derivar de
+     * {@code ThreadPoolTaskExecutor#getActiveCount} só no modo CPU daria dois
+     * significados ao mesmo campo.
+     *
+     * <p>Incrementa ao ACEITAR, decrementa ao concluir — inclusive quando a
+     * task lança, senão um handler que estoura vazaria o contador para cima
+     * até o número virar ficção. Rejeição do executor (fila cheia no modo
+     * CPU) também devolve, no {@code catch}: o {@code execute} não aconteceu.
+     *
+     * <p>Classe nomeada dona do próprio contador, e não uma lambda sobre um
+     * {@code AtomicInteger} de fora: o contador e o executor que o alimenta
+     * só significam alguma coisa juntos — soltos em dois campos, nada impede
+     * um par que não se conversa, e o número mentiria em silêncio.
+     *
+     * <p>Envolve uma vez, na construção, e não a cada {@link #resolve}: quem
+     * chama continua recebendo o mesmo executor de sempre e não precisa saber
+     * que existe contagem.
+     */
+    static final class CountingExecutor implements AsyncTaskExecutor {
+
+        private final AsyncTaskExecutor delegate;
+        private final AtomicInteger running = new AtomicInteger();
+
+        CountingExecutor(AsyncTaskExecutor delegate) {
+            this.delegate = Objects.requireNonNull(delegate, "delegate");
+        }
+
+        @Override
+        public void execute(Runnable task) {
+            running.incrementAndGet();
+            try {
+                delegate.execute(() -> {
+                    try {
+                        task.run();
+                    } finally {
+                        running.decrementAndGet();
+                    }
+                });
+            } catch (RuntimeException notAccepted) {
+                // devolve a vaga só porque o execute NÃO aconteceu. Isto depende
+                // de o executor delegado nunca rodar a task na thread chamadora:
+                // hoje é verdade (AbortPolicy no CPU, rejectTasksWhenLimitReached
+                // no IO — ver MohsExecutors), e com CallerRunsPolicy uma task que
+                // lança decrementaria duas vezes, aqui e no finally acima.
+                running.decrementAndGet();
+                throw notAccepted;
+            }
+        }
+
+        /**
+         * Nunca negativo. Um contador que vaza para baixo só é alcançável por
+         * defeito daqui (decremento duplo), e o {@code RunnerSnapshot} recusa
+         * {@code running < 0} — o que transformaria o bug num 500 do
+         * {@code GET /runners}, derrubando junto os runners que estão sãos e
+         * enchendo o log a cada refresh do dashboard. Instrumento degrada e
+         * grita; nunca vira a causa da indisponibilidade que deveria explicar.
+         */
+        int running() {
+            int current = running.get();
+            if (current < 0) {
+                log.warn("runner occupancy counter went negative ({}) — reporting 0; this is a bug in CountingExecutor", current);
+                return 0;
+            }
+            return current;
+        }
+    }
+
+    /**
+     * O que este node declarou e quanto cada runner carrega agora.
+     *
+     * <p>Ordenado por nome porque {@code executors} é um {@code Map.copyOf}
+     * — sem ordem definida. Uma lista que muda de ordem entre duas leituras
+     * faria a tabela do dashboard dançar a cada atualização; alfabética é
+     * estável e não precisa de explicação.
+     */
+    public List<RunnerSnapshot> snapshots() {
+        return executors.values().stream()
+                .map(LiveRunner::snapshot)
+                .sorted(Comparator.comparing(RunnerSnapshot::name))
+                .toList();
+    }
+
+    /** O teto declarado muda de campo com o modo — {@code maxConcurrent} no IO, {@code maxSize} no CPU (ver {@code RunnerSnapshot}). */
+    private static int maxOf(MohsRunner spec) {
+        return switch (spec.mode()) {
+            case IO -> spec.maxConcurrent();
+            case CPU -> spec.maxSize();
         };
     }
 
