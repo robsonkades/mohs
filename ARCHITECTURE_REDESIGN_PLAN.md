@@ -538,6 +538,10 @@ ORDER BY next_fire_at
 LIMIT :fireLimit
 ```
 
+(E2's multi-shard-ordering lesson was weighed here and does not apply: `mohs_trigger`
+is tiny — one row per armed recurring job — and the Timer tolerates seconds; a sort
+over the due slice is irrelevant at this table's scale.)
+
 then, per trigger, one guarded advance that is **the same statement that inserts the
 occurrences**, in one transaction:
 
@@ -610,7 +614,7 @@ exists as a table rather than as columns.
 WITH picked AS (
     SELECT execution_id, job_key, attempt
       FROM mohs_ready
-     WHERE shard = ANY(:ownedShards)
+     WHERE shard = :shard          -- ONE shard per statement (E2 — see below)
        AND visible_at <= :now
        AND job_key <> ALL(:inadmissible)
      ORDER BY priority, visible_at
@@ -626,6 +630,20 @@ INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, c
 SELECT execution_id, job_key, :nodeId, :epoch, attempt, :now FROM gone
 RETURNING execution_id, job_key;
 ```
+
+**One shard per statement — measured, not stylistic.** The first draft claimed with
+`shard = ANY(:ownedShards)`, and E2 retired it: with a multi-shard predicate the
+`(shard, priority, visible_at)` index cannot supply the `ORDER BY` (PG 16 planner —
+`= ANY` index scans do not preserve order), so every round full-scans the eligible
+set and external-sorts it — 25.5 ms/round against 0.43 ms for the single-shard
+probe on the same seed (EXPLAIN in BASELINE). At the proposed ownership (8/64
+shards, 8 claimers) the `ANY` form measured 1.01× of the current engine before the
+methodology fixes and 1.44× after — above the kill line but **~2× worse than the
+single-shard form in the same cell (2.21×–2.91×)**, so it dies by dominance and
+plan instability, not by the raw criterion. The claimer round-robins its owned
+shards, one statement each; a full lap of empty probes ends the round ("round" =
+lap from here on, §5.7). Priority stays global within a shard — the §8.3 trade
+already accepted — and the starved probe (§5.6) uses this same single-shard shape.
 
 Compare with today's claim, which is a `SELECT … JOIN mohs_job_definitions …
 FOR UPDATE SKIP LOCKED`, then per-candidate window and rate filtering, then a job
@@ -716,12 +734,20 @@ find nothing and cost near zero — the same "cheap negative" shape BASELINE alr
 validated for the reaper. No new column, no new index.
 
 The same probe, with the shard filter dropped, is the cross-shard fallback that
-handler-aware claiming requires (§11.1).
+handler-aware claiming requires (§11.1). Dropping the shard prefix means the index
+serves neither predicate nor order — a full scan, accepted deliberately: the probe
+runs at 1 s cadence off the hot path, and E2's lesson (never pay a sort per claim
+round) does not license "optimizing" this back into an `ANY` — the fallback's cost
+budget is the cadence, not the plan shape.
 
 ### 5.7 Concurrency caps — decision: derive from `mohs_lease`, delete the counter
 
 `mohs_lease` contains exactly the running work, cluster-wide, and is bounded by
-`nodes × dispatch-concurrency` — thousands of rows, not millions. So:
+`nodes × dispatch-concurrency` — thousands of rows, not millions. Since E2 made a
+round a *lap* of single-shard statements (§5.4), "once per round" here means **once
+per lap**, never per statement — headroom and the `:inadmissible` list are computed
+before the lap starts, so the over-admission bound below reads `nodes × 1 lap`,
+still corrected on the next lap, same error direction as before. So:
 
 ```sql
 SELECT job_key, count(*) FROM mohs_lease
@@ -1433,9 +1459,12 @@ ADR-0003 §5 got this right and it does not change. Admission that waits on capa
 turns a scheduler into a synchronous queue and destroys the p99 of the enqueue path.
 
 **Fairness.** Within a limit, permits are handed out in claim order, which is
-priority order within a shard. Across tenants sharing a limit, add
-`ROW_NUMBER() OVER (PARTITION BY tenant_id …)` in the ready scan to interleave —
-deferred until multi-tenancy is actually used (§13), with the trigger stated there.
+priority order within a shard. Across tenants sharing a limit, interleaving is
+deferred until multi-tenancy is actually used (§13), with the trigger stated
+there — and when it lands, E2's lesson applies: a window function
+(`ROW_NUMBER() OVER (PARTITION BY tenant_id …)`) inside the claim scan defeats
+the index order exactly like the retired `ANY` form did. Interleave must come
+from per-tenant admission across rounds, never from a sort in the hot scan.
 
 ---
 
@@ -2234,7 +2263,8 @@ existing sequence.
 ### ADR-F · Shard the ready set into 64 fixed shards
 
 - **Decision.** `shard = hash(execution_id) % 64`; ownership derived from sorted live
-  node ids at heartbeat; claim filters `shard = ANY(:owned)`.
+  node ids at heartbeat; the claim probes **one owned shard per statement**,
+  round-robin (E2 — §5.4); a full empty lap ends the round.
 - **Alternatives.** (a) No sharding — `SKIP LOCKED` convoy from ~4 nodes.
   (b) Claim-per-runner (`CLAIM-GRANULARITY.md` option B) — makes priority meaningless
   *across* runners, which operators notice, and needs a runner count nobody has.
@@ -2376,6 +2406,27 @@ decision, ordered by how expensive it would be to discover the answer late.
 | **E4** | Does token leasing hold the cap exactly, and what is the real under-delivery? | 8 nodes, limit at 50% of demand, 10-minute run; count deliveries per window against `max`; includes idle nodes exercising return-on-idle (§9.4) | **ADR-E** | any window exceeds `max`, or steady-state delivery < 90% of nominal |
 | **E5** | What does group commit cost in duplicates, and gain in throughput? | S1 with `flush ∈ {1, 64, 256, 1024}` × `{1 ms, 5 ms, 20 ms}`; kill −9 at each setting and count duplicates | **ADR-C** (tuning of, not the decision) | duplicates scale worse than linearly with batch size |
 | **E6** | Does the node-lease model detect and recover as fast as per-execution leases? | Chaos: kill −9, `SIGSTOP` (simulated GC pause), network partition to DB, at 80% load | **ADR-B** | recovery p99 > 20 s, or any lost execution |
+
+**Phase 1 results (2026-08-21, BASELINE "E2/E3 — forma do claim e sharding"):**
+E2 ran three rounds (round 3, with post-seed `ANALYZE`, JVM warmup discarded and
+median-of-3 on verdict cells, is the round of record). The literal §5.4 form
+(`shard = ANY(:owned)`, at the proposed 8-of-64-shards ownership) measured 1.01×
+of the current engine before the methodology fixes and 1.44× after — above the
+kill line but **~2× worse than the single-shard round-robin form in the same
+cell**, with a plan that degenerates to full scan + external sort as the shard
+fraction grows (0.47× unsharded; 25.5 ms/round vs 0.43 ms, EXPLAIN captured).
+Retired by dominance and plan instability; §5.4 rewritten. The corrected form
+**passes E2**: 2.21× (unsharded) and 2.91× (64 shards) of the current claim at 8
+claimers, 487k rows/s at 16, payload read included. **E3 validated ADR-F**: the
+unsharded form *degrades* from 8 to 16 claimers (261.7k → 161.7k rows/s,
+medians) while the sharded one keeps scaling (345.1k → 487.3k) — the kill
+criterion ("unsharded already linear to 16") was not met. Version note: the
+`ANY` collapse is PG 16 planner behaviour (PG 17 preserves order for `= ANY`
+scans); the single-shard decision does not depend on it, but re-checking the
+`ANY` arm on PG 17 is an ADR-A line item. The WAL-per-row deltas from this
+harness are checkpoint-noisy and are NOT evidence — WAL per execution remains
+E1's job. E3's declared 32-claimer point was not run: the degradation the
+criterion asks about already shows at 16, which decides it.
 
 **Two things that need measurement but do not gate the design:**
 

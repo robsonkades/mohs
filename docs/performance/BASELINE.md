@@ -739,6 +739,104 @@ durante drain + leitura do caminho em `Dispatcher`/`JdbcExecutionStore`):
    (predicados de índice parcial), `markFired` parcialmente HOT.
    Confirma o mecanismo do Finding B, com números.
 
+## E2/E3 — forma do claim e sharding (Phase 1 do redesign) — 2026-08-21
+
+Experimentos do `ARCHITECTURE_REDESIGN_PLAN.md` §20.3 que decidem a
+ADR-A (§5.4, forma nova do claim) e a ADR-F (§8.3, sharding), ANTES de
+qualquer código de produção. `ClaimShapeExperimentHarness`
+(`mohs-benchmark`), Postgres 16 (Testcontainers), mesmo container para
+todos os braços: braço "current" = `JdbcClaimer` real sobre
+`schema-postgresql.sql` (seed misto ~20% RETRY_SCHEDULED); braços novos
+= `e2_ready`/`e2_lease`/`e2_execution` particionada, claim CTE
+`DELETE … RETURNING` + `INSERT` **incluindo a leitura batched de
+payload** (sem ela a comparação mediria uma query que não existe).
+`batch=100`, backlog 100k por sweep, `ANALYZE` pós-seed, warmup de JVM
+descartado (a rodada sem warmup mediu current@1 com p99 238ms — puro
+C2/buffers frios; corrigido nesta).
+
+### Rodada 1 — a forma literal do plano morreu (atribuição exata)
+
+Sem `ANALYZE` pós-seed e sem warmup de JVM (corrigidos nas rodadas
+seguintes). A forma proposta pelo §5.4 v1 — `shard = ANY(:owned)` com
+ownership 8/64 shards a 8 claimers — mediu 116.178 rows/s = **1,01× o
+engine atual**, abaixo do kill criterion (1,3×); a variante sem shard
+(`ANY` de 1 elemento) mediu 0,37×. Mecanismo, capturado por EXPLAIN:
+com `= ANY` o index scan do PG não fornece a ordem
+`priority, visible_at` — varredura completa dos candidatos + **sort
+externo em disco a cada rodada** (25,5 ms/rodada, `Sort Method:
+external merge Disk: 5496kB`, captura da rodada 1 com ownership 64/64,
+impressa na saída da rodada; o artefato commitado traz a captura da
+rodada 3 — ANY com ownership 8/64, sort em memória, ~4 ms, e a forma
+single-shard, 0,43 ms). A correção: **um shard por statement**
+(igualdade única no prefixo do índice, scan ordenado), round-robin
+sobre os shards do claimer.
+
+### Rodada 2 — metodologia corrigida
+
+Com `ANALYZE` pós-seed e warmup descartado, `any/64 @8` subiu a 1,51× —
+o swing 1,01→1,51 é metodologia (autoanalyze sorteando plano no meio do
+drain + JIT frio), e é por isso que o descarte da forma `ANY` se apoia
+em **dominância e instabilidade de plano**, não no kill criterion bruto.
+Rodada intermediária, não é a de registro.
+
+### Rodada 3 — registro (mediana de 3 nas células com claimers ≥ 8)
+
+| arm | shards | claimers | rows/s | p50 (ms) | p99 (ms) |
+|---|---:|---:|---:|---:|---:|
+| current | — | 1 | 7.144,2 | 13,67 | 49,29 |
+| current | — | 4 | 50.356,3 | 6,81 | 29,73 |
+| current | — | 8 | 118.660,5 | 6,52 | 11,64 |
+| current | — | 16 | 145.007,3 | 10,51 | 22,32 |
+| any (§5.4 v1) | 1 | 8 | 55.950,5 | 14,61 | 29,60 |
+| any (§5.4 v1) | 64 | 8 | 170.350,4 | 4,28 | 8,63 |
+| any (§5.4 v1) | 64 | 16 | 325.780,7 | 4,33 | 14,03 |
+| rr (§5.4 v2) | 1 | 8 | 261.743,9 | 2,62 | 7,86 |
+| rr (§5.4 v2) | 1 | 16 | **161.685,0** ↓ | 8,31 | 29,24 |
+| rr (§5.4 v2) | 64 | 8 | 345.070,3 | 1,90 | 7,58 |
+| rr (§5.4 v2) | 64 | 16 | 487.261,3 | 2,80 | 8,35 |
+
+Tabela completa (1/4 claimers, WAL por linha) no artefato
+`mohs-benchmark/docs/performance/e2-e3-claim-shape-results.txt`; planos
+em `mohs-benchmark/docs/performance/explain-e2-ready-claim.txt`.
+
+### Vereditos
+
+- **E2 (gate da ADR-A): PASSA com a forma corrigida** — rr/current a 8
+  claimers: **2,21×** (sem shard) e **2,91×** (64 shards), critério
+  ≥ 1,3×. A forma `ANY(:owned)` foi descartada por **dominância e
+  instabilidade de plano**, não pelo kill criterion: com o ownership
+  proposto (8/64 shards) ela mediu 1,44× — acima da linha — mas ~2×
+  pior que a forma single-shard na mesma célula, e seu plano degenera
+  para varredura completa + sort externo conforme a fração de shards no
+  predicado cresce (0,47× na variante sem shard, mantida como evidência
+  do mecanismo).
+- **E3 (gate da ADR-F): sharding NÃO é prematuro** — rr sem shard
+  DEGRADA de 8 para 16 claimers (261,7k → 161,7k rows/s, medianas de 3;
+  o convoy do `SKIP LOCKED` num índice só), rr com 64 shards segue
+  escalando (345,1k → 487,3k). O kill criterion ("não-shardado já
+  linear até 16") não se cumpriu.
+
+### Limitações declaradas
+
+- Claim-only: nenhum braço executa/conclui — mede a aquisição, não o
+  fim a fim (esse é o E1).
+- Os deltas de WAL por linha desta bancada são contaminados por FPI de
+  checkpoint (variam 24–685 B/linha entre sweeps idênticos) — **não são
+  evidência**; WAL por execução é entregável do E1.
+- O colapso da forma `ANY` é comportamento do planner do PG 16 (index
+  scan com `= ANY` não preserva ordem; o PG 17 muda isso). A decisão
+  single-shard não depende dele — igualdade no prefixo do índice é a
+  única forma com scan ordenado garantido nos três dialetos Tier 1/2 —
+  mas re-verificar o braço `any` no PG 17 antes de fechar a ADR-A custa
+  uma rodada e fica anotado como item da ADR.
+- Claimers são virtual threads num só processo/host contra um container
+  — mede contenção de banco, não rede entre nós.
+- `rows/s` aqui é vazão de CLAIM (linhas adquiridas), não comparável
+  com os exec/s fim a fim das seções anteriores.
+- Células com 1/4 claimers são rodada única (só as de veredito têm
+  mediana de 3) — os valores de 1 claimer variaram até 2,7× entre
+  rodadas e não sustentam conclusão nenhuma.
+
 ## Como reproduzir
 
 Os harnesses moram em `mohs-benchmark` desde 2026-08-21 (Phase 0 do

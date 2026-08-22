@@ -1,0 +1,28 @@
+=== ClaimShapeExperimentHarness — E2/E3 (batch=100, backlog=100000, mediana de 3 p/ claimers >= 8) ===
+arm       shards  claimers         rows/s    WAL B/row    p50(ms)    p99(ms)
+current        -         1         7144.2        683.5      13.67      49.29
+current        -         4        50356.3        412.3       6.81      29.73
+current        -         8       118660.5         78.5       6.52      11.64
+current        -        16       145007.3         44.5      10.51      22.32
+any            1         1         5483.6        304.0      17.97      40.12
+any            1         4        24461.5        296.2      17.33      36.28
+any            1         8        55950.5        138.8      14.61      29.60
+any            1        16        75728.5        190.1      21.29      41.04
+any           64         1         5428.3        302.6      17.77      46.44
+any           64         4        55944.1        194.5       6.75      20.72
+any           64         8       170350.4         72.8       4.28       8.63
+any           64        16       325780.7         24.3       4.33      14.03
+rr             1         1        60249.2        302.6       1.56       3.40
+rr             1         4       194440.2         75.6       1.82       5.71
+rr             1         8       261743.9         39.6       2.62       7.86
+rr             1        16       161685.0         22.7       8.31      29.24
+rr            64         1        57921.9        370.3       1.52       4.49
+rr            64         4       212283.0         80.3       1.62       4.87
+rr            64         8       345070.3         41.8       1.90       7.58
+rr            64        16       487261.3         24.2       2.80       8.35
+
+E2: any(shard=1) / current @ 8 claimers = 0.47x  (kill criterion: < 1.3x)
+E2: any(shard=64) / current @ 8 claimers = 1.44x  (kill criterion: < 1.3x)
+E2: rr(shard=1) / current @ 8 claimers = 2.21x  (kill criterion: < 1.3x)
+E2: rr(shard=64) / current @ 8 claimers = 2.91x  (kill criterion: < 1.3x)
+E3: rr(64) / rr(1) @ 8 claimers = 1.32x
