@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.mohs</groupId>
+        <artifactId>mohs-parent</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>mohs-benchmark</artifactId>
+
+    <name>Mohs :: Benchmark</name>
+    <!--
+      Bancada de performance (ARCHITECTURE_REDESIGN_PLAN.md, Phase 0): scripts de
+      medição macro (write amplification, drains fim a fim) e, futuramente, os
+      harnesses JMH/EXPLAIN hoje espalhados nos test sources de mohs-jdbc.
+      Nunca publicado — mesmo estatuto do mohs-demo.
+    -->
+    <description>Load, JMH and EXPLAIN harnesses; never published</description>
+
+    <properties>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+</project>

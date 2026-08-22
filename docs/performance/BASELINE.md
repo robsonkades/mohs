@@ -673,6 +673,72 @@ adquire lock; anomalias aceitas documentadas no REST-API-DESIGN v0.7).
 
 Planos completos: `explain-overview-{postgresql,mysql,sqlserver,h2}.txt`.
 
+## Write amplification por execução (Phase 0 do redesign) — 2026-08-21
+
+Os três números que o `ARCHITECTURE_REDESIGN_PLAN.md` exige antes de
+qualquer fase (commits/execução, tuple versions/execução, WAL bytes/
+execução) não existiam. Medidos aqui pela primeira vez, com
+`mohs-benchmark/scripts/write-amplification.ps1`: app no ponto de
+operação da rodada 5 (`poll=50ms`, `batch=1000`, `dispatch=1024`,
+eventos 256, Hikari 300), Postgres 18.4 (`postgres:latest`, Docker),
+drains de 50k semeados por SQL, deltas de `pg_stat_database`/
+`pg_stat_user_tables`/`pg_stat_wal`, janela de calibração idle de 30s
+para quantificar o ruído de fundo (~97 commits/s: polls vazios do tick
++ every-job PT1S + heartbeat — descontado nas leituras por execução).
+
+Contexto que difere da rodada 08-16: a tabela já carregava ~500k
+execuções terminais de rodadas anteriores (lá o histórico era menor) e
+a vazão ficou em 3.006–3.343 exec/s, abaixo dos 4.0–4.2k de referência.
+Os números abaixo são razões por execução — válidas nessa vazão — mas a
+diferença fica registrada: histórico maior + dead tuples (~124k por
+drain) no mesmo heap é exatamente o acoplamento que a Phase 5 do plano
+quer remover.
+
+| Métrica (por execução, engine-side) | Rodada 1 | Rodada 2 |
+|---|---:|---:|
+| commits (`xact_commit`) | 3,965 | 3,915 |
+| tuple versions em `mohs_executions` (ins+upd) | 3,966 | 3,904 |
+| WAL bytes | 3.177 | 2.226 |
+| WAL records | 26,1 | 25,6 |
+| updates em `mohs_executions` | 2,965 | 2,903 |
+| — dos quais HOT | 0,518 | 0,494 |
+
+A rodada 1 pagou 6.116 FPIs (checkpoint recente); a rodada 2 (4 FPIs) é
+a leitura limpa de WAL: **~2,2 KB/execução**. O enqueue não está nos
+números (seed por SQL): +1 commit e +1 tuple version por construção
+(ADR-0003 §4) — total fim a fim ≈ 4,9 commits/execução.
+
+**Atribuição dos ~3,9 commits** (amostragem de `pg_stat_activity`
+durante drain + leitura do caminho em `Dispatcher`/`JdbcExecutionStore`):
+
+- **2,0 são commits síncronos de escrita** — `markFired` (autocommit,
+  round trip próprio; a amostra mais frequente do perfil ativo) e a
+  transação de conclusão (CAS + `INSERT mohs_attempts` + decremento
+  guardado). O claim amortiza a ~1/1000. Consistente com os updates:
+  claim + markFired + CAS ≈ 2,97 upd/execução.
+- **~1,9 são round trips autocommit de leitura** — a carga de attempts
+  para montar o `Execution` do dispatch e cerimônia por transação
+  (`SHOW TRANSACTION ISOLATION LEVEL` do pgJDBC). Não pagam WALWrite,
+  mas pagam latência de rede — alavanca separada da fusão de commits.
+
+**Divergências contra as previsões do plano (§1.1), registradas:**
+
+1. **Tuple versions medidas: ~3,9, não ~9.** O Finding B previa ~5
+   renovações de lease por execução; neste ponto de operação (handler
+   trivial) a renovação é **≈ 0** — `renewOwnedLeases` só renova o que
+   está em voo NO INSTANTE do tick, e o pipeline esvazia entre ticks. O
+   custo de renovação é `in-flight sustentado × ticks/s`: com 1.024
+   jobs lentos ocupando o tanque, o teto aritmético de ~20k updates/s
+   do Finding A segue real — mas é carga-dependente, não constante. A
+   medição com handler lento fica como pendência da Phase 4 (E6).
+2. **Commits reais: ~3,9 engine-side, não 2.** A seção 08-16 dizia "2
+   commits síncronos" — verdade para escrita, mas o caminho paga mais
+   ~1,9 leituras autocommit por execução que ninguém tinha contado. O
+   prêmio do group commit (Phase 3) é maior que o estimado.
+3. **~0,5 update/execução é HOT** — claim e CAS terminal não-HOT
+   (predicados de índice parcial), `markFired` parcialmente HOT.
+   Confirma o mecanismo do Finding B, com números.
+
 ## Como reproduzir
 
 ```

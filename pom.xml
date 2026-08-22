@@ -21,6 +21,7 @@
         <module>mohs-test</module>
         <module>mohs-spring-boot-starter</module>
         <module>mohs-demo</module>
+        <module>mohs-benchmark</module>
         <module>mohs-bom</module>
     </modules>
 
