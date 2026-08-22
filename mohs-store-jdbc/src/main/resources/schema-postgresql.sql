@@ -146,3 +146,81 @@ CREATE TABLE IF NOT EXISTS mohs_nodes (
 -- pelo UPDATE de claim — o invariante de countActiveByState) e segue
 -- elegível.
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_owner ON mohs_executions (node_id) WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL;
+
+-- ─── Phase 5 (ADR-A): o hot path fora da história ────────────────────────────
+-- Quatro perfis de escrita, quatro tabelas (racional completo na migração
+-- V3__table_split.sql — as duas cópias são mantidas idênticas pelo
+-- guardião estrutural de MohsFlywayPostgresTest). Em transição (PLAN.md):
+-- o engine flipa no S5.3; as tabelas antigas caem no S5.4.
+
+CREATE TABLE IF NOT EXISTS mohs_ready (
+    execution_id VARCHAR(255) PRIMARY KEY,
+    job_key      VARCHAR(255) NOT NULL,
+    shard        SMALLINT     NOT NULL DEFAULT 0,
+    priority     INT          NOT NULL DEFAULT 20,
+    attempt      INT          NOT NULL,
+    visible_at   TIMESTAMPTZ  NOT NULL
+) WITH (fillfactor = 70,
+        autovacuum_vacuum_scale_factor = 0.0, autovacuum_vacuum_threshold = 1000,
+        autovacuum_vacuum_cost_delay = 0);
+CREATE INDEX IF NOT EXISTS idx_mohs_ready_claim ON mohs_ready (shard, priority, visible_at);
+
+CREATE TABLE IF NOT EXISTS mohs_lease (
+    execution_id     VARCHAR(255) PRIMARY KEY,
+    job_key          VARCHAR(255) NOT NULL,
+    node_id          VARCHAR(255) NOT NULL,
+    epoch            BIGINT       NOT NULL,
+    attempt_number   INT          NOT NULL,
+    claimed_at       TIMESTAMPTZ  NOT NULL,
+    cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE
+) WITH (fillfactor = 70,
+        autovacuum_vacuum_scale_factor = 0.0, autovacuum_vacuum_threshold = 1000,
+        autovacuum_vacuum_cost_delay = 0);
+CREATE INDEX IF NOT EXISTS idx_mohs_lease_node ON mohs_lease (node_id, epoch);
+CREATE INDEX IF NOT EXISTS idx_mohs_lease_job  ON mohs_lease (job_key);
+
+CREATE TABLE IF NOT EXISTS mohs_execution (
+    execution_id    VARCHAR(255) NOT NULL,
+    job_key         VARCHAR(255) NOT NULL,
+    shard           SMALLINT     NOT NULL DEFAULT 0,
+    priority        INT          NOT NULL DEFAULT 20,
+    state           VARCHAR(20)  NOT NULL,
+    scheduled_at    TIMESTAMPTZ  NOT NULL,
+    created_at      TIMESTAMPTZ  NOT NULL,
+    finished_at     TIMESTAMPTZ,
+    actor           VARCHAR(255) NOT NULL,
+    correlation_id  VARCHAR(255),
+    idempotency_key VARCHAR(255),
+    payload         TEXT         NOT NULL,
+    payload_type    VARCHAR(500) NOT NULL,
+    PRIMARY KEY (created_at, execution_id)
+) PARTITION BY RANGE (created_at);
+CREATE INDEX IF NOT EXISTS idx_mohs_execution_id   ON mohs_execution (execution_id);
+CREATE INDEX IF NOT EXISTS idx_mohs_execution_job  ON mohs_execution (job_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mohs_execution_corr ON mohs_execution (correlation_id)
+    WHERE correlation_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS mohs_attempt (
+    execution_id VARCHAR(255) NOT NULL,
+    number       INT          NOT NULL,
+    node_id      VARCHAR(255) NOT NULL,
+    started_at   TIMESTAMPTZ  NOT NULL,
+    finished_at  TIMESTAMPTZ  NOT NULL,
+    outcome      VARCHAR(20)  NOT NULL,
+    error_type   VARCHAR(500),
+    error        TEXT,
+    PRIMARY KEY (finished_at, execution_id, number)
+) PARTITION BY RANGE (finished_at);
+CREATE INDEX IF NOT EXISTS idx_mohs_attempt_throughput ON mohs_attempt (finished_at, outcome);
+CREATE INDEX IF NOT EXISTS idx_mohs_attempt_exec ON mohs_attempt (execution_id);
+
+CREATE TABLE IF NOT EXISTS mohs_idempotency (
+    job_key         VARCHAR(255) NOT NULL,
+    idempotency_key VARCHAR(255) NOT NULL,
+    execution_id    VARCHAR(255) NOT NULL,
+    created_at      TIMESTAMPTZ  NOT NULL,
+    PRIMARY KEY (job_key, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS mohs_execution_default PARTITION OF mohs_execution DEFAULT;
+CREATE TABLE IF NOT EXISTS mohs_attempt_default PARTITION OF mohs_attempt DEFAULT;
