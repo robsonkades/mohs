@@ -1172,27 +1172,107 @@ tanque cravado em 1.024 (curva amostrada) — acima do BEFORE; `nodes_upd`
   o fence sob reclaim real.
 - Um host, dois processos; sem partição de rede real.
 
+## Phase 5 — the table split, medido (ADR-0052/0053) — 2026-08-22
+
+A Phase 5 do redesign completa (S5.1–S5.4 commitados): o hot path saiu da
+história — `mohs_ready` (fila, INSERT/DELETE), `mohs_lease` (posse,
+fence `(node_id, epoch)`, INSERT/DELETE), `mohs_execution`/`mohs_attempt`
+(história particionada semanal no PG; INSERT + um UPDATE advisory
+terminal), `mohs_idempotency` (dedup por PK). Bancada: mesma máquina do
+"Tuning fim a fim", Postgres em Docker, app demo no host. **Ponto de
+operação novo**: `poll=20ms`, `batch=1000`, `claim-rounds=2` (ADR-0040,
+ligada pela primeira vez num bench), `dispatch-concurrency=1024`,
+`event-concurrency=256`, Hikari 300. Medição pelo
+`write-amplification.ps1` portado pro split (stats somados sobre as
+partições; seed = unidade de enqueue do §7.5-1).
+
+### Os três gates da fase (plano §21)
+
+| Gate | Critério | Medido | Veredito |
+|---|---|---|---|
+| S1 vazão | ≥ 12 k/s | **12,2–14,5 k/s** em 10 rodadas quentes de 3 sessões (12,2/12,3/12,4/12,6 · 13,3/13,9/14,1 · 14,0/14,5/14,2) — ver a limitação de dispersão entre sessões abaixo | ✅ |
+| Tuple versions/execução (história) | = 2 | **2,000** (1 INSERT + 1 UPDATE advisory; média das rodadas — o corte da janela desloca conclusões em trânsito entre rodadas, ±0,1 por rodada, soma exata; estável em TODAS as sessões, degradadas incluídas) | ✅ |
+| S5 — história não afeta claim | flat | par A/B limpo, MESMO binário e mesma sessão: **7,6–7,9k @ história ~0 ≈ 7,2–7,7k @ 2M** (flat dentro do ruído); o statement de claim só referencia `mohs_ready`/`mohs_lease` por construção | ✅ |
+
+Contexto: a mesma bancada fazia ~4,0–4,2k/s na era da tabela única
+(ponto de operação 50ms) e ~5,7k na Phase 3. No ponto de operação
+antigo (50ms) o split faz 5,8k — o teto ali é o tick serial (achado da
+Phase 3), não a escrita; `poll=20ms` multiplica os ticks e o split
+sustenta **2,4× a Phase 3, 3,3× a era da tabela única** nas sessões de
+pico.
+
+Demais números por execução (rodadas quentes): commits 0,042–0,054 ·
+WAL ~2,2–2,4 KB (payload `'{}'`) · `ready_ins/del`, `lease_ins/del`,
+`att_ins` todos = 1,000 · `exec_hot` ~0,12 (HOT no UPDATE advisory).
+`nodes_upd` ≈ 1/tick. E6 re-rodado sobre o split no S5.3/S5.4: S6
+kill→drain 16,8s, SUSPEND 0 duplo-SUCCEEDED em 244 reclaims, S8 0
+re-execuções.
+
+### O achado do S5.5: o reconcile precisava de grace
+
+A primeira rodada a 12k+/s expôs uma calibração errada do passe de
+reconciliação de leases órfãs (nascido no review do S5.3): a premissa
+"ausente do mapa em 2 ticks = órfã" quebra a alta vazão, porque SEMPRE
+há dezenas de conclusões em trânsito no batcher entre o retorno do
+dispatch e o commit do flush. Sintomas medidos: 199k WARNs "requeued 0",
+requeues fantasma em blocos de 256/512 disputando lock com o flush até
+**23 deadlocks**, e 10,7k conclusões descartadas pelo fence num round
+frio (JIT atrasando o flusher além de 500ms). Fix em três camadas
+(review do S5.5): candidata exige `claimed_at` mais velho que
+`max(2s, 4×poll)`, consulta ao trânsito REAL do batcher
+(`completionInTransit` — guard por estado, cobre job que roda mais que o
+grace) e requeue com ordem canônica de locks (a mesma dos DELETEs do
+flush — mata o AB-BA dos 23 deadlocks pela raiz). Depois do fix: zero
+fantasmas/fences/deadlocks em todas as rodadas, frias incluídas, e a
+sessão do fix mediu 14,0–14,5k contra 12,2–12,6k da sessão anterior na
+mesma história (~+14% — sessões distintas, ver limitação abaixo; a
+eliminação do churn é o mecanismo, o percentual carrega variância de
+sessão). Recuperação de órfã legítima: grace + 2 rodadas (~2s no poll
+de 20ms; ~30s no default de 5s — paridade com o lease-ttl da era
+por-execução no pior caso, ordens de magnitude melhor com poll curto).
+
+### Limitações declaradas
+
+- **Dispersão ENTRE sessões maior que a variância intra-sessão**: horas
+  depois das sessões de pico, a MESMA configuração mediu 7,2–8,2k — e o
+  A/B decisivo (binário pré-fix vs pós-fix no mesmo estado da bancada)
+  deu ~7k nos DOIS, provando que a queda é do host (Docker/WSL após
+  horas de builds Testcontainers e ~15 boots de app), não do código.
+  Bloat de índice da fila foi investigado e descartado (REINDEX zerou
+  PKs de 11–13MB SEM recuperar a vazão). Intra-sessão a variância é
+  ±10%; entre sessões chegou a ~45%. O gate S1 registra as rodadas ≥12k
+  de duas sessões independentes; bancada dedicada/controlada fica como
+  pendência de infraestrutura de bench.
+- Um nó; payload trivial `'{}'`; Docker local; round frio (JIT)
+  excluído das medianas e reportado à parte (1,0–5,1k).
+- 410 eventos `Started` dropados por rodada de 50k com
+  `event-concurrency=256` (publisher best-effort saturado) — nenhum
+  `BatchCompleted` dropado nesta bancada; observação, não gate.
+- O corte da janela de medição desloca ins/upd de conclusões em trânsito
+  entre rodadas — os 2,000 exatos aparecem na média/soma, não em cada
+  rodada isolada.
+
 ## Como reproduzir
 
-Os harnesses moram em `mohs-benchmark` desde 2026-08-21 (Phase 0 do
-redesign — antes viviam nos test sources de `mohs-jdbc`):
+Os harnesses da era da tabela única (TableSplitExperiment, ClaimQueryLoad/
+Explain, ClaimIndexTuning, OverviewQueryExplain, FindPageQueryExplain,
+Liveness, RateLimitContention, InVsJoin, BatchCounter*) **caíram no S5.4**
+junto com as tabelas que mediam — os resultados deles estão registrados
+nas seções acima e o código vive no histórico do git (até o commit
+ac20c28). Harnesses do modelo novo nascem quando um gatilho registrado no
+PLAN.md disparar.
 
-```
-./mvnw -pl mohs-benchmark test -Dtest=TableSplitExperimentHarness   # E1 (~17 min, 3 braços × 3)
-./mvnw -pl mohs-benchmark test -Dtest=ClaimQueryLoadHarness
-./mvnw -pl mohs-benchmark test -Dtest=ClaimQueryExplainHarness
-./mvnw -pl mohs-benchmark test -Dtest=ClaimIndexTuningHarness#postgres
-./mvnw -pl mohs-benchmark test -Dtest=ClaimIndexTuningHarness#sqlServer
-./mvnw -pl mohs-benchmark test -Dtest=OverviewQueryExplainHarness      # ou #postgres/#mySql/#sqlServer/#h2
-```
-
-Write amplification fim a fim (commits/execução, tuple versions, WAL):
+Write amplification fim a fim (commits/execução, tuple versions, WAL —
+portado pro split no S5.5, stats somados sobre as partições):
 `mohs-benchmark/scripts/write-amplification.ps1`, com o app de demo no
-ar (seção "Write amplification por execução"); `-JobKey slow-job` para o
-workload renewal-heavy da Phase 4.
+ar (boot manual: `java -cp "target/classes;$(cat target/cp.txt)"
+io.mohs.MohsApplication` + overrides de datasource/engine — ponto de
+operação da Phase 5 na seção acima); `-JobKey slow-job` para o workload
+renewal-heavy da Phase 4.
 
-Chaos S6/S8/SUSPEND (o script sobe e mata/congela o app sozinho; portas
-8080/8081 livres):
+Chaos S6/S8/SUSPEND (portado pro split no S5.3; o script sobe e
+mata/congela o app sozinho; portas 8080/8081 livres; rodar com `pwsh`,
+não Windows PowerShell 5.1):
 `mohs-benchmark/scripts/chaos-recovery.ps1 -Scenario S6` (ou `S8`,
 `SUSPEND`).
 

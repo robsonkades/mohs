@@ -246,6 +246,15 @@ public final class Dispatcher {
     }
 
     /**
+     * O guard por estado do reconcile de stray leases (review S5.5): a
+     * conclusão deste id está em trânsito no {@link CompletionBatcher}?
+     * Sem batcher (conclusão síncrona) não existe trânsito — {@code false}.
+     */
+    boolean completionInTransit(ExecutionId executionId) {
+        return completionBatcher != null && completionBatcher.completionInTransit(executionId);
+    }
+
+    /**
      * Chain of Responsibility clássica (GoF): cada interceptor embrulha o
      * próximo, o mais interno chama o handler de verdade. Roda na própria
      * thread do dispatch; exceção de interceptor É falha de attempt.

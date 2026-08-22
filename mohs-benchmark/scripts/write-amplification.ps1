@@ -4,7 +4,8 @@
 # engine: commits/execution, tuple versions/execution and WAL bytes/execution.
 # Methodology identical to BASELINE.md "Tuning fim a fim no Postgres": the app
 # runs on the host at the documented operating point, this script seeds N
-# ENQUEUED rows by SQL (unique prefix per round), waits for the drain, and
+# executions by SQL — the Phase-5 enqueue unit: a PENDING history row plus a
+# mohs_ready entry (unique prefix per round) — waits for the drain, and
 # reads the deltas from pg_stat_database / pg_stat_user_tables / pg_stat_wal.
 #
 # The enqueue commit is NOT in these numbers (the seed bypasses REST); it is
@@ -35,17 +36,24 @@ function Invoke-Psql([string]$Sql) {
     $out
 }
 
+# Phase 5 (split): a história é particionada — os stats vivem nas FOLHAS,
+# então cada métrica de mohs_execution/mohs_attempt é SUM sobre o regex de
+# partição (^nome(_|$) — LIKE trataria _ como curinga e o escape varia).
 function Get-Snapshot {
     $sql = "SELECT 'ts', extract(epoch from clock_timestamp())::text " +
         "UNION ALL SELECT 'xact_commit', xact_commit::text FROM pg_stat_database WHERE datname = current_database() " +
         "UNION ALL SELECT 'wal_records', wal_records::text FROM pg_stat_wal " +
         "UNION ALL SELECT 'wal_fpi', wal_fpi::text FROM pg_stat_wal " +
         "UNION ALL SELECT 'wal_bytes', wal_bytes::text FROM pg_stat_wal " +
-        "UNION ALL SELECT 'exec_ins', n_tup_ins::text FROM pg_stat_user_tables WHERE relname = 'mohs_executions' " +
-        "UNION ALL SELECT 'exec_upd', n_tup_upd::text FROM pg_stat_user_tables WHERE relname = 'mohs_executions' " +
-        "UNION ALL SELECT 'exec_hot', n_tup_hot_upd::text FROM pg_stat_user_tables WHERE relname = 'mohs_executions' " +
-        "UNION ALL SELECT 'exec_dead', n_dead_tup::text FROM pg_stat_user_tables WHERE relname = 'mohs_executions' " +
-        "UNION ALL SELECT 'att_ins', n_tup_ins::text FROM pg_stat_user_tables WHERE relname = 'mohs_attempts' " +
+        "UNION ALL SELECT 'exec_ins', COALESCE(SUM(n_tup_ins),0)::text FROM pg_stat_user_tables WHERE relname ~ '^mohs_execution(_|$)' " +
+        "UNION ALL SELECT 'exec_upd', COALESCE(SUM(n_tup_upd),0)::text FROM pg_stat_user_tables WHERE relname ~ '^mohs_execution(_|$)' " +
+        "UNION ALL SELECT 'exec_hot', COALESCE(SUM(n_tup_hot_upd),0)::text FROM pg_stat_user_tables WHERE relname ~ '^mohs_execution(_|$)' " +
+        "UNION ALL SELECT 'exec_dead', COALESCE(SUM(n_dead_tup),0)::text FROM pg_stat_user_tables WHERE relname ~ '^mohs_execution(_|$)' " +
+        "UNION ALL SELECT 'att_ins', COALESCE(SUM(n_tup_ins),0)::text FROM pg_stat_user_tables WHERE relname ~ '^mohs_attempt(_|$)' " +
+        "UNION ALL SELECT 'ready_ins', n_tup_ins::text FROM pg_stat_user_tables WHERE relname = 'mohs_ready' " +
+        "UNION ALL SELECT 'ready_del', n_tup_del::text FROM pg_stat_user_tables WHERE relname = 'mohs_ready' " +
+        "UNION ALL SELECT 'lease_ins', n_tup_ins::text FROM pg_stat_user_tables WHERE relname = 'mohs_lease' " +
+        "UNION ALL SELECT 'lease_del', n_tup_del::text FROM pg_stat_user_tables WHERE relname = 'mohs_lease' " +
         "UNION ALL SELECT 'jobdef_upd', n_tup_upd::text FROM pg_stat_user_tables WHERE relname = 'mohs_job_definitions' " +
         "UNION ALL SELECT 'ratelimit_upd', n_tup_upd::text FROM pg_stat_user_tables WHERE relname = 'mohs_rate_limits' " +
         "UNION ALL SELECT 'nodes_upd', n_tup_upd::text FROM pg_stat_user_tables WHERE relname = 'mohs_nodes'"
@@ -86,12 +94,15 @@ foreach ($round in 1..$Rounds) {
 
     $before = Get-Snapshot
 
-    $seed = "INSERT INTO mohs_executions (id, job_key, state, scheduled_at, actor, priority, payload, payload_type, created_at) " +
-        "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', 'ENQUEUED', now(), 'anonymous', 20, '{}', " +
-        "'java.util.Collections`$UnmodifiableMap', now() FROM generate_series(1,$SeedSize) n"
-    Invoke-Psql $seed | Out-Null
+    # Phase 5: a unidade de enqueue do §7.5-1 — história advisory PENDING +
+    # entrada na fila (mesma forma do chaos-recovery.ps1)
+    Invoke-Psql ("INSERT INTO mohs_execution (execution_id, job_key, shard, priority, state, scheduled_at, created_at, actor, payload, payload_type) " +
+        "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', 0, 20, 'PENDING', now(), now(), 'anonymous', '{}', " +
+        "'java.util.Collections`$UnmodifiableMap' FROM generate_series(1,$SeedSize) n") | Out-Null
+    Invoke-Psql ("INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at) " +
+        "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', 0, 20, 1, now() FROM generate_series(1,$SeedSize) n") | Out-Null
 
-    $pending = "SELECT count(*) FROM mohs_executions WHERE id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')"
+    $pending = "SELECT count(*) FROM mohs_execution WHERE execution_id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')"
     $deadline = (Get-Date).AddSeconds($DrainTimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 500
@@ -104,7 +115,7 @@ foreach ($round in 1..$Rounds) {
     $after = Get-Snapshot
 
     $window = Invoke-Psql ("SELECT count(*)||'|'||EXTRACT(EPOCH FROM max(finished_at) - min(started_at)) " +
-        "FROM mohs_attempts WHERE execution_id LIKE '$prefix%'")
+        "FROM mohs_attempt WHERE execution_id LIKE '$prefix%'")
     $attempts, $windowSec = $window -split '\|', 2
     $throughput = [double]$attempts / [double]$windowSec
 
@@ -114,15 +125,19 @@ foreach ($round in 1..$Rounds) {
     'background during window (from idle rate): ~{0:N0} commits, ~{1:N0} exec-upd' -f `
         ($idleCommitsPerSec * $dur), ($idleUpdPerSec * $dur)
     Write-Host "--- deltas ---"
-    foreach ($k in 'xact_commit', 'wal_records', 'wal_fpi', 'wal_bytes', 'exec_ins', 'exec_upd', 'exec_hot', 'att_ins') {
+    foreach ($k in 'xact_commit', 'wal_records', 'wal_fpi', 'wal_bytes', 'exec_ins', 'exec_upd', 'exec_hot', 'att_ins',
+             'ready_ins', 'ready_del', 'lease_ins', 'lease_del') {
         Show-Delta $k $before $after $SeedSize
     }
     foreach ($k in 'exec_dead', 'jobdef_upd', 'ratelimit_upd', 'nodes_upd') {
         Show-Delta $k $before $after 0
     }
+    # o número do §3.3 do plano: versões de tupla na HISTÓRIA por execução
+    # (INSERT nasce a 1ª, o UPDATE terminal advisory cria a 2ª — alvo = 2,000
+    # exato; o seed é a própria história, então o ins conta aqui de propósito)
     $tupleVersions = (($after['exec_ins'] - $before['exec_ins']) + ($after['exec_upd'] - $before['exec_upd'])) / $SeedSize
     Write-Host "--- the three numbers (engine-side; enqueue adds 1 commit by construction) ---"
     'commits/execution        : {0:N3}' -f (($after['xact_commit'] - $before['xact_commit']) / $SeedSize)
-    'tuple versions/execution : {0:N3}   (mohs_executions ins+upd)' -f $tupleVersions
+    'tuple versions/execution : {0:N3}   (mohs_execution ins+upd, historia)' -f $tupleVersions
     'WAL bytes/execution      : {0:N0}' -f (($after['wal_bytes'] - $before['wal_bytes']) / $SeedSize)
 }

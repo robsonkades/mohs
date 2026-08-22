@@ -126,9 +126,37 @@ Phases 0–4 commitadas (1756933), E1/E2 decididos (BASELINE).
       código), portas velhas (`ExecutionStore`/`Claimer`/`Reaper`… → as 4),
       `TerminalStateWriteScanTest` re-apontado, ArchUnit atualizado,
       migração V4 de drop.
-- [ ] **S5.5 — Validação e registro.** S1 ≥ 12k/s, tuple versions = 2 na
+- [x] **S5.5 — Validação e registro.** *(2026-08-22. Os três gates
+      MEDIDOS e atendidos (BASELINE "Phase 5"): S1 = 12,2–14,5k/s em 5
+      rodadas quentes de 2 sessões (ponto de operação novo poll=20ms +
+      claim-rounds=2 — a 50ms o teto é o tick serial, 5,8k; dispersão
+      entre sessões de até ~45% DECLARADA, com A/B binário provando que é
+      do host, não do código); tuple versions = 2,000 exato em todas as
+      sessões; S5 = par A/B limpo mesmo binário: ~0 de história ≈ 2M
+      (flat). Achado e fix no caminho: o reconcile de leases órfãs
+      requeueava em massa conclusões em trânsito no batcher a 12k+/s (199k
+      WARNs, 23 deadlocks requeue×flush, 10,7k fences perdidos num round
+      frio) — fix em 3 camadas: grace por claimed_at max(2s, 4×poll) +
+      guard por ESTADO no batcher (completionInTransit, cobre job mais
+      longo que o grace) + ordem canônica de locks no requeue (mata o
+      AB-BA dos deadlocks pela raiz); zero fantasmas/deadlocks depois.
+      WARN do fence-perdeu rebaixado a DEBUG (rotina, não achado).
+      write-amplification.ps1 portado pro split (stats somados sobre
+      partições, seed §7.5-1). ADRs: 0052 (split/ADR-A), 0053 (cap
+      derivado/ADR-D); ADR-C JÁ ERA a ADR-0047 (Phase 3) — emenda
+      registrando a re-hospedagem no LeaseStore, uma decisão = um
+      documento (desvio do "A/C/D escritas" registrado aqui). §21 do
+      plano com o resultado. Observação registrada: 410 drops de Started
+      por rodada com event-concurrency=256 (best-effort; nenhum
+      BatchCompleted dropado).)* S1 ≥ 12k/s, tuple versions = 2 na
       história, S5 (claim independe do tamanho da história); BASELINE
       "Phase 5"; ADR-A/C/D escritas; plano §21 com o resultado.
+
+## Fase completa
+
+Phase 5 entregue: S5.1 (97d781a) → S5.2 (d6f0aa3) → S5.3 (ac20c28) →
+S5.4 (3a3bdd4) → S5.5. Gate da fase integralmente verde (abaixo).
+Próxima fase do plano: Phase 6 (sharding + adaptive poll + NOTIFY).
 
 ## Pendências registradas (com gatilho)
 
@@ -161,6 +189,19 @@ Phases 0–4 commitadas (1756933), E1/E2 decididos (BASELINE).
   custo O(história de lotes) no join; a 3,9ms hoje. **Gatilho:**
   `Mohs.remove` de job com milhões de execuções de lote passando de ~1s —
   saída portável registrada no relatório do tuning.
+- **Requeue reconstrói a entrada com `shard = 0` hardcoded** (a lease não
+  carrega shard). Correto com shard único; **gatilho: Phase 6** — ou a
+  lease ganha a coluna, ou o requeue devolve pro shard errado.
+- **Cancel contra stray lease se perde no requeue** (`Requeue` não
+  transporta `cancel_requested`): o job re-roda apesar da ordem. Aceito
+  como cancel cooperativo best-effort (ADR-0034); registrado como gap
+  conhecido, não decisão nova. **Gatilho:** primeira reclamação real de
+  operador.
+- **Bancada de bench não-controlada** (S5.5): dispersão entre sessões de
+  até ~45% no host compartilhado (Docker/WSL) — A/B binário provou que
+  não é código. **Gatilho:** próxima fase com gate de vazão (Phase 6, S2)
+  — considerar bancada dedicada/reboot ritual antes das rodadas de
+  registro.
 
 ## Gate da fase (do plano)
 

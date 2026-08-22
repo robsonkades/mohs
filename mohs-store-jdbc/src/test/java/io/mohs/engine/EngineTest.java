@@ -1062,6 +1062,52 @@ class EngineTest {
                 .containsExactly(1);
     }
 
+    /**
+     * O grace do S5.5: lease sem encarnação mas RECÉM-claimada não é
+     * candidata do reconcile — a alta vazão ela é quase sempre uma
+     * conclusão em trânsito no batcher, e requeueá-la é o bug medido no
+     * bench (requeues fantasma, deadlocks com o flush). Só depois de
+     * {@code max(2s, 4×poll)} + duas rodadas ela vira órfã de verdade e
+     * volta pra fila.
+     */
+    @Test
+    void aFreshStrayLeaseWaitsTheClaimedAtGraceBeforeRequeue() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        rawJdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = 'exec-1'");
+        CountDownLatch succeeded = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+        });
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
+        Engine engine = newEngine(counting, List.of(listener));
+        // posse deste engine SEM encarnação, claimed_at = agora — dentro do grace
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested)
+                VALUES ('exec-1', 'welcome-email', ?, 1, 1, 20, ?, FALSE)
+                """, engine.nodeId(), JdbcTimestamps.toUtcLocalDateTime(NOW));
+
+        engine.start();
+        try {
+            // vários ticks com o relógio parado: dentro do grace, NADA é requeueado
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(readyCount()).isZero();
+            assertThat(leaseCount()).isEqualTo(1);
+
+            // além do grace (2s no poll de teste): duas rodadas depois, requeue → claim → conclui
+            clock.advance(Duration.ofSeconds(3));
+            assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("stray requeued after the grace and completed").isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(rawJdbcTemplate.queryForList("SELECT number FROM mohs_attempt WHERE execution_id = 'exec-1'", Integer.class))
+                .containsExactly(1);
+    }
+
     /** Uma lease possuída por um nó AUSENTE de mohs_nodes (morto por definição, ADR-0051) — a matéria-prima dos testes de reaper. */
     private void seedOrphanedLease(String id, String jobKey, boolean cancelRequested) {
         recordAndOffer(id, jobKey, "hello", NOW.minusSeconds(60));

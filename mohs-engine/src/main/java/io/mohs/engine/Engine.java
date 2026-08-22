@@ -521,19 +521,36 @@ public final class Engine implements MohsLifecycle {
      * alcançável). Devolve pra fila com o MESMO attempt (nada rodou,
      * orçamento intacto), pelo requeue cercado de sempre.
      *
-     * <p>Duas rodadas consecutivas ausente, não uma: com o
-     * {@link CompletionBatcher}, a entrada sai do mapa quando o dispatch
-     * retorna, mas a lease só cai no commit do flush (≤ flush-interval <
-     * poll-interval) — um snapshot único requeueria conclusões apenas
-     * enfileiradas. Se mesmo assim uma conclusão perder a corrida, o fence
-     * do requeue decide e o pior caso é uma re-execução (at-least-once),
-     * nunca corrupção. Estado confinado à thread do tick (JCIP 3.3).
+     * <p>Duas guardas contra falso positivo, porque o normal a alta vazão é
+     * a lease de uma conclusão EM TRÂNSITO no {@link CompletionBatcher} (a
+     * entrada sai do mapa quando o dispatch retorna; a lease só cai no
+     * commit do flush): (1) grace por {@code claimed_at} —
+     * {@link #strayLeaseGrace()} — porque a 10k+/s SEMPRE há dezenas de
+     * leases em trânsito e o esquema de rodadas sozinho as pegava aos
+     * milhares (medido no bench do S5.5: 199k WARNs, requeues fantasma
+     * disputando lock com o flush até deadlock); (2) duas rodadas
+     * consecutivas ausente. Órfã legítima tem {@code claimed_at} parado —
+     * a recuperação custa o grace + 2 rodadas: ~2s no ponto de operação do
+     * bench (poll 20ms), ~30s no poll default de 5s — a era por-execução
+     * também recuperava em lease-ttl de 30s, então nunca pior, e ordens de
+     * magnitude melhor com poll curto. Se mesmo assim uma conclusão perder
+     * a corrida, o fence do requeue decide e o pior caso é uma re-execução
+     * (at-least-once), nunca corrupção. Estado confinado à thread do tick
+     * (JCIP 3.3).
      */
     private void reconcileOwnStrayLeases(Instant now) {
+        Instant strayBefore = now.minus(strayLeaseGrace());
         Set<ExecutionId> absentNow = new HashSet<>();
         List<WorkQueue.Requeue> strays = new ArrayList<>();
         for (LeaseStore.Lease lease : leaseStore.findByNodes(List.of(nodeId))) {
-            if (inFlightAttempts.containsKey(lease.executionId())) {
+            // três guardas, na ordem estado > estado > tempo: encarnação em
+            // voo; conclusão em trânsito no batcher (cobre job que roda MAIS
+            // que o grace — review S5.5); e o grace por claimed_at, que fica
+            // pro único caso sem estado consultável (perda entre claim e
+            // dispatch)
+            if (inFlightAttempts.containsKey(lease.executionId())
+                    || dispatcher.completionInTransit(lease.executionId())
+                    || lease.claimedAt().isAfter(strayBefore)) {
                 continue;
             }
             absentNow.add(lease.executionId());
@@ -547,10 +564,33 @@ public final class Engine implements MohsLifecycle {
         strayLeaseCandidates.addAll(absentNow);
         if (!strays.isEmpty()) {
             int requeued = workQueue.requeue(strays);
-            metrics.claimRequeued("stray-lease", requeued);
-            log.warn("requeued {} lease(s) this node was holding with no in-flight incarnation — "
-                    + "work lost between claim and dispatch (same attempt, retry budget untouched)", requeued);
+            if (requeued > 0) {
+                metrics.claimRequeued("stray-lease", requeued);
+                log.warn("requeued {} lease(s) this node was holding with no in-flight incarnation — "
+                        + "work lost between claim and dispatch (same attempt, retry budget untouched)", requeued);
+            } else {
+                // fence perdeu pra todas: as conclusões commitaram entre o
+                // findByNodes e o requeue — rotina a alta vazão, não achado
+                log.debug("stray-lease candidates all vanished before the requeue — completions won the race");
+            }
         }
+    }
+
+    /**
+     * Idade mínima pra uma lease sem encarnação virar candidata:
+     * {@code max(2s, 4×poll)} — acima do pior trânsito plausível pelo
+     * batcher. O piso de 2s não é teórico: no cold start do bench do S5.5
+     * (JIT/warmup), o flusher atrasou além de 500ms e o reconcile requeueou
+     * LOTES inteiros de conclusões em trânsito (blocos de 256/512, 10,7k
+     * fences perdidos num round frio); com 2s o regime frio fica limpo. O
+     * custo (recuperação de órfã legítima esperar o grace) depende do poll:
+     * ~2s a 20ms, ~20s no default de 5s — nunca pior que o lease-ttl de 30s
+     * da era por-execução. Deriva do poll-interval — nenhum knob novo.
+     */
+    private Duration strayLeaseGrace() {
+        Duration fourPolls = settings.pollInterval().multipliedBy(4);
+        Duration floor = Duration.ofSeconds(2);
+        return fourPolls.compareTo(floor) > 0 ? fourPolls : floor;
     }
 
     /** Vivos deste instante — inclui SEMPRE este node (a promessa dele acabou de ser renovada neste mesmo tick, antes do reaper: a ordem que mata o self-reap do S8). */

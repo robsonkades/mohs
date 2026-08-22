@@ -189,6 +189,21 @@ class CompletionBatcherTest {
         return org.mockito.ArgumentMatchers.argThat(list -> list != null && list.size() == 2);
     }
 
+    /** O guard por estado do reconcile (S5.5): id fica em trânsito entre o submit e o veredito, e some em TODO desfecho. */
+    @Test
+    void completionInTransitTracksSubmitToOutcome() throws Exception {
+        seedLeasedExecution("exec-1");
+        startBatcher(leaseStore, 100, LONG_INTERVAL); // lote longe de encher: só o close flusha
+        CountDownLatch delivered = new CountDownLatch(1);
+
+        batcher.submit(successResult("exec-1"), completion -> delivered.countDown());
+        assertThat(batcher.completionInTransit(ExecutionId.of("exec-1"))).isTrue();
+
+        batcher.close();
+        assertThat(delivered.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(batcher.completionInTransit(ExecutionId.of("exec-1"))).isFalse();
+    }
+
     /** O close é o dreno do shutdown: o que estava na fila fica durável antes de ele retornar. */
     @Test
     void closeDrainsWhatIsStillQueued() {

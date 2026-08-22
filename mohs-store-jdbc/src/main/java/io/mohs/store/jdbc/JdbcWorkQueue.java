@@ -2,6 +2,7 @@ package io.mohs.store.jdbc;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
@@ -87,10 +88,16 @@ public final class JdbcWorkQueue implements WorkQueue {
         if (orders.isEmpty()) {
             return 0;
         }
+        // mesma ordem canônica dos DELETEs do complete (JCIP cap. 10 em row
+        // locks): requeue e conclusão travam conjuntos sobrepostos — em ordens
+        // opostas seria o AB-BA que o bench do S5.5 mediu (23 deadlocks)
+        List<Requeue> ordered = orders.stream()
+                .sorted(Comparator.comparing(order -> order.executionId().value()))
+                .toList();
         // requireNonNull: mesmo invariante de claim()
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
             int requeued = 0;
-            for (Requeue order : orders) {
+            for (Requeue order : ordered) {
                 int fenceWon = jdbcTemplate.update(JdbcSupport.FENCED_LEASE_DELETE,
                         JdbcSupport.fencedLeaseDeleteParams(order.executionId().value(), order.nodeId(), order.epoch()));
                 if (fenceWon == 1) {

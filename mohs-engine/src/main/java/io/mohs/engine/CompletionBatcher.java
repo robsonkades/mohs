@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -61,6 +63,16 @@ public final class CompletionBatcher implements AutoCloseable {
     private final int flushSize;
     private final Duration flushInterval;
     private final LinkedBlockingQueue<Pending> queue;
+    /**
+     * Ids com conclusão EM TRÂNSITO (entre o {@code submit} e o veredito) —
+     * o guard por ESTADO que o reconcile de stray leases do Engine consulta
+     * (review S5.5): a heurística temporal do grace não cobre job que roda
+     * mais que o grace, e a lease dele existiria sem entrada em nenhum mapa
+     * na janela do flush. Entrada removida em TODO desfecho, inclusive na
+     * falha da conclusão individual (deixá-la seria esconder a lease do
+     * reconcile para sempre — o oposto do propósito).
+     */
+    private final Set<ExecutionId> inTransit = ConcurrentHashMap.newKeySet();
     private final Thread flusher;
     private volatile boolean closed;
 
@@ -101,9 +113,12 @@ public final class CompletionBatcher implements AutoCloseable {
             onOutcome.accept(completeOne(result));
             return;
         }
+        inTransit.add(result.executionId());
         try {
             queue.put(new Pending(result, onOutcome));
         } catch (InterruptedException e) {
+            // put interrompido NÃO inseriu — o trânsito não começou
+            inTransit.remove(result.executionId());
             // completa ANTES de re-armar a flag: com ela de pé o acquire do
             // JDBC lançaria (mesmo racional do flushLoop) e o fallback se
             // derrotaria; o status restaurado é para o CHAMADOR observar
@@ -111,6 +126,11 @@ public final class CompletionBatcher implements AutoCloseable {
             onOutcome.accept(completeOne(result));
             Thread.currentThread().interrupt();
         }
+    }
+
+    /** O guard por estado do reconcile (review S5.5): a conclusão deste id está entre o submit e o veredito? */
+    boolean completionInTransit(ExecutionId id) {
+        return inTransit.contains(id);
     }
 
     /**
@@ -158,10 +178,15 @@ public final class CompletionBatcher implements AutoCloseable {
                 try {
                     flush(buffer);
                 } catch (Throwable t) {
-                    log.error("completion flush cycle failed unexpectedly — {} result(s) fall to the reaper on lease expiry",
-                            buffer.size(), t);
+                    log.error("completion flush cycle failed unexpectedly — {} result(s) fall to this node's "
+                            + "stray-lease reconcile (or a peer's reaper if this node dies)", buffer.size(), t);
+                } finally {
+                    // idempotente com os removes de deliverOutcome/completeIndividually:
+                    // NENHUM desfecho — Error incluído — deixa marcador vivo, senão a
+                    // lease ficaria escondida do reconcile para sempre (review S5.5)
+                    buffer.forEach(pending -> inTransit.remove(pending.result().executionId()));
+                    buffer.clear();
                 }
-                buffer.clear();
             }
         } finally {
             // se esta thread sair por QUALQUER via, submit degrada pro
@@ -199,6 +224,9 @@ public final class CompletionBatcher implements AutoCloseable {
         try {
             deliverOutcome(pending, completeOne(pending.result()));
         } catch (RuntimeException e) {
+            // trânsito acabou mesmo sem veredito — a lease fica visível pro
+            // reconcile/reaper em vez de escondida atrás de um marcador morto
+            inTransit.remove(pending.result().executionId());
             log.error("could not record the completion of execution {} — its lease stands until a reaper reclaims it",
                     pending.result().executionId(), e);
         }
@@ -209,7 +237,8 @@ public final class CompletionBatcher implements AutoCloseable {
                 .getOrDefault(result.executionId(), Completion.FENCED_OUT);
     }
 
-    private static void deliverOutcome(Pending pending, Completion completion) {
+    private void deliverOutcome(Pending pending, Completion completion) {
+        inTransit.remove(pending.result().executionId());
         try {
             pending.onOutcome().accept(completion);
         } catch (RuntimeException e) {

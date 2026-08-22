@@ -49,6 +49,12 @@ public final class EngineMetrics {
         this.claimBatchSize = DistributionSummary.builder("mohs.claim.batch.size")
                 .description("executions claimed per round — full batches mean claim-bound, small ones dispatch-bound")
                 .register(registry);
+        // pré-registro dos reasons conhecidos (review S5.5): counter lazy só
+        // nasce no primeiro incremento, e alerta com increase() não distingue
+        // "série ausente" de zero — a série existir desde o boot é o contrato
+        for (String reason : new String[] {"concurrency-cap", "rate-limit", "window-closed", "stray-lease"}) {
+            registry.counter("mohs.claim.requeued", "reason", reason);
+        }
     }
 
     void claimRound(long elapsedNanos, int claimed) {

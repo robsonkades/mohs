@@ -2,6 +2,17 @@
 
 Data: 2026-08-22 · Status: aceita · Fase: Phase 3 do `ARCHITECTURE_REDESIGN_PLAN.md` (⭐ ship first)
 
+> **Emenda (2026-08-22, Phase 5):** esta É a ADR-C do plano. Com o split
+> (ADR-0052), o mecanismo foi re-hospedado sem mudança de semântica: o
+> `CompletionBatcher` flusha por `LeaseStore.complete` — a transação do
+> §7.5-3 (DELETE cercado da posse + attempt + UPDATE advisory + retry na
+> fila + contagem de lote + rearme) — e o veredito por resultado virou
+> `Completion(owned, closedBatch)` com o fence `(node_id, epoch)`.
+> `completeAll`/`CompletionRequest` morreram com a tabela única (S5.4).
+> Caminhos frios (watchdog, pré-dispatch) concluem SÍNCRONOS fora do
+> batcher — o contrato de erro do chamador exige exceção síncrona
+> (review S5.3).
+
 ## Contexto
 
 A Phase 0 do redesign mediu o custo de escrita por execução do motor atual

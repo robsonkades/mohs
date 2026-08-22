@@ -2598,6 +2598,27 @@ phase depends on a later phase to be correct.
 - **Validation.** S1 ≥ 12 k/s; tuple versions/execution = 2; S5 shows history size no
   longer affects claim latency.
 - **Rollback.** Flip back to the old path (still present during the shadow release).
+- **Result (2026-08-22, ADR-0052/0053; BASELINE "Phase 5 — the table
+  split"):** delivered, all three gates met. Commits 97d781a (expand),
+  d6f0aa3 (ports+stores), ac20c28 (flip), 3a3bdd4 (contract). One recorded
+  deviation: no dual-write/shadow release — pre-GA there is no live data to
+  protect (PLAN.md decision 1); correctness was gated by the full suite +
+  E6 re-run on the split instead. Measured (Postgres bench, operating
+  point poll=20ms/batch=1000/claim-rounds=2/dispatch=1024): **S1 =
+  12.2–14.5 k/s across ten hot rounds in three sessions** (was ~5.7 k on
+  the single table — 2.4× at peak; between-session bench dispersion up
+  to ~45% is declared in BASELINE with the binary A/B that pins it on
+  the host, not the code); **tuple versions/execution = 2.000** (history
+  INSERT + one advisory UPDATE — §3.3 exact, stable in every session);
+  **S5 holds by a clean same-binary A/B pair**: ~0 history ≈ 2 M history
+  within noise (the claim statement touches only
+  `mohs_ready`/`mohs_lease` by construction). Commits/execution
+  0.042–0.054; WAL ~2.2 KB ('{}' payload). E6 re-ran green on the split
+  (S6 16.8s, SUSPEND 0 double-completions, S8 0 re-runs). S5.5's own
+  finding: the stray-lease reconcile pass mass-requeued completions
+  still in the batcher at 12 k+/s (199k warns, phantom requeues, flush
+  deadlocks) — fixed by a claimed-at grace (max(2s, 4×poll)) + a real
+  in-transit check on the batcher + canonical lock ordering on requeue.
 
 ### Phase 6 — Sharding + adaptive poll + `NOTIFY` *(1 sprint)*
 
