@@ -59,6 +59,7 @@ public record MohsProperties(
      * @param misfireThreshold ADR-0035: separa disparo atrasado de perdido — ocorrência devida dentro do threshold dispara atrasada em qualquer política; mais velha responde ao {@code Misfire} do job
      * @param dispatchConcurrency teto real de concorrência do executor de dispatch (nunca por tamanho de pool — CLAUDE.md); também limita o claim (ADR-0039)
      * @param eventConcurrency teto real de concorrência do executor de publicação de eventos
+     * @param completionFlushOnEveryResult ADR-0047: desliga o group commit da conclusão e volta ao commit síncrono por resultado — troca a janela de durabilidade (~5ms) pela latência por execução de antes; o único knob que a decisão adiciona
      */
     public record Engine(
             @DefaultValue("5s") Duration pollInterval,
@@ -68,7 +69,8 @@ public record MohsProperties(
             @Nullable Duration watchdogTimeout,
             @DefaultValue("60s") Duration misfireThreshold,
             @DefaultValue("64") int dispatchConcurrency,
-            @DefaultValue("16") int eventConcurrency) {
+            @DefaultValue("16") int eventConcurrency,
+            @DefaultValue("false") boolean completionFlushOnEveryResult) {
     }
 
     /**

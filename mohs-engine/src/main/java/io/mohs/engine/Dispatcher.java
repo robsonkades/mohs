@@ -62,10 +62,18 @@ public final class Dispatcher {
     private final List<ExecutionInterceptor> interceptors;
     private final ExecutionEventPublisher events;
     private final EngineMetrics metrics;
+    private final @Nullable CompletionBatcher completionBatcher;
 
+    /** Conclusão síncrona por resultado (pré-ADR-0047) — a forma dos testes e de {@code completion-flush-on-every-result}. */
     public Dispatcher(ExecutionStore executionStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
             List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
             EngineMetrics metrics) {
+        this(executionStore, jobStore, handlerRegistry, clock, interceptors, listeners, eventExecutor, metrics, null);
+    }
+
+    public Dispatcher(ExecutionStore executionStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
+            List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
+            EngineMetrics metrics, @Nullable CompletionBatcher completionBatcher) {
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
@@ -73,6 +81,7 @@ public final class Dispatcher {
         this.interceptors = List.copyOf(Objects.requireNonNull(interceptors, "interceptors"));
         this.events = new ExecutionEventPublisher(Objects.requireNonNull(listeners, "listeners"), Objects.requireNonNull(eventExecutor, "eventExecutor"));
         this.metrics = Objects.requireNonNull(metrics, "metrics");
+        this.completionBatcher = completionBatcher;
     }
 
     /** Forma sem fonte externa de cancelamento — sinal próprio, nada o levanta. Conveniência de teste e de chamador avulso. */
@@ -86,8 +95,10 @@ public final class Dispatcher {
         Objects.requireNonNull(payload, "payload");
         Objects.requireNonNull(signal, "signal");
 
+        // fired_at persistido já saiu daqui (ADR-0047): o claim grava a coluna
+        // no próprio CAS pra RUNNING — este instante segue sendo o "início do
+        // attempt" (Started, JobContext, métrica), que é conceito do dispatch
         Instant firedAt = clock.instant();
-        executionStore.markFired(execution.id(), firedAt);
         metrics.dispatchLatency(execution.jobKey(), Duration.between(execution.scheduledAt(), firedAt));
 
         int attemptNumber = execution.attempts().size() + 1;
@@ -309,10 +320,21 @@ public final class Dispatcher {
     /**
      * Publica os eventos só se o CAS de conclusão passou — uma conclusão
      * concorrente (reaper/outro caminho) descarta o resultado com WARN,
-     * nunca publica evento de uma transição que não ocorreu.
+     * nunca publica evento de uma transição que não ocorreu. Com o
+     * {@link CompletionBatcher} (ADR-0047) a escrita vira group commit e o
+     * desfecho (métrica/eventos) roda na thread do flusher, DEPOIS do
+     * commit do lote — mesma garantia, janela de durabilidade ≤ o
+     * intervalo de flush.
      */
     private void completeOrDiscard(ExecutionStore.CompletionRequest request, Runnable publishEvents) {
-        ExecutionStore.Completion completion = executionStore.complete(request, jobStore);
+        if (completionBatcher == null) {
+            handleOutcome(request, executionStore.complete(request, jobStore), publishEvents);
+            return;
+        }
+        completionBatcher.submit(request, completion -> handleOutcome(request, completion, publishEvents));
+    }
+
+    private void handleOutcome(ExecutionStore.CompletionRequest request, ExecutionStore.Completion completion, Runnable publishEvents) {
         if (completion.applied()) {
             metrics.attemptFinished(request.jobKey(), request.attempt(), request.newState());
             publishEvents.run();

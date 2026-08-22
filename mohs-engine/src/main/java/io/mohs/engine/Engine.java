@@ -426,13 +426,42 @@ public final class Engine implements MohsLifecycle {
             long claimStartNanos = System.nanoTime();
             List<Execution> claimed = claimer.claim(nodeId, claimLimit);
             metrics.claimRound(System.nanoTime() - claimStartNanos, claimed.size());
-            for (Execution execution : claimed) {
-                submitDispatch(execution, definitionsByKey);
+            if (!claimed.isEmpty() && !dispatchClaimedBatch(claimed, definitionsByKey)) {
+                return;
             }
             if (claimed.size() < claimLimit) {
                 return;
             }
         }
+    }
+
+    /**
+     * ADR-0047: UMA consulta de payload por round, não uma por execução
+     * (era a maior fatia dos commits de leitura da Phase 0). Falha da
+     * consulta é infra, nunca veredito sobre as execuções: o lote fica
+     * RUNNING e o reaper o devolve na expiração da lease — o soluço nunca
+     * vira falha TERMINAL imediata (o achado do S8). O reclaim consome um
+     * attempt do orçamento como qualquer zumbi (ADR-0033): job sem retries
+     * ainda termina FAILED por esse caminho, só que com o backoff da lease
+     * em vez de na hora.
+     *
+     * @return {@code false} se a consulta de payloads falhou — o chamador
+     *         encerra os rounds do tick (o lote já reivindicado fica pro
+     *         reaper)
+     */
+    private boolean dispatchClaimedBatch(List<Execution> claimed, Map<JobKey, Optional<StoredJob>> definitionsByKey) {
+        ExecutionStore.PayloadBatch payloads;
+        try {
+            payloads = executionStore.findPayloads(claimed.stream().map(Execution::id).toList());
+        } catch (RuntimeException e) {
+            log.warn("could not load the payloads of the claimed batch ({} execution(s)) — already claimed, "
+                    + "they will sit RUNNING until the reaper reclaims them on lease expiry", claimed.size(), e);
+            return false;
+        }
+        for (Execution execution : claimed) {
+            submitDispatch(execution, payloads, definitionsByKey);
+        }
+        return true;
     }
 
     /**
@@ -708,7 +737,8 @@ public final class Engine implements MohsLifecycle {
      * órfãs até a lease expirar e o {@link Reaper} reclamá-las — caminho de
      * recuperação bem mais lento que necessário.
      */
-    private void submitDispatch(Execution execution, Map<JobKey, Optional<StoredJob>> definitionsByKey) {
+    private void submitDispatch(Execution execution, ExecutionStore.PayloadBatch payloads,
+            Map<JobKey, Optional<StoredJob>> definitionsByKey) {
         // Consulta síncrona, na própria thread do tick — mesmo padrão de
         // claimer.claim()/reaper.reclaimExpired() em tick(). DBTUNE-18:
         // memoizada por job_key dentro do tick — os N finds seriais eram o
@@ -748,6 +778,23 @@ public final class Engine implements MohsLifecycle {
             return;
         }
 
+        // ADR-0047: o payload chegou na leitura em lote do round. Linha que
+        // não desserializou é terminal por natureza (payload corrompido não
+        // sara re-lendo — mesma semântica do findPayload por execução que
+        // isto substitui); a falha TRANSIENTE da consulta nunca chega aqui
+        // (tratada no round, lote inteiro fica pro reaper).
+        RuntimeException unreadable = payloads.unreadable().get(execution.id());
+        if (unreadable != null) {
+            failUnreadablePayload(execution, definition, unreadable);
+            return;
+        }
+        Object payload = payloads.payloads().get(execution.id());
+        if (payload == null) {
+            failUnreadablePayload(execution, definition, new IllegalStateException(
+                    "execution " + execution.id() + " vanished before payload could be read — should be unreachable"));
+            return;
+        }
+
         // registrado ANTES do runAsync: a execução está RUNNING no banco desde o
         // claim — a primeira renovação precisa cobri-la mesmo que o executor a
         // deixe na fila por um tick inteiro. Remoções sempre com o remove de
@@ -759,7 +806,7 @@ public final class Engine implements MohsLifecycle {
         inFlightAttempts.put(execution.id(), attempt);
         CompletableFuture<Void> future;
         try {
-            future = CompletableFuture.runAsync(() -> resolvePayloadAndDispatch(execution, definition, attempt.signal), executor);
+            future = CompletableFuture.runAsync(() -> dispatcher.dispatch(execution, definition, payload, attempt.signal), executor);
         } catch (RuntimeException e) {
             inFlightAttempts.remove(execution.id(), attempt);
             log.warn("runner executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
@@ -768,10 +815,10 @@ public final class Engine implements MohsLifecycle {
         }
         inFlight.add(future);
         future.whenComplete((_, thrown) -> {
-            // resolvePayloadAndDispatch trata as falhas conhecidas — throwable aqui
-            // significa que a própria gravação da falha lançou (ex.: colisão de PK
-            // de attempts numa conclusão concorrente); engolir esconderia o único
-            // rastro do zumbi
+            // Dispatcher.dispatch trata as falhas conhecidas — throwable aqui
+            // significa que a própria gravação do desfecho lançou (ex.: colisão de
+            // PK de attempts numa conclusão concorrente); engolir esconderia o
+            // único rastro do zumbi
             if (thrown != null) {
                 log.error("dispatch of execution {} threw outside the normal failure paths", execution.id(), thrown);
             }
@@ -836,29 +883,11 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Resolve o payload gravado por {@code ExecutionStore#insert} — a única
-     * coisa que só {@link Engine} sabe fazer aqui, já que {@link Dispatcher}
-     * é deliberadamente agnóstico a como o payload chega (testável com
-     * {@code Object} puro) — e só então delega pra
-     * {@link Dispatcher#dispatch}. Payload ilegível vira falha terminal via
-     * {@link #failUnreadablePayload}, nunca propaga.
-     */
-    private void resolvePayloadAndDispatch(Execution execution, JobDefinition definition, CancellationSignal signal) {
-        Object payload;
-        try {
-            payload = executionStore
-                    .findPayload(execution.id())
-                    .orElseThrow(() -> new IllegalStateException("execution " + execution.id() + " vanished before payload could be read — should be unreachable"));
-        } catch (RuntimeException e) {
-            failUnreadablePayload(execution, definition, e);
-            return;
-        }
-        dispatcher.dispatch(execution, definition, payload, signal);
-    }
-
-    /**
      * Payload corrompido/classe sumida do classpath não trava o ciclo —
-     * falha só esta execução, direto, sem passar pelo handler.
+     * falha só esta execução, direto, sem passar pelo handler. Desde a
+     * ADR-0047 só o veredito POR LINHA de {@code findPayloads} chega aqui:
+     * falha transiente da consulta em lote deixa o lote RUNNING pro reaper
+     * (tratada no round), nunca vira terminal.
      * {@link Dispatcher#failBeforeDispatch} sintetiza o {@code Attempt} e
      * publica {@code Failed} — mesmo caminho que qualquer outra falha
      * terminal do sistema usa, então um {@code ExecutionListener} é

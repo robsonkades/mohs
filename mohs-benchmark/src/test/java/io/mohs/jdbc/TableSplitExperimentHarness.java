@@ -411,7 +411,12 @@ class TableSplitExperimentHarness {
                             inFlight.acquire();
                             dispatched.add(dispatcher.submit(() -> {
                                 try {
-                                    executionStore.markFired(execution.id(), NOW);
+                                    // era executionStore.markFired antes da Phase 3 (ADR-0047
+                                    // fundiu fired_at no claim); inline pra este braço seguir
+                                    // medindo o caminho de escrita que o E1 registrou
+                                    new JdbcTemplate(pool).update(
+                                            "UPDATE mohs_executions SET fired_at = ? WHERE id = ?",
+                                            Timestamp.from(NOW), execution.id().value());
                                     ExecutionStore.Completion completion = executionStore.complete(
                                             new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(),
                                                     new Attempt(1, NOW, NOW, ExecutionState.SUCCEEDED, null),

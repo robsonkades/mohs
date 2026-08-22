@@ -137,6 +137,11 @@ class JdbcClaimerTest {
         Timestamp leaseExpiresAt = rawJdbcTemplate.queryForObject(
                 "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", Timestamp.class, "exec-1");
         assertThat(JdbcTimestamps.fromUtcTimestamp(leaseExpiresAt)).isEqualTo(NOW.plus(LEASE_TTL));
+        // ADR-0047: fired_at nasce no CAS do claim — o round trip próprio do
+        // markFired foi fundido aqui
+        Timestamp firedAt = rawJdbcTemplate.queryForObject(
+                "SELECT fired_at FROM mohs_executions WHERE id = ?", Timestamp.class, "exec-1");
+        assertThat(JdbcTimestamps.fromUtcTimestamp(firedAt)).isEqualTo(NOW);
     }
 
     @Test

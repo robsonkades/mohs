@@ -439,6 +439,22 @@ class JdbcJobStoreTest {
         assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(0);
     }
 
+    /** ADR-0047: o bloco devolve N vagas numa escrita, mesmo estado final de N decrementos guardados — inclusive o piso. */
+    @Test
+    void bulkDecrementReleasesSeveralSlotsAndFloorsAtZero() {
+        store.upsert(definitionWithCap("report-summary", 10));
+        JobKey key = JobKey.of("report-summary");
+        for (int i = 0; i < 3; i++) {
+            store.tryIncrementRunningExecutions(key);
+        }
+
+        store.decrementRunningExecutions(key, 2);
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(1);
+
+        store.decrementRunningExecutions(key, 5);
+        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(0);
+    }
+
     @Test
     void findSkipsRowsWhoseHandlerTypeNoLongerResolves() {
         // simula um handler removido do código: insere a linha direto,

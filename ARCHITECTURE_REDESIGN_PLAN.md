@@ -2528,6 +2528,18 @@ phase depends on a later phase to be correct.
 - **Rollback.** One property.
 - **Why first:** it is the highest ratio of measured gain to structural risk in the
   entire plan, and it makes every later phase's numbers better.
+- **Result (2026-08-22, ADR-0047; BASELINE "Phase 3 — group commit + fusões"):**
+  shipped on the current schema — `fired_at` folded into the claim CAS, payload
+  read batched per round (also killing the S8 finding's transient arm by
+  construction), `CompletionBatcher` (256/5 ms, opt-out property), `completeAll`
+  returning per-request verdicts, and bulk slot release (the first bench run
+  showed the flusher serialized by one `decrementRunningExecutions` round trip
+  per execution — §1.2's hidden counter, again). Gates: commits/execution
+  3.9 → **0.04** (≤ 1.5 passes 30×); throughput 3.0-3.3k → median **~5.7k =
+  1.7-1.9×** on a doubled-history bench (1.8× gate on the line; fold ~1.45×,
+  group commit +1.05-1.36×); E5: zero duplicate exposure beyond in-flight
+  (batcher queue is still RUNNING rows). The engine is no longer commit-bound —
+  the new ceiling is the serial tick (§1.3), which is Phase 5/6's business.
 
 ### Phase 4 — Node lease + epoch fencing *(1–2 sprints)*
 

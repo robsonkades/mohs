@@ -22,6 +22,11 @@ public interface JobContext {
 
     Instant scheduledAt();
 
+    /**
+     * O instante em que ESTE attempt começou a ser despachado — não é a
+     * coluna {@code fired_at} de {@code Execution}, que desde a ADR-0047
+     * registra o claim (dezenas de ms antes, sob carga).
+     */
     Instant firedAt();
 
     /**

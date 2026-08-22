@@ -1,6 +1,7 @@
 package io.mohs.autoconfigure;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 
 import javax.sql.DataSource;
@@ -31,6 +32,7 @@ import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.BatchCompletionCallbacks;
 import io.mohs.engine.BatchStore;
 import io.mohs.engine.Claimer;
+import io.mohs.engine.CompletionBatcher;
 import io.mohs.engine.Dispatcher;
 import io.mohs.engine.Engine;
 import io.mohs.engine.EngineMetrics;
@@ -272,10 +274,24 @@ public class MohsAutoConfiguration {
             List<ExecutionInterceptor> interceptors,
             List<ExecutionListener> listeners,
             @Qualifier("mohsEventExecutor") AsyncTaskExecutor mohsEventExecutor,
-            EngineMetrics mohsEngineMetrics
+            EngineMetrics mohsEngineMetrics,
+            ObjectProvider<CompletionBatcher> mohsCompletionBatcher
     ) {
         return new Dispatcher(mohsExecutionStore, mohsJobStore, mohsHandlerRegistry, mohsClock, interceptors, listeners,
-                mohsEventExecutor, mohsEngineMetrics);
+                mohsEventExecutor, mohsEngineMetrics, mohsCompletionBatcher.getIfAvailable());
+    }
+
+    /**
+     * Group commit da conclusão (ADR-0047) — N=256/T=5ms fixos por decisão
+     * (§7.6: o único knob é o opt-out). {@code start}/{@code close} pelo
+     * ciclo de vida do contexto: o {@code SmartLifecycle} de
+     * {@link #mohsEngineLifecycle} para o engine ANTES da destruição de
+     * beans, então o close drena o que os últimos handlers submeteram.
+     */
+    @Bean(initMethod = "start", destroyMethod = "close")
+    @ConditionalOnProperty(name = "mohs.engine.completion-flush-on-every-result", havingValue = "false", matchIfMissing = true)
+    public CompletionBatcher mohsCompletionBatcher(ExecutionStore mohsExecutionStore, JobStore mohsJobStore) {
+        return new CompletionBatcher(mohsExecutionStore, mohsJobStore, 256, Duration.ofMillis(5));
     }
 
     @Bean

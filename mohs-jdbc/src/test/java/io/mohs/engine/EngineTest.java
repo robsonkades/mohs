@@ -1378,6 +1378,11 @@ class EngineTest {
         public void decrementRunningExecutions(JobKey key) {
             delegate.decrementRunningExecutions(key);
         }
+
+        @Override
+        public void decrementRunningExecutions(JobKey key, int permits) {
+            delegate.decrementRunningExecutions(key, permits);
+        }
     }
 
     /** Decorator que faz {@link ExecutionStore#complete} lançar pra uma execução específica — simula o banco falhando na gravação da falha terminal. */
@@ -1444,12 +1449,12 @@ class EngineTest {
         }
 
         @Override
-        public void markFired(ExecutionId id, Instant firedAt) {
-            delegate.markFired(id, firedAt);
+        public PayloadBatch findPayloads(List<ExecutionId> ids) {
+            return delegate.findPayloads(ids);
         }
 
         @Override
-        public Set<ExecutionId> completeAll(List<CompletionRequest> requests, JobStore jobStore) {
+        public Map<ExecutionId, Completion> completeAll(List<CompletionRequest> requests, JobStore jobStore) {
             return delegate.completeAll(requests, jobStore);
         }
 

@@ -31,8 +31,8 @@ import io.mohs.core.job.JobKey;
  * transição de conclusão (ADR-0024): toca só {@code mohs_executions} +
  * {@code mohs_attempts}, dono natural é esta porta. Payload não é campo
  * de {@link Execution} (não é parte do contrato M1) — {@link #insert}
- * grava, {@link #findPayload} lê de volta; nenhum outro método desta
- * porta o expõe.
+ * grava, {@link #findPayload}/{@link #findPayloads} leem de volta;
+ * nenhum outro método desta porta o expõe.
  */
 public interface ExecutionStore {
 
@@ -61,13 +61,36 @@ public interface ExecutionStore {
     Optional<Object> findPayload(ExecutionId id);
 
     /**
-     * Grava {@code fired_at} — metadado, não transição de estado (sem CAS
-     * guardado, ao contrário de {@link #complete}). {@link Execution#firedAt}
-     * fica {@code null} enquanto a execução não disparou de verdade
-     * (claim/lease não conta); {@link Dispatcher} chama isto no início do
-     * dispatch, antes de invocar o handler.
+     * {@link #findPayload} para o lote inteiro do claim numa consulta só
+     * (ADR-0047): o find por execução era ~1 round trip autocommit por
+     * execução no hot path — a maior fatia dos commits de leitura medidos
+     * na Phase 0 do redesign. Falha de DESSERIALIZAÇÃO é veredito por
+     * linha ({@link PayloadBatch#unreadable}) — payload corrompido/classe
+     * sumida não sara re-tentando e segue terminal; falha da CONSULTA
+     * propaga — é infra, e o chamador ({@link Engine}) deixa o lote
+     * RUNNING para o reaper: o soluço nunca vira falha TERMINAL imediata
+     * (o achado do S8). O reclaim consome um attempt do orçamento como
+     * qualquer zumbi (ADR-0033) — job com {@code retries = 0} ainda
+     * termina FAILED por esse caminho, só que com o backoff da lease em
+     * vez de na hora. Id ausente dos dois mapas: a execução sumiu do
+     * store.
      */
-    void markFired(ExecutionId id, Instant firedAt);
+    PayloadBatch findPayloads(List<ExecutionId> ids);
+
+    /**
+     * O resultado de {@link #findPayloads}: payloads reconstituídos e, por
+     * linha que não desserializou, a causa — chaves disjuntas por
+     * construção.
+     */
+    record PayloadBatch(Map<ExecutionId, Object> payloads, Map<ExecutionId, RuntimeException> unreadable) {
+
+        public static final PayloadBatch EMPTY = new PayloadBatch(Map.of(), Map.of());
+
+        public PayloadBatch {
+            payloads = Map.copyOf(payloads);
+            unreadable = Map.copyOf(unreadable);
+        }
+    }
 
     /**
      * Transiciona uma {@code Execution RUNNING} para um estado terminal ou
@@ -124,14 +147,17 @@ public interface ExecutionStore {
      * ~42x mais rápida no Postgres, mas o throughput fim-a-fim quase não
      * mudeu — o gargalo tinha migrado pra cá). Mesma disciplina de CAS
      * por request: uma execução que perdeu a corrida (conclusão
-     * concorrente por outro caminho) sai silenciosamente do retorno, sem
-     * erro — nunca grava {@link Attempt} nem libera vaga de concorrência
-     * pra quem não transicionou de verdade.
+     * concorrente por outro caminho) recebe {@link Completion#NOT_APPLIED},
+     * sem erro — nunca grava {@link Attempt} nem libera vaga de
+     * concorrência pra quem não transicionou de verdade.
      *
-     * @return os ids das execuções cuja transição realmente ocorreu —
-     *         subconjunto de {@code requests}, possivelmente vazio.
+     * @return um veredito {@link Completion} por request (ADR-0047 — o
+     *         {@code CompletionBatcher} publica evento e fecha lote a
+     *         partir daqui, o mesmo contrato de {@link #complete} em
+     *         lote); chaves são os ids dos requests, sempre todas
+     *         presentes.
      */
-    Set<ExecutionId> completeAll(List<CompletionRequest> requests, JobStore jobStore);
+    Map<ExecutionId, Completion> completeAll(List<CompletionRequest> requests, JobStore jobStore);
 
     /**
      * Um pedido de conclusão — a forma única de {@link #complete} e

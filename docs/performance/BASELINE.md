@@ -1018,6 +1018,83 @@ heartbeat de nó, `expires_at` ~5-15 s).
 - Handler trivial: duplicata aqui custa um log; o custo real de
   re-execução é do handler do usuário.
 
+## Phase 3 — group commit + fusões, medido (ADR-0047) — 2026-08-22
+
+A Phase 3 do redesign no schema ATUAL: `fired_at` fundido no CAS do claim
+(o `markFired` autocommit morre), leitura de payload em lote por round
+(era ~1 round trip autocommit POR EXECUÇÃO) e `CompletionBatcher` — group
+commit da conclusão via `completeAll` (256 resultados/5 ms), com opt-out
+`mohs.engine.completion-flush-on-every-result`. Bancada: mesma dos
+"Tuning fim a fim" (app demo no ponto de operação da rodada 5, Postgres
+`postgres:latest`, drains de 50k), MAS com ~1M linhas de história
+acumulada das rodadas de chaos/write-amp — o dobro da Phase 0 — e
+`max_wal_size` 8GB/`checkpoint_timeout` 30min via ALTER SYSTEM (higiene
+de FPI, lição do E1). A/B pela própria propriedade: braço "control" =
+mesmo binário com flush síncrono por resultado (JÁ inclui as duas
+fusões), braço "batched" = default novo.
+
+### O achado do caminho: o flusher serializado pelo decremento
+
+A primeira rodada do braço batched entregou os commits (0,05/exec) mas
+NÃO a vazão (3,4k — igual à Phase 0): o `completeAll` devolvia a vaga de
+concorrência com `decrementRunningExecutions` UMA POR EXECUÇÃO — ~256
+round trips sequenciais por flush na thread única do flusher, teto
+aritmético de ~3-5k conclusões/s. Corrigido no mesmo passo: decremento em
+bloco por `job_key` distinto (`CASE` com piso em zero — portável; SQL
+Server 2019 não tem `GREATEST`). É o padrão da §1.2 do plano de novo:
+o custo escondido não era o commit, era o contador.
+
+### Números (drains de 50k; rodadas na ordem em que rodaram)
+
+| Braço | exec/s por rodada | commits/exec | tuple versions/exec | WAL B/exec (rodadas limpas*) |
+|---|---|---:|---:|---:|
+| batched, flusher serial | 3.372 · 2.869 | 0,050-0,054 | 4,2-4,3 | — (FPI contaminado) |
+| **batched, corrigido** | 4.942 · 6.401 · 7.253 · 3.879 (mediana ~5,7k) | **0,037-0,048** | 3,2-3,4 | **2.337 · 2.880** |
+| control (fusões, sem batcher) | 4.696 · 4.748 | 1,96-2,03 | 3,2 | 2.193 |
+
+*rodadas com FPI < 0,1/exec; as demais pegaram checkpoint/vacuum no meio
+(variância do braço batched, 3,9-7,3k, é vacuum de ~120k dead tuples por
+drain interferindo — o control, mais lento, oscila menos).
+
+### Vereditos dos gates da fase
+
+- **commits/execução ≤ 1,5: PASSA por 30×** — 0,037-0,054 engine-side
+  (era ~3,9 na Phase 0; o enqueue segue +1 por construção). A decomposição
+  do control mostra o resto: 2,0/exec = a transação de conclusão + a
+  cerimônia `SHOW TRANSACTION ISOLATION LEVEL` do pgjdbc por transação.
+- **S1 ≥ 1,8×: na linha, com atribuição dividida.** Contra a régua da
+  Phase 0 (3,0-3,3k, com METADE da história): mediana batched ~5,7k =
+  **1,7-1,9×** — e o viés da história dobrada joga contra. O A/B
+  mesmo-dia divide o mérito: as fusões sozinhas (control) fazem 4,7k
+  (~1,45× da Phase 0); o group commit adiciona 1,05-1,36×. O motor
+  deixou de ser commit-bound: com dispatch 1024, o Postgres já agrupava
+  os WALWrites concorrentes — o teto novo (~5-7k) é o tick serial
+  (renovação + claim + payload na mesma thread), exatamente a §1.3 do
+  plano, que é problema da Phase 5/6.
+- **E5 (duplicatas sob kill −9, batcher ON): nenhuma exposição além do
+  em-voo.** S6 re-rodado no motor novo: 314 RUNNING no kill → exatamente
+  314 re-execuções, 0 violações, 50k/50k SUCCEEDED, recuperação
+  kill→drain 31,5s (piso do lease TTL, como antes). O que está na fila
+  do batcher ainda é RUNNING no banco — já pertence ao conjunto em voo
+  que o contrato aceita re-executar; o kill criterion do E5 ("duplicatas
+  pior que linear no flush") não se manifesta.
+- **Bônus de resiliência:** a falha TRANSIENTE na carga de payload deixou
+  de ser terminal (o lote fica RUNNING pro reaper) — o braço transiente
+  do achado do S8 morre por construção; payload ilegível por linha segue
+  terminal, semântica preservada.
+
+### Limitações declaradas
+
+- História ~1M e autovacuum ativo tornam as rodadas ±30% — as medianas e
+  o A/B same-day carregam o veredito, não uma rodada isolada.
+- Handler trivial: o ganho do group commit cresce com handler curto e
+  I/O-bound; com handler lento o commit nunca foi o gargalo.
+- WAL bytes/exec não muda com o batcher (esperado: group commit amortiza
+  fsync/commits, não bytes); os ~2,2-2,9 KB/exec seguem sendo o alvo da
+  ADR-A (E1 mediu o split em −36,4%).
+- `SHOW TRANSACTION ISOLATION LEVEL` (~1 xact contado por transação real)
+  é cerimônia do driver — alavanca separada, não perseguida aqui.
+
 ## Como reproduzir
 
 Os harnesses moram em `mohs-benchmark` desde 2026-08-21 (Phase 0 do

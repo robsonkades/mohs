@@ -96,6 +96,31 @@ class DispatcherTest {
                 new EngineMetrics(new SimpleMeterRegistry()));
     }
 
+    /**
+     * ADR-0047: com o {@link CompletionBatcher}, a conclusão vira group
+     * commit e o evento sai DEPOIS do flush — a garantia "publica só o que
+     * ficou durável" atravessa o batcher. A mecânica do batcher em si mora
+     * em {@link CompletionBatcherTest}; aqui é só o wiring do dispatcher.
+     */
+    @Test
+    void dispatchThroughTheBatcherCompletesAndPublishesAfterTheFlush() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+        });
+        CompletionBatcher batcher = new CompletionBatcher(executionStore, jobStore, 1, Duration.ofMillis(5));
+        batcher.start();
+        try {
+            new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener), eventExecutor,
+                    new EngineMetrics(new SimpleMeterRegistry()), batcher)
+                    .dispatch(execution, onDemand("welcome-email"), "hello");
+
+            assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
+            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        } finally {
+            batcher.close();
+        }
+    }
+
     private Execution seedRunningExecution(String id, String jobKey) {
         jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
         rawJdbcTemplate.update("""
@@ -258,7 +283,8 @@ class DispatcherTest {
         Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
         assertThat(found.attempts()).hasSize(1);
         assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.SUCCEEDED);
-        assertThat(found.firedAt()).isEqualTo(NOW);
+        // fired_at não é mais escrito aqui — nasce no CAS do claim (ADR-0047);
+        // a cobertura mora em JdbcClaimerTest.claimReturnsDueEnqueuedExecutionsAsRunning
         assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
     }
 

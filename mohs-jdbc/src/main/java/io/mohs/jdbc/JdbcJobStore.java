@@ -465,6 +465,29 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /**
+     * ADR-0047 — {@code CASE}, não {@code GREATEST}: piso em zero portável
+     * nos 4 dialetos (SQL Server 2019, Tier 2, não tem {@code GREATEST}).
+     * N decrementos guardados e o bloco com piso terminam no mesmo valor.
+     */
+    @Override
+    public void decrementRunningExecutions(JobKey key, int permits) {
+        Objects.requireNonNull(key, "key");
+        if (permits < 0) {
+            throw new IllegalArgumentException("permits must be >= 0, got " + permits);
+        }
+        if (permits == 0) {
+            return;
+        }
+        jdbcTemplate.update("""
+                UPDATE mohs_job_definitions
+                SET running_execution_count = CASE WHEN running_execution_count >= :permits
+                    THEN running_execution_count - :permits ELSE 0 END
+                WHERE job_key = :jobKey AND running_execution_count > 0
+                """,
+                new MapSqlParameterSource().addValue("permits", permits).addValue("jobKey", key.value()));
+    }
+
+    /**
      * Aposentar o job cancela as execuções pendentes dele, e cancelar é
      * terminal: sem contar, o membro some do lote e {@code pending} nunca zera
      * — o lote fica aberto para sempre, sem varredura de reconciliação que

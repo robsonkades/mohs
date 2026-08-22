@@ -9,6 +9,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -155,14 +156,33 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return objectMapper.readValue(payloadJson, type);
     }
 
+    /**
+     * ADR-0047 — o veredito é POR LINHA de propósito: uma linha que não
+     * desserializa (classe sumida, JSON corrompido) entra em
+     * {@code unreadable} sem contaminar as vizinhas; só a falha da
+     * própria consulta (infra) propaga, porque aí não há veredito nenhum
+     * a dar.
+     */
     @Override
-    public void markFired(ExecutionId id, Instant firedAt) {
-        Objects.requireNonNull(id, "id");
-        Objects.requireNonNull(firedAt, "firedAt");
-        jdbcTemplate.update("UPDATE mohs_executions SET fired_at = :firedAt WHERE id = :id",
-                new MapSqlParameterSource()
-                        .addValue("firedAt", JdbcTimestamps.toUtcTimestamp(firedAt))
-                        .addValue("id", id.value()));
+    public ExecutionStore.PayloadBatch findPayloads(List<ExecutionId> ids) {
+        Objects.requireNonNull(ids, "ids");
+        if (ids.isEmpty()) {
+            return ExecutionStore.PayloadBatch.EMPTY;
+        }
+        Map<ExecutionId, Object> payloads = new LinkedHashMap<>();
+        Map<ExecutionId, RuntimeException> unreadable = new LinkedHashMap<>();
+        for (List<String> chunk : chunksOf(ids.stream().map(ExecutionId::value).toList())) {
+            jdbcTemplate.query("SELECT id, payload, payload_type FROM mohs_executions WHERE id IN (:ids)",
+                    new MapSqlParameterSource("ids", chunk), rs -> {
+                        ExecutionId id = ExecutionId.of(rs.getString("id"));
+                        try {
+                            payloads.put(id, mapPayloadRow(rs));
+                        } catch (RuntimeException e) {
+                            unreadable.put(id, e);
+                        }
+                    });
+        }
+        return new ExecutionStore.PayloadBatch(payloads, unreadable);
     }
 
     /**
@@ -266,46 +286,59 @@ public final class JdbcExecutionStore implements ExecutionStore {
      * DBTUNE-14: {@link #complete} em lote — {@code batchUpdate} com params
      * por linha (cada request carrega seu {@code retryAt}/fence), cujo
      * {@code int[]} é a confirmação exata do CAS linha a linha, e um
-     * {@code INSERT} em lote só dos {@link Attempt} confirmados —
-     * {@code jobStore.decrementRunningExecutions} continua uma chamada por
-     * execução (guardada, barata, sem API de lote em {@link JobStore} — não
-     * vale o acoplamento novo pra isto).
+     * {@code INSERT} em lote só dos {@link Attempt} confirmados — e as
+     * vagas de concorrência voltam em bloco por job distinto
+     * ({@link JobStore#decrementRunningExecutions(io.mohs.core.job.JobKey, int)},
+     * ADR-0047). Desde a mesma ADR devolve o
+     * veredito {@link ExecutionStore.Completion} por request — o
+     * {@code CompletionBatcher} publica evento e elege o fechador do lote
+     * daqui, exatamente como {@link #complete} sempre fez.
      */
     @Override
-    public Set<ExecutionId> completeAll(List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
+    public Map<ExecutionId, ExecutionStore.Completion> completeAll(List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
         Objects.requireNonNull(requests, "requests");
         Objects.requireNonNull(jobStore, "jobStore");
         if (requests.isEmpty()) {
-            return Set.of();
+            return Map.of();
         }
         // requireNonNull só documenta o invariante pro @NullMarked (JAVA-8) —
-        // o callback sempre devolve um Set.
+        // o callback sempre devolve um Map.
         return Objects.requireNonNull(transactionTemplate.execute(_ -> completeAllWithinTransaction(requests, jobStore)));
     }
 
-    private Set<ExecutionId> completeAllWithinTransaction(List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
-        Map<String, ExecutionStore.CompletionRequest> byId = requests.stream()
-                .collect(Collectors.toMap(r -> r.id().value(), r -> r));
+    private Map<ExecutionId, ExecutionStore.Completion> completeAllWithinTransaction(
+            List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
+        Map<ExecutionId, ExecutionStore.CompletionRequest> byId = requests.stream()
+                .collect(Collectors.toMap(ExecutionStore.CompletionRequest::id, r -> r));
         Set<ExecutionId> completedIds = transitionAll(requests);
+        Map<ExecutionId, ExecutionStore.Completion> verdicts = LinkedHashMap.newLinkedHashMap(requests.size());
+        for (ExecutionStore.CompletionRequest request : requests) {
+            verdicts.put(request.id(), ExecutionStore.Completion.NOT_APPLIED);
+        }
         if (completedIds.isEmpty()) {
-            return completedIds;
+            return verdicts;
         }
 
         MapSqlParameterSource[] attemptParams = completedIds.stream()
-                .map(id -> attemptParams(id, byId.get(id.value()).attempt()))
+                .map(id -> attemptParams(id, byId.get(id).attempt()))
                 .toArray(MapSqlParameterSource[]::new);
         jdbcTemplate.batchUpdate("""
                 INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
                 VALUES (:executionId, :number, :startedAt, :finishedAt, :outcome, :error)
                 """, attemptParams);
 
+        // ADR-0047: as vagas voltam em bloco por job distinto, não uma por
+        // execução — o decremento serial era ~1 round trip por execução na
+        // thread do flusher, o gargalo assim que o commit deixou de ser
+        Map<JobKey, Integer> slotsPerJob = new LinkedHashMap<>();
         for (ExecutionId id : completedIds) {
-            ExecutionStore.CompletionRequest request = byId.get(id.value());
-            jobStore.decrementRunningExecutions(request.jobKey());
+            ExecutionStore.CompletionRequest request = byId.get(id);
+            slotsPerJob.merge(request.jobKey(), 1, Integer::sum);
             rearmIfRequested(request, jobStore);
-            countIntoBatch(request);
+            verdicts.put(id, ExecutionStore.Completion.applied(countIntoBatch(request)));
         }
-        return completedIds;
+        slotsPerJob.forEach(jobStore::decrementRunningExecutions);
+        return verdicts;
     }
 
     /**

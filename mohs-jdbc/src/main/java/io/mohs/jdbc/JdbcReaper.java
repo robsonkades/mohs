@@ -108,7 +108,12 @@ public final class JdbcReaper implements Reaper {
             requestById.put(candidate.id(), reclaimRequest(candidate, execution, now));
         }
 
-        Set<ExecutionId> completedIds = executionStore.completeAll(List.copyOf(requestById.values()), jobStore);
+        Map<ExecutionId, ExecutionStore.Completion> verdicts =
+                executionStore.completeAll(List.copyOf(requestById.values()), jobStore);
+        Set<ExecutionId> completedIds = verdicts.entrySet().stream()
+                .filter(e -> e.getValue().applied())
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toSet());
         return buildReclaimedList(candidates, executionsById, requestById, completedIds);
     }
 

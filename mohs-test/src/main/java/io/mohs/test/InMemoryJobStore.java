@@ -173,4 +173,15 @@ public final class InMemoryJobStore implements JobStore {
                 ? stored
                 : new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), stored.runningExecutionCount() - 1, stored.nextFireAt()));
     }
+
+    /** Mesmo piso em zero do bloco JDBC (ADR-0047). */
+    @Override
+    public void decrementRunningExecutions(JobKey key, int permits) {
+        Objects.requireNonNull(key, "key");
+        if (permits < 0) {
+            throw new IllegalArgumentException("permits must be >= 0, got " + permits);
+        }
+        jobs.computeIfPresent(key, (_, stored) -> new StoredJob(stored.definition(), stored.orphaned(), stored.paused(),
+                Math.max(stored.runningExecutionCount() - permits, 0), stored.nextFireAt()));
+    }
 }

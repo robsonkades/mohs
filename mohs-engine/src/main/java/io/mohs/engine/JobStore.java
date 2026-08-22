@@ -124,4 +124,16 @@ public interface JobStore {
      * implementada).
      */
     void decrementRunningExecutions(JobKey key);
+
+    /**
+     * {@link #decrementRunningExecutions(JobKey)} em bloco — devolve
+     * {@code permits} vagas do mesmo job numa escrita só, com o mesmo piso
+     * em zero (a sequência de N decrementos guardados e o bloco com piso
+     * produzem o mesmo estado final). ADR-0047: o flush do
+     * {@code CompletionBatcher} devolvia as vagas UMA POR EXECUÇÃO, serial
+     * na thread do flusher — ~256 round trips por flush, medido como o
+     * gargalo novo assim que o commit deixou de ser (bancada da Phase 3 na
+     * BASELINE).
+     */
+    void decrementRunningExecutions(JobKey key, int permits);
 }

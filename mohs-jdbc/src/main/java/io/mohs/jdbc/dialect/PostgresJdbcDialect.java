@@ -19,7 +19,7 @@ public final class PostgresJdbcDialect implements JdbcDialect {
      */
     public static final String BATCH_TRANSITION_TO_RUNNING = """
             UPDATE mohs_executions
-            SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId
+            SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId, fired_at = :now
             WHERE id IN (:ids) AND state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND scheduled_at <= :now
             RETURNING id
             """;

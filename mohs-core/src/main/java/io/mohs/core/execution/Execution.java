@@ -14,8 +14,11 @@ import org.jspecify.annotations.Nullable;
  * o actor que causou o disparo e cada {@link Attempt} feita até agora. A
  * trilha de actor é inegociável em toda invocação (ver
  * {@code docs/API-DESIGN.md} §"Actor e regressão ergonômica assumida").
- * {@code firedAt} é {@code null} enquanto a execução ainda não disparou
- * (ex.: estado {@link ExecutionState#ENQUEUED}).
+ * {@code firedAt} é o instante em que a execução foi reivindicada por um
+ * node — o CAS do claim o grava (ADR-0047) — e fica {@code null} enquanto
+ * isso não ocorreu (ex.: estado {@link ExecutionState#ENQUEUED}); o
+ * início real de cada attempt é {@link Attempt#startedAt}, dezenas de ms
+ * depois sob carga.
  */
 public record Execution(
         ExecutionId id,

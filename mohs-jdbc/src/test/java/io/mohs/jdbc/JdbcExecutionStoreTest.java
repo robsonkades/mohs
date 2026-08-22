@@ -16,6 +16,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -52,6 +53,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
@@ -179,6 +181,32 @@ class JdbcExecutionStoreTest {
                 Collections.unmodifiableMap(new LinkedHashMap<String, Object>()));
 
         assertThat(store.findPayload(ExecutionId.of("019abc-wrap"))).contains(Map.of());
+    }
+
+    /**
+     * ADR-0047: o veredito é por linha — a ilegível (classe fora do
+     * classpath) sai em {@code unreadable} com a causa, as legíveis vêm
+     * inteiras, e id inexistente simplesmente não aparece em mapa nenhum.
+     */
+    @Test
+    void findPayloadsSeparatesReadableUnreadableAndMissingPerRow() {
+        store.insert(execution("019abc-pb-1", "welcome-email"), new WelcomeEmail("ana", 31));
+        store.insert(execution("019abc-pb-2", "welcome-email"), new WelcomeEmail("bia", 28));
+        new JdbcTemplate(dataSource).update(
+                "UPDATE mohs_executions SET payload_type = 'com.example.Gone' WHERE id = '019abc-pb-2'");
+
+        ExecutionStore.PayloadBatch batch = store.findPayloads(List.of(
+                ExecutionId.of("019abc-pb-1"), ExecutionId.of("019abc-pb-2"), ExecutionId.of("019abc-pb-missing")));
+
+        assertThat(batch.payloads()).containsOnlyKeys(ExecutionId.of("019abc-pb-1"));
+        assertThat(batch.payloads().get(ExecutionId.of("019abc-pb-1"))).isEqualTo(new WelcomeEmail("ana", 31));
+        assertThat(batch.unreadable()).containsOnlyKeys(ExecutionId.of("019abc-pb-2"));
+        assertThat(batch.unreadable().get(ExecutionId.of("019abc-pb-2"))).hasMessageContaining("com.example.Gone");
+    }
+
+    @Test
+    void findPayloadsReturnsEmptyBatchForNoIds() {
+        assertThat(store.findPayloads(List.of())).isEqualTo(ExecutionStore.PayloadBatch.EMPTY);
     }
 
     @Test
@@ -374,12 +402,13 @@ class JdbcExecutionStoreTest {
         Attempt failedAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "exhausted");
         Attempt retryAttempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "will retry");
 
-        Set<ExecutionId> completed = store.completeAll(List.of(
+        Map<ExecutionId, ExecutionStore.Completion> completed = store.completeAll(List.of(
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-retry-2"), JobKey.of("welcome-email"), failedAttempt, ExecutionState.FAILED),
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-retry-3"), JobKey.of("welcome-email"), retryAttempt, ExecutionState.RETRY_SCHEDULED, retryAt)),
                 jobStore);
 
-        assertThat(completed).containsExactlyInAnyOrder(ExecutionId.of("019abc-retry-2"), ExecutionId.of("019abc-retry-3"));
+        assertThat(completed).containsOnlyKeys(ExecutionId.of("019abc-retry-2"), ExecutionId.of("019abc-retry-3"));
+        assertThat(completed.values()).allMatch(ExecutionStore.Completion::applied);
         assertThat(store.find(ExecutionId.of("019abc-retry-2")).orElseThrow().state()).isEqualTo(ExecutionState.FAILED);
         Execution retried = store.find(ExecutionId.of("019abc-retry-3")).orElseThrow();
         assertThat(retried.state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
@@ -688,7 +717,8 @@ class JdbcExecutionStoreTest {
         seedRunningExecution("019abc-atomic-2", "welcome-email");
         seedRunningExecution("019abc-atomic-3", "welcome-email");
         JobStore failingJobStore = mock(JobStore.class);
-        doThrow(new RuntimeException("simulated failure releasing the slot")).when(failingJobStore).decrementRunningExecutions(any());
+        // a sobrecarga em bloco (ADR-0047) é a que o completeAll usa agora
+        doThrow(new RuntimeException("simulated failure releasing the slot")).when(failingJobStore).decrementRunningExecutions(any(), anyInt());
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
         List<ExecutionStore.CompletionRequest> requests = List.of(
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-atomic-2"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED),
@@ -713,9 +743,10 @@ class JdbcExecutionStoreTest {
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-1"), JobKey.of("welcome-email"), attempt1, ExecutionState.FAILED),
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-2"), JobKey.of("welcome-email"), attempt2, ExecutionState.FAILED));
 
-        var completedIds = store.completeAll(requests, jobStore);
+        var verdicts = store.completeAll(requests, jobStore);
 
-        assertThat(completedIds).containsExactlyInAnyOrder(ExecutionId.of("019abc-completeall-1"), ExecutionId.of("019abc-completeall-2"));
+        assertThat(verdicts).containsOnlyKeys(ExecutionId.of("019abc-completeall-1"), ExecutionId.of("019abc-completeall-2"));
+        assertThat(verdicts.values()).allMatch(ExecutionStore.Completion::applied);
         assertThat(store.find(ExecutionId.of("019abc-completeall-1")).map(Execution::attempts)).contains(List.of(attempt1));
         assertThat(store.find(ExecutionId.of("019abc-completeall-2")).map(Execution::attempts)).contains(List.of(attempt2));
     }
@@ -733,9 +764,12 @@ class JdbcExecutionStoreTest {
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-3"), JobKey.of("welcome-email"), attempt3, ExecutionState.FAILED),
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-completeall-4"), JobKey.of("welcome-email"), attempt4, ExecutionState.FAILED));
 
-        var completedIds = store.completeAll(requests, jobStore);
+        var verdicts = store.completeAll(requests, jobStore);
 
-        assertThat(completedIds).containsExactly(ExecutionId.of("019abc-completeall-3"));
+        // ADR-0047: todo request tem veredito — o perdedor vem NOT_APPLIED, nunca ausente
+        assertThat(verdicts).containsOnlyKeys(ExecutionId.of("019abc-completeall-3"), ExecutionId.of("019abc-completeall-4"));
+        assertThat(verdicts.get(ExecutionId.of("019abc-completeall-3")).applied()).isTrue();
+        assertThat(verdicts.get(ExecutionId.of("019abc-completeall-4"))).isEqualTo(ExecutionStore.Completion.NOT_APPLIED);
         assertThat(store.find(ExecutionId.of("019abc-completeall-4"))).contains(stillEnqueued);
     }
 
@@ -758,7 +792,7 @@ class JdbcExecutionStoreTest {
     }
 
     @Test
-    void completeAllReturnsEmptySetForEmptyRequests() {
+    void completeAllReturnsEmptyMapForEmptyRequests() {
         assertThat(store.completeAll(List.of(), new JdbcJobStore(dataSource, clock))).isEmpty();
     }
 
@@ -977,6 +1011,39 @@ class JdbcExecutionStoreTest {
         assertThat(counters.failed()).isEqualTo(2);
         assertThat(counters.succeeded()).isZero();
         assertThat(counters.pending()).isEqualTo(1);
+    }
+
+    /**
+     * ADR-0047: o {@code completeAll} agora carrega o veredito de fechador
+     * no retorno — antes ele contava e DESCARTAVA (o wart do item 2 do
+     * BATCH-ARCHITECTURE-REVIEW); com o group commit, quem publica
+     * {@code BatchCompleted} lê daqui. Exatamente UM request do lote
+     * fechado recebe os counters, mesmo com os dois no mesmo flush.
+     */
+    @Test
+    void completeAllElectsExactlyOneBatchCloserInItsVerdicts() {
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        JdbcBatchStore batches = new JdbcBatchStore(dataSource, clock);
+        batches.insert("b5", 2);
+        seedBatchMember("019abc-closer-1", "b5");
+        seedBatchMember("019abc-closer-2", "b5");
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.SUCCEEDED, null);
+
+        var verdicts = store.completeAll(List.of(
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-closer-1"), JobKey.of("welcome-email"),
+                        attempt, ExecutionState.SUCCEEDED).inBatch("b5"),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-closer-2"), JobKey.of("welcome-email"),
+                        attempt, ExecutionState.SUCCEEDED).inBatch("b5")),
+                jobStore);
+
+        assertThat(verdicts.values()).allMatch(ExecutionStore.Completion::applied);
+        List<BatchCounters> closers = verdicts.values().stream()
+                .map(ExecutionStore.Completion::closedBatch)
+                .filter(Objects::nonNull)
+                .toList();
+        assertThat(closers).hasSize(1);
+        assertThat(closers.get(0).succeeded()).isEqualTo(2);
+        assertThat(closers.get(0).pending()).isZero();
     }
 
     /**
