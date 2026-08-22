@@ -65,8 +65,13 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
 - `mohs-jdbc`'s Testcontainers tests need Docker up (Rancher Desktop here);
   without it they error on `Could not initialize class *TestSupport`, which
   is environment, not regression.
-- JMH benchmarks: [fill in: benchmark module command]
-- Load harness: [fill in: how to run the macro scenario from BASELINE.md]
+- Benchmarks/harnesses live in `mohs-benchmark` (never published). Query
+  harnesses run only by explicit name (surefire's default pattern skips
+  `*Harness`): `./mvnw -pl mohs-benchmark test -Dtest=ClaimQueryLoadHarness`.
+  No JMH yet — when it lands, it lands there.
+- Load harness (macro): `mohs-benchmark/scripts/write-amplification.ps1`
+  with the demo app running — measures commits/tuple versions/WAL bytes
+  per execution; boot recipe in BASELINE.md "Tuning fim a fim no Postgres".
 - Pinning diagnostics: `-Djdk.tracePinnedThreads` was **removed in JDK 24**
   (JEP 491) — it is a silent no-op on the JDK 25 this project uses. Today use
   JFR (`-XX:StartFlightRecording=filename=rec.jfr`, then `jfr print --events

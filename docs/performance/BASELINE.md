@@ -741,12 +741,19 @@ durante drain + leitura do caminho em `Dispatcher`/`JdbcExecutionStore`):
 
 ## Como reproduzir
 
+Os harnesses moram em `mohs-benchmark` desde 2026-08-21 (Phase 0 do
+redesign — antes viviam nos test sources de `mohs-jdbc`):
+
 ```
-mvn test -Dtest=ClaimQueryLoadHarness
-mvn test -Dtest=ClaimQueryExplainHarness
-mvn test -Dtest=ClaimIndexTuningHarness#postgres
-mvn test -Dtest=ClaimIndexTuningHarness#sqlServer
-mvn test -Dtest=OverviewQueryExplainHarness            # ou #postgres/#mySql/#sqlServer/#h2
+./mvnw -pl mohs-benchmark test -Dtest=ClaimQueryLoadHarness
+./mvnw -pl mohs-benchmark test -Dtest=ClaimQueryExplainHarness
+./mvnw -pl mohs-benchmark test -Dtest=ClaimIndexTuningHarness#postgres
+./mvnw -pl mohs-benchmark test -Dtest=ClaimIndexTuningHarness#sqlServer
+./mvnw -pl mohs-benchmark test -Dtest=OverviewQueryExplainHarness      # ou #postgres/#mySql/#sqlServer/#h2
 ```
+
+Write amplification fim a fim (commits/execução, tuple versions, WAL):
+`mohs-benchmark/scripts/write-amplification.ps1`, com o app de demo no
+ar (seção "Write amplification por execução").
 
 Requer Docker local (Testcontainers sobe Postgres/MySQL/SQL Server).
