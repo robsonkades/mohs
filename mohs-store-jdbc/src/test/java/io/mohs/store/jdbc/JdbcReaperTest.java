@@ -36,6 +36,8 @@ class JdbcReaperTest {
     }
 
     private static final Instant NOW = Instant.parse("2026-08-14T12:00:00Z");
+    /** Corte de staleness pra linha de node legado sem {@code expires_at} (ADR-0051). */
+    private static final Duration LEGACY_STALENESS = Duration.ofSeconds(30);
 
     private DataSource dataSource;
     private MutableClock clock;
@@ -50,7 +52,7 @@ class JdbcReaperTest {
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         jobStore = new JdbcJobStore(dataSource, clock);
         JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
-        reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
+        reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEGACY_STALENESS);
     }
 
     private static DataSource freshH2DataSource() {
@@ -66,13 +68,36 @@ class JdbcReaperTest {
         jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
     }
 
-    private void seedRunningExecution(String id, String jobKey, Instant leaseExpiresAt) {
+    /**
+     * A execução nasce com lease PRÓPRIA ainda válida de propósito
+     * (ADR-0051): o critério de morte é o node, não {@code
+     * lease_expires_at} — quem controla o desfecho de cada teste é a linha
+     * (ou ausência) de {@code node-a} em {@code mohs_nodes}.
+     */
+    private void seedRunningExecution(String id, String jobKey) {
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_executions (
-                    id, job_key, state, scheduled_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
-                VALUES (?, ?, 'RUNNING', ?, 'test', 'node-a', ?, '{}', 'java.lang.Object', ?)
+                    id, job_key, state, scheduled_at, fired_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
+                VALUES (?, ?, 'RUNNING', ?, ?, 'test', 'node-a', ?, '{}', 'java.lang.Object', ?)
                 """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)),
-                JdbcTimestamps.toUtcLocalDateTime(leaseExpiresAt), JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)));
+                JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)),
+                JdbcTimestamps.toUtcLocalDateTime(NOW.plusSeconds(30)), JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)));
+    }
+
+    /** Linha de node pós-V2, com a promessa de liveness em {@code expires_at}. */
+    private void seedNode(String nodeId, Instant expiresAt) {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_nodes (node_id, state, last_heartbeat_at, epoch, expires_at)
+                VALUES (?, 'RUNNING', ?, 1, ?)
+                """, nodeId, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(1)), JdbcTimestamps.toUtcLocalDateTime(expiresAt));
+    }
+
+    /** Linha de node de jar antigo — sem {@code expires_at}; liveness responde pela staleness do heartbeat. */
+    private void seedLegacyNode(String nodeId, Instant lastHeartbeatAt) {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_nodes (node_id, state, last_heartbeat_at, epoch)
+                VALUES (?, 'RUNNING', ?, 0)
+                """, nodeId, JdbcTimestamps.toUtcLocalDateTime(lastHeartbeatAt));
     }
 
     private ExecutionState stateOf(String id) {
@@ -80,10 +105,11 @@ class JdbcReaperTest {
                 "SELECT state FROM mohs_executions WHERE id = ?", String.class, id));
     }
 
+    /** Node ausente de {@code mohs_nodes} (linha purgada, ADR-0041) é morto por definição. */
     @Test
-    void reclaimExpiredTransitionsExpiredRunningExecutionToFailed() {
+    void reclaimExpiredTransitionsARunningExecutionOfAnUnknownNodeToFailed() {
         seedJob("welcome-email");
-        seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+        seedRunningExecution("exec-1", "welcome-email");
 
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
@@ -97,10 +123,24 @@ class JdbcReaperTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
     }
 
+    /** ADR-0051: com a promessa do node vencida, o reclaim acontece mesmo com a lease da EXECUÇÃO ainda válida — a liveness mora no nó. */
     @Test
-    void reclaimExpiredIgnoresExecutionsWithAStillValidLease() {
+    void reclaimExpiredTransitionsARunningExecutionOfAnExpiredNodeToFailed() {
         seedJob("welcome-email");
-        seedRunningExecution("exec-1", "welcome-email", NOW.plusSeconds(30));
+        seedRunningExecution("exec-1", "welcome-email");
+        seedNode("node-a", NOW.minusSeconds(1));
+
+        List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
+
+        assertThat(reclaimed).hasSize(1);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+    }
+
+    @Test
+    void reclaimExpiredIgnoresExecutionsOfALiveNode() {
+        seedJob("welcome-email");
+        seedRunningExecution("exec-1", "welcome-email");
+        seedNode("node-a", NOW.plusSeconds(15));
 
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
@@ -108,11 +148,32 @@ class JdbcReaperTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
     }
 
+    /** Tolerância de versão mista (ADR-0051): linha de node de jar antigo, sem {@code expires_at}, responde pela staleness do heartbeat com corte de {@code lease-ttl}. */
+    @Test
+    void reclaimExpiredIgnoresExecutionsOfAFreshLegacyNode() {
+        seedJob("welcome-email");
+        seedRunningExecution("exec-1", "welcome-email");
+        seedLegacyNode("node-a", NOW.minus(LEGACY_STALENESS).plusSeconds(1));
+
+        assertThat(reaper.reclaimExpired()).isEmpty();
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+    }
+
+    @Test
+    void reclaimExpiredTreatsAStaleLegacyNodeAsDead() {
+        seedJob("welcome-email");
+        seedRunningExecution("exec-1", "welcome-email");
+        seedLegacyNode("node-a", NOW.minus(LEGACY_STALENESS).minusSeconds(1));
+
+        assertThat(reaper.reclaimExpired()).hasSize(1);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+    }
+
     @Test
     void reclaimExpiredReleasesTheJobConcurrencySlot() {
         jobStore.upsert(JobDefinition.of("report-summary", Handler.class, spec -> spec.onDemand().preventOverlap()));
         jobStore.tryIncrementRunningExecutions(JobKey.of("report-summary"));
-        seedRunningExecution("exec-1", "report-summary", NOW.minusSeconds(1));
+        seedRunningExecution("exec-1", "report-summary");
 
         reaper.reclaimExpired();
 
@@ -128,7 +189,7 @@ class JdbcReaperTest {
     @Test
     void reclaimHonoursAStandingCancelRequest() {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(2)));
-        seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+        seedRunningExecution("exec-1", "welcome-email");
         rawJdbcTemplate.update("UPDATE mohs_executions SET cancel_requested = TRUE WHERE id = 'exec-1'");
 
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
@@ -146,7 +207,7 @@ class JdbcReaperTest {
     @Test
     void reclaimSchedulesARetryWhenTheJobStillHasBudget() {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(2)));
-        seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+        seedRunningExecution("exec-1", "welcome-email");
 
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
@@ -165,7 +226,7 @@ class JdbcReaperTest {
     @Test
     void reclaimOfARetiredJobIsTerminalEvenWithBudgetRemaining() {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(5)));
-        seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+        seedRunningExecution("exec-1", "welcome-email");
         jobStore.remove(JobKey.of("welcome-email")); // não alcança a RUNNING; marca retired
 
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
@@ -201,7 +262,7 @@ class JdbcReaperTest {
     @Test
     void reclaimFailsTerminallyWhenTheBudgetIsExhausted() {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
-        seedRunningExecution("exec-1", "welcome-email", NOW.minusSeconds(1));
+        seedRunningExecution("exec-1", "welcome-email");
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
                 VALUES (?, 1, ?, ?, 'FAILED', 'boom')
@@ -221,7 +282,7 @@ class JdbcReaperTest {
     void terminalReclaimOfASchedulerOccurrenceRearmsTheAfterFinishChain() {
         jobStore.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5))));
         rawJdbcTemplate.update("UPDATE mohs_job_definitions SET next_fire_at = NULL WHERE job_key = 'poll'");
-        seedRunningSchedulerOccurrence("exec-1", "poll", NOW.minusSeconds(1));
+        seedRunningSchedulerOccurrence("exec-1", "poll");
 
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
@@ -237,7 +298,7 @@ class JdbcReaperTest {
     void aBudgetedReclaimOfASchedulerOccurrenceDoesNotRearm() {
         jobStore.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)).retries(2)));
         rawJdbcTemplate.update("UPDATE mohs_job_definitions SET next_fire_at = NULL WHERE job_key = 'poll'");
-        seedRunningSchedulerOccurrence("exec-1", "poll", NOW.minusSeconds(1));
+        seedRunningSchedulerOccurrence("exec-1", "poll");
 
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
@@ -248,12 +309,13 @@ class JdbcReaperTest {
         assertThat(nextFireAt).isNull();
     }
 
-    private void seedRunningSchedulerOccurrence(String id, String jobKey, Instant leaseExpiresAt) {
+    private void seedRunningSchedulerOccurrence(String id, String jobKey) {
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_executions (
-                    id, job_key, state, scheduled_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
-                VALUES (?, ?, 'RUNNING', ?, 'scheduler', 'node-a', ?, '{}', 'java.lang.Object', ?)
+                    id, job_key, state, scheduled_at, fired_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
+                VALUES (?, ?, 'RUNNING', ?, ?, 'scheduler', 'node-a', ?, '{}', 'java.lang.Object', ?)
                 """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)),
-                JdbcTimestamps.toUtcLocalDateTime(leaseExpiresAt), JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)));
+                JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)),
+                JdbcTimestamps.toUtcLocalDateTime(NOW.plusSeconds(30)), JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)));
     }
 }

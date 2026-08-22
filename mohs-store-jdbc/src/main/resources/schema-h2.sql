@@ -108,10 +108,14 @@ CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     refilled_at     TIMESTAMP NOT NULL
 );
 
--- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma
--- lógica de claim/reclaim consulta esta tabela.
+-- Heartbeat de node (ADR-0012). Desde a ADR-0051 deixou de ser só
+-- informativa: o reaper consulta expires_at/last_heartbeat_at para decidir
+-- quem está morto (anti-join de JdbcReaper).
 CREATE TABLE IF NOT EXISTS mohs_nodes (
     node_id           VARCHAR(255) PRIMARY KEY,
     state             VARCHAR(20) NOT NULL,
-    last_heartbeat_at TIMESTAMP   NOT NULL
+    last_heartbeat_at TIMESTAMP   NOT NULL,
+    epoch             BIGINT      NOT NULL DEFAULT 0, -- encarnação do nó (ADR-0051)
+    expires_at        TIMESTAMP                       -- lease do NÓ (ADR-0051)
 );
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_owner ON mohs_executions (state, node_id);

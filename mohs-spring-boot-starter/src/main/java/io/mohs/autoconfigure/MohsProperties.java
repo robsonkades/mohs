@@ -55,8 +55,9 @@ public record MohsProperties(
      * @param pollInterval intervalo entre ticks do poll loop do engine
      * @param batchSize máximo de execuções reclamadas por claim
      * @param claimRounds ADR-0040: quantos claims um mesmo tick encadeia enquanto o lote voltar cheio e houver folga de dispatch — relaxa o acoplamento da vazão com o {@code poll-interval} sob backlog (medição na ADR); 1 (default) = formato clássico de um claim por tick
-     * @param leaseTtl ADR-0012: alimenta {@code lease_expires_at} no claim e na renovação por tick; o reaper reclama execuções cuja lease já expirou
-     * @param watchdogTimeout Watchdog Bound (ADR-0012): teto da renovação de lease — atingido, o node para de renovar e o reaper reclama na expiração; {@code null} (default) = sem teto; quando presente, deve ser maior que {@code lease-ttl} (validado na montagem do engine)
+     * @param leaseTtl ADR-0012: alimenta {@code lease_expires_at} no claim; desde a ADR-0051 é também o corte de staleness para linha de node legado sem {@code expires_at}
+     * @param nodeLeaseTtl ADR-0051: lease do NÓ — o heartbeat de cada tick promete "vivo até agora+TTL" em {@code mohs_nodes.expires_at}; o reaper só reclama execuções de node cuja promessa venceu
+     * @param watchdogTimeout Watchdog Bound (ADR-0012, revisto na ADR-0051): teto de runtime — atingido, o node LIBERA a posse (falha cercada, retry normal); {@code null} (default) = sem teto; quando presente, deve ser maior que {@code node-lease-ttl} (validado na montagem do engine)
      * @param misfireThreshold ADR-0035: separa disparo atrasado de perdido — ocorrência devida dentro do threshold dispara atrasada em qualquer política; mais velha responde ao {@code Misfire} do job
      * @param dispatchConcurrency teto real de concorrência do executor de dispatch (nunca por tamanho de pool — CLAUDE.md); também limita o claim (ADR-0039)
      * @param eventConcurrency teto real de concorrência do executor de publicação de eventos
@@ -67,6 +68,7 @@ public record MohsProperties(
             @DefaultValue("50") int batchSize,
             @DefaultValue("1") int claimRounds,
             @DefaultValue("30s") Duration leaseTtl,
+            @DefaultValue("15s") Duration nodeLeaseTtl,
             @Nullable Duration watchdogTimeout,
             @DefaultValue("60s") Duration misfireThreshold,
             @DefaultValue("64") int dispatchConcurrency,

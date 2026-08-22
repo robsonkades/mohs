@@ -1,5 +1,7 @@
 package io.mohs.store.jdbc;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -34,13 +36,23 @@ import io.mohs.engine.RetrySchedule;
 import io.mohs.store.jdbc.dialect.JdbcDialect;
 
 /**
- * {@link Reaper} sobre {@code mohs_executions} (ADR-0012/0025/0033).
- * Mesma forma de transação própria de {@link JdbcClaimer} — quem chama
+ * {@link Reaper} sobre {@code mohs_executions} (ADR-0012/0025/0033;
+ * critério de morte revisto pela ADR-0051). Mesma forma de transação
+ * própria de {@link JdbcClaimer} — quem chama
  * {@link #reclaimExpired} não tem transação ativa (disparado pelo ciclo
  * de poll do motor, não por um chamador com contexto transacional já
  * aberto). {@code executionStore}/{@code jobStore} precisam apontar pro
  * mesmo {@code DataSource} passado aqui — é assim que participam da
  * mesma transação (mesmo padrão de {@link JdbcClaimer}).
+ *
+ * <p><b>ADR-0051:</b> candidato a reclaim é execução {@code RUNNING} de
+ * NODE MORTO — aquele cuja promessa em {@code mohs_nodes.expires_at}
+ * venceu — não mais a execução cuja própria lease expirou: a liveness
+ * mora no nó, e handler saudável de node vivo nunca é reclamado, sem
+ * custar uma renovação por execução. Linha de node de jar antigo
+ * (sem {@code expires_at}, gravada antes da migração V2) responde pela
+ * staleness do {@code last_heartbeat_at} com corte de {@code lease-ttl}
+ * — tolerância de versão mista durante rolling upgrade.
  *
  * <p>DBTUNE-14: lê ({@link ExecutionStore#findByIds}) e escreve ({@link
  * ExecutionStore#completeAll}) em lote, não candidato a candidato — medido
@@ -51,7 +63,7 @@ import io.mohs.store.jdbc.dialect.JdbcDialect;
  */
 public final class JdbcReaper implements Reaper {
 
-    private static final String LEASE_EXPIRED_ERROR = "lease expired — node presumed dead";
+    private static final String LEASE_EXPIRED_ERROR = "node lease expired — node presumed dead";
 
     /**
      * Teto de reclaims por ciclo — morte de nó em massa não vira uma
@@ -68,8 +80,11 @@ public final class JdbcReaper implements Reaper {
     private final Clock clock;
     private final ExecutionStore executionStore;
     private final JobStore jobStore;
+    /** Corte de staleness pra linha de node de jar antigo, sem {@code expires_at} (tolerância de versão mista, ADR-0051). */
+    private final Duration legacyNodeStaleness;
 
-    public JdbcReaper(DataSource dataSource, JdbcDialect dialect, Clock clock, ExecutionStore executionStore, JobStore jobStore) {
+    public JdbcReaper(DataSource dataSource, JdbcDialect dialect, Clock clock, ExecutionStore executionStore, JobStore jobStore,
+            Duration legacyNodeStaleness) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -80,6 +95,7 @@ public final class JdbcReaper implements Reaper {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
+        this.legacyNodeStaleness = Objects.requireNonNull(legacyNodeStaleness, "legacyNodeStaleness");
     }
 
     @Override
@@ -128,8 +144,9 @@ public final class JdbcReaper implements Reaper {
      * com error nulo, invariante de {@link Attempt}) — e job aposentado
      * ({@code retired}) nunca reagenda: {@code RETRY_SCHEDULED} de job
      * removido ficaria preso pra sempre (claim filtra retired, o cancel do
-     * remove já passou). Todo request leva a lease observada como fence
-     * anti-ABA: se um re-claim concorrente já deu lease nova à execução, o
+     * remove já passou). Todo request leva a posse observada —
+     * {@code (node_id, fired_at)} — como fence anti-ABA (ADR-0051): se um
+     * re-claim concorrente já deu nova encarnação à execução, o
      * CAS do reclaim perde — nunca mata a encarnação nova saudável (DDIA
      * cap. 8: estado reentrante exige fencing token).
      */
@@ -151,18 +168,18 @@ public final class JdbcReaper implements Reaper {
         if (candidate.cancelRequested()) {
             Attempt attempt = new Attempt(attemptNumber, startedAt, now, ExecutionState.CANCELLED, null);
             return new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.CANCELLED, null,
-                    candidate.leaseExpiresAt(), rearmNextFireAt).inBatch(batchId);
+                    candidate.fence(), rearmNextFireAt).inBatch(batchId);
         }
         Attempt attempt = new Attempt(attemptNumber, startedAt, now, ExecutionState.FAILED, LEASE_EXPIRED_ERROR);
         if (candidate.retired()) {
             return new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.FAILED, null,
-                    candidate.leaseExpiresAt()).inBatch(batchId);
+                    candidate.fence()).inBatch(batchId);
         }
         return RetrySchedule.nextRetryAt(attemptNumber, candidate.retries(), now)
                 .map(retryAt -> new ExecutionStore.CompletionRequest(id, jobKey, attempt,
-                        ExecutionState.RETRY_SCHEDULED, retryAt, candidate.leaseExpiresAt()))
+                        ExecutionState.RETRY_SCHEDULED, retryAt, candidate.fence()))
                 .orElseGet(() -> new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.FAILED, null,
-                        candidate.leaseExpiresAt(), rearmNextFireAt))
+                        candidate.fence(), rearmNextFireAt))
                 .inBatch(batchId);
     }
 
@@ -190,11 +207,25 @@ public final class JdbcReaper implements Reaper {
     }
 
     /**
-     * {@code j.retries}/{@code j.retired} entram no mesmo SELECT — a decisão
-     * de orçamento não paga uma consulta por candidato. {@code lease_expires_at}
-     * sai junto porque é o fence do CAS de conclusão (ver {@link #reclaimRequest}).
+     * ADR-0051: candidato é execução {@code RUNNING} cujo dono NÃO está no
+     * conjunto de nodes vivos — vivo é {@code expires_at > now} (a promessa
+     * do heartbeat) ou, em linha de jar antigo sem {@code expires_at},
+     * {@code last_heartbeat_at} mais novo que o corte de {@code lease-ttl};
+     * node ausente de {@code mohs_nodes} (linha purgada, ADR-0041) é morto
+     * por definição. {@code j.retries}/{@code j.retired} entram no mesmo
+     * SELECT — a decisão de orçamento não paga uma consulta por candidato.
+     * {@code e.node_id}/{@code e.fired_at} saem junto porque são o fence do
+     * CAS de conclusão (ver {@link #reclaimRequest}).
      * Teto de {@link #RECLAIM_LIMIT} por ciclo via {@code TOP}/{@code LIMIT}
      * do dialeto (mesmo par de cláusulas do {@code findPage}).
+     *
+     * <p>{@code e.lease_expires_at IS NOT NULL} não filtra nada de verdade
+     * (toda linha {@code RUNNING} tem lease gravada pelo UPDATE de claim —
+     * o invariante que {@code countActiveByState} já usa desde a
+     * DBTUNE-17): existe só pra IMPLICAR o predicado do índice parcial
+     * {@code idx_mohs_executions_owner} em Postgres/SQL Server (DBTUNE-22
+     * — sem o conjunct no predicado do índice, o CAS de conclusão cercado
+     * o implicaria e o planner o escolhia no lugar do PK).
      */
     private List<ExpiredCandidate> selectExpiredCandidates(Instant now) {
         // ORDER BY e.id: reapers concorrentes acordam juntos numa morte de nó e
@@ -203,26 +234,47 @@ public final class JdbcReaper implements Reaper {
         // batchUpdate preserva encounter order. Com o LIMIT, também garante
         // drenagem mais-antigo-primeiro (UUIDv7 ordena no tempo).
         return jdbcTemplate.query("""
-                SELECT %se.id AS id, e.job_key AS job_key, e.lease_expires_at AS lease_expires_at,
+                SELECT %se.id AS id, e.job_key AS job_key, e.node_id AS node_id, e.fired_at AS fired_at,
                        e.cancel_requested AS cancel_requested, j.retries AS retries, j.retired AS retired,
                        j.interval_duration AS interval_duration, j.interval_after_finish AS interval_after_finish
                 FROM mohs_executions e
                 JOIN mohs_job_definitions j ON j.job_key = e.job_key
-                WHERE e.state = 'RUNNING' AND e.lease_expires_at < :now
+                WHERE e.state = 'RUNNING' AND e.lease_expires_at IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM mohs_nodes n
+                    WHERE n.node_id = e.node_id
+                      AND (n.expires_at > :now
+                           OR (n.expires_at IS NULL AND n.last_heartbeat_at > :legacyCutoff))
+                )
                 ORDER BY e.id
                 %s""".formatted(dialect.topClause(), dialect.limitClause()),
                 new MapSqlParameterSource()
                         .addValue("now", JdbcTimestamps.toUtcLocalDateTime(now))
+                        .addValue("legacyCutoff", JdbcTimestamps.toUtcLocalDateTime(now.minus(legacyNodeStaleness)))
                         .addValue("limit", RECLAIM_LIMIT),
                 (rs, _) -> new ExpiredCandidate(rs.getString("id"), rs.getString("job_key"),
-                        JdbcTimestamps.fromUtcLocalDateTime(rs.getObject("lease_expires_at", LocalDateTime.class)),
+                        rs.getString("node_id"), readFiredAt(rs),
                         rs.getBoolean("cancel_requested"), rs.getInt("retries"), rs.getBoolean("retired"),
                         rs.getString("interval_duration"), rs.getBoolean("interval_after_finish")));
     }
 
+    private static @Nullable Instant readFiredAt(ResultSet rs) throws SQLException {
+        LocalDateTime firedAt = rs.getObject("fired_at", LocalDateTime.class);
+        return firedAt == null ? null : JdbcTimestamps.fromUtcLocalDateTime(firedAt);
+    }
+
     /** As colunas de agenda saem no mesmo SELECT pelo mesmo motivo de {@code retries}/{@code retired}: a decisão de rearme (ADR-0035) não paga uma consulta por candidato. */
-    private record ExpiredCandidate(String id, String jobKey, Instant leaseExpiresAt, boolean cancelRequested, int retries,
+    private record ExpiredCandidate(String id, String jobKey, @Nullable String nodeId, @Nullable Instant firedAt,
+            boolean cancelRequested, int retries,
             boolean retired, @Nullable String intervalDuration, boolean intervalAfterFinish) {
+
+        /**
+         * A posse da encarnação morta, como fence do CAS (ADR-0051) —
+         * {@code null} só em linha anômala sem dono/fired_at, que degrada
+         * pra conclusão não cercada (o CAS de estado ainda protege).
+         */
+        ExecutionStore.@Nullable OwnerFence fence() {
+            return nodeId != null && firedAt != null ? new ExecutionStore.OwnerFence(nodeId, firedAt) : null;
+        }
 
         /** {@code fim + interval} de uma agenda fixed-delay; {@code null} nas demais (nada a rearmar). */
         @Nullable Instant rearmNextFireAt(Instant now) {

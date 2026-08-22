@@ -205,11 +205,12 @@ public final class JdbcExecutionStore implements ExecutionStore {
      * O CAS de conclusão (ADR-0024/0033): {@code COALESCE} grava o
      * {@code retryAt} como novo {@code scheduled_at} na mesma transição
      * (invariante do record: só presente em {@code RETRY_SCHEDULED}).
-     * A variante com fence acrescenta {@code lease_expires_at} ao predicado
-     * — anti-ABA do reaper (ver Javadoc de
-     * {@link ExecutionStore.CompletionRequest#expectedLeaseExpiresAt}).
-     * Dois templates em vez de {@code (:p IS NULL OR ...)}: parâmetro em
-     * predicado de nulidade tem suporte irregular entre os 4 dialetos.
+     * A variante cercada acrescenta o par de posse
+     * {@code (node_id, fired_at)} ao predicado (ADR-0051, que revisa o
+     * fence de lease da ADR-0033 — ver Javadoc de
+     * {@link ExecutionStore.OwnerFence}). Dois templates em vez de
+     * {@code (:p IS NULL OR ...)}: parâmetro em predicado de nulidade tem
+     * suporte irregular entre os 4 dialetos.
      */
     // batch-counted: countIntoBatch, na mesma transação deste CAS
     private static final String COMPLETE_CAS = """
@@ -220,11 +221,11 @@ public final class JdbcExecutionStore implements ExecutionStore {
     // batch-counted: countIntoBatch, na mesma transação deste CAS
     private static final String COMPLETE_CAS_FENCED = """
             UPDATE mohs_executions SET state = :newState, scheduled_at = COALESCE(:retryAt, scheduled_at)
-            WHERE id = :id AND state = 'RUNNING' AND lease_expires_at = :expectedLease
+            WHERE id = :id AND state = 'RUNNING' AND node_id = :fenceNodeId AND fired_at = :fenceFiredAt
             """;
 
     private ExecutionStore.Completion completeWithinTransaction(ExecutionStore.CompletionRequest request, JobStore jobStore) {
-        String sql = request.expectedLeaseExpiresAt() == null ? COMPLETE_CAS : COMPLETE_CAS_FENCED;
+        String sql = request.fence() == null ? COMPLETE_CAS : COMPLETE_CAS_FENCED;
         int updated = jdbcTemplate.update(sql, completionParams(request));
         if (updated == 0) {
             return ExecutionStore.Completion.NOT_APPLIED;
@@ -341,67 +342,6 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return verdicts;
     }
 
-    /**
-     * ADR-0012 — renovação em lote por node, {@code batchUpdate} por linha
-     * com o {@code int[]} como confirmação exata (mesmo padrão de
-     * {@link #completeAll}); {@code SUCCESS_NO_INFO} recai na confirmação
-     * por {@code SELECT} da lease recém-gravada.
-     */
-    @Override
-    public Set<ExecutionId> renewLeases(String nodeId, List<ExecutionId> ids, Instant leaseExpiresAt) {
-        Objects.requireNonNull(nodeId, "nodeId");
-        Objects.requireNonNull(ids, "ids");
-        Objects.requireNonNull(leaseExpiresAt, "leaseExpiresAt");
-        if (ids.isEmpty()) {
-            return Set.of();
-        }
-        LocalDateTime newLease = JdbcTimestamps.toUtcLocalDateTime(leaseExpiresAt);
-        MapSqlParameterSource[] params = ids.stream()
-                .map(id -> new MapSqlParameterSource()
-                        .addValue("id", id.value())
-                        .addValue("nodeId", nodeId)
-                        .addValue("leaseExpiresAt", newLease))
-                .toArray(MapSqlParameterSource[]::new);
-        int[] updated = jdbcTemplate.batchUpdate("""
-                UPDATE mohs_executions SET lease_expires_at = :leaseExpiresAt
-                WHERE id = :id AND state = 'RUNNING' AND node_id = :nodeId
-                """, params);
-
-        Set<ExecutionId> renewed = new LinkedHashSet<>();
-        for (int i = 0; i < updated.length; i++) {
-            if (updated[i] == Statement.SUCCESS_NO_INFO) {
-                return confirmRenewalsBySelect(nodeId, ids);
-            }
-            if (updated[i] > 0) {
-                renewed.add(ids.get(i));
-            }
-        }
-        return renewed;
-    }
-
-    /**
-     * Fallback raro do {@code SUCCESS_NO_INFO} — confirma por POSSE
-     * ({@code state + node_id}), nunca por igualdade de timestamp: precisão
-     * temporal não faz round-trip garantido entre JVM e os 4 dialetos
-     * (nanos do {@code Instant} vs micros da coluna), e uma igualdade
-     * quebrada aqui dropava o node inteiro da renovação como falso "lost
-     * lease". A posse implica o UPDATE aplicado: re-claim pelo próprio node
-     * dentro da mesma chamada é impossível (o claim roda depois, na mesma
-     * thread do tick) e re-claim por outro node troca o {@code node_id}.
-     */
-    private Set<ExecutionId> confirmRenewalsBySelect(String nodeId, List<ExecutionId> ids) {
-        Set<ExecutionId> renewed = new LinkedHashSet<>();
-        for (List<String> chunk : chunksOf(ids.stream().map(ExecutionId::value).toList())) {
-            renewed.addAll(jdbcTemplate.query("""
-                    SELECT id FROM mohs_executions
-                    WHERE id IN (:ids) AND state = 'RUNNING' AND node_id = :nodeId
-                    """,
-                    new MapSqlParameterSource().addValue("ids", chunk).addValue("nodeId", nodeId),
-                    (rs, _) -> ExecutionId.of(rs.getString("id"))));
-        }
-        return renewed;
-    }
-
     /** ADR-0034 — mesmo CAS de {@code JdbcJobStore.remove}, por id: só os dois estados claimáveis; claim concorrente vence e o chamador cai no caminho da flag. */
     @Override
     public boolean cancelIfPending(ExecutionId id) {
@@ -496,10 +436,10 @@ public final class JdbcExecutionStore implements ExecutionStore {
         return flagged;
     }
 
-    /** Particiona por presença de fence — mesmo par de templates do caminho unitário; na prática o lote do reaper é uniformemente fenced. */
+    /** Particiona por presença de fence — mesmo par de templates do caminho unitário; na prática os lotes (reaper, batcher) são uniformemente cercados. */
     private Set<ExecutionId> transitionAll(List<ExecutionStore.CompletionRequest> requests) {
         Map<Boolean, List<ExecutionStore.CompletionRequest>> byFence = requests.stream()
-                .collect(Collectors.partitioningBy(r -> r.expectedLeaseExpiresAt() != null));
+                .collect(Collectors.partitioningBy(r -> r.fence() != null));
         Set<ExecutionId> confirmed = new LinkedHashSet<>();
         confirmed.addAll(transitionBatch(byFence.get(Boolean.FALSE), COMPLETE_CAS));
         confirmed.addAll(transitionBatch(byFence.get(Boolean.TRUE), COMPLETE_CAS_FENCED));
@@ -553,10 +493,12 @@ public final class JdbcExecutionStore implements ExecutionStore {
     }
 
     private static MapSqlParameterSource completionParams(ExecutionStore.CompletionRequest request) {
+        ExecutionStore.OwnerFence fence = request.fence();
         return new MapSqlParameterSource()
                 .addValue("newState", request.newState().name())
                 .addValue("retryAt", request.retryAt() == null ? null : JdbcTimestamps.toUtcLocalDateTime(request.retryAt()), Types.TIMESTAMP)
-                .addValue("expectedLease", request.expectedLeaseExpiresAt() == null ? null : JdbcTimestamps.toUtcLocalDateTime(request.expectedLeaseExpiresAt()), Types.TIMESTAMP)
+                .addValue("fenceNodeId", fence == null ? null : fence.nodeId(), Types.VARCHAR)
+                .addValue("fenceFiredAt", fence == null ? null : JdbcTimestamps.toUtcLocalDateTime(fence.firedAt()), Types.TIMESTAMP)
                 .addValue("id", request.id().value());
     }
 

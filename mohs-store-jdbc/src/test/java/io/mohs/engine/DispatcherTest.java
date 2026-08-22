@@ -187,7 +187,7 @@ class DispatcherTest {
     void failBeforeDispatchPublishesFailedWithoutTheExhaustedFlag() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
 
-        newDispatcher(List.of()).failBeforeDispatch(execution, null, new IllegalStateException("payload could not be read"));
+        newDispatcher(List.of()).failBeforeDispatch(execution, null, new IllegalStateException("payload could not be read"), null);
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         Failed event = listener.awaitEvent(Failed.class);

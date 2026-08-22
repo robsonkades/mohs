@@ -148,10 +148,10 @@ class MohsImplTest {
     @Test
     void nodesAreListedMostRecentHeartbeatFirstWithAStableTiebreak() {
         when(nodeStore.findAll()).thenReturn(List.of(
-                new StoredNode("node-old", EngineState.RUNNING, NOW.minusSeconds(120)),
-                new StoredNode("node-tie-b", EngineState.RUNNING, NOW.minusSeconds(30)),
-                new StoredNode("node-fresh", EngineState.RUNNING, NOW),
-                new StoredNode("node-tie-a", EngineState.STOPPED, NOW.minusSeconds(30))));
+                new StoredNode("node-old", EngineState.RUNNING, NOW.minusSeconds(120), 1, NOW.minusSeconds(105)),
+                new StoredNode("node-tie-b", EngineState.RUNNING, NOW.minusSeconds(30), 1, NOW.minusSeconds(15)),
+                new StoredNode("node-fresh", EngineState.RUNNING, NOW, 1, NOW.plusSeconds(15)),
+                new StoredNode("node-tie-a", EngineState.STOPPED, NOW.minusSeconds(30), 1, NOW.minusSeconds(30))));
 
         assertThat(mohs.nodes())
                 .extracting(NodeSnapshot::nodeId)

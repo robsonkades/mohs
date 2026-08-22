@@ -414,19 +414,20 @@ class JdbcExecutionStoreTest {
         assertThat(retried.scheduledAt()).isEqualTo(retryAt);
     }
 
-    /** Fence anti-ABA (ADR-0033): se a lease observada pelo reaper já não é a da linha (re-claim concorrente deu lease nova), o CAS perde — a encarnação nova saudável nunca é morta. */
+    /** Fence anti-ABA (ADR-0051): se a posse observada — (node_id, fired_at) — já não é a da linha (re-claim concorrente gravou nova encarnação), o CAS perde — a encarnação nova saudável nunca é morta. */
     @Test
-    void completeWithAStaleLeaseFenceLosesTheCas() {
+    void completeWithAStaleOwnerFenceLosesTheCas() {
         seedRunningExecution("019abc-fence-1", "welcome-email");
-        Instant currentLease = clock.instant().plusSeconds(30);
-        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET lease_expires_at = ? WHERE id = ?",
-                JdbcTimestamps.toUtcLocalDateTime(currentLease), "019abc-fence-1");
+        Instant currentFiredAt = clock.instant();
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET node_id = 'node-b', fired_at = ? WHERE id = ?",
+                JdbcTimestamps.toUtcLocalDateTime(currentFiredAt), "019abc-fence-1");
         JobStore jobStore = new JdbcJobStore(dataSource, clock);
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "lease expired");
-        Instant staleObservedLease = currentLease.minusSeconds(60);
+        // a posse antiga: mesmo id de node diferente OU fired_at anterior — aqui as duas coisas
+        ExecutionStore.OwnerFence staleFence = new ExecutionStore.OwnerFence("node-a", currentFiredAt.minusSeconds(60));
 
         boolean completed = store.complete(new ExecutionStore.CompletionRequest(
-                ExecutionId.of("019abc-fence-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null, staleObservedLease), jobStore).applied();
+                ExecutionId.of("019abc-fence-1"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null, staleFence), jobStore).applied();
 
         assertThat(completed).isFalse();
         Execution untouched = store.find(ExecutionId.of("019abc-fence-1")).orElseThrow();
@@ -435,48 +436,20 @@ class JdbcExecutionStoreTest {
     }
 
     @Test
-    void completeWithTheMatchingLeaseFenceWins() {
+    void completeWithTheMatchingOwnerFenceWins() {
         seedRunningExecution("019abc-fence-2", "welcome-email");
-        Instant lease = clock.instant().minusSeconds(5);
-        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET lease_expires_at = ? WHERE id = ?",
-                JdbcTimestamps.toUtcLocalDateTime(lease), "019abc-fence-2");
+        Instant firedAt = clock.instant().minusSeconds(5);
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET node_id = 'node-a', fired_at = ? WHERE id = ?",
+                JdbcTimestamps.toUtcLocalDateTime(firedAt), "019abc-fence-2");
         JobStore jobStore = new JdbcJobStore(dataSource, clock);
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "lease expired");
 
         boolean completed = store.complete(new ExecutionStore.CompletionRequest(
-                ExecutionId.of("019abc-fence-2"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null, lease), jobStore).applied();
+                ExecutionId.of("019abc-fence-2"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, null,
+                new ExecutionStore.OwnerFence("node-a", firedAt)), jobStore).applied();
 
         assertThat(completed).isTrue();
         assertThat(store.find(ExecutionId.of("019abc-fence-2")).orElseThrow().state()).isEqualTo(ExecutionState.FAILED);
-    }
-
-    /** ADR-0012: a renovação é fenced por node+estado — nunca ressuscita lease de execução que saiu de RUNNING nem toca a posse de outro node. */
-    @Test
-    void renewLeasesTouchesOnlyOwnRunningExecutions() {
-        JdbcTemplate raw = new JdbcTemplate(dataSource);
-        seedRunningExecution("019abc-renew-1", "welcome-email");
-        seedRunningExecution("019abc-renew-2", "welcome-email");
-        seedRunningExecution("019abc-renew-3", "welcome-email");
-        raw.update("UPDATE mohs_executions SET node_id = 'node-a' WHERE id IN ('019abc-renew-1', '019abc-renew-3')");
-        raw.update("UPDATE mohs_executions SET node_id = 'node-b' WHERE id = '019abc-renew-2'");
-        raw.update("UPDATE mohs_executions SET state = 'RETRY_SCHEDULED' WHERE id = '019abc-renew-3'");
-        Instant newLease = clock.instant().plusSeconds(30);
-
-        Set<ExecutionId> renewed = store.renewLeases("node-a",
-                List.of(ExecutionId.of("019abc-renew-1"), ExecutionId.of("019abc-renew-2"), ExecutionId.of("019abc-renew-3")),
-                newLease);
-
-        assertThat(renewed).containsExactly(ExecutionId.of("019abc-renew-1"));
-        LocalDateTime renewedLease = raw.queryForObject(
-                "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", LocalDateTime.class, "019abc-renew-1");
-        assertThat(JdbcTimestamps.fromUtcLocalDateTime(renewedLease)).isEqualTo(newLease);
-        assertThat(raw.queryForObject(
-                "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", LocalDateTime.class, "019abc-renew-2")).isNull();
-    }
-
-    @Test
-    void renewLeasesWithNoIdsIsANoOp() {
-        assertThat(store.renewLeases("node-a", List.of(), clock.instant())).isEmpty();
     }
 
     /** ADR-0034: cancel de execução que ainda não roda é CAS direto pra CANCELLED — só os dois estados claimáveis; RUNNING fica pro caminho da flag. */
@@ -523,36 +496,39 @@ class JdbcExecutionStoreTest {
 
     /**
      * Fallback do {@code SUCCESS_NO_INFO} (o JDBC permite ao driver executar
-     * o batch sem contar linhas): a confirmação recai no SELECT por POSSE —
-     * e nunca por igualdade de timestamp, que não faz round-trip garantido
-     * entre JVM e coluna. O decorator reproduz o contrato exato do driver:
+     * o batch sem contar linhas): a confirmação do {@code completeAll} recai
+     * no SELECT por estado. O decorator reproduz o contrato exato do driver:
      * executa o batch de verdade e só mente a contagem. O tracker prova que
      * a interceptação aconteceu — sem ele, uma mudança interna do spring-jdbc
      * (ex.: migrar pra {@code executeLargeBatch}) faria o teste decair em
      * silêncio pro caminho normal, cobertura fantasma do branch.
      */
     @Test
-    void renewLeasesFallsBackToOwnershipSelectWhenTheDriverReturnsSuccessNoInfo() {
+    void completeAllFallsBackToStateSelectWhenTheDriverReturnsSuccessNoInfo() {
         JdbcTemplate raw = new JdbcTemplate(dataSource);
         seedRunningExecution("019abc-noinfo-1", "welcome-email");
         seedRunningExecution("019abc-noinfo-2", "welcome-email");
-        raw.update("UPDATE mohs_executions SET node_id = 'node-a' WHERE id = '019abc-noinfo-1'");
-        raw.update("UPDATE mohs_executions SET node_id = 'node-b' WHERE id = '019abc-noinfo-2'");
+        // o CAS do segundo perde de propósito (a linha já saiu de RUNNING) —
+        // prova que o SELECT de confirmação discrimina, não confirma o lote inteiro
+        raw.update("UPDATE mohs_executions SET state = 'RETRY_SCHEDULED' WHERE id = '019abc-noinfo-2'");
         AtomicBoolean rewroteCounts = new AtomicBoolean();
         JdbcExecutionStore noInfoStore = new JdbcExecutionStore(
                 successNoInfoDataSource(dataSource, rewroteCounts), clock, JsonMapper.builder().build(), new H2JdbcDialect());
-        Instant newLease = clock.instant().plusSeconds(30);
+        JobStore jobStore = new JdbcJobStore(dataSource, clock);
+        Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.SUCCEEDED, null);
 
-        Set<ExecutionId> renewed = noInfoStore.renewLeases("node-a",
-                List.of(ExecutionId.of("019abc-noinfo-1"), ExecutionId.of("019abc-noinfo-2")), newLease);
+        Map<ExecutionId, ExecutionStore.Completion> verdicts = noInfoStore.completeAll(List.of(
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-noinfo-1"), JobKey.of("welcome-email"), attempt, ExecutionState.SUCCEEDED),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-noinfo-2"), JobKey.of("welcome-email"), attempt, ExecutionState.SUCCEEDED)),
+                jobStore);
 
         assertThat(rewroteCounts)
                 .as("the decorator must have intercepted executeBatch — otherwise this exercises the normal path, not the fallback")
                 .isTrue();
-        assertThat(renewed).containsExactly(ExecutionId.of("019abc-noinfo-1"));
-        LocalDateTime renewedLease = raw.queryForObject(
-                "SELECT lease_expires_at FROM mohs_executions WHERE id = ?", LocalDateTime.class, "019abc-noinfo-1");
-        assertThat(JdbcTimestamps.fromUtcLocalDateTime(renewedLease)).isEqualTo(newLease);
+        assertThat(verdicts.get(ExecutionId.of("019abc-noinfo-1")).applied()).isTrue();
+        assertThat(verdicts.get(ExecutionId.of("019abc-noinfo-2")).applied()).isFalse();
+        assertThat(store.find(ExecutionId.of("019abc-noinfo-1")).orElseThrow().state()).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(store.find(ExecutionId.of("019abc-noinfo-2")).orElseThrow().state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
     }
 
     private static DataSource successNoInfoDataSource(DataSource delegate, AtomicBoolean rewroteCounts) {

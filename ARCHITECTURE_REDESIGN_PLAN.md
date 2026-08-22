@@ -2566,6 +2566,23 @@ phase depends on a later phase to be correct.
   column is retained (unused) for one release so a rollback does not need a migration.
 - **Validation.** E6 passes; `n_tup_upd` on the executions table drops ≥ 80%.
 - **Rollback.** Re-enable per-execution renewal; column still present.
+- **Result (2026-08-22, ADR-0051; BASELINE "Phase 4 — node lease + fence de
+  posse"):** delivered. Renewal deleted; node lease (`epoch`/`expires_at`,
+  15s TTL) in migration V2; reaper dead-node driven, heartbeat-first tick;
+  ownership fenced by `(node_id, fired_at)` — the epoch guard deviation is
+  recorded in the ADR (`fired_at` is already a per-incarnation token since
+  ADR-0047; epoch stays on `mohs_nodes` until `mohs_lease` exists in
+  Phase 5). Measured on the renewal-heavy slow-handler workload:
+  `n_tup_upd` 6.67–6.97 → **2.00**/execution = **−70%** — the literal ≥80%
+  gate assumed ~10 upd/exec before; the renewal component went to zero and
+  the remaining 2.00 (claim + terminal CAS) is Phase 5's target, so the
+  mechanism gate is met and the literal number is recorded as missed.
+  E6 passes: S6 recovery 17.1s (< 20s; was ~31s), SUSPEND shows zero
+  double-completions under real zombie resume (fence holds), S8 re-runs
+  0 (self-reap dead — was 486–598). One pre-existing gap documented:
+  a node frozen mid-claim leaves its batch locked-but-ENQUEUED until the
+  session dies (DB-side `idle_in_transaction_session_timeout` is the
+  mitigation).
 
 ### Phase 5 — The table split *(2–3 sprints)*
 

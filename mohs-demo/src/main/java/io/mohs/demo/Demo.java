@@ -29,4 +29,15 @@ public class Demo {
     void everyMethod2() {
         log.info("Hello, world!");
     }
+
+    /**
+     * Bancada da Phase 4 (renovação de lease é carga-dependente — Finding A
+     * da Phase 0 só aparece com in-flight sustentado): handler lento de
+     * propósito, mantém ~dispatch-concurrency execuções em voo durante o
+     * drain. O sleep é espera deliberada de bancada, não sincronização.
+     */
+    @OnDemandJob(id = "slow-job", retries = 10)
+    void slowMethod() throws InterruptedException {
+        Thread.sleep(500);
+    }
 }

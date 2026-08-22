@@ -3,7 +3,6 @@ package io.mohs.engine;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -19,7 +18,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 import io.github.robsonkades.uuidv7.UUIDv7;
 import org.jspecify.annotations.Nullable;
@@ -66,13 +64,16 @@ import io.mohs.core.job.JobKey;
  * {@link MohsExecutors}), só {@link #drain} espera o que já está em voo
  * terminar.
  *
- * <p><b>Liveness (ADR-0012):</b> a lease de tudo que este node executa é
- * renovada em lote a cada tick — handler saudável mais lento que
- * {@code lease-ttl} nunca é reclamado enquanto o node vive; a lease vira
- * detecção de falha, não teto de runtime. O teto opcional é o Watchdog
- * Bound ({@code mohs.engine.watchdog-timeout}): atingido, o node para de
- * renovar, a lease expira e o reaper decide com o orçamento de retry
- * (ADR-0033). Sob falha de nó a garantia é <b>at-least-once</b> quando
+ * <p><b>Liveness (ADR-0012, revista pela ADR-0051):</b> por NÓ, não por
+ * execução — o heartbeat de cada tick grava em {@code mohs_nodes} a
+ * promessa "vivo até agora+{@code node-lease-ttl}", e o reaper só reclama
+ * execuções de node cuja promessa venceu. Handler saudável nunca é
+ * reclamado enquanto o node vive, sem UMA escrita por execução; a lease
+ * é detecção de falha, não teto de runtime. O teto opcional é o Watchdog
+ * Bound ({@code mohs.engine.watchdog-timeout}): atingido, o node LIBERA
+ * a posse (falha cercada pela encarnação, ADR-0051) e o orçamento de
+ * retry decide (ADR-0033). Sob falha de nó a garantia é
+ * <b>at-least-once</b> quando
  * {@code retries > 0} — com o default {@code retries = 0}, at-most-once.
  *
  * <p><b>Timeout e cancelamento (ADR-0034):</b> o {@code timeout} do job é
@@ -122,11 +123,11 @@ public final class Engine implements MohsLifecycle {
     private final AtomicReference<EngineState> state = new AtomicReference<>(EngineState.CREATED);
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
     /**
-     * As execuções em voo NESTE node — a base da renovação de lease
-     * (ADR-0012) e da escada de timeout/cancelamento (ADR-0034) a cada
-     * tick. Entrada nasce no submit e SÓ morre na conclusão
-     * ({@code whenComplete}): os drops de renovação (watchdog, posse
-     * perdida) MARCAM a encarnação ({@code renewalStopped}) em vez de
+     * As execuções em voo NESTE node — a base do watchdog (ADR-0051) e da
+     * escada de timeout/cancelamento (ADR-0034) a cada tick. Entrada
+     * nasce no submit e SÓ morre na conclusão ({@code whenComplete}): a
+     * liberação de posse pelo watchdog MARCA a encarnação
+     * ({@code ownershipReleased}) em vez de
      * removê-la — o zumbi continua alcançável pela escalada de drain e
      * pelo poll de cancel; removê-lo o deixaria fora do alcance de
      * qualquer sinal exatamente no cenário pra que a escalada existe
@@ -141,6 +142,17 @@ public final class Engine implements MohsLifecycle {
 
     /** {@code volatile}: escrito por {@link #start} e lido por {@link #stop}, que podem vir de threads distintas ({@code MohsLifecycle} é API pública) — publicação segura, JCIP 3.1. */
     private volatile @Nullable ScheduledFuture<?> tickHandle;
+
+    /**
+     * A encarnação e o lease do NÓ (ADR-0051) — escritos só pela thread do
+     * tick ({@link #renewNodeLease}). Epoch começa em 1 e só sobe quando o
+     * próprio node percebe o lease expirado (§11.2 do redesign);
+     * monotonicidade entre restarts é irrelevante porque cada boot gera
+     * {@code node_id} novo.
+     */
+    /** {@code volatile} só pelo leitor de fora: {@link #writeFinalStoppedHeartbeat} lê de outra thread no stop (JCIP 3.1; JLS 17.7 pra {@code long}) — mesma razão de {@code tickHandle}. */
+    private volatile long nodeEpoch = 1;
+    private @Nullable Instant nodeLeaseExpiresAt;
 
     public Engine(
             Claimer claimer,
@@ -250,17 +262,22 @@ public final class Engine implements MohsLifecycle {
      * morre sem conseguir escrever fica coberto pela staleness (ADR-0012) e
      * pelo purge (ver {@link #purgeStaleNodeRows}).
      *
-     * <p>Corrida aceita de propósito (review ADR-0041): um tick que leu o
-     * estado antes do {@code state.set(STOPPED)} pode commitar seu heartbeat
-     * DEPOIS deste — a linha fica RUNNING/DRAINING apesar do stop limpo.
-     * Fechar isso exigiria o stop esperar o tick em curso (lock
-     * compartilhado; até {@code leaseTtl/4} de claim rounds), acoplando a
-     * latência de shutdown a um cosmético autocurável: staleness + purge
-     * cobrem a linha do mesmo jeito que cobririam um crash.
+     * <p>Corrida aceita de propósito (review ADR-0041, custo revisto pela
+     * ADR-0051): um tick que leu o estado antes do {@code state.set(STOPPED)}
+     * pode commitar seu heartbeat DEPOIS deste — a linha fica
+     * RUNNING/DRAINING com uma promessa fresca de +{@code node-lease-ttl},
+     * e órfãos RUNNING deste node esperam esse TTL extra pelo reaper (o
+     * mesmo custo de um crash). Fechar isso exigiria o stop esperar o tick
+     * em curso (lock compartilhado; até {@code nodeLeaseTtl/4} de claim
+     * rounds), acoplando a latência de shutdown a uma janela de um TTL que
+     * staleness + purge já cobrem.
      */
     private void writeFinalStoppedHeartbeat() {
         try {
-            nodeStore.heartbeat(nodeId, EngineState.STOPPED, clock.instant());
+            // ADR-0051: node parado não promete liveness — expires_at = now
+            // (lease já vencida) diz aos pares "o que era meu está livre"
+            Instant now = clock.instant();
+            nodeStore.heartbeat(nodeId, EngineState.STOPPED, nodeEpoch, now, now);
         } catch (RuntimeException e) {
             log.warn("could not write the final STOPPED heartbeat for node {} — the row will read as its last "
                     + "ticked state until the stale purge collects it", nodeId, e);
@@ -326,14 +343,16 @@ public final class Engine implements MohsLifecycle {
      * seguem o retry normal pelo caminho de conclusão de sempre, na própria
      * thread do handler (independe do tick, que {@link #stop} cancela em
      * seguida). Sem segunda janela de espera configurável (YAGNI, ADR-0034);
-     * handler surdo ao interrupt perde a renovação com o fim dos ticks e o
-     * reaper de outro node o reclama na expiração da lease. Durante o grace
+     * handler surdo ao interrupt fica órfão com o fim dos ticks — o
+     * heartbeat para, a lease do nó expira e o reaper de outro node
+     * reclama (ADR-0051). Durante o grace
      * nada disso acontece: drain ≠ cancel (ADR-0007).
      */
     private void escalateAfterDrainGrace(Duration grace) {
         // as duas contagens de propósito: inFlight (futures) é quem segura o
-        // grace; o mapa é quem a escalada alcança — com a marca de renovação
-        // (zumbi fica no mapa), divergem só na janela de conclusão do whenComplete
+        // grace; o mapa é quem a escalada alcança — com a marca de posse
+        // liberada (zumbi fica no mapa), divergem só na janela de conclusão
+        // do whenComplete
         log.warn("drain grace period ({}) elapsed with {} dispatch(es) still in flight ({} still signallable) — "
                 + "signalling cancellation and interrupting them; their attempts will fail with a node-shutdown cause "
                 + "and follow the retry policy (ADR-0034)",
@@ -352,15 +371,10 @@ public final class Engine implements MohsLifecycle {
     private void tick() {
         try {
             EngineState current = state.get();
-            nodeStore.heartbeat(nodeId, current, clock.instant());
+            renewNodeLease(current, clock.instant());
             signalJobTimeouts();
             pollCancelRequests();
-            // node vivo renova o que ainda executa — PAUSED/DRAINING incluídos
-            // (ADR-0007: drain ≠ cancel; a lease detecta morte, não pausa —
-            // sem isto, um drain mais longo que a lease viraria dupla execução
-            // do trabalho que ele mesmo espera terminar). Só reaper e claim
-            // são exclusivos de RUNNING: "isto ainda é meu" ≠ "quero mais".
-            renewOwnedLeases();
+            signalWatchdogOverruns();
             if (current != EngineState.RUNNING) {
                 return;
             }
@@ -374,6 +388,35 @@ public final class Engine implements MohsLifecycle {
         } catch (RuntimeException e) {
             log.error("engine tick failed — will retry next tick", e);
         }
+    }
+
+    /**
+     * ADR-0051: perceber o PRÓPRIO lease de nó expirado ANTES de renová-lo
+     * — este node esteve "morto" para o cluster (pausa/stall >
+     * node-lease-ttl) e pares podem ter reclamado o que estava em voo. O
+     * bump de epoch registra a reencarnação (§11.2 do redesign); as
+     * escritas dos zumbis já perdem pelo fence de posse
+     * (node_id, fired_at) independentemente. O heartbeat que renova a
+     * lease sai em qualquer estado — PAUSED/DRAINING incluídos (ADR-0007:
+     * drain ≠ cancel — o lease de nó detecta morte, não pausa; um drain
+     * mais longo que o lease viraria dupla execução do trabalho que ele
+     * mesmo espera).
+     */
+    private void renewNodeLease(EngineState current, Instant now) {
+        if (nodeLeaseExpiresAt != null && now.isAfter(nodeLeaseExpiresAt)) {
+            nodeEpoch++;
+            log.warn("node lease expired at {} while this node was stalled — epoch bumped to {}; peers may have "
+                    + "reclaimed in-flight work (their re-runs stand; this node's fenced completions will be discarded)",
+                    nodeLeaseExpiresAt, nodeEpoch);
+        }
+        Instant promised = now.plus(settings.nodeLeaseTtl());
+        nodeStore.heartbeat(nodeId, current, nodeEpoch, now, promised);
+        // só a promessa que o cluster REALMENTE viu conta pra detectar a
+        // própria morte: se o heartbeat falha (catch do tick), o campo retém
+        // a última promessa persistida e o bump dispara na primeira renovação
+        // bem-sucedida depois de > TTL — sem isto, ticks que rodam com
+        // escrita falhando por minutos jamais logariam o WARN acima
+        nodeLeaseExpiresAt = promised;
     }
 
     /**
@@ -398,12 +441,12 @@ public final class Engine implements MohsLifecycle {
      * {@code pause()} no meio dos rounds interrompe o encadeamento — a
      * partir do sinal, o node para de ACEITAR trabalho novo (ADR-0007;
      * Burns, shutdown coordenado), mesma janela de 1 lote de antes; (2) um
-     * orçamento monotônico de {@code leaseTtl/4} limita a duração total dos
-     * rounds — a renovação de lease roda UMA vez por tick, antes daqui, e
-     * rounds que se aproximassem do TTL fariam um handler longo de tick
-     * anterior perder a renovação e ser duplicado pelo reaper de outro node
-     * (lease é detecção de falha — DDIA; tick longo vira "node morto" para
-     * o cluster). Duração por {@code System.nanoTime}, nunca pelo
+     * orçamento monotônico de {@code nodeLeaseTtl/4} limita a duração total
+     * dos rounds — o heartbeat roda UMA vez por tick, antes daqui, e
+     * rounds que se aproximassem do TTL deixariam a lease do NÓ vencer no
+     * meio do tick, com o reaper de outro node duplicando tudo que estava
+     * em voo (lease é detecção de falha — DDIA; tick longo vira "node
+     * morto" para o cluster). Duração por {@code System.nanoTime}, nunca pelo
      * {@code Clock} injetado, que pode saltar no resync.
      *
      * <p>DBTUNE-18: uma consulta de definição por job_key DISTINTO do
@@ -413,7 +456,10 @@ public final class Engine implements MohsLifecycle {
      */
     private void claimAndDispatch() {
         Map<JobKey, Optional<StoredJob>> definitionsByKey = new HashMap<>();
-        long roundsBudgetNanos = settings.leaseTtl().toNanos() / 4;
+        // ADR-0051: o orçamento protege o HEARTBEAT — rounds que se
+        // aproximassem do lease de nó fariam o cluster declarar este node
+        // morto no meio de um tick longo e reclamar trabalho vivo
+        long roundsBudgetNanos = settings.nodeLeaseTtl().toNanos() / 4;
         long startNanos = System.nanoTime();
         for (int round = 0; round < settings.claimRounds(); round++) {
             if (round > 0 && (state.get() != EngineState.RUNNING || System.nanoTime() - startNanos >= roundsBudgetNanos)) {
@@ -582,114 +628,49 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * ADR-0012: renova em lote a lease de tudo que este node ainda executa
-     * — ANTES do reaper no mesmo tick, para as próprias execuções nunca
-     * parecerem abandonadas enquanto os ticks rodam. Duas marcas de saída
-     * da renovação ({@code renewalStopped} — a entrada fica no mapa),
-     * cada uma com WARN único:
-     * {@link #dropFromRenewalPastWatchdogBound} (runtime além do bound) e
-     * {@link #dropFromRenewalAfterLostLease} (renovação perdida — reclaim
-     * concorrente ou conclusão local na corrida).
+     * O Watchdog Bound pós-ADR-0051: execução cujo runtime monotônico
+     * passou de {@code mohs.engine.watchdog-timeout} tem a posse LIBERADA
+     * explicitamente ({@link Dispatcher#abandonOwnership} — attempt
+     * sintético pelo orçamento de retry, CAS cercado pela posse desta
+     * encarnação), no lugar do mecanismo antigo de parar a renovação e
+     * esperar o reaper — sem renovação por execução, liberar é uma escrita
+     * por zumbi raro. MARCA a encarnação em vez de removê-la (review
+     * ADR-0034): o zumbi continua no mapa pra escalada de drain e poll de
+     * cancel o alcançarem; a remoção é exclusiva da conclusão
+     * ({@code whenComplete}). Falha na liberação não marca — o próximo
+     * tick tenta de novo.
      */
-    private void renewOwnedLeases() {
-        List<Map.Entry<ExecutionId, InFlightAttempt>> owned = new ArrayList<>(inFlightAttempts.size());
-        for (Map.Entry<ExecutionId, InFlightAttempt> entry : inFlightAttempts.entrySet()) {
-            InFlightAttempt attempt = entry.getValue();
-            if (attempt.renewalStopped) {
-                continue;
+    private void signalWatchdogOverruns() {
+        inFlightAttempts.forEach((id, attempt) -> {
+            if (!attempt.ownershipReleased && watchdogBoundExceeded(attempt.submittedNanos)) {
+                releaseOverrunOwnership(id, attempt);
             }
-            if (watchdogBoundExceeded(attempt.submittedNanos)) {
-                dropFromRenewalPastWatchdogBound(entry.getKey(), attempt);
-            } else {
-                owned.add(Map.entry(entry.getKey(), attempt));
-            }
-        }
-        if (owned.isEmpty()) {
-            return;
-        }
-        Set<ExecutionId> renewed = executionStore.renewLeases(nodeId,
-                owned.stream().map(Map.Entry::getKey).toList(), clock.instant().plus(settings.leaseTtl()));
-        List<Map.Entry<ExecutionId, InFlightAttempt>> lost = owned.stream()
-                .filter(entry -> !renewed.contains(entry.getKey()))
-                .toList();
-        if (lost.isEmpty()) {
-            return;
-        }
-        Map<ExecutionId, ExecutionState> lostStates = fetchStatesBestEffort(lost.stream().map(Map.Entry::getKey).toList());
-        for (Map.Entry<ExecutionId, InFlightAttempt> entry : lost) {
-            dropFromRenewalAfterLostLease(entry.getKey(), entry.getValue(), lostStates.get(entry.getKey()));
-        }
+        });
     }
 
-    /**
-     * Consulta diagnóstica dos ids que perderam a renovação — em lote e
-     * best-effort. Em lote porque perda em massa (stall > lease seguido de
-     * reclaim de todo o in-flight por outro node) é exatamente quando este
-     * caminho fica grande: N+1 serial aqui atrasaria heartbeat e renovação
-     * do que sobrou, no pior momento. Best-effort porque a consulta só
-     * qualifica o WARN — ela nunca pode ter mais autoridade pra abortar o
-     * tick do que a informação que agrega: falhou, os drops acontecem do
-     * mesmo jeito, com estado desconhecido.
-     */
-    private Map<ExecutionId, ExecutionState> fetchStatesBestEffort(List<ExecutionId> lostIds) {
+    /** Um estouro do bound: libera a posse cercada; falha na liberação não marca — o próximo tick tenta de novo. */
+    private void releaseOverrunOwnership(ExecutionId id, InFlightAttempt attempt) {
+        if (attempt.fence == null) {
+            // sem posse cercável não há liberação segura — só o aviso;
+            // a conclusão eventual do zumbi resolve pelo CAS de estado
+            attempt.ownershipReleased = true;
+            log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} but carries no owner fence — "
+                    + "ownership not released; the zombie's own completion (or a peer's reclaim) settles it",
+                    id, settings.watchdogTimeout());
+            return;
+        }
         try {
-            return executionStore.findByIds(lostIds).stream()
-                    .collect(Collectors.toMap(Execution::id, Execution::state));
+            dispatcher.abandonOwnership(attempt.execution, attempt.definition, attempt.fence,
+                    "watchdog bound " + settings.watchdogTimeout() + " exceeded — node released ownership; "
+                            + "the local handler keeps running as a zombie and its result will be discarded");
+            attempt.ownershipReleased = true;
+            log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} — ownership released (retry budget "
+                    + "applied); the local handler keeps running as a zombie until it finishes",
+                    id, settings.watchdogTimeout());
         } catch (RuntimeException e) {
-            log.warn("could not fetch the state of {} lost-lease execution(s) — dropping them from renewal with unknown state",
-                    lostIds.size(), e);
-            return Map.of();
+            log.warn("could not release ownership of watchdog-overrun execution {} — will retry next tick",
+                    id, e);
         }
-    }
-
-    /**
-     * Watchdog Bound: execução cujo runtime monotônico passou de
-     * {@code mohs.engine.watchdog-timeout} sai da renovação — a lease
-     * expira sozinha e o reaper decide com o orçamento de retry
-     * (ADR-0033). É a rede de segurança de último caso da ADR-0012: entra
-     * depois que o {@code timeout} do job falhou em parar o handler.
-     * MARCA a encarnação em vez de removê-la (review ADR-0034): a marca na
-     * PRÓPRIA instância é inerentemente segura contra o ABA de re-claim
-     * (encarnação nova é outro objeto), e o zumbi continua no mapa pra
-     * escalada de drain e poll de cancel ainda o alcançarem — a remoção é
-     * exclusiva da conclusão ({@code whenComplete}).
-     */
-    private void dropFromRenewalPastWatchdogBound(ExecutionId id, InFlightAttempt attempt) {
-        attempt.renewalStopped = true;
-        log.warn("execution {} exceeded mohs.engine.watchdog-timeout {} — lease renewal stopped; the reaper will "
-                        + "reclaim it when the lease expires (retry budget applies) and the local handler keeps "
-                        + "running as a zombie until it finishes (it already survived or lacked a job timeout interrupt)",
-                id, settings.watchdogTimeout());
-    }
-
-    /**
-     * Id que a renovação perdeu e ainda está no mapa sai da renovação. A
-     * causa é ambígua por estado: reclaim concorrente (o handler local
-     * virou zumbi, e a escrita terminal dele será descartada pelo CAS de
-     * conclusão) ou conclusão local que commitou entre o snapshot da
-     * renovação e este drop — {@code SUCCEEDED} cala o WARN: o reaper
-     * nunca o produz diretamente, então na prática é a conclusão local
-     * vencendo a corrida (exceção não coberta: reclaim seguido de
-     * re-execução bem-sucedida em outro node durante um stall local maior
-     * que a lease fica sem aviso — o CAS de conclusão ainda descarta o
-     * resultado do zumbi local); nos demais estados, o WARN nomeia as
-     * duas hipóteses em vez de acusar uma: log operacional é contrato com
-     * o operador, e causa errada manda caçar um reaper fantasma às 3h da
-     * manhã. MARCA em vez de remover, como
-     * {@link #dropFromRenewalPastWatchdogBound} — o zumbi continua
-     * alcançável pela escalada e pelo poll; {@code actual} vem de
-     * {@link #fetchStatesBestEffort} ({@code null} = desconhecido,
-     * impresso como {@code unknown}).
-     */
-    private void dropFromRenewalAfterLostLease(ExecutionId id, InFlightAttempt attempt, @Nullable ExecutionState actual) {
-        attempt.renewalStopped = true;
-        if (actual == ExecutionState.SUCCEEDED) {
-            return; // na prática, conclusão local venceu a corrida — a exceção (re-execução remota pós-reclaim) está no Javadoc
-        }
-        log.warn("execution {} dropped from lease renewal (state now {}) — either reclaimed by another node's reaper "
-                + "(the local handler is now a zombie; its result will be discarded by the completion CAS) "
-                + "or a local completion raced this check",
-                id, Objects.toString(actual, "unknown"));
     }
 
     /** Runtime por tempo monotônico ({@code System.nanoTime}) — duração nunca vem do {@code Clock} injetado, que pode saltar no resync. */
@@ -795,18 +776,20 @@ public final class Engine implements MohsLifecycle {
             return;
         }
 
-        // registrado ANTES do runAsync: a execução está RUNNING no banco desde o
-        // claim — a primeira renovação precisa cobri-la mesmo que o executor a
-        // deixe na fila por um tick inteiro. Remoções sempre com o remove de
+        // registrado ANTES do runAsync: a execução está RUNNING no banco desde
+        // o claim — a varredura do tick (timeout/cancel/watchdog, ADR-0034/
+        // ADR-0051) precisa alcançá-la mesmo que o executor a deixe na fila
+        // por um tick inteiro. Remoções sempre com o remove de
         // dois argumentos: o mesmo ExecutionId pode ser re-reivindicado por
         // este node após um reclaim, e o whenComplete tardio de um zumbi não
         // pode apagar a entrada da encarnação nova (ABA em memória —
         // InFlightAttempt tem igualdade de identidade de propósito).
-        InFlightAttempt attempt = new InFlightAttempt(definition.timeout());
+        ExecutionStore.OwnerFence fence = ownerFenceOf(execution);
+        InFlightAttempt attempt = new InFlightAttempt(definition.timeout(), execution, definition, fence);
         inFlightAttempts.put(execution.id(), attempt);
         CompletableFuture<Void> future;
         try {
-            future = CompletableFuture.runAsync(() -> dispatcher.dispatch(execution, definition, payload, attempt.signal), executor);
+            future = CompletableFuture.runAsync(() -> dispatcher.dispatch(execution, definition, payload, attempt.signal, fence), executor);
         } catch (RuntimeException e) {
             inFlightAttempts.remove(execution.id(), attempt);
             log.warn("runner executor rejected execution {} — already claimed, will sit RUNNING until the reaper reclaims it on lease expiry",
@@ -842,16 +825,24 @@ public final class Engine implements MohsLifecycle {
         final long submittedNanos = System.nanoTime();
         final @Nullable Duration timeout;
         final CancellationSignal signal = new CancellationSignal();
+        /** A encarnação em si (ADR-0051) — o que o watchdog precisa pra liberar a posse sem consulta nova. */
+        final Execution execution;
+        final JobDefinition definition;
+        final ExecutionStore.@Nullable OwnerFence fence;
         /**
-         * Renovação parou (watchdog ou posse perdida) — escrito só pela
-         * thread do tick, lido por ela e pela escalada. A entrada continua
-         * no mapa até a conclusão: zumbi marcado ainda recebe o interrupt
-         * do shutdown e o sinal de cancel (review ADR-0034).
+         * Posse liberada pelo watchdog — escrito só pela thread do tick.
+         * A entrada continua no mapa até a conclusão: zumbi marcado ainda
+         * recebe o interrupt do shutdown e o sinal de cancel (review
+         * ADR-0034).
          */
-        volatile boolean renewalStopped;
+        volatile boolean ownershipReleased;
 
-        InFlightAttempt(@Nullable Duration timeout) {
+        InFlightAttempt(@Nullable Duration timeout, Execution execution, JobDefinition definition,
+                ExecutionStore.@Nullable OwnerFence fence) {
             this.timeout = timeout;
+            this.execution = execution;
+            this.definition = definition;
+            this.fence = fence;
         }
 
         /** O gatilho da varredura do tick (ADR-0034): tem timeout próprio, o handler roda há mais que ele e o sinal ainda não foi levantado. */
@@ -875,11 +866,16 @@ public final class Engine implements MohsLifecycle {
      */
     private void failBeforeDispatchGuarded(Execution execution, @Nullable JobDefinition definition, IllegalStateException error) {
         try {
-            dispatcher.failBeforeDispatch(execution, definition, error);
+            dispatcher.failBeforeDispatch(execution, definition, error, ownerFenceOf(execution));
         } catch (RuntimeException e) {
             log.warn("could not record the terminal failure of execution {} ({}) — will sit RUNNING until the reaper reclaims it on lease expiry",
                     execution.id(), error.getMessage(), e);
         }
+    }
+
+    /** A posse desta encarnação (ADR-0051) — nula só em linha anômala sem {@code fired_at}, que degrada pra conclusão não cercada. */
+    private ExecutionStore.@Nullable OwnerFence ownerFenceOf(Execution execution) {
+        return execution.firedAt() == null ? null : new ExecutionStore.OwnerFence(nodeId, execution.firedAt());
     }
 
     /**
@@ -898,7 +894,7 @@ public final class Engine implements MohsLifecycle {
      */
     private void failUnreadablePayload(Execution execution, JobDefinition definition, RuntimeException cause) {
         String message = "payload could not be read: " + Objects.requireNonNullElse(cause.getMessage(), cause.toString());
-        dispatcher.failBeforeDispatch(execution, definition, new IllegalStateException(message, cause));
+        dispatcher.failBeforeDispatch(execution, definition, new IllegalStateException(message, cause), ownerFenceOf(execution));
     }
 
     /** Package-private — só {@code EngineTest} usa isto pra confirmar a identidade do node por trás de heartbeat/claim. */

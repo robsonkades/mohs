@@ -385,15 +385,15 @@ class MohsAutoConfigurationTest {
         }
     }
 
-    /** Bound menor/igual à lease é erro de boot nomeando as duas propriedades — bound abaixo da lease tornaria a renovação inútil (ADR-0012). */
+    /** Bound menor/igual à lease do NÓ é erro de boot nomeando as duas propriedades — bound abaixo dela liberaria posse antes de o node poder ser considerado morto (ADR-0051). */
     @Test
-    void watchdogTimeoutBelowLeaseTtlFailsBoot() {
-        runnerWith(freshH2DataSource(), "mohs.engine.lease-ttl=30s", "mohs.engine.watchdog-timeout=10s")
+    void watchdogTimeoutBelowNodeLeaseTtlFailsBoot() {
+        runnerWith(freshH2DataSource(), "mohs.engine.node-lease-ttl=15s", "mohs.engine.watchdog-timeout=10s")
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
                             .hasStackTraceContaining("mohs.engine.watchdog-timeout")
-                            .hasStackTraceContaining("mohs.engine.lease-ttl");
+                            .hasStackTraceContaining("mohs.engine.node-lease-ttl");
                 });
     }
 

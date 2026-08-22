@@ -122,10 +122,27 @@ CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     refilled_at     TIMESTAMP NOT NULL
 );
 
--- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma
--- lógica de claim/reclaim consulta esta tabela.
+-- Heartbeat de node (ADR-0012). Desde a ADR-0051 deixou de ser só
+-- informativa: o reaper consulta expires_at/last_heartbeat_at para decidir
+-- quem está morto (anti-join de JdbcReaper).
 CREATE TABLE IF NOT EXISTS mohs_nodes (
     node_id           VARCHAR(255) PRIMARY KEY,
     state             VARCHAR(20) NOT NULL,
-    last_heartbeat_at TIMESTAMP   NOT NULL
+    last_heartbeat_at TIMESTAMP   NOT NULL,
+    epoch             BIGINT      NOT NULL DEFAULT 0, -- encarnação do nó (ADR-0051)
+    expires_at        TIMESTAMP                       -- lease do NÓ (ADR-0051); NULL = heartbeat de jar pré-Phase-4
 );
+-- Reaper dirigido por nó (ADR-0051): "RUNNING deste node" — parcial pelo
+-- mesmo racional dos índices de claim/reaper (DBTUNE-5/10).
+-- lease_expires_at IS NOT NULL no predicado (DBTUNE-22): o mesmo truque da
+-- DBTUNE-17, pelo mesmo motivo — o CAS de conclusão cercado ("WHERE id = ?
+-- AND state = 'RUNNING' AND node_id = ?") implica "state = 'RUNNING'" E tem
+-- igualdade na chave, e o planner (seletividades de node_id × state
+-- multiplicadas como independentes, quando são correlacionadas — node_id
+-- novo a cada boot) o escolhia no lugar do PK: medido 41 buffers/1.84 ms
+-- por conclusão vs 6/0.11 ms pelo PK. Com o conjunct, o CAS (que não
+-- menciona lease_expires_at) fica inelegível; o reaper carrega o conjunct
+-- trivialmente verdadeiro na query (toda linha RUNNING tem lease gravada
+-- pelo UPDATE de claim — o invariante de countActiveByState) e segue
+-- elegível.
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_owner ON mohs_executions (node_id) WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL;

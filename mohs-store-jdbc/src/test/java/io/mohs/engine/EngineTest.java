@@ -71,6 +71,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
@@ -130,7 +131,7 @@ class EngineTest {
     /** Montagem comum aos helpers que só variam claimer/node store: reaper, dispatcher e tick scheduler reais sobre as portas do fixture. */
     private Engine assembleEngine(Claimer claimer, NodeStore nodeStoreOverride, List<ExecutionListener> listeners,
             RunnerRegistry runnerRegistry, EngineSettings settings) {
-        JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
+        JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         EngineMetrics metrics = new EngineMetrics(new SimpleMeterRegistry());
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor, metrics);
@@ -162,9 +163,9 @@ class EngineTest {
         };
         NodeStore tracingNodeStore = new NodeStore() {
             @Override
-            public void heartbeat(String nodeId, EngineState state, Instant at) {
+            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
                 trace.add("tick");
-                counting.heartbeat(nodeId, state, at);
+                counting.heartbeat(nodeId, state, epoch, at, expiresAt);
             }
 
             @Override
@@ -210,7 +211,7 @@ class EngineTest {
     private Engine newEngineWith(JobStore jobStoreOverride, ExecutionStore executionStoreOverride, List<ExecutionListener> listeners,
             NodeStore nodeStoreOverride) {
         JdbcClaimer claimer = newClaimer(LEASE_TTL);
-        JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
+        JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore, LEASE_TTL);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         EngineMetrics metrics = new EngineMetrics(new SimpleMeterRegistry());
         Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor, metrics);
@@ -368,14 +369,15 @@ class EngineTest {
     }
 
     /**
-     * ADR-0012: o tick renova a lease de tudo que este node executa — um
-     * handler mais lento que a lease sobrevive enquanto os ticks rodam. O
-     * avanço do relógio é MENOR que a lease de propósito: nenhum
-     * interleaving de tick torna o reaper gatilhável, e a renovação fica
-     * observável (novo now + ttl > lease inicial).
+     * ADR-0051: a liveness mora no NÓ — handler mais lento que a lease da
+     * própria execução sobrevive enquanto o node ticka, sem nenhuma
+     * renovação por execução. O avanço do relógio ultrapassa
+     * {@code lease-ttl} de propósito: a lease da EXECUÇÃO vence e nada
+     * acontece, porque o heartbeat roda ANTES do reaper no mesmo tick
+     * (a ordem que mata o self-reap do S8) e a promessa do nó segue fresca.
      */
     @Test
-    void tickRenewsLeasesOfRunningExecutions() throws Exception {
+    void aHandlerOutlivingItsExecutionLeaseSurvivesWhileTheNodeTicks() throws Exception {
         seedEnqueuedExecution("exec-1", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
@@ -390,12 +392,14 @@ class EngineTest {
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
             Instant initialLease = leaseOf("exec-1");
-            clock.advance(Duration.ofSeconds(5));
+            clock.advance(LEASE_TTL.plusSeconds(5));
             counting.resetLatch(new CountDownLatch(2));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
             assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
-            assertThat(leaseOf("exec-1")).isAfter(initialLease);
+            // a lease da execução venceu e NÃO foi renovada — quem mantém o
+            // trabalho vivo é a promessa do nó, não esta coluna
+            assertThat(leaseOf("exec-1")).isEqualTo(initialLease);
         } finally {
             releaseHandler.countDown();
             engine.stop(Duration.ofSeconds(5));
@@ -520,13 +524,34 @@ class EngineTest {
     @Test
     void stopCompletesEvenWhenTheFinalHeartbeatWriteFails() throws Exception {
         NodeStore blinkingStore = mock(NodeStore.class, delegatesTo(nodeStore));
-        CountingNodeStore counting = new CountingNodeStore(blinkingStore, new CountDownLatch(1));
-        Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
+        // o purge é a ÚLTIMA chamada de NodeStore do tick — esperar por ele
+        // garante que a thread do tick não toca mais o mock durante o
+        // stubbing abaixo (Mockito detecta a interleaving como UnfinishedStubbing)
+        CountDownLatch tickDone = new CountDownLatch(1);
+        NodeStore tickCompletionProbe = new NodeStore() {
+            @Override
+            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+                blinkingStore.heartbeat(nodeId, state, epoch, at, expiresAt);
+            }
+
+            @Override
+            public List<StoredNode> findAll() {
+                return blinkingStore.findAll();
+            }
+
+            @Override
+            public int deleteHeartbeatsBefore(Instant cutoff) {
+                int purged = blinkingStore.deleteHeartbeatsBefore(cutoff);
+                tickDone.countDown();
+                return purged;
+            }
+        };
+        Engine engine = newEngine(tickCompletionProbe, List.of(), defaultRunnerRegistry(),
                 new EngineSettings(Duration.ofMinutes(5), BATCH_SIZE, LEASE_TTL));
         engine.start();
-        assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(tickDone.await(5, TimeUnit.SECONDS)).isTrue();
         doThrow(new DataAccessResourceFailureException("database down during shutdown"))
-                .when(blinkingStore).heartbeat(any(), any(), any());
+                .when(blinkingStore).heartbeat(any(), any(), anyLong(), any(), any());
 
         engine.stop(Duration.ofSeconds(5));
 
@@ -536,8 +561,9 @@ class EngineTest {
     /** ADR-0041: heartbeat mais velho que 10× lease-ttl é purgado de carona no tick — cada boot gera node_id novo, e sem purge cada instância morta deixava uma linha órfã para sempre. */
     @Test
     void tickPurgesNodeRowsWithStaleHeartbeats() throws Exception {
-        nodeStore.heartbeat("dead-node", EngineState.RUNNING, NOW.minus(LEASE_TTL.multipliedBy(10)).minusSeconds(1));
-        nodeStore.heartbeat("recent-node", EngineState.RUNNING, NOW.minusSeconds(1));
+        Instant staleAt = NOW.minus(LEASE_TTL.multipliedBy(10)).minusSeconds(1);
+        nodeStore.heartbeat("dead-node", EngineState.RUNNING, 1, staleAt, staleAt.plus(LEASE_TTL));
+        nodeStore.heartbeat("recent-node", EngineState.RUNNING, 1, NOW.minusSeconds(1), NOW.minusSeconds(1).plus(LEASE_TTL));
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngine(counting, List.of());
 
@@ -576,7 +602,7 @@ class EngineTest {
         List<String> trace = Collections.synchronizedList(new ArrayList<>());
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(4));
         Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
-                new EngineSettings(POLL_INTERVAL, 2, 6, 2, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(POLL_INTERVAL, 2, 6, 2, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
 
         engine.start();
         try {
@@ -613,7 +639,7 @@ class EngineTest {
         List<String> trace = Collections.synchronizedList(new ArrayList<>());
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
-                new EngineSettings(POLL_INTERVAL, 2, 10, 3, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(POLL_INTERVAL, 2, 10, 3, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
 
         engine.start();
         try {
@@ -631,52 +657,16 @@ class EngineTest {
         assertThat(countByState(ExecutionState.SUCCEEDED)).isEqualTo(3);
     }
 
-    /** Posse perdida (reclaim externo) é detectada pela renovação: WARN de zumbi, e o resultado tardio do handler é descartado pelo CAS de conclusão. */
-    @Test
-    void lostLeaseIsDetectedWarnedAndTheZombieResultDiscarded() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
-        CountDownLatch handlerStarted = new CountDownLatch(1);
-        CountDownLatch releaseHandler = new CountDownLatch(1);
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-            handlerStarted.countDown();
-            releaseHandler.await(10, TimeUnit.SECONDS);
-        });
-        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
-        Engine engine = newEngine(counting, List.of());
-        ListAppender<ILoggingEvent> warnWatcher = new ListAppender<>();
-        warnWatcher.start();
-        engineLogger.addAppender(warnWatcher);
-
-        engine.start();
-        try {
-            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            // reclaim externo simulado: outro nó reagendou a execução (scheduled_at
-            // futuro impede re-claim imediato e mantém o estado observável)
-            rawJdbcTemplate.update(
-                    "UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', node_id = NULL, scheduled_at = ? WHERE id = 'exec-1'",
-                    JdbcTimestamps.toUtcLocalDateTime(NOW.plusSeconds(3600)));
-            counting.resetLatch(new CountDownLatch(2));
-            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
-
-            assertThat(warnWatcher.list).anyMatch(event ->
-                    event.getFormattedMessage().contains("dropped from lease renewal (state now RETRY_SCHEDULED)"));
-        } finally {
-            releaseHandler.countDown();
-            engine.stop(Duration.ofSeconds(5));
-            engineLogger.detachAppender(warnWatcher);
-        }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
-    }
-
     /**
-     * A consulta diagnóstica do lost-lease é em lote e best-effort: o banco
-     * piscar durante o fetch não pode apagar o WARN do zumbi nem abortar o
-     * tick — perda em massa (stall > lease + reclaim de todo o in-flight) é
-     * exatamente quando esse caminho fica grande, e é o pior momento pra
-     * atrasar heartbeat/renovação do que sobrou.
+     * ADR-0051: posse perdida (reclaim externo) não tem mais detecção por
+     * renovação — o zumbi termina sozinho e o resultado tardio é descartado
+     * pelo FENCE do CAS: a linha volta a RUNNING com {@code fired_at} novo
+     * (re-claim de outro nó), então SÓ o fence de posse — não o CAS de
+     * estado — distingue a encarnação nova da velha. Sem o fence, a
+     * conclusão zumbi venceria e mataria a encarnação nova saudável.
      */
     @Test
-    void lostLeaseStateFetchFailureNeverAbortsTheTick() throws Exception {
+    void aZombieResultAfterAnExternalReclaimIsDiscardedByTheFencedCompletion() throws Exception {
         seedEnqueuedExecution("exec-1", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
@@ -684,32 +674,28 @@ class EngineTest {
             handlerStarted.countDown();
             releaseHandler.await(10, TimeUnit.SECONDS);
         });
-        ExecutionStore blinkingStore = mock(ExecutionStore.class, delegatesTo(executionStore));
-        doThrow(new DataAccessResourceFailureException("database blinked")).when(blinkingStore).findByIds(any());
-        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
-        Engine engine = newEngineWith(jobStore, blinkingStore, List.of(), counting);
-        ListAppender<ILoggingEvent> logWatcher = new ListAppender<>();
-        logWatcher.start();
-        engineLogger.addAppender(logWatcher);
+        Engine engine = newEngine(nodeStore, List.of());
+        Instant newIncarnationFiredAt = NOW.plusSeconds(7);
 
         engine.start();
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            // reclaim externo simulado, como em lostLeaseIsDetectedWarnedAndTheZombieResultDiscarded
+            // re-claim externo simulado: outro nó VIVO (senão o reaper deste
+            // engine o declararia morto e reclamaria no meio do teste) já
+            // reexecuta a mesma linha — RUNNING, posse de outra encarnação
+            nodeStore.heartbeat("other-node", EngineState.RUNNING, 1, NOW, NOW.plusSeconds(3600));
             rawJdbcTemplate.update(
-                    "UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', node_id = NULL, scheduled_at = ? WHERE id = 'exec-1'",
-                    JdbcTimestamps.toUtcLocalDateTime(NOW.plusSeconds(3600)));
-            counting.resetLatch(new CountDownLatch(2));
-            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
-
-            assertThat(logWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("could not fetch the state"));
-            assertThat(logWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("dropped from lease renewal (state now unknown)"));
-            assertThat(logWatcher.list).noneMatch(event -> event.getFormattedMessage().contains("engine tick failed"));
+                    "UPDATE mohs_executions SET node_id = 'other-node', fired_at = ? WHERE id = 'exec-1'",
+                    JdbcTimestamps.toUtcLocalDateTime(newIncarnationFiredAt));
         } finally {
             releaseHandler.countDown();
-            engine.stop(Duration.ofSeconds(5));
-            engineLogger.detachAppender(logWatcher);
+            engine.stop(Duration.ofSeconds(5)); // drena o handler — a conclusão tardia roda e perde o FENCE
         }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT node_id FROM mohs_executions WHERE id = 'exec-1'", String.class)).isEqualTo("other-node");
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM mohs_attempts WHERE execution_id = 'exec-1'", Integer.class)).isZero();
     }
 
     /**
@@ -895,14 +881,14 @@ class EngineTest {
     }
 
     /**
-     * Review ADR-0034: zumbi dropado da renovação (posse perdida) continua
-     * no mapa — marcado, não removido — e por isso a escalada do shutdown
-     * ainda o interrompe (pra job sem timeout, a única chance de pará-lo
-     * antes de a JVM morrer). O resultado tardio é descartado pelo CAS,
-     * como todo zumbi.
+     * Review ADR-0034: zumbi (posse perdida por reclaim externo) continua
+     * no mapa de in-flight até a conclusão — e por isso a escalada do
+     * shutdown ainda o interrompe (pra job sem timeout, a única chance de
+     * pará-lo antes de a JVM morrer). O resultado tardio é descartado pelo
+     * CAS, como todo zumbi.
      */
     @Test
-    void aZombieDroppedFromRenewalStillReceivesTheShutdownInterrupt() throws Exception {
+    void aZombieAfterAnExternalReclaimStillReceivesTheShutdownInterrupt() throws Exception {
         seedEnqueuedExecution("exec-1", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch never = new CountDownLatch(1);
@@ -922,7 +908,7 @@ class EngineTest {
         engine.start();
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            // reclaim externo: a renovação perde a posse e MARCA a encarnação (não remove)
+            // reclaim externo: a posse foi perdida, mas a entrada fica no mapa até a conclusão
             rawJdbcTemplate.update(
                     "UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', node_id = NULL, scheduled_at = ? WHERE id = 'exec-1'",
                     JdbcTimestamps.toUtcLocalDateTime(NOW.plusSeconds(3600)));
@@ -935,9 +921,9 @@ class EngineTest {
         assertThat(interrupted.await(5, TimeUnit.SECONDS)).as("escalation still reaches the dropped zombie").isTrue();
     }
 
-    /** Drain ≠ cancel (ADR-0007): o in-flight continua executando em PAUSED — a renovação tem que acompanhar o TRABALHO, não o modo do control loop; sem isto, pause/drain mais longo que a lease vira dupla execução do que o próprio drain espera. */
+    /** Drain ≠ cancel (ADR-0007): o in-flight continua executando em PAUSED — a promessa de liveness do NÓ (ADR-0051) tem que acompanhar o TRABALHO, não o modo do control loop; sem isto, pause/drain mais longo que a lease do nó vira dupla execução do que o próprio drain espera. */
     @Test
-    void leasesKeepRenewingWhilePaused() throws Exception {
+    void theNodeLeaseKeepsBeingPromisedWhilePaused() throws Exception {
         seedEnqueuedExecution("exec-1", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
@@ -952,12 +938,12 @@ class EngineTest {
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
             engine.pause();
-            Instant initialLease = leaseOf("exec-1");
+            Instant initialExpiry = nodeLeaseExpiryOfTheOnlyNode();
             clock.advance(Duration.ofSeconds(5));
             counting.resetLatch(new CountDownLatch(2));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
-            assertThat(leaseOf("exec-1")).isAfter(initialLease);
+            assertThat(nodeLeaseExpiryOfTheOnlyNode()).isAfter(initialExpiry);
             assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
             engine.resume();
         } finally {
@@ -967,26 +953,32 @@ class EngineTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
-    /** Bound menor/igual à lease tornaria a renovação inútil (a primeira lease já nasceria condenada) — rejeitado na construção, nomeando as duas propriedades. */
+    private Instant nodeLeaseExpiryOfTheOnlyNode() {
+        List<StoredNode> nodes = nodeStore.findAll();
+        assertThat(nodes).hasSize(1);
+        Instant expiresAt = nodes.get(0).expiresAt();
+        assertThat(expiresAt).isNotNull();
+        return expiresAt;
+    }
+
+    /** Bound menor/igual à lease do NÓ liberaria posse antes de o node sequer poder ser considerado morto (ADR-0051) — rejeitado na construção, nomeando as duas propriedades. */
     @Test
-    void watchdogTimeoutMustExceedLeaseTtl() {
+    void watchdogTimeoutMustExceedNodeLeaseTtl() {
         assertThatThrownBy(() -> new EngineSettings(POLL_INTERVAL, BATCH_SIZE, Duration.ofSeconds(30), Duration.ofSeconds(30)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("mohs.engine.watchdog-timeout")
-                .hasMessageContaining("mohs.engine.lease-ttl");
+                .hasMessageContaining("mohs.engine.node-lease-ttl");
     }
 
     /**
-     * Watchdog Bound (ADR-0012): passado o bound (tempo monotônico real,
-     * ~200ms aqui), o node para de renovar — a lease expira e o reaper
-     * reclama com o orçamento (retries = 0 → FAILED terminal, imune a
-     * re-claim, o que torna a asserção final estável). Determinístico: até
-     * o advance a lease renovada (NOW+50ms) está sempre no futuro do
-     * relógio lógico parado; depois do advance a renovação já parou pra
-     * esta execução, então nenhum interleaving a salva do reaper.
+     * Watchdog Bound pós-ADR-0051: passado o bound (tempo monotônico real,
+     * ~200ms aqui), o node LIBERA a posse explicitamente — attempt
+     * sintético consome o orçamento (retries = 0 → FAILED terminal) sem
+     * reaper nem avanço de relógio envolvidos; o handler zumbi segue
+     * rodando e seu resultado tardio é descartado pelo CAS cercado.
      */
     @Test
-    void watchdogBoundStopsRenewalAndTheReaperReclaims() throws Exception {
+    void watchdogBoundReleasesOwnershipAndFailsTheExecution() throws Exception {
         seedEnqueuedExecution("exec-1", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
@@ -994,6 +986,12 @@ class EngineTest {
             handlerStarted.countDown();
             releaseHandler.await(10, TimeUnit.SECONDS);
         });
+        CountDownLatch failedPublished = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Failed) {
+                failedPublished.countDown();
+            }
+        };
         CountDownLatch boundWarned = new CountDownLatch(1);
         AppenderBase<ILoggingEvent> watcher = new AppenderBase<>() {
             @Override
@@ -1006,17 +1004,14 @@ class EngineTest {
         watcher.start();
         engineLogger.addAppender(watcher);
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
-        Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
+        Engine engine = newEngine(counting, List.of(listener), defaultRunnerRegistry(),
                 new EngineSettings(POLL_INTERVAL, BATCH_SIZE, Duration.ofMillis(50), Duration.ofMillis(200)));
 
         engine.start();
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(boundWarned.await(5, TimeUnit.SECONDS)).as("watchdog bound warned within timeout").isTrue();
-
-            clock.advance(Duration.ofSeconds(2));
-            counting.resetLatch(new CountDownLatch(2));
-            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(failedPublished.await(5, TimeUnit.SECONDS)).as("ownership released as a terminal failure").isTrue();
 
             assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         } finally {
@@ -1024,6 +1019,8 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
             engineLogger.detachAppender(watcher);
         }
+        // o zumbi terminou no stop e o resultado tardio perdeu o CAS cercado
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
     }
 
     @Test
@@ -1404,11 +1401,6 @@ class EngineTest {
         }
 
         @Override
-        public Set<ExecutionId> renewLeases(String nodeId, List<ExecutionId> ids, Instant leaseExpiresAt) {
-            return delegate.renewLeases(nodeId, ids, leaseExpiresAt);
-        }
-
-        @Override
         public boolean cancelIfPending(ExecutionId id) {
             return delegate.cancelIfPending(id);
         }
@@ -1508,8 +1500,8 @@ class EngineTest {
         }
 
         @Override
-        public void heartbeat(String nodeId, EngineState state, Instant at) {
-            delegate.heartbeat(nodeId, state, at);
+        public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+            delegate.heartbeat(nodeId, state, epoch, at, expiresAt);
             latch.get().countDown();
         }
 

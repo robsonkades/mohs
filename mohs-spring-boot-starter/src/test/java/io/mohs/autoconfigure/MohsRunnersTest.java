@@ -29,7 +29,7 @@ class MohsRunnersTest {
         return new MohsProperties(
                 true,
                 new MohsProperties.Jdbc(null, true),
-                new MohsProperties.Engine(Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), null, Duration.ofSeconds(60), 64, 16, false),
+                new MohsProperties.Engine(Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60), 64, 16, false),
                 new MohsProperties.Lifecycle(MohsProperties.Lifecycle.StartMode.AUTO,
                         new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30))),
                 new MohsProperties.Time(MohsProperties.Time.Mode.APPLICATION, Duration.ofSeconds(1), Duration.ofSeconds(30)),

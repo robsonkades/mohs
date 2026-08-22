@@ -7,15 +7,24 @@ import io.mohs.core.EngineState;
 import io.mohs.core.execution.Execution;
 
 /**
- * Registro de heartbeat de node (ADR-0012) — Repository (PoEAA), porta
- * que {@code io.mohs.store.jdbc} implementa. Só informativo: nenhuma lógica de
- * claim/reclaim consulta esta porta, é o relógio "cluster-wide" separado
- * do lease funcional de {@link Execution} que a ADR-0012 distingue.
+ * Registro de heartbeat e lease de node (ADR-0012, promovida a
+ * autoridade de liveness pela ADR-0051) — Repository (PoEAA), porta que
+ * {@code io.mohs.store.jdbc} implementa. Deixou de ser só informativa: o
+ * reaper decide "morto" pelo {@code expires_at} desta tabela (uma escrita
+ * por node por tick), no lugar da renovação de lease POR EXECUÇÃO que
+ * pagava ~5 updates/execução na tabela mais quente do sistema (Finding A
+ * do redesign, medido na BASELINE da Phase 4).
  */
 public interface NodeStore {
 
-    /** Registra o heartbeat mais recente do node — upsert por {@code nodeId}. */
-    void heartbeat(String nodeId, EngineState state, Instant at);
+    /**
+     * Registra o heartbeat mais recente do node — upsert por
+     * {@code nodeId}. Desde a ADR-0051 o heartbeat carrega o lease do NÓ:
+     * {@code epoch} (encarnação) e {@code expiresAt} (a promessa "estou
+     * vivo até aqui" que o reaper consulta — a autoridade de liveness que
+     * substituiu a renovação por execução).
+     */
+    void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt);
 
     /**
      * Todos os nodes já registrados, sem filtro de "recente" — o limiar de

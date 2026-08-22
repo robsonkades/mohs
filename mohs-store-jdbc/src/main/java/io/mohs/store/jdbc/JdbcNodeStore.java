@@ -31,23 +31,33 @@ public final class JdbcNodeStore implements NodeStore {
         this.jdbcTemplate = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
     }
 
+    private static final String HEARTBEAT_UPDATE = """
+            UPDATE mohs_nodes SET state = :state, last_heartbeat_at = :lastHeartbeatAt,
+                epoch = :epoch, expires_at = :expiresAt
+            WHERE node_id = :nodeId
+            """;
+
     @Override
-    public void heartbeat(String nodeId, EngineState state, Instant at) {
+    public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
         Objects.requireNonNull(nodeId, "nodeId");
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(at, "at");
+        Objects.requireNonNull(expiresAt, "expiresAt");
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("nodeId", nodeId)
                 .addValue("state", state.name())
-                .addValue("lastHeartbeatAt", JdbcTimestamps.toUtcLocalDateTime(at));
+                .addValue("epoch", epoch)
+                .addValue("lastHeartbeatAt", JdbcTimestamps.toUtcLocalDateTime(at))
+                .addValue("expiresAt", JdbcTimestamps.toUtcLocalDateTime(expiresAt));
 
         // ver CONC-2 em JdbcJobStore.upsert — mesma corrida, mesma correção.
-        int updated = jdbcTemplate.update("UPDATE mohs_nodes SET state = :state, last_heartbeat_at = :lastHeartbeatAt WHERE node_id = :nodeId", params);
+        int updated = jdbcTemplate.update(HEARTBEAT_UPDATE, params);
         if (updated == 0) {
             try {
-                jdbcTemplate.update("INSERT INTO mohs_nodes (node_id, state, last_heartbeat_at) VALUES (:nodeId, :state, :lastHeartbeatAt)", params);
+                jdbcTemplate.update("INSERT INTO mohs_nodes (node_id, state, last_heartbeat_at, epoch, expires_at)"
+                        + " VALUES (:nodeId, :state, :lastHeartbeatAt, :epoch, :expiresAt)", params);
             } catch (DuplicateKeyException _) {
-                jdbcTemplate.update("UPDATE mohs_nodes SET state = :state, last_heartbeat_at = :lastHeartbeatAt WHERE node_id = :nodeId", params);
+                jdbcTemplate.update(HEARTBEAT_UPDATE, params);
             }
         }
     }
@@ -65,6 +75,10 @@ public final class JdbcNodeStore implements NodeStore {
     }
 
     private static StoredNode mapRow(ResultSet rs) throws SQLException {
-        return new StoredNode(rs.getString("node_id"), EngineState.valueOf(rs.getString("state")), JdbcTimestamps.fromUtcLocalDateTime(rs.getObject("last_heartbeat_at", LocalDateTime.class)));
+        LocalDateTime expiresAt = rs.getObject("expires_at", LocalDateTime.class);
+        return new StoredNode(rs.getString("node_id"), EngineState.valueOf(rs.getString("state")),
+                JdbcTimestamps.fromUtcLocalDateTime(rs.getObject("last_heartbeat_at", LocalDateTime.class)),
+                rs.getLong("epoch"),
+                expiresAt == null ? null : JdbcTimestamps.fromUtcLocalDateTime(expiresAt));
     }
 }

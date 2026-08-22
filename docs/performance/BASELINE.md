@@ -1095,6 +1095,83 @@ drain interferindo — o control, mais lento, oscila menos).
 - `SHOW TRANSACTION ISOLATION LEVEL` (~1 xact contado por transação real)
   é cerimônia do driver — alavanca separada, não perseguida aqui.
 
+## Phase 4 — node lease + fence de posse, medido (ADR-0051) — 2026-08-22
+
+A Phase 4 do redesign: renovação de lease por execução deletada, liveness
+por nó (`mohs_nodes.epoch`/`expires_at`, heartbeat 1×/tick,
+`node-lease-ttl` 15s), reaper dead-node driven com tick
+heartbeat-antes-do-reaper, e todo CAS de conclusão cercado pela posse da
+encarnação (`node_id`, `fired_at`). Bancada: mesma do "Tuning fim a fim"
+(app demo, `poll=50ms`, `batch=1000`, `dispatch=1024`, Hikari 300,
+Postgres `postgres:latest`), workload **slow-job** (`Thread.sleep(500)`,
+`retries=10`) — o cenário renewal-heavy que a Phase 0 deixou como
+pendência: com 1.024 em voo sustentados, a renovação era o maior
+componente de update da tabela quente. Medição ad-hoc por
+`pg_stat_user_tables`/`pg_stat_wal` (mesmo par de snapshots do BEFORE,
+tomado no mesmo dia com o engine pré-Phase-4).
+
+### Write amplification (o gate do plano)
+
+| Métrica (por execução) | BEFORE 20k | BEFORE 50k | AFTER 20k | AFTER 50k ×3 |
+|---|---:|---:|---:|---:|
+| updates em `mohs_executions` | 6,67 | 6,97 | **2,00** | **2,00** (nas 3 rodadas) |
+| — dos quais HOT | 0,00 | 0,00 | 0,00 | 0,00 |
+| WAL bytes | 8.410 | 4.753 | 5.472* | 2.112–4.564* |
+| vazão (exec/s) | 1.465 | 1.525 | 1.748 | 921–1.829** |
+
+*WAL contaminado por checkpoint/FPI conforme a rodada; a leitura limpa é
+~2,1 KB/exec (rodada pós-VACUUM FULL). **A dispersão de vazão é
+checkpoint/vacuum, não o mecanismo: a rodada quente fez 1.829/s com o
+tanque cravado em 1.024 (curva amostrada) — acima do BEFORE; `nodes_upd`
+≈ 1 por tick, como projetado.
+
+- **`n_tup_upd`: 6,67–6,97 → 2,00 = −70,0% a −71,3%.** O gate do plano
+  dizia ≥ 80% assumindo ~10 upd/exec de renovação sustentada; o BEFORE
+  real era ~6,8 (≈ 4,8 de renovação + 2 de claim/CAS). A renovação foi a
+  **zero** — o −80% literal era inalcançável porque os 2,00 restantes
+  (claim + CAS terminal) nunca foram alvo da Phase 4: são o piso que a
+  Phase 5 ataca. Registrado como gate de mecanismo atendido, gate
+  numérico literal não (70% < 80%).
+- A query nova do reaper (anti-join com `mohs_nodes`) custa **1,8 ms**
+  com 1.024 RUNNING e 1,5M linhas (EXPLAIN ANALYZE no meio do drain,
+  `idx_mohs_executions_owner` da migração V2) — de graça no tick.
+
+### E6 — chaos, o gate de corretude (S6/SUSPEND/S8, `node-lease-ttl` 15s)
+
+- **S6 (kill −9 a 40% do drain de 50k): PASSA.** 100% terminal; 2.048
+  re-executadas = exatamente o em-voo no kill; violações 0; reclaim wave
+  aos **+15,1 s** do kill (era +30 s com a lease de execução);
+  **kill→drain 17,1 s** (critério do plano: recovery < 20 s — antes
+  31,2–31,9 s); zero exceções.
+- **SUSPEND (NtSuspendProcess 25 s > TTL, 2 nós): fence PASSA.** Na
+  variante com o node2 ainda ativo no vencimento: 1.024 reclaims
+  disparam exatamente no TTL, re-runs completam ~2 s depois, e ao
+  retomar o node1 seus zumbis perdem TODOS os CAS cercados — **0
+  conclusões duplas** em todas as rodadas; epoch bump WARN no node1.
+  **Achado (pré-existente, não regressão):** freeze no MEIO da transação
+  de claim deixa o lote travado-mas-ENQUEUED (uncommitted) — invisível
+  ao reaper e pulado pelo SKIP LOCKED de outros nós até a sessão
+  congelada morrer (confirmado por `pg_stat_activity`: backend
+  `idle in transaction` no UPDATE do claim). O engine da renovação tinha
+  o mesmo buraco. Mitigação DB-side (`idle_in_transaction_session_timeout`)
+  reportada, não implementada.
+- **S8 (docker pause 30 s — 2× o TTL): PASSA, self-reap MORTO.**
+  Re-executadas **0** (Phase 0: 486–598 com pausa == TTL) — a ordem
+  heartbeat-antes-do-reaper faz o reaper de cada tick enxergar a própria
+  promessa recém-renovada; app sobrevive, 1ª conclusão no unpause+0 ms,
+  27,6k conclusões nos 10 s seguintes, zero linhas de exceção no log
+  (a tempestade da Phase 0 também sumiu deste cenário).
+
+### Limitações declaradas
+
+- Vazão slow-job é teto aritmético (`dispatch/0,5s` = 2.048/s) — as
+  rodadas medem write amplification, não capacidade.
+- O SUSPEND com gatilho a 40% cai com frequência no modo freeze-mid-claim
+  (achado acima) — o critério "reclaims > 0" do script só vale quando o
+  freeze pega o node fora do claim; a variante instrumentada é que provou
+  o fence sob reclaim real.
+- Um host, dois processos; sem partição de rede real.
+
 ## Como reproduzir
 
 Os harnesses moram em `mohs-benchmark` desde 2026-08-21 (Phase 0 do
@@ -1111,9 +1188,12 @@ redesign — antes viviam nos test sources de `mohs-jdbc`):
 
 Write amplification fim a fim (commits/execução, tuple versions, WAL):
 `mohs-benchmark/scripts/write-amplification.ps1`, com o app de demo no
-ar (seção "Write amplification por execução").
+ar (seção "Write amplification por execução"); `-JobKey slow-job` para o
+workload renewal-heavy da Phase 4.
 
-Chaos S6/S8 (o script sobe e mata o app sozinho; porta 8080 livre):
-`mohs-benchmark/scripts/chaos-recovery.ps1 -Scenario S6` (ou `S8`).
+Chaos S6/S8/SUSPEND (o script sobe e mata/congela o app sozinho; portas
+8080/8081 livres):
+`mohs-benchmark/scripts/chaos-recovery.ps1 -Scenario S6` (ou `S8`,
+`SUSPEND`).
 
 Requer Docker local (Testcontainers sobe Postgres/MySQL/SQL Server).

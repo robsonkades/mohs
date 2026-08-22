@@ -153,10 +153,22 @@ CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     refilled_at     DATETIME(6) NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
 
--- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma
--- lógica de claim/reclaim consulta esta tabela.
+-- Heartbeat de node (ADR-0012). Desde a ADR-0051 deixou de ser só
+-- informativa: o reaper consulta expires_at/last_heartbeat_at para decidir
+-- quem está morto (anti-join de JdbcReaper).
 CREATE TABLE IF NOT EXISTS mohs_nodes (
     node_id           VARCHAR(255) PRIMARY KEY,
     state             VARCHAR(20) NOT NULL,
-    last_heartbeat_at DATETIME(6) NOT NULL
+    last_heartbeat_at DATETIME(6) NOT NULL,
+    epoch             BIGINT      NOT NULL DEFAULT 0, -- encarnação do nó (ADR-0051)
+    expires_at        DATETIME(6)                     -- lease do NÓ (ADR-0051)
 ) DEFAULT CHARACTER SET utf8mb4;
+-- Reaper dirigido por nó (ADR-0051) — guarda idêntica às da seção de índices acima
+SET @mohs_sql = IF(EXISTS(SELECT 1 FROM information_schema.statistics
+                          WHERE table_schema = DATABASE() AND table_name = 'mohs_executions'
+                            AND index_name = 'idx_mohs_executions_owner'),
+                   'SELECT 1',
+                   'CREATE INDEX idx_mohs_executions_owner ON mohs_executions (state, node_id)');
+PREPARE mohs_stmt FROM @mohs_sql;
+EXECUTE mohs_stmt;
+DEALLOCATE PREPARE mohs_stmt;

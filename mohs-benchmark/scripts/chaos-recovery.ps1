@@ -1,28 +1,44 @@
-# Chaos scenarios S6/S8 (ARCHITECTURE_REDESIGN_PLAN.md §20.2, Phase 0).
+# Chaos scenarios S6/S8/SUSPEND (ARCHITECTURE_REDESIGN_PLAN.md §20.2/§20.3 E6).
 #
-# Runs the two recovery scenarios against the CURRENT engine, on the same
+# Runs the recovery scenarios against the CURRENT engine, on the same
 # bench as BASELINE.md "Tuning fim a fim no Postgres": demo app on the host
 # at the documented operating point, container 'postgres', seed by SQL with
 # a unique prefix per round, measurement by mohs_attempts timestamps.
 #
 #   S6 — node kill -9 mid-drain. Pass: 100% of the seed reaches a terminal
 #        state; re-executions (attempts > 1) only for executions that were
-#        RUNNING at the kill. Reports the recovery timeline (lease expiry
-#        is the floor: mohs.engine.lease-ttl, default 30s).
+#        RUNNING at the kill. Reports the recovery timeline (node lease
+#        expiry is the floor: mohs.engine.node-lease-ttl, default 15s —
+#        ADR-0051).
 #   S8 — docker pause of the database for -PauseSeconds mid-drain. Pass:
 #        no data loss, no exception storm in the app log, drain resumes
-#        after unpause. Reports exception counts and the resume latency.
+#        after unpause, and NO self-reap (ADR-0051's heartbeat-first tick
+#        order — re-executions should be 0 with a single node).
+#   SUSPEND — E6 (ADR-0051 gate): two nodes; node1 is frozen
+#        (NtSuspendProcess) for -SuspendSeconds > node-lease-ttl, node2's
+#        reaper reclaims its in-flight work, node1 resumes as a zombie.
+#        Pass: seed fully terminal; reclaim actually happened (synthetic
+#        reaper attempts > 0); ZERO executions with more than one
+#        SUCCEEDED attempt (the owner fence discards every zombie result).
+#        Known mode (measured 2026-08-22): if the freeze catches node1
+#        MID-CLAIM-TRANSACTION, the batch's rows stay locked-but-ENQUEUED
+#        (uncommitted) — invisible to the reaper (not RUNNING) and skipped
+#        by other claims (SKIP LOCKED) until the frozen session ends, so
+#        "reclaimed: 0" with a full drain right after resume is that mode,
+#        not a fence failure. Pre-existing gap (the renewal-era engine had
+#        it too); DB-side mitigation: idle_in_transaction_session_timeout.
 #
 # The script boots the app itself (it must own the PID it kills) and aborts
-# if port 8080 is already taken. Prerequisites: mohs-demo/target/classes and
+# if the app port is already taken. Prerequisites: mohs-demo/target/classes and
 # mohs-demo/target/cp.txt (mvnw -pl mohs-demo -am install, then
 # dependency:build-classpath -DincludeScope=runtime -Dmdep.outputFile=target/cp.txt).
 
 param(
-    [Parameter(Mandatory)][ValidateSet('S6', 'S8')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('S6', 'S8', 'SUSPEND')][string]$Scenario,
     [int]$SeedSize = 50000,
     [double]$TriggerAtFraction = 0.4,
     [int]$PauseSeconds = 30,
+    [int]$SuspendSeconds = 25,
     [int]$DrainTimeoutSeconds = 300,
     [string]$Container = 'postgres',
     [string]$DbUser = 'postgres',
@@ -42,19 +58,20 @@ function Invoke-Psql([string]$Sql) {
 
 function Get-DbNow { (Invoke-Psql "SELECT now()::text") }
 
-function Start-App([string]$LogName) {
-    if (Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue) {
-        throw 'port 8080 already in use — stop whatever owns it first (the script must own the PID it kills)'
+function Start-App([string]$LogName, [int]$Port = 8080, [int]$PoolSize = 300) {
+    if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+        throw "port $Port already in use — stop whatever owns it first (the script must own the PID it kills)"
     }
     $cp = "target/classes;" + (Get-Content (Join-Path $demoDir 'target/cp.txt') -Raw).Trim()
     $javaArgs = @(
         '-Dspring.devtools.restart.enabled=false'
         '-cp', $cp
         'io.mohs.MohsApplication'
+        "--server.port=$Port"
         '--spring.datasource.url=jdbc:postgresql://localhost:5432/postgres'
         '--spring.datasource.username=postgres'
         '--spring.datasource.password=postgres'
-        '--spring.datasource.hikari.maximum-pool-size=300'
+        "--spring.datasource.hikari.maximum-pool-size=$PoolSize"
         '--mohs.jdbc.dialect=postgresql'
         '--mohs.engine.poll-interval=50ms'
         '--mohs.engine.batch-size=1000'
@@ -65,13 +82,21 @@ function Start-App([string]$LogName) {
         -RedirectStandardOutput (Join-Path $logDir "$LogName.log") `
         -RedirectStandardError (Join-Path $logDir "$LogName.err.log")
     $deadline = (Get-Date).AddSeconds(90)
-    while (-not (Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue)) {
+    while (-not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) {
         if ($proc.HasExited) { throw "app exited during boot — see $logDir\$LogName.err.log" }
-        if ((Get-Date) -gt $deadline) { throw 'app did not open port 8080 in 90s' }
+        if ((Get-Date) -gt $deadline) { throw "app did not open port $Port in 90s" }
         Start-Sleep -Milliseconds 500
     }
     $proc
 }
+
+# NtSuspendProcess/NtResumeProcess — o SIGSTOP do Windows: congela todas as
+# threads do processo sem shutdown hooks, exatamente o "GC pause infinito"
+# que o cenário SUSPEND precisa.
+Add-Type -Namespace Chaos -Name Native -MemberDefinition @'
+[DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr processHandle);
+[DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr processHandle);
+'@
 
 function Get-Pending([string]$Prefix) {
     [int](Invoke-Psql "SELECT count(*) FROM mohs_executions WHERE id LIKE '$Prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
@@ -140,7 +165,7 @@ function Invoke-S6 {
 
     $proc2 = Start-App "s6-$prefix-node2"
     $restartClock = Get-Date
-    Write-Host "node2 up (pid $($proc2.Id)) — waiting full drain (lease-ttl 30s is the recovery floor)"
+    Write-Host "node2 up (pid $($proc2.Id)) — waiting full drain (node-lease-ttl 15s is the recovery floor, ADR-0051)"
     Wait-Drain $prefix
     $endClock = Get-Date
 
@@ -195,7 +220,7 @@ function Invoke-S8 {
     $resume = Invoke-Psql ("SELECT 'first completion after unpause: '||min(finished_at)||' (unpause $unpauseTsUtc)' " +
         "FROM mohs_attempts WHERE execution_id LIKE '$prefix%' AND finished_at > '$unpauseTsUtc'")
     "seed fully terminal      : $(if ($lost -eq 0) { 'YES' } else { "NO — $lost non-terminal" })"
-    "re-executed (attempts>1) : $multi (lease-ttl 30s vs pause ${PauseSeconds}s — self-reap race is the thing measured)"
+    "re-executed (attempts>1) : $multi (node-lease-ttl 15s vs pause ${PauseSeconds}s — ADR-0051's heartbeat-first tick order should make this 0)"
     $resume
     Invoke-Psql ("SELECT 'completions in first 10s after unpause: '||count(*) FROM mohs_attempts " +
         "WHERE execution_id LIKE '$prefix%' AND finished_at BETWEEN '$unpauseTsUtc' AND ('$unpauseTsUtc'::timestamp + interval '10 seconds')")
@@ -204,4 +229,49 @@ function Invoke-S8 {
     Show-ExceptionProfile "s8-$prefix"
 }
 
-if ($Scenario -eq 'S6') { Invoke-S6 } else { Invoke-S8 }
+# ── SUSPEND: node frozen past the node lease, peers reclaim, zombie fenced ───
+function Invoke-Suspend {
+    $prefix = 'sp{0}-' -f (Get-Date -Format 'HHmmss')
+    Write-Host "== SUSPEND (E6): seeding $SeedSize as '$prefix*', freezing node1 ${SuspendSeconds}s at $([int]($TriggerAtFraction*100))% drained =="
+    # dois nodes no mesmo Postgres: metade do pool cada, senão 2×300 estoura max_connections
+    $proc1 = Start-App "sp-$prefix-node1" 8080 200
+    $proc2 = Start-App "sp-$prefix-node2" 8081 200
+    Seed $prefix
+
+    $pendingAtSuspend = Wait-Fraction $prefix $TriggerAtFraction
+    $suspendTs = Get-DbNow
+    [void][Chaos.Native]::NtSuspendProcess($proc1.Handle)
+    Write-Host ("froze node1 pid {0} at {1} (pending {2}) — node2 keeps draining and its reaper reclaims" -f $proc1.Id, $suspendTs, $pendingAtSuspend)
+    Start-Sleep -Seconds $SuspendSeconds
+    [void][Chaos.Native]::NtResumeProcess($proc1.Handle)
+    $resumeClock = Get-Date
+    Write-Host "node1 resumed — its zombies now race the reclaimed re-runs; the owner fence decides"
+
+    Wait-Drain $prefix
+    $endClock = Get-Date
+
+    Write-Host "--- SUSPEND results ---"
+    Invoke-Psql "SELECT 'terminal '||state||': '||count(*) FROM mohs_executions WHERE id LIKE '$prefix%' GROUP BY state ORDER BY state"
+    $lost = [int](Invoke-Psql "SELECT count(*) FROM mohs_executions WHERE id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
+    $reaped = [int](Invoke-Psql "SELECT count(*) FROM mohs_attempts WHERE execution_id LIKE '$prefix%' AND outcome = 'FAILED' AND error LIKE '%lease%'")
+    $doubleCompleted = [int](Invoke-Psql ("SELECT count(*) FROM (SELECT execution_id FROM mohs_attempts " +
+        "WHERE execution_id LIKE '$prefix%' AND outcome = 'SUCCEEDED' GROUP BY execution_id HAVING count(*) > 1) d"))
+    $epochBumped = (Get-Content (Join-Path $logDir "sp-$prefix-node1.log") -ErrorAction SilentlyContinue |
+        Select-String -Pattern 'epoch bumped' | Measure-Object).Count
+    "seed fully terminal        : $(if ($lost -eq 0) { 'YES' } else { "NO — $lost non-terminal" })"
+    "reclaimed while frozen     : $reaped synthetic reaper attempt(s) (criterion: > 0 — the suspension must actually be seen as death)"
+    "double-completed executions: $doubleCompleted (criterion: 0 — every zombie result fenced out, ADR-0051)"
+    "node1 epoch bump WARNs     : $epochBumped (expected: >= 1 — the node noticed its own expiry on resume)"
+    'resume -> drain end        : {0:N1}s' -f ($endClock - $resumeClock).TotalSeconds
+
+    Stop-Process -Id $proc1.Id -Force
+    Stop-Process -Id $proc2.Id -Force
+    Show-ExceptionProfile "sp-$prefix-node1"
+    Show-ExceptionProfile "sp-$prefix-node2"
+}
+
+switch ($Scenario) {
+    'S6' { Invoke-S6 }
+    'S8' { Invoke-S8 }
+    'SUSPEND' { Invoke-Suspend }
+}

@@ -167,13 +167,16 @@ public interface ExecutionStore {
      * escrita silenciosamente ignorada — as duas combinações são bug do
      * chamador, rejeitadas na construção.
      *
-     * <p>{@code expectedLeaseExpiresAt} é o fence anti-ABA (ADR-0033, DDIA
-     * cap. 8): com {@code RETRY_SCHEDULED} re-claimável, "state = RUNNING"
-     * deixou de identificar <em>qual</em> encarnação está rodando — o
-     * reaper preenche com a lease que observou expirada, e o CAS só vence
-     * se ela ainda for a mesma (re-claim concorrente troca a lease e
-     * protege a encarnação nova). {@code null} = sem fence — o caminho do
-     * dispatcher, que conclui a própria encarnação que executou.
+     * <p>{@code fence} é o cercamento de posse (ADR-0033 revista pela
+     * ADR-0051; DDIA cap. 8): com {@code RETRY_SCHEDULED} re-claimável,
+     * "state = RUNNING" deixou de identificar <em>qual</em> encarnação
+     * está rodando. O token é {@code (node_id, fired_at)} — desde a
+     * ADR-0047 o claim grava {@code fired_at} no próprio CAS, então o par
+     * é único por encarnação e viaja de graça no {@link Execution} que o
+     * claim devolveu. TODO caminho que possui uma encarnação (dispatcher,
+     * reaper, watchdog) conclui cercado; {@code null} = sem fence, só
+     * para escrita administrativa que deliberadamente não representa uma
+     * encarnação.
      *
      * <p>{@code rearmNextFireAt} rearma a corrente fixed-delay (ADR-0035):
      * conclusão terminal de ocorrência {@code afterFinish} grava
@@ -186,7 +189,7 @@ public interface ExecutionStore {
      * retry.
      */
     record CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
-            @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt, @Nullable Instant rearmNextFireAt,
+            @Nullable Instant retryAt, @Nullable OwnerFence fence, @Nullable Instant rearmNextFireAt,
             @Nullable String batchId) {
 
         public CompletionRequest {
@@ -205,18 +208,18 @@ public interface ExecutionStore {
             }
         }
 
-        /** Conclusão sem retry (terminal) e sem fence — a forma do dispatcher pra sucesso/falha terminal. */
+        /** Conclusão sem retry (terminal) e sem fence — conveniência de teste/chamada administrativa. */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState) {
             this(id, jobKey, attempt, newState, null, null, null, null);
         }
 
         /** Forma com fence e sem rearme — quem conclui sem agenda {@code afterFinish} em mãos. */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
-                @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt) {
-            this(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt, null, null);
+                @Nullable Instant retryAt, @Nullable OwnerFence fence) {
+            this(id, jobKey, attempt, newState, retryAt, fence, null, null);
         }
 
-        /** Retry sem fence — a forma do dispatcher pra falha com orçamento. */
+        /** Retry sem fence — conveniência de teste. */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState, @Nullable Instant retryAt) {
             this(id, jobKey, attempt, newState, retryAt, null, null, null);
         }
@@ -227,9 +230,9 @@ public interface ExecutionStore {
          * e chega pelo {@link #inBatch}, não por aqui.
          */
         public CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
-                @Nullable Instant retryAt, @Nullable Instant expectedLeaseExpiresAt,
+                @Nullable Instant retryAt, @Nullable OwnerFence fence,
                 @Nullable Instant rearmNextFireAt) {
-            this(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt, rearmNextFireAt, null);
+            this(id, jobKey, attempt, newState, retryAt, fence, rearmNextFireAt, null);
         }
 
         /**
@@ -240,24 +243,27 @@ public interface ExecutionStore {
          * por um campo que quase sempre é nulo.
          */
         public CompletionRequest inBatch(@Nullable String batchId) {
-            return new CompletionRequest(id, jobKey, attempt, newState, retryAt, expectedLeaseExpiresAt,
+            return new CompletionRequest(id, jobKey, attempt, newState, retryAt, fence,
                     rearmNextFireAt, batchId);
         }
     }
 
     /**
-     * Renova a lease das execuções {@code RUNNING} deste node (ADR-0012:
-     * "o motor renova a lease de toda Execution RUNNING a cada ciclo de
-     * poll" — em lote, cluster-wide, nunca por job). O guard
-     * {@code state = 'RUNNING' AND node_id = :nodeId} é o fence natural:
-     * renovação perde para qualquer reclaim/conclusão concorrente e nunca
-     * ressuscita a lease de uma execução que já saiu deste node.
-     *
-     * @return os ids efetivamente renovados — subconjunto de {@code ids};
-     *         um id ausente perdeu a posse (reclaim do reaper ou conclusão
-     *         concorrente) e o chamador decide o que logar.
+     * A posse de uma encarnação (ADR-0051): o par que o claim gravou no
+     * CAS pra {@code RUNNING} — {@code node_id} diz QUEM, {@code fired_at}
+     * diz QUAL encarnação (único por claim desde a ADR-0047; re-claim
+     * grava um novo). Um zumbi — handler que sobreviveu a reclaim, pausa
+     * de GC, partição — carrega o par antigo e perde todo CAS cercado por
+     * construção, mesmo quando o mesmo node re-reivindicou a mesma
+     * execução (o {@code fired_at} novo difere). Kleppmann, fencing token,
+     * no único lugar onde dá pra impor: o storage engine.
      */
-    Set<ExecutionId> renewLeases(String nodeId, List<ExecutionId> ids, Instant leaseExpiresAt);
+    record OwnerFence(String nodeId, Instant firedAt) {
+        public OwnerFence {
+            Objects.requireNonNull(nodeId, "nodeId");
+            Objects.requireNonNull(firedAt, "firedAt");
+        }
+    }
 
     /**
      * Cancela uma execução que ainda não roda — CAS

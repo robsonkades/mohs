@@ -1,15 +1,13 @@
 package io.mohs.store.jdbc;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import javax.sql.DataSource;
 
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
@@ -70,22 +68,50 @@ class MohsFlywayTest {
     }
 
     /**
-     * O guardião das duas cópias da mesma verdade (ADR-0048): enquanto a
-     * V1 for o schema verbatim, igualdade literal — sem isto, uma V1
+     * O guardião das duas cópias da mesma verdade (ADR-0048), na forma que
+     * a V2 exigiu: {@code schema-h2.sql} num banco e a cadeia Flyway
+     * (V1+V2) noutro têm que produzir a MESMA estrutura — colunas e
+     * índices das tabelas {@code mohs_*}. Sem isto, uma migração
      * divergente viraria no-op silencioso na adoção (as guardas comem a
      * diferença) e produção teria um schema que o fast-path dos testes
-     * nunca viu. Quando a V2 nascer, este teste vira a comparação
-     * estrutural (schema ≡ V1+V2).
+     * nunca viu. H2 é o guardião rápido; Postgres tem o próprio
+     * ({@code MohsFlywayPostgresTest}) porque o predicado parcial do índice
+     * owner (V2, DBTUNE-22) não existe em H2. MySQL/SQL Server ficam com os
+     * testes de adoção (cadeia POR CIMA do schema-file, falham em conflito)
+     * — SQL Server coberto por procuração do guardião PG na forma do filtro.
      */
-    @ParameterizedTest
-    @ValueSource(strings = { "h2", "postgresql", "mysql", "sqlserver" })
-    void v1BaselineIsTheSchemaVerbatim(String dialect) throws IOException {
-        String schema = new ClassPathResource("schema-" + dialect + ".sql")
-                .getContentAsString(StandardCharsets.UTF_8);
-        String baseline = new ClassPathResource(
-                "io/mohs/store/jdbc/migration/" + dialect + "/V1__mohs_baseline.sql")
-                .getContentAsString(StandardCharsets.UTF_8);
-        assertThat(baseline).isEqualTo(schema);
+    @Test
+    void flywayChainMatchesTheSchemaFileStructurally() {
+        DataSource fromSchemaFile = freshH2();
+        new ResourceDatabasePopulator(new ClassPathResource("schema-h2.sql")).execute(fromSchemaFile);
+        DataSource fromFlyway = freshH2();
+        new MohsFlyway(fromFlyway, new H2JdbcDialect()).migrate();
+
+        assertThat(mohsStructure(fromFlyway)).isEqualTo(mohsStructure(fromSchemaFile));
+    }
+
+    /** Colunas + índices das tabelas mohs_* (fora o histórico do Flyway), num shape comparável por igualdade. */
+    private static List<String> mohsStructure(DataSource dataSource) {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        List<String> structure = new ArrayList<>(jdbc.query("""
+                SELECT LOWER(table_name) || '.' || LOWER(column_name) || ':' || data_type || ':' || is_nullable
+                FROM information_schema.columns
+                WHERE LOWER(table_name) LIKE 'mohs\\_%' AND LOWER(table_name) <> ?
+                ORDER BY 1
+                """, (rs, _) -> rs.getString(1), MohsFlyway.HISTORY_TABLE));
+        // nome de índice de PK é auto-gerado pelo H2 (sufixo aleatório) —
+        // normalizado; o que se compara é "a PK existe nestas colunas"
+        structure.addAll(jdbc.query("""
+                SELECT LOWER(i.table_name) || '.'
+                       || CASE WHEN LOWER(i.index_name) LIKE 'primary\\_key%' THEN 'primary_key' ELSE LOWER(i.index_name) END
+                       || '(' || LOWER(ic.column_name) || '@' || ic.ordinal_position || ')'
+                FROM information_schema.indexes i
+                JOIN information_schema.index_columns ic
+                  ON ic.index_name = i.index_name AND ic.table_name = i.table_name
+                WHERE LOWER(i.table_name) LIKE 'mohs\\_%' AND LOWER(i.table_name) <> ?
+                ORDER BY 1
+                """, (rs, _) -> rs.getString(1), MohsFlyway.HISTORY_TABLE));
+        return structure;
     }
 
     @Test

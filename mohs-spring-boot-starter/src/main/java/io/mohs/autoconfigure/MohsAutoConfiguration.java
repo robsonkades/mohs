@@ -275,9 +275,10 @@ public class MohsAutoConfiguration {
         return new ExecutionWindowRegistry(mohsExecutionWindowBeans);
     }
 
+    /** O corte legado ({@code lease-ttl}) só vale pra linha de node de jar antigo, sem {@code expires_at} (ADR-0051). */
     @Bean
-    public Reaper mohsReaper(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock, ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsFlyway mohsFlyway) {
-        return new JdbcReaper(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore);
+    public Reaper mohsReaper(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock, ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsProperties properties, MohsFlyway mohsFlyway) {
+        return new JdbcReaper(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore, properties.engine().leaseTtl());
     }
 
     @Bean
@@ -349,7 +350,7 @@ public class MohsAutoConfiguration {
         MohsProperties.Engine engineProperties = properties.engine();
         EngineSettings settings = new EngineSettings(engineProperties.pollInterval(), engineProperties.batchSize(),
                 engineProperties.dispatchConcurrency(), engineProperties.claimRounds(), engineProperties.leaseTtl(),
-                engineProperties.watchdogTimeout(), engineProperties.misfireThreshold());
+                engineProperties.nodeLeaseTtl(), engineProperties.watchdogTimeout(), engineProperties.misfireThreshold());
         return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper,
                 mohsTriggerFirer, mohsClock, settings, mohsTickScheduler, mohsRunnerRegistry, mohsEngineMetrics);
     }

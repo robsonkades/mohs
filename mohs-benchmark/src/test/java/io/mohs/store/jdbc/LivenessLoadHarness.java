@@ -45,7 +45,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * (CLAUDE.md: "sem número, não é otimização" vale pra evitar reivindicar
  * ganho sem medir; a parte de {@code heartbeat} não reivindica ganho
  * nenhum, só caracteriza um caminho deliberadamente não-hot-path). A
- * parte de {@code reclaimExpired} mede de verdade o índice DBTUNE-10
+ * parte de {@code reclaimExpired} mede de verdade o índice de posse
+ * (idx_mohs_executions_owner, ADR-0051; substituiu o papel do DBTUNE-10
+ * na seleção de candidatos)
  * (antes/depois, mesmo container) — sem histórico "de peso morto" na
  * tabela, table scan e index scan custam o mesmo, então o teste enche
  * {@code mohs_executions} de execuções terminais primeiro, mesma lição
@@ -76,9 +78,18 @@ class LivenessLoadHarness {
 
     private static final Path OUTPUT_DIR = Path.of("docs", "performance");
 
-    private static final String RECLAIM_QUERY_WHERE = "WHERE state = 'RUNNING' AND lease_expires_at < TIMESTAMP '2026-08-14 12:00:00'";
-    private static final String H2_EXPLAIN_SQL = "EXPLAIN SELECT id, job_key FROM mohs_executions " + RECLAIM_QUERY_WHERE;
-    private static final String POSTGRES_EXPLAIN_SQL = "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) SELECT id, job_key FROM mohs_executions " + RECLAIM_QUERY_WHERE;
+    // A forma ADR-0051 da seleção do reaper: candidato é RUNNING de node morto
+    // (NOT EXISTS contra mohs_nodes), não mais lease_expires_at vencida. O
+    // conjunct lease_expires_at IS NOT NULL é o do JdbcReaper real (DBTUNE-22:
+    // elegibilidade ao predicado do índice owner por construção).
+    private static final String RECLAIM_QUERY_WHERE = """
+            WHERE e.state = 'RUNNING' AND e.lease_expires_at IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM mohs_nodes n
+                WHERE n.node_id = e.node_id
+                  AND (n.expires_at > TIMESTAMP '2026-08-14 12:00:00'
+                       OR (n.expires_at IS NULL AND n.last_heartbeat_at > TIMESTAMP '2026-08-14 11:59:30')))""";
+    private static final String H2_EXPLAIN_SQL = "EXPLAIN SELECT e.id, e.job_key FROM mohs_executions e " + RECLAIM_QUERY_WHERE;
+    private static final String POSTGRES_EXPLAIN_SQL = "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) SELECT e.id, e.job_key FROM mohs_executions e " + RECLAIM_QUERY_WHERE;
 
     @Test
     void run() throws Exception {
@@ -89,13 +100,15 @@ class LivenessLoadHarness {
         printHeartbeatReport(heartbeatResults);
 
         List<ReclaimResult> reclaimResults = new ArrayList<>();
+        // ADR-0051: o índice da seleção de candidatos passou a ser o de posse
+        // (idx_mohs_executions_owner, migração V2) — o antes/depois agora mede ele.
         reclaimResults.add(measureReclaimBeforeAfter("H2", LivenessLoadHarness::freshH2DataSource,
-                "DROP INDEX idx_mohs_executions_reaper",
-                "CREATE INDEX idx_mohs_executions_reaper ON mohs_executions (state, lease_expires_at)",
+                "DROP INDEX idx_mohs_executions_owner",
+                "CREATE INDEX idx_mohs_executions_owner ON mohs_executions (state, node_id)",
                 H2_EXPLAIN_SQL));
         reclaimResults.add(measureReclaimBeforeAfter("PostgreSQL", PostgresTestSupport::freshSchema,
-                "DROP INDEX idx_mohs_executions_reaper",
-                "CREATE INDEX idx_mohs_executions_reaper ON mohs_executions (lease_expires_at) WHERE state = 'RUNNING'",
+                "DROP INDEX idx_mohs_executions_owner",
+                "CREATE INDEX idx_mohs_executions_owner ON mohs_executions (node_id) WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL",
                 POSTGRES_EXPLAIN_SQL));
         printReclaimReport(reclaimResults);
     }
@@ -113,12 +126,12 @@ class LivenessLoadHarness {
         try (HikariDataSource pool = pooledDataSource(rawDataSourceFactory.get())) {
             JdbcNodeStore nodeStore = new JdbcNodeStore(pool);
             for (int i = 0; i < HEARTBEAT_WARMUP; i++) {
-                nodeStore.heartbeat("warmup-node", EngineState.RUNNING, NOW.plusSeconds(i));
+                nodeStore.heartbeat("warmup-node", EngineState.RUNNING, 1, NOW.plusSeconds(i), NOW.plusSeconds(i + 15));
             }
             long[] samplesNanos = new long[HEARTBEAT_SAMPLES];
             for (int i = 0; i < HEARTBEAT_SAMPLES; i++) {
                 long start = System.nanoTime();
-                nodeStore.heartbeat("liveness-node", EngineState.RUNNING, NOW.plusSeconds(i));
+                nodeStore.heartbeat("liveness-node", EngineState.RUNNING, 1, NOW.plusSeconds(i), NOW.plusSeconds(i + 15));
                 samplesNanos[i] = System.nanoTime() - start;
             }
             return new HeartbeatResult(label, LatencyStats.of(samplesNanos));
@@ -168,7 +181,7 @@ class LivenessLoadHarness {
     private double runReclaim(DataSource dataSource, MutableClock clock, JdbcDialect dialect) {
         JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), dialect);
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcReaper reaper = new JdbcReaper(dataSource, dialect, clock, executionStore, jobStore);
+        JdbcReaper reaper = new JdbcReaper(dataSource, dialect, clock, executionStore, jobStore, Duration.ofSeconds(30));
 
         long start = System.nanoTime();
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
@@ -291,7 +304,7 @@ class LivenessLoadHarness {
 
     private void printReclaimReport(List<ReclaimResult> results) {
         System.out.println("=== LivenessLoadHarness — Reaper.reclaimExpired (" + RECLAIM_BACKLOG_SIZE
-                + " execuções órfãs, " + HISTORY_ROWS + " linhas de histórico), idx_mohs_executions_reaper (DBTUNE-10) ===");
+                + " execuções órfãs, " + HISTORY_ROWS + " linhas de histórico), idx_mohs_executions_owner (ADR-0051) ===");
         System.out.printf("%-12s %20s %20s%n", "Dialeto", "sem índice (rows/s)", "com índice (rows/s)");
         for (ReclaimResult result : results) {
             System.out.printf("%-12s %20.1f %20.1f%n", result.dialect(), result.throughputBefore(), result.throughputAfter());

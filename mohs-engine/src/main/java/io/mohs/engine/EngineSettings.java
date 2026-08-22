@@ -9,12 +9,20 @@ import org.jspecify.annotations.Nullable;
  * Parâmetros de tempo e lote do {@link Engine} — snapshot imutável no
  * lugar de parâmetros posicionais de construtor que só cresciam (Long
  * Parameter List). {@code leaseTtl} é o mesmo valor que alimenta o claim
- * ({@code mohs.engine.lease-ttl}): a renovação de lease (ADR-0012)
- * reescreve a lease com o mesmo horizonte com que ela nasce.
- * {@code watchdogTimeout} é o teto opcional da renovação (Watchdog
- * Bound, ADR-0012): {@code null} = sem teto; quando presente, precisa
- * ser maior que a lease — um bound menor tornaria a renovação inútil
- * (a primeira lease já nasceria condenada). O bound mede
+ * ({@code mohs.engine.lease-ttl}): o horizonte com que a lease de
+ * EXECUÇÃO nasce no claim — e, desde a ADR-0051, também o corte de
+ * staleness para linha de node legado sem {@code expires_at}.
+ * {@code nodeLeaseTtl} ({@code mohs.engine.node-lease-ttl}, ADR-0051) é
+ * a lease do NÓ: o heartbeat de cada tick promete "estou vivo até
+ * agora+TTL" em {@code mohs_nodes.expires_at}, e o reaper só considera
+ * morto o node cuja promessa venceu — a autoridade de liveness que
+ * substituiu a renovação por execução.
+ * {@code watchdogTimeout} é o teto opcional de runtime (Watchdog
+ * Bound, ADR-0012, semântica revista pela ADR-0051: vencido o bound, o
+ * node LIBERA a posse da execução em vez de só parar de renovar):
+ * {@code null} = sem teto; quando presente, precisa ser maior que a
+ * lease do nó — um bound menor liberaria posse antes de o node sequer
+ * poder ser considerado morto. O bound mede
  * submit→agora em tempo monotônico: espera na fila de um runner CPU
  * conta como runtime — semântica deliberada até o interrupt por
  * timeout de job (próximo ciclo) trazer um carimbo do início real.
@@ -36,16 +44,16 @@ import org.jspecify.annotations.Nullable;
  * dispatch); {@code 1} (default) preserva o formato clássico de um claim
  * por tick. Um lote que volta menor que o pedido encerra os rounds (a
  * fila drenou — o round seguinte seria um SELECT vazio).
- * Dimensionamento: o tick renova as leases UMA vez, antes dos rounds —
+ * Dimensionamento: o tick emite o heartbeat UMA vez, antes dos rounds —
  * por isso os rounds carregam um orçamento monotônico de
- * {@code leaseTtl/4} além do contador; sem ele, {@code claimRounds ×
- * latência-de-claim} perto do TTL faria um handler longo de tick anterior
- * perder a renovação no meio dos rounds e ser duplicado pelo reaper de
- * outro node. O alongamento do tick também adia heartbeat e os sinais de
+ * {@code nodeLeaseTtl/4} além do contador; sem ele, {@code claimRounds ×
+ * latência-de-claim} perto do TTL faria um tick longo deixar a lease do
+ * nó vencer no meio dos rounds e o reaper de outro node duplicar tudo
+ * que estava em voo. O alongamento do tick também adia os sinais de
  * timeout/cancel (ADR-0034) — mais um motivo para rounds serem poucos.
  */
 public record EngineSettings(Duration pollInterval, int batchSize, int dispatchConcurrency, int claimRounds,
-        Duration leaseTtl, @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
+        Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
 
     /** Mesmo default de {@code mohs.engine.misfire-threshold} ({@code MohsProperties}) — precedente Quartz. */
     public static final Duration DEFAULT_MISFIRE_THRESHOLD = Duration.ofSeconds(60);
@@ -61,6 +69,7 @@ public record EngineSettings(Duration pollInterval, int batchSize, int dispatchC
     public EngineSettings {
         Objects.requireNonNull(pollInterval, "pollInterval");
         Objects.requireNonNull(leaseTtl, "leaseTtl");
+        Objects.requireNonNull(nodeLeaseTtl, "nodeLeaseTtl");
         Objects.requireNonNull(misfireThreshold, "misfireThreshold");
         if (batchSize <= 0) {
             throw new IllegalArgumentException("batchSize must be positive");
@@ -79,10 +88,14 @@ public record EngineSettings(Duration pollInterval, int batchSize, int dispatchC
             throw new IllegalArgumentException("mohs.engine.lease-ttl must be positive, got " + leaseTtl
                     + " — a non-positive lease is born expired and turns the first tick into a reclaim storm");
         }
-        if (watchdogTimeout != null && watchdogTimeout.compareTo(leaseTtl) <= 0) {
+        if (!nodeLeaseTtl.isPositive()) {
+            throw new IllegalArgumentException("mohs.engine.node-lease-ttl must be positive, got " + nodeLeaseTtl
+                    + " — a non-positive node lease is born expired and every peer's reaper reclaims this node's work");
+        }
+        if (watchdogTimeout != null && watchdogTimeout.compareTo(nodeLeaseTtl) <= 0) {
             throw new IllegalArgumentException("mohs.engine.watchdog-timeout (" + watchdogTimeout
-                    + ") must be greater than mohs.engine.lease-ttl (" + leaseTtl
-                    + ") — the bound is the ceiling ON TOP of renewal (ADR-0012), not a shorter lease");
+                    + ") must be greater than mohs.engine.node-lease-ttl (" + nodeLeaseTtl
+                    + ") — the bound is the ceiling ON TOP of node liveness (ADR-0051), not a shorter lease");
         }
         if (!misfireThreshold.isPositive()) {
             throw new IllegalArgumentException("mohs.engine.misfire-threshold must be positive, got " + misfireThreshold
@@ -90,10 +103,10 @@ public record EngineSettings(Duration pollInterval, int batchSize, int dispatchC
         }
     }
 
-    /** Um claim por tick (pré-ADR-0040) — conveniência para quem só configura o teto de dispatch. */
+    /** Um claim por tick (pré-ADR-0040) e lease de nó = lease de execução — conveniência para quem só configura o teto de dispatch. */
     public EngineSettings(Duration pollInterval, int batchSize, int dispatchConcurrency, Duration leaseTtl,
             @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
-        this(pollInterval, batchSize, dispatchConcurrency, 1, leaseTtl, watchdogTimeout, misfireThreshold);
+        this(pollInterval, batchSize, dispatchConcurrency, 1, leaseTtl, leaseTtl, watchdogTimeout, misfireThreshold);
     }
 
     /** Threshold de misfire default (ADR-0035), claim sem teto de dispatch (pré-ADR-0039) e um claim por tick — conveniência de teste. */

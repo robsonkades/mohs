@@ -20,6 +20,9 @@ param(
     [int]$Rounds = 2,
     [int]$IdleSeconds = 30,
     [int]$DrainTimeoutSeconds = 180,
+    # 'slow-job' (Thread.sleep 500ms) is the renewal-heavy Phase 4 workload;
+    # the default 'every-job' is the trivial-handler shape of the Phase 0 numbers.
+    [string]$JobKey = 'every-job',
     [string]$Container = 'postgres',
     [string]$DbUser = 'postgres'
 )
@@ -84,7 +87,7 @@ foreach ($round in 1..$Rounds) {
     $before = Get-Snapshot
 
     $seed = "INSERT INTO mohs_executions (id, job_key, state, scheduled_at, actor, priority, payload, payload_type, created_at) " +
-        "SELECT '$prefix'||lpad(n::text,7,'0'), 'every-job', 'ENQUEUED', now(), 'anonymous', 20, '{}', " +
+        "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', 'ENQUEUED', now(), 'anonymous', 20, '{}', " +
         "'java.util.Collections`$UnmodifiableMap', now() FROM generate_series(1,$SeedSize) n"
     Invoke-Psql $seed | Out-Null
 

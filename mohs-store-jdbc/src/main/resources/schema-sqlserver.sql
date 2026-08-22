@@ -130,11 +130,25 @@ CREATE TABLE mohs_rate_limits (
     refilled_at     DATETIME2 NOT NULL
 );
 
--- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma
--- lógica de claim/reclaim consulta esta tabela.
+-- Heartbeat de node (ADR-0012). Desde a ADR-0051 deixou de ser só
+-- informativa: o reaper consulta expires_at/last_heartbeat_at para decidir
+-- quem está morto (anti-join de JdbcReaper).
 IF OBJECT_ID('mohs_nodes', 'U') IS NULL
 CREATE TABLE mohs_nodes (
     node_id           NVARCHAR(255) PRIMARY KEY,
     state             NVARCHAR(20) NOT NULL,
-    last_heartbeat_at DATETIME2    NOT NULL
+    last_heartbeat_at DATETIME2    NOT NULL,
+    epoch             BIGINT       NOT NULL DEFAULT 0, -- encarnação do nó (ADR-0051)
+    expires_at        DATETIME2                        -- lease do NÓ (ADR-0051)
 );
+IF COL_LENGTH('mohs_nodes', 'epoch') IS NULL
+ALTER TABLE mohs_nodes ADD epoch BIGINT NOT NULL DEFAULT 0;
+IF COL_LENGTH('mohs_nodes', 'expires_at') IS NULL
+ALTER TABLE mohs_nodes ADD expires_at DATETIME2;
+-- Reaper dirigido por nó (ADR-0051). lease_expires_at IS NOT NULL no
+-- filtro (DBTUNE-22) — ver schema-postgresql.sql: torna o índice
+-- inelegível pro CAS de conclusão cercado (que fica no seek do PK
+-- clustered por construção); o reaper carrega o conjunct trivialmente
+-- verdadeiro na query e segue elegível.
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_owner' AND object_id = OBJECT_ID('mohs_executions'))
+CREATE INDEX idx_mohs_executions_owner ON mohs_executions (node_id) WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL;

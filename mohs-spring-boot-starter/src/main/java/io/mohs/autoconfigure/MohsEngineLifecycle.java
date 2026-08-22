@@ -54,12 +54,12 @@ final class MohsEngineLifecycle implements SmartLifecycle {
      * Avisos de boot sobre lacunas entre o que a definição declara e o que
      * o motor entrega — o operador precisa saber o preço no boot, não no
      * postmortem. Duas checagens, uma passada só pelo store:
-     * (1) com a renovação de lease por tick (ADR-0012), handler lento
-     * saudável não é mais reclamado — o risco restante é o Watchdog Bound
+     * (1) com a liveness por nó (ADR-0051), handler lento saudável não é
+     * mais reclamado — o risco restante é o Watchdog Bound
      * ({@code mohs.engine.watchdog-timeout}) menor que o {@code timeout}
-     * declarado do job: o node pararia de renovar antes do prazo que o
-     * próprio job se deu, e o reaper reclamaria uma execução ainda
-     * saudável; (2) {@code retryPolicy} (bean customizado) ainda não é
+     * declarado do job: o node liberaria a posse antes do prazo que o
+     * próprio job se deu, falhando uma execução ainda saudável;
+     * (2) {@code retryPolicy} (bean customizado) ainda não é
      * honrada (ADR-0033) — só {@code retries} vale, com o backoff default.
      * Diagnóstico nunca derruba o boot: falha na leitura vira WARN com a
      * causa completa, o engine sobe igual.
@@ -78,8 +78,8 @@ final class MohsEngineLifecycle implements SmartLifecycle {
     private void warnIfTimeoutOutlivesWatchdogBound(JobDefinition definition) {
         if (watchdogTimeout != null && definition.timeout() != null && definition.timeout().compareTo(watchdogTimeout) >= 0) {
             log.warn(
-                    "job '{}' declares timeout {} >= mohs.engine.watchdog-timeout {} — the watchdog stops renewing the lease "
-                            + "before the job's own deadline, and the reaper will reclaim a still-healthy run (retry budget applies); "
+                    "job '{}' declares timeout {} >= mohs.engine.watchdog-timeout {} — the watchdog releases ownership "
+                            + "before the job's own deadline, failing a still-healthy run (retry budget applies); "
                             + "raise mohs.engine.watchdog-timeout above the slowest declared job timeout",
                     definition.key().value(), definition.timeout(), watchdogTimeout);
         }

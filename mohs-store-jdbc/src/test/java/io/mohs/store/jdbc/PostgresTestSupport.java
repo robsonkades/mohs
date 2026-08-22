@@ -50,4 +50,21 @@ final class PostgresTestSupport {
                 "TRUNCATE TABLE mohs_attempts, mohs_executions, mohs_job_definitions, mohs_batches, mohs_rate_limits, mohs_nodes CASCADE");
         return dataSource;
     }
+
+    /**
+     * Um database NOVO e vazio no mesmo container — pro guardião estrutural
+     * (schema-file × cadeia Flyway), que precisa de dois schemas construídos
+     * do zero por caminhos diferentes, coisa que o database compartilhado
+     * (schema já aplicado no static) não oferece.
+     */
+    static DataSource freshEmptyDatabase(String name) {
+        new JdbcTemplate(dataSource()).execute("DROP DATABASE IF EXISTS " + name + "; CREATE DATABASE " + name);
+        PGSimpleDataSource dataSource = new PGSimpleDataSource();
+        dataSource.setServerNames(new String[] { CONTAINER.getHost() });
+        dataSource.setPortNumbers(new int[] { CONTAINER.getMappedPort(5432) });
+        dataSource.setDatabaseName(name);
+        dataSource.setUser(CONTAINER.getUsername());
+        dataSource.setPassword(CONTAINER.getPassword());
+        return dataSource;
+    }
 }
