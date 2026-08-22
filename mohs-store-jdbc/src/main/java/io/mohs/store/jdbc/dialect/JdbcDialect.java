@@ -1,9 +1,14 @@
 package io.mohs.store.jdbc.dialect;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
+import org.jspecify.annotations.Nullable;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
@@ -155,5 +160,104 @@ public interface JdbcDialect {
      */
     default String lockFreeCountHint() {
         return "";
+    }
+
+    // ─── Phase 5 (ADR-A): as costuras das tabelas do split ──────────────────
+
+    /**
+     * Travessia temporal das tabelas do split (PLAN.md, decisão 6): elas
+     * nasceram {@code TIMESTAMPTZ} no Postgres (§7.2 — o que a ADR-0049
+     * adiou) e permanecem sem fuso nos equivalentes funcionais. Default =
+     * a travessia {@code LocalDateTime} UTC de sempre; Postgres sobrescreve
+     * com {@code OffsetDateTime} — {@code LocalDateTime} numa coluna
+     * tz-aware seria interpretado pelo fuso da SESSÃO, a classe de bug que
+     * a ADR-0049 matou. As tabelas da era da tabela única continuam usando
+     * {@link JdbcTimestamps} direto até o S5.4 as levar.
+     */
+    default Object splitTimestamp(Instant instant) {
+        return JdbcTimestamps.toUtcLocalDateTime(instant);
+    }
+
+    default @Nullable Instant readSplitTimestamp(ResultSet rs, String column) throws SQLException {
+        LocalDateTime value = rs.getObject(column, LocalDateTime.class);
+        return value == null ? null : JdbcTimestamps.fromUtcLocalDateTime(value);
+    }
+
+    /**
+     * Template portátil da varredura de candidatos do claim da Phase 5
+     * (§5.4): single-shard por statement (lição do E2 — multi-shard no
+     * predicado mata a ordenação do índice), ordenado por
+     * {@code (priority, visible_at)} que o índice {@code idx_mohs_ready_claim}
+     * fornece sem Sort. Compartilhado por H2/MySQL; SQL Server sobrescreve
+     * {@link #selectReadyCandidates} ({@code TOP} + lock por hint);
+     * Postgres sobrescreve {@link #claimReady} inteiro (statement único).
+     * Duas constantes em vez de concatenação: {@code NOT IN} de lista
+     * vazia não expande.
+     */
+    String ANSI_READY_CANDIDATES = """
+            SELECT execution_id, job_key, attempt
+            FROM mohs_ready
+            WHERE shard = :shard AND visible_at <= :now
+            ORDER BY priority, visible_at
+            LIMIT :limit
+            FOR UPDATE SKIP LOCKED
+            """;
+
+    String ANSI_READY_CANDIDATES_FILTERED = """
+            SELECT execution_id, job_key, attempt
+            FROM mohs_ready
+            WHERE shard = :shard AND visible_at <= :now AND job_key NOT IN (:inadmissible)
+            ORDER BY priority, visible_at
+            LIMIT :limit
+            FOR UPDATE SKIP LOCKED
+            """;
+
+    String READY_DELETE = "DELETE FROM mohs_ready WHERE execution_id IN (:ids)";
+
+    String LEASE_INSERT = """
+            INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, claimed_at)
+            VALUES (:executionId, :jobKey, :nodeId, :epoch, :attempt, :now)
+            """;
+
+    default List<ClaimedReady> selectReadyCandidates(NamedParameterJdbcTemplate jdbcTemplate, int shard, int limit,
+            Collection<String> inadmissibleJobKeys, Instant now) {
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("shard", shard)
+                .addValue("now", splitTimestamp(now))
+                .addValue("limit", limit);
+        if (inadmissibleJobKeys.isEmpty()) {
+            return jdbcTemplate.query(ANSI_READY_CANDIDATES, params, ClaimedReady::fromReadyRow);
+        }
+        return jdbcTemplate.query(ANSI_READY_CANDIDATES_FILTERED,
+                params.addValue("inadmissible", inadmissibleJobKeys), ClaimedReady::fromReadyRow);
+    }
+
+    /**
+     * O claim da Phase 5 (§5.4/§6.2): remove da fila e insere a posse — o
+     * CHAMADOR ({@code JdbcWorkQueue}) garante a transação que torna os
+     * dois efeitos atômicos (não existe instante "nem na fila nem
+     * possuído"). Default portátil em três statements (SELECT com lock →
+     * DELETE → INSERT em lote); Postgres sobrescreve com o statement único
+     * {@code WITH picked … DELETE … RETURNING → INSERT}.
+     */
+    default List<ClaimedReady> claimReady(NamedParameterJdbcTemplate jdbcTemplate, int shard, String nodeId, long epoch,
+            int limit, Collection<String> inadmissibleJobKeys, Instant now) {
+        List<ClaimedReady> picked = selectReadyCandidates(jdbcTemplate, shard, limit, inadmissibleJobKeys, now);
+        if (picked.isEmpty()) {
+            return picked;
+        }
+        jdbcTemplate.update(READY_DELETE, new MapSqlParameterSource()
+                .addValue("ids", picked.stream().map(ClaimedReady::executionId).toList()));
+        MapSqlParameterSource[] leases = picked.stream()
+                .map(row -> new MapSqlParameterSource()
+                        .addValue("executionId", row.executionId())
+                        .addValue("jobKey", row.jobKey())
+                        .addValue("nodeId", nodeId)
+                        .addValue("epoch", epoch)
+                        .addValue("attempt", row.attempt())
+                        .addValue("now", splitTimestamp(now)))
+                .toArray(MapSqlParameterSource[]::new);
+        jdbcTemplate.batchUpdate(LEASE_INSERT, leases);
+        return picked;
     }
 }

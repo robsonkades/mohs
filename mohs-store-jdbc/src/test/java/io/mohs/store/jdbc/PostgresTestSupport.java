@@ -47,7 +47,7 @@ final class PostgresTestSupport {
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();
         new JdbcTemplate(dataSource).execute(
-                "TRUNCATE TABLE mohs_attempts, mohs_executions, mohs_job_definitions, mohs_batches, mohs_rate_limits, mohs_nodes CASCADE");
+                "TRUNCATE TABLE mohs_attempts, mohs_executions, mohs_job_definitions, mohs_batches, mohs_rate_limits, mohs_nodes, mohs_ready, mohs_lease, mohs_execution, mohs_attempt, mohs_idempotency CASCADE");
         return dataSource;
     }
 

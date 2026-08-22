@@ -2,6 +2,7 @@ package io.mohs.store.jdbc;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
 /**
@@ -40,5 +41,24 @@ public final class JdbcTimestamps {
 
     public static Instant fromUtcLocalDateTime(LocalDateTime dateTime) {
         return dateTime.toInstant(ZoneOffset.UTC);
+    }
+
+    /**
+     * Travessia das tabelas TZ-AWARE da Phase 5 ({@code TIMESTAMPTZ} do
+     * Postgres — §7.2 do redesign, o que a ADR-0049 adiou pra cá):
+     * {@link OffsetDateTime} em UTC via JDBC 4.2. {@link LocalDateTime}
+     * seria interpretado pelo fuso da SESSÃO numa coluna tz-aware —
+     * exatamente a classe de bug que a ADR-0049 matou; o offset explícito
+     * atravessa verbatim independente de {@code TimeZone} de sessão. Os
+     * dialetos sem coluna tz-aware (H2/MySQL/SQL Server, equivalentes
+     * funcionais do split) continuam na travessia LocalDateTime — a
+     * escolha é do {@code JdbcDialect}.
+     */
+    public static OffsetDateTime toUtcOffsetDateTime(Instant instant) {
+        return instant.atOffset(ZoneOffset.UTC);
+    }
+
+    public static Instant fromUtcOffsetDateTime(OffsetDateTime dateTime) {
+        return dateTime.toInstant();
     }
 }

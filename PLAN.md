@@ -54,8 +54,22 @@ Phases 0–4 commitadas (1756933), E1/E2 decididos (BASELINE).
       `mohs_execution`/`mohs_attempt` (particionadas por RANGE no PG com
       bootstrap de partições; tabelas planas nos demais). Storage options
       (fillfactor 70, autovacuum agressivo) só no PG. Nenhum código muda.
-- [ ] **S5.2 — As quatro portas + stores novos, sem chamador.** `WorkQueue`,
-      `LeaseStore`, `HistoryStore`, `ControlStore` em `io.mohs.engine`;
+- [x] **S5.2 — As portas + stores novos, sem chamador.** *(2026-08-22.
+      Pipeline: refactorer ✅; db-tuner ✅ zero mudanças, planos reais
+      confirmando claim CTE 1,1ms/50k sem Sort, fence grátis no PK, prune
+      por igualdade nos dois modos de plano — 2 gatilhos registrados:
+      `findPayloads` >12 partições populadas; requeue em lote quando o
+      reaper der in-flight ≥500 — e 1 nota: cabeça da fila dominada por
+      job inadmissível custa 53ms/5k buffers no pior caso, mitigação é
+      admissão/backoff, não índice; reviewer ⚠️→fixes aplicados: contrato
+      do retry no complete, enqueue-fora-de-transação declarado não
+      suportado, REQUIRES_NEW no claim/complete, ordem do claim garantida
+      TAMBÉM no statement único do PG, probe da DEFAULT sob o contrato
+      WARN-never-throw, outcome tipado, guardas dos replace _FILTERED,
+      testes de SKIP LOCKED/READPAST concorrente determinísticos.)* `WorkQueue`,
+      `LeaseStore`, `HistoryStore` em `io.mohs.engine` (a quarta porta,
+      `ControlStore`, fica pro S5.3/S5.4: consolidar `NodeStore` +
+      `TriggerFirer` é cosmético até o firer mirar `mohs_ready`);
       implementações em `io.mohs.store.jdbc` (claim §5.4 single-statement no
       PG; forma portátil SELECT FOR UPDATE SKIP LOCKED + DELETE nos demais),
       enqueue §7.5-1, completion em lote §7.6 (lease delete fenced RETURNING

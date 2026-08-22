@@ -50,6 +50,11 @@ final class MySqlTestSupport {
         jdbcTemplate.execute("DELETE FROM mohs_batches");
         jdbcTemplate.execute("DELETE FROM mohs_rate_limits");
         jdbcTemplate.execute("DELETE FROM mohs_nodes");
+        jdbcTemplate.execute("DELETE FROM mohs_ready");
+        jdbcTemplate.execute("DELETE FROM mohs_lease");
+        jdbcTemplate.execute("DELETE FROM mohs_attempt");
+        jdbcTemplate.execute("DELETE FROM mohs_execution");
+        jdbcTemplate.execute("DELETE FROM mohs_idempotency");
         return dataSource;
     }
 }
