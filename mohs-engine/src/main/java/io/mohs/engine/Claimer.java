@@ -10,7 +10,7 @@ import io.mohs.core.execution.Execution;
  * definida). Não é Repository de uma entidade só: cruza
  * {@code mohs_executions} e {@code mohs_job_definitions} numa única
  * transação, então não entra em nenhum {@code *Store} — porta própria,
- * mesmo padrão porta/adaptador dos stores ({@code io.mohs.jdbc} implementa).
+ * mesmo padrão porta/adaptador dos stores ({@code io.mohs.store.jdbc} implementa).
  *
  * <p>Claim e a transição para {@code RUNNING} são um único statement
  * atômico (ADR-0016); mutex por job é decidido dentro da mesma transação

@@ -19,7 +19,7 @@
         <!-- Só a API pública: nada daqui enxerga engine ou jdbc (regra de ArchUnit). -->
         <dependency>
             <groupId>io.mohs</groupId>
-            <artifactId>mohs-core</artifactId>
+            <artifactId>mohs-api</artifactId>
         </dependency>
         <!-- Optional, padrão actuator (ADR-0001 §2): os controllers viajam sempre no jar, mas
              quem não quer a API operacional não herda o stack web. MohsRestAutoConfiguration

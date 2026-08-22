@@ -18,7 +18,7 @@ import io.mohs.core.job.JobKey;
 
 /**
  * Persistência de {@link Execution} — Repository (PoEAA), porta que
- * {@code io.mohs.jdbc} implementa (Data Mapper). {@link #insert} é o
+ * {@code io.mohs.store.jdbc} implementa (Data Mapper). {@link #insert} é o
  * "insert do terminal" da cláusula 4 da ADR-0003 (transacional por
  * participação): entra na transação já ativa do chamador quando existe
  * uma (mesmo {@code DataSource}), ou auto-commit sem ela — nenhuma

@@ -13,9 +13,9 @@
 
     <modules>
         <module>mohs-cron</module>
-        <module>mohs-core</module>
+        <module>mohs-api</module>
         <module>mohs-engine</module>
-        <module>mohs-jdbc</module>
+        <module>mohs-store-jdbc</module>
         <module>mohs-rest</module>
         <module>mohs-ui</module>
         <module>mohs-test</module>
@@ -58,7 +58,7 @@
             </dependency>
             <dependency>
                 <groupId>io.mohs</groupId>
-                <artifactId>mohs-core</artifactId>
+                <artifactId>mohs-api</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
@@ -68,7 +68,7 @@
             </dependency>
             <dependency>
                 <groupId>io.mohs</groupId>
-                <artifactId>mohs-jdbc</artifactId>
+                <artifactId>mohs-store-jdbc</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

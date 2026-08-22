@@ -2515,6 +2515,19 @@ phase depends on a later phase to be correct.
 - **Validation.** Full suite green on all Tier-1/2 dialects; a migration applied to an
   existing database in a test.
 - **Rollback.** Revert; no data change beyond column types.
+- **Result (2026-08-22, ADRs 0048/0049/0050):** delivered, with one deliberate
+  deviation. Library-owned Flyway with `mohs_schema_history` (idempotent V1
+  adoption baseline per dialect, `baselineVersion=0`, opt-out
+  `mohs.jdbc.migrate`); the DST defect killed **at the traversal, not the column
+  type** — `LocalDateTime` via JDBC 4.2 everywhere (ADR-0049 records why the
+  letter "migrate all four schemas to timestamptz" was impossible as written:
+  MySQL's `TIMESTAMP` ends in 2038; the §7.2 tables are born TIMESTAMPTZ in
+  Phase 5 instead), gap regression pinned by `JdbcTimestampsTest`; dialect
+  tiering declared (ADR-0050, H2 = Tier 3 with a boot WARN); renames done
+  (`mohs-core`→`mohs-api` keeping the frozen `io.mohs.core` public package,
+  `mohs-jdbc`→`mohs-store-jdbc` with `io.mohs.jdbc`→`io.mohs.store.jdbc`); the
+  two §18.2 ArchUnit rules that don't depend on the split added (engine free of
+  JDBC; only the starter speaks autoconfigure).
 
 ### Phase 3 — Group commit + `markFired` removal *(1 sprint)* ⭐ ship first
 

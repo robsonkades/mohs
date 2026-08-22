@@ -42,8 +42,9 @@ public record MohsProperties(
 
     /**
      * @param dialect ADR-0023: escolha explícita, nunca auto-detecção via {@code DataSource}. Sem default — obrigatório.
+     * @param migrate ADR-0048: o Mohs roda as próprias migrações Flyway no boot ({@code mohs_schema_history}); {@code false} para quem gerencia o schema por fora (DBA) — as migrações continuam no jar como fonte
      */
-    public record Jdbc(@Nullable Dialect dialect) {
+    public record Jdbc(@Nullable Dialect dialect, @DefaultValue("true") boolean migrate) {
 
         public enum Dialect {
             H2, POSTGRESQL, MYSQL, SQLSERVER
@@ -92,8 +93,8 @@ public record MohsProperties(
     }
 
     /**
-     * @param mode ADR-0008: {@code application} usa o relógio do sistema; {@code database} usa {@link io.mohs.jdbc.DatabaseClock} (banco é a autoridade de tempo do cluster)
-     * @param skewWarnThreshold só lido quando {@code mode} é {@code database} — limiar de WARN de {@link io.mohs.jdbc.DatabaseClock#sync()}
+     * @param mode ADR-0008: {@code application} usa o relógio do sistema; {@code database} usa {@link io.mohs.store.jdbc.DatabaseClock} (banco é a autoridade de tempo do cluster)
+     * @param skewWarnThreshold só lido quando {@code mode} é {@code database} — limiar de WARN de {@link io.mohs.store.jdbc.DatabaseClock#sync()}
      * @param syncInterval só lido quando {@code mode} é {@code database} — a cada quanto tempo reamostrar (ver Javadoc de {@link io.mohs.engine.SyncableClock}, que já nomeia esta propriedade)
      */
     public record Time(

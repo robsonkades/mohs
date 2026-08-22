@@ -9,7 +9,7 @@ import io.mohs.core.resource.RateLimit;
 
 /**
  * Persistência de {@link RateLimit} — Repository (PoEAA), porta que
- * {@code io.mohs.jdbc} implementa. Guarda também o estado operacional do
+ * {@code io.mohs.store.jdbc} implementa. Guarda também o estado operacional do
  * enforcement: o balde de tokens da ADR-0042 (saldo + instante até o qual
  * o tempo já virou token), lido por {@link #available} e cobrado por
  * {@link #charge} nas duas fases do claim.

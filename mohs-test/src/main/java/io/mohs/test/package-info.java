@@ -6,7 +6,7 @@
  * documento mestre). {@link io.mohs.test.InMemoryJobStore} é a
  * implementação "storage em memória" de {@link io.mohs.engine.JobStore}
  * — mesma precisão definicional×operacional (ADR-0006) que
- * {@code JdbcJobStore} (io.mohs.jdbc), sem depender de banco.
+ * {@code JdbcJobStore} (io.mohs.store.jdbc), sem depender de banco.
  */
 @NullMarked
 package io.mohs.test;

@@ -30,14 +30,14 @@
              *Harness), como já era em mohs-jdbc. -->
         <dependency>
             <groupId>io.mohs</groupId>
-            <artifactId>mohs-jdbc</artifactId>
+            <artifactId>mohs-store-jdbc</artifactId>
             <scope>test</scope>
         </dependency>
         <!-- Os *TestSupport (containers por dialeto) de mohs-jdbc — type=test-jar não é
              coberto pelo dependencyManagement do jar, daí a versão explícita. -->
         <dependency>
             <groupId>io.mohs</groupId>
-            <artifactId>mohs-jdbc</artifactId>
+            <artifactId>mohs-store-jdbc</artifactId>
             <version>${project.version}</version>
             <type>test-jar</type>
             <scope>test</scope>

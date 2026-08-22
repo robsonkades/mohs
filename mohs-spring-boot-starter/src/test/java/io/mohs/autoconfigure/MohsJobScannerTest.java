@@ -135,7 +135,7 @@ class MohsJobScannerTest {
         // construção direta do record, com os mesmos defaults do binding — o scanner só lê registration()
         MohsProperties properties = new MohsProperties(
                 true,
-                new MohsProperties.Jdbc(null),
+                new MohsProperties.Jdbc(null, true),
                 new MohsProperties.Engine(Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), null, Duration.ofSeconds(60), 64, 16, false),
                 new MohsProperties.Lifecycle(MohsProperties.Lifecycle.StartMode.AUTO,
                         new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30))),

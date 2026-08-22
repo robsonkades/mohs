@@ -12,7 +12,7 @@ import io.mohs.core.schedule.Schedule;
 
 /**
  * Persistência de {@link JobDefinition} — Repository (PoEAA), porta que
- * {@code io.mohs.jdbc} implementa (Data Mapper). {@link #upsert} segue a
+ * {@code io.mohs.store.jdbc} implementa (Data Mapper). {@link #upsert} segue a
  * precisão da ADR-0006: grava estado definicional; {@code orphaned}/
  * {@code paused} (operacionais) têm duas exceções deliberadas — o upsert
  * limpa {@code orphaned} (a própria fonte reaparecer é prova de vida,

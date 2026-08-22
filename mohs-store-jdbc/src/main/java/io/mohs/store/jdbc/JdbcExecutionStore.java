@@ -1,0 +1,820 @@
+package io.mohs.store.jdbc;
+
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Types;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import javax.sql.DataSource;
+
+import org.jspecify.annotations.Nullable;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import tools.jackson.databind.ObjectMapper;
+
+import io.mohs.core.execution.Attempt;
+import io.mohs.core.execution.Execution;
+import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.execution.Priority;
+import io.mohs.core.job.JobKey;
+import io.mohs.engine.BatchCounters;
+import io.mohs.engine.BatchStore;
+import io.mohs.engine.ExecutionStore;
+import io.mohs.engine.JobStore;
+import io.mohs.store.jdbc.dialect.JdbcDialect;
+
+/**
+ * {@link ExecutionStore} sobre {@code mohs_executions}/{@code mohs_attempts}
+ * (Data Mapper, PoEAA). Payload serializado via {@link ObjectMapper}
+ * (Jackson, dependência obrigatória do módulo) — nunca campo de
+ * {@link Execution}, só grava/carrega na borda JDBC.
+ *
+ * <p>{@link #insert} é o "insert do terminal" da cláusula 4 da ADR-0003:
+ * usa o mesmo {@code DataSource} do chamador via
+ * {@link NamedParameterJdbcTemplate}, que participa da transação Spring
+ * já ativa quando existe uma — nenhuma transação própria é aberta por ele.
+ *
+ * <p>{@link #complete}/{@link #completeAll} são a exceção: a transição de
+ * estado, o {@code INSERT} do {@link Attempt} e a devolução da vaga de
+ * concorrência ({@code JobStore.decrementRunningExecutions}) são um
+ * invariante que cruza duas tabelas — Unit of Work (PoEAA), atomicidade
+ * de transação (DDIA cap. 7). Sem fronteira de atomicidade, um crash
+ * entre o CAS e o decremento deixaria {@code running_execution_count}
+ * incrementado pra sempre (a execução já não está {@code RUNNING}, o
+ * reaper nunca a vê) — pra um job com {@code allowConcurrentExecutions =
+ * false}, o mutex vaza e o job para de rodar permanentemente.
+ * {@code PROPAGATION_REQUIRED}: participa da transação do reaper quando
+ * ela existir (sincronização por {@code DataSource}, mesmo mecanismo
+ * documentado em {@link JdbcClaimer}), abre a própria no caminho quente
+ * do dispatch, que roda sem transação ativa.
+ */
+public final class JdbcExecutionStore implements ExecutionStore {
+
+    /** Bem abaixo do teto de 2100 parâmetros do SQL Server pro `IN (:ids)` de {@link #findByIds} (DB-11). Package-private pro teste de fronteira. */
+    static final int MAX_IDS_PER_QUERY = 1000;
+
+    private static final String EXECUTION_COLUMNS = "id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key, batch_id";
+
+    private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+    private final Clock clock;
+    private final BatchStore batchStore;
+    private final ObjectMapper objectMapper;
+    private final JdbcDialect dialect;
+
+    /**
+     * O {@link BatchStore} nasce aqui, da MESMA {@code DataSource}, em vez de
+     * ser injetado: o incremento do lote tem que cair na mesma transação do
+     * CAS de estado (ADR-0043) — é isso que o faz exatamente-uma-vez sem
+     * tabela de idempotência —, e a transação só é compartilhada porque
+     * ambos falam com a mesma {@code DataSource}. Um {@code BatchStore}
+     * vindo de fora poderia apontar para outra, quebrando a garantia em
+     * silêncio.
+     */
+    public JdbcExecutionStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper, JdbcDialect dialect) {
+        this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
+        this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        // mesmo raciocínio da DBTUNE-4 em JdbcClaimer: CAS guardado assume
+        // "última escrita vence" (READ COMMITTED), não herda o default do banco.
+        this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.batchStore = new JdbcBatchStore(dataSource, clock);
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.dialect = Objects.requireNonNull(dialect, "dialect");
+    }
+
+    @Override
+    public Execution insert(Execution execution, Object payload) {
+        Objects.requireNonNull(execution, "execution");
+        Objects.requireNonNull(payload, "payload");
+        if (!execution.attempts().isEmpty()) {
+            throw new IllegalArgumentException("execution.attempts() must be empty on insert — nothing has run yet");
+        }
+
+        String payloadJson = objectMapper.writeValueAsString(payload);
+
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("id", execution.id().value())
+                .addValue("jobKey", execution.jobKey().value())
+                .addValue("state", execution.state().name())
+                .addValue("scheduledAt", JdbcTimestamps.toUtcLocalDateTime(execution.scheduledAt()))
+                .addValue("firedAt", execution.firedAt() == null ? null : JdbcTimestamps.toUtcLocalDateTime(execution.firedAt()))
+                .addValue("actor", execution.actor())
+                .addValue("priority", execution.priority().value())
+                .addValue("idempotencyKey", execution.idempotencyKey())
+                .addValue("batchId", execution.batchId())
+                .addValue("payload", payloadJson)
+                .addValue("payloadType", payload.getClass().getName())
+                .addValue("createdAt", JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
+
+        jdbcTemplate.update("""
+                INSERT INTO mohs_executions (
+                    id, job_key, state, scheduled_at, fired_at, actor, priority, idempotency_key, batch_id, payload, payload_type, created_at)
+                VALUES (:id, :jobKey, :state, :scheduledAt, :firedAt, :actor, :priority, :idempotencyKey, :batchId, :payload, :payloadType, :createdAt)
+                """, params);
+
+        return execution;
+    }
+
+    @Override
+    public Optional<Object> findPayload(ExecutionId id) {
+        Objects.requireNonNull(id, "id");
+        return JdbcSupport.findOne(jdbcTemplate,
+                "SELECT payload, payload_type FROM mohs_executions WHERE id = :id",
+                new MapSqlParameterSource("id", id.value()),
+                this::mapPayloadRow);
+    }
+
+    private Object mapPayloadRow(ResultSet rs) throws SQLException {
+        String payloadJson = rs.getString("payload");
+        String payloadType = rs.getString("payload_type");
+        Class<?> type;
+        try {
+            type = Class.forName(payloadType);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalStateException("payload type '" + payloadType + "' not found on classpath", e);
+        }
+        return objectMapper.readValue(payloadJson, type);
+    }
+
+    /**
+     * ADR-0047 — o veredito é POR LINHA de propósito: uma linha que não
+     * desserializa (classe sumida, JSON corrompido) entra em
+     * {@code unreadable} sem contaminar as vizinhas; só a falha da
+     * própria consulta (infra) propaga, porque aí não há veredito nenhum
+     * a dar.
+     */
+    @Override
+    public ExecutionStore.PayloadBatch findPayloads(List<ExecutionId> ids) {
+        Objects.requireNonNull(ids, "ids");
+        if (ids.isEmpty()) {
+            return ExecutionStore.PayloadBatch.EMPTY;
+        }
+        Map<ExecutionId, Object> payloads = new LinkedHashMap<>();
+        Map<ExecutionId, RuntimeException> unreadable = new LinkedHashMap<>();
+        for (List<String> chunk : chunksOf(ids.stream().map(ExecutionId::value).toList())) {
+            jdbcTemplate.query("SELECT id, payload, payload_type FROM mohs_executions WHERE id IN (:ids)",
+                    new MapSqlParameterSource("ids", chunk), rs -> {
+                        ExecutionId id = ExecutionId.of(rs.getString("id"));
+                        try {
+                            payloads.put(id, mapPayloadRow(rs));
+                        } catch (RuntimeException e) {
+                            unreadable.put(id, e);
+                        }
+                    });
+        }
+        return new ExecutionStore.PayloadBatch(payloads, unreadable);
+    }
+
+    /**
+     * CAS primeiro (ADR-0024): só grava o {@link Attempt} e libera a vaga de
+     * concorrência (ADR-0025) se a transição de estado realmente ocorreu —
+     * uma conclusão concorrente (ex.: dispatch normal terminou entre o
+     * reaper selecionar o candidato e chamar isto) não deixa Attempt órfão
+     * de uma execução que já tinha terminado de outro jeito.
+     */
+    @Override
+    public ExecutionStore.Completion complete(ExecutionStore.CompletionRequest request, JobStore jobStore) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(jobStore, "jobStore");
+        return Objects.requireNonNullElse(
+                transactionTemplate.execute(_ -> completeWithinTransaction(request, jobStore)),
+                ExecutionStore.Completion.NOT_APPLIED);
+    }
+
+    /**
+     * O CAS de conclusão (ADR-0024/0033): {@code COALESCE} grava o
+     * {@code retryAt} como novo {@code scheduled_at} na mesma transição
+     * (invariante do record: só presente em {@code RETRY_SCHEDULED}).
+     * A variante com fence acrescenta {@code lease_expires_at} ao predicado
+     * — anti-ABA do reaper (ver Javadoc de
+     * {@link ExecutionStore.CompletionRequest#expectedLeaseExpiresAt}).
+     * Dois templates em vez de {@code (:p IS NULL OR ...)}: parâmetro em
+     * predicado de nulidade tem suporte irregular entre os 4 dialetos.
+     */
+    // batch-counted: countIntoBatch, na mesma transação deste CAS
+    private static final String COMPLETE_CAS = """
+            UPDATE mohs_executions SET state = :newState, scheduled_at = COALESCE(:retryAt, scheduled_at)
+            WHERE id = :id AND state = 'RUNNING'
+            """;
+
+    // batch-counted: countIntoBatch, na mesma transação deste CAS
+    private static final String COMPLETE_CAS_FENCED = """
+            UPDATE mohs_executions SET state = :newState, scheduled_at = COALESCE(:retryAt, scheduled_at)
+            WHERE id = :id AND state = 'RUNNING' AND lease_expires_at = :expectedLease
+            """;
+
+    private ExecutionStore.Completion completeWithinTransaction(ExecutionStore.CompletionRequest request, JobStore jobStore) {
+        String sql = request.expectedLeaseExpiresAt() == null ? COMPLETE_CAS : COMPLETE_CAS_FENCED;
+        int updated = jdbcTemplate.update(sql, completionParams(request));
+        if (updated == 0) {
+            return ExecutionStore.Completion.NOT_APPLIED;
+        }
+
+        jdbcTemplate.update("""
+                INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
+                VALUES (:executionId, :number, :startedAt, :finishedAt, :outcome, :error)
+                """, attemptParams(request.id(), request.attempt()));
+        jobStore.decrementRunningExecutions(request.jobKey());
+        rearmIfRequested(request, jobStore);
+        return ExecutionStore.Completion.applied(countIntoBatch(request));
+    }
+
+    /**
+     * O membro só conta quando ACABA: {@code RETRY_SCHEDULED} continua vivo,
+     * e contá-lo fecharia o lote antes da hora. {@code CANCELLED} entra como
+     * falha porque o lote tem duas colunas e um membro cancelado não teve
+     * êxito — a contagem responde "quantos deram certo", não "por que os
+     * outros não deram".
+     *
+     * <p>O caminho em lote ({@code completeAll}, só do reaper) chama isto para
+     * CONTAR e descarta o veredito: publicar o {@code BatchCompleted} de lá
+     * exigiria o reaper ter publicador de evento, que hoje ele não tem. Não
+     * contar era pior — o membro que morre com o nó sumia do lote, {@code
+     * pending} nunca zerava e ninguém fechava, sem erro e sem varredura de
+     * reconciliação que curasse (a ADR-0043 dispensou a varredura justamente
+     * sob a premissa de que todo caminho conta).
+     *
+     * @return o saldo do lote quando ESTA conclusão o fechou; {@code null}
+     *         quando não fechou ou quando a execução não pertence a lote
+     *         nenhum
+     */
+    private @Nullable BatchCounters countIntoBatch(ExecutionStore.CompletionRequest request) {
+        String batchId = request.batchId();
+        if (batchId == null || request.newState() == ExecutionState.RETRY_SCHEDULED) {
+            return null;
+        }
+        BatchCounters counters = request.newState() == ExecutionState.SUCCEEDED
+                ? batchStore.incrementSucceeded(batchId)
+                : batchStore.incrementFailed(batchId);
+        return counters.pending() == 0 ? counters : null;
+    }
+
+    /**
+     * ADR-0035: o rearme da corrente fixed-delay aterrissa na mesma
+     * transação do CAS que venceu — {@code jobStore} participa dela pelo
+     * mesmo mecanismo de {@code decrementRunningExecutions} (mesmo
+     * {@code DataSource}); o guard {@code IS NULL} é de
+     * {@link JobStore#armNextFire}.
+     */
+    private static void rearmIfRequested(ExecutionStore.CompletionRequest request, JobStore jobStore) {
+        if (request.rearmNextFireAt() != null) {
+            jobStore.armNextFire(request.jobKey(), request.rearmNextFireAt());
+        }
+    }
+
+    /**
+     * DBTUNE-14: {@link #complete} em lote — {@code batchUpdate} com params
+     * por linha (cada request carrega seu {@code retryAt}/fence), cujo
+     * {@code int[]} é a confirmação exata do CAS linha a linha, e um
+     * {@code INSERT} em lote só dos {@link Attempt} confirmados — e as
+     * vagas de concorrência voltam em bloco por job distinto
+     * ({@link JobStore#decrementRunningExecutions(io.mohs.core.job.JobKey, int)},
+     * ADR-0047). Desde a mesma ADR devolve o
+     * veredito {@link ExecutionStore.Completion} por request — o
+     * {@code CompletionBatcher} publica evento e elege o fechador do lote
+     * daqui, exatamente como {@link #complete} sempre fez.
+     */
+    @Override
+    public Map<ExecutionId, ExecutionStore.Completion> completeAll(List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
+        Objects.requireNonNull(requests, "requests");
+        Objects.requireNonNull(jobStore, "jobStore");
+        if (requests.isEmpty()) {
+            return Map.of();
+        }
+        // requireNonNull só documenta o invariante pro @NullMarked (JAVA-8) —
+        // o callback sempre devolve um Map.
+        return Objects.requireNonNull(transactionTemplate.execute(_ -> completeAllWithinTransaction(requests, jobStore)));
+    }
+
+    private Map<ExecutionId, ExecutionStore.Completion> completeAllWithinTransaction(
+            List<ExecutionStore.CompletionRequest> requests, JobStore jobStore) {
+        Map<ExecutionId, ExecutionStore.CompletionRequest> byId = requests.stream()
+                .collect(Collectors.toMap(ExecutionStore.CompletionRequest::id, r -> r));
+        Set<ExecutionId> completedIds = transitionAll(requests);
+        Map<ExecutionId, ExecutionStore.Completion> verdicts = LinkedHashMap.newLinkedHashMap(requests.size());
+        for (ExecutionStore.CompletionRequest request : requests) {
+            verdicts.put(request.id(), ExecutionStore.Completion.NOT_APPLIED);
+        }
+        if (completedIds.isEmpty()) {
+            return verdicts;
+        }
+
+        MapSqlParameterSource[] attemptParams = completedIds.stream()
+                .map(id -> attemptParams(id, byId.get(id).attempt()))
+                .toArray(MapSqlParameterSource[]::new);
+        jdbcTemplate.batchUpdate("""
+                INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
+                VALUES (:executionId, :number, :startedAt, :finishedAt, :outcome, :error)
+                """, attemptParams);
+
+        // ADR-0047: as vagas voltam em bloco por job distinto, não uma por
+        // execução — o decremento serial era ~1 round trip por execução na
+        // thread do flusher, o gargalo assim que o commit deixou de ser
+        Map<JobKey, Integer> slotsPerJob = new LinkedHashMap<>();
+        for (ExecutionId id : completedIds) {
+            ExecutionStore.CompletionRequest request = byId.get(id);
+            slotsPerJob.merge(request.jobKey(), 1, Integer::sum);
+            rearmIfRequested(request, jobStore);
+            verdicts.put(id, ExecutionStore.Completion.applied(countIntoBatch(request)));
+        }
+        slotsPerJob.forEach(jobStore::decrementRunningExecutions);
+        return verdicts;
+    }
+
+    /**
+     * ADR-0012 — renovação em lote por node, {@code batchUpdate} por linha
+     * com o {@code int[]} como confirmação exata (mesmo padrão de
+     * {@link #completeAll}); {@code SUCCESS_NO_INFO} recai na confirmação
+     * por {@code SELECT} da lease recém-gravada.
+     */
+    @Override
+    public Set<ExecutionId> renewLeases(String nodeId, List<ExecutionId> ids, Instant leaseExpiresAt) {
+        Objects.requireNonNull(nodeId, "nodeId");
+        Objects.requireNonNull(ids, "ids");
+        Objects.requireNonNull(leaseExpiresAt, "leaseExpiresAt");
+        if (ids.isEmpty()) {
+            return Set.of();
+        }
+        LocalDateTime newLease = JdbcTimestamps.toUtcLocalDateTime(leaseExpiresAt);
+        MapSqlParameterSource[] params = ids.stream()
+                .map(id -> new MapSqlParameterSource()
+                        .addValue("id", id.value())
+                        .addValue("nodeId", nodeId)
+                        .addValue("leaseExpiresAt", newLease))
+                .toArray(MapSqlParameterSource[]::new);
+        int[] updated = jdbcTemplate.batchUpdate("""
+                UPDATE mohs_executions SET lease_expires_at = :leaseExpiresAt
+                WHERE id = :id AND state = 'RUNNING' AND node_id = :nodeId
+                """, params);
+
+        Set<ExecutionId> renewed = new LinkedHashSet<>();
+        for (int i = 0; i < updated.length; i++) {
+            if (updated[i] == Statement.SUCCESS_NO_INFO) {
+                return confirmRenewalsBySelect(nodeId, ids);
+            }
+            if (updated[i] > 0) {
+                renewed.add(ids.get(i));
+            }
+        }
+        return renewed;
+    }
+
+    /**
+     * Fallback raro do {@code SUCCESS_NO_INFO} — confirma por POSSE
+     * ({@code state + node_id}), nunca por igualdade de timestamp: precisão
+     * temporal não faz round-trip garantido entre JVM e os 4 dialetos
+     * (nanos do {@code Instant} vs micros da coluna), e uma igualdade
+     * quebrada aqui dropava o node inteiro da renovação como falso "lost
+     * lease". A posse implica o UPDATE aplicado: re-claim pelo próprio node
+     * dentro da mesma chamada é impossível (o claim roda depois, na mesma
+     * thread do tick) e re-claim por outro node troca o {@code node_id}.
+     */
+    private Set<ExecutionId> confirmRenewalsBySelect(String nodeId, List<ExecutionId> ids) {
+        Set<ExecutionId> renewed = new LinkedHashSet<>();
+        for (List<String> chunk : chunksOf(ids.stream().map(ExecutionId::value).toList())) {
+            renewed.addAll(jdbcTemplate.query("""
+                    SELECT id FROM mohs_executions
+                    WHERE id IN (:ids) AND state = 'RUNNING' AND node_id = :nodeId
+                    """,
+                    new MapSqlParameterSource().addValue("ids", chunk).addValue("nodeId", nodeId),
+                    (rs, _) -> ExecutionId.of(rs.getString("id"))));
+        }
+        return renewed;
+    }
+
+    /** ADR-0034 — mesmo CAS de {@code JdbcJobStore.remove}, por id: só os dois estados claimáveis; claim concorrente vence e o chamador cai no caminho da flag. */
+    @Override
+    public boolean cancelIfPending(ExecutionId id) {
+        Objects.requireNonNull(id, "id");
+        MapSqlParameterSource params = new MapSqlParameterSource("id", id.value());
+        return Boolean.TRUE.equals(transactionTemplate.execute(_ -> {
+            // batch-counted: countCancelledIntoBatch, logo abaixo, nesta transação
+            if (jdbcTemplate.update("""
+                    UPDATE mohs_executions SET state = 'CANCELLED'
+                    WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+                    """, params) == 0) {
+                return false;
+            }
+            countCancelledIntoBatch(params);
+            return true;
+        }));
+    }
+
+    /**
+     * Cancelar é terminal: o membro acabou, e um fim que não conta deixa o
+     * lote aberto para sempre — {@code pending} nunca zera, ninguém fecha e
+     * não há varredura de reconciliação que cure (ADR-0043). Conta como falha
+     * pela mesma regra de {@link #countIntoBatch}: o lote responde quantos
+     * deram certo, e cancelado não deu.
+     *
+     * <p>Na MESMA transação do CAS de cancelamento, que é o que impede contar
+     * duas vezes: sem o CAS ter pego a linha, não se chega aqui.
+     */
+    private void countCancelledIntoBatch(MapSqlParameterSource idParam) {
+        String batchId = jdbcTemplate.queryForObject(
+                "SELECT batch_id FROM mohs_executions WHERE id = :id", idParam, String.class);
+        if (batchId != null) {
+            batchStore.incrementFailed(batchId);
+        }
+    }
+
+    /** Booleano por parâmetro, nunca literal — {@code TRUE} não existe no SQL Server ({@code BIT}); o driver converte. */
+    @Override
+    public boolean requestCancellation(ExecutionId id) {
+        Objects.requireNonNull(id, "id");
+        return jdbcTemplate.update("""
+                UPDATE mohs_executions SET cancel_requested = :requested
+                WHERE id = :id AND state = 'RUNNING'
+                """, new MapSqlParameterSource().addValue("id", id.value()).addValue("requested", true)) > 0;
+    }
+
+    /**
+     * Dois guards além do estado (review deste ciclo): (1) job aposentado
+     * não rearma — a claim query filtra {@code retired}, o reaper só vê
+     * RUNNING, e a linha rearmada ficaria presa pra sempre com um 202
+     * mentiroso (o estado que a ADR-0033 lista como inaceitável); o EXISTS
+     * no próprio CAS ESTREITA a janela contra um {@code remove} concorrente
+     * (commitou antes: o guard barra; começou depois: o sweep dele apanha a
+     * linha) — não a fecha: sob READ COMMITTED, um rearm que commita entre
+     * o sweep e o commit do remove deixa RETRY_SCHEDULED de job aposentado
+     * (janela sub-ms; {@code cancelIfPending} é o remédio do operador —
+     * predicado só estreita, quem fecha janela é lock).
+     * (2) {@code cancel_requested} stale é LIMPO no mesmo UPDATE — o retry
+     * manual é ordem MAIS NOVA do mesmo operador; sem a limpeza, um cancel
+     * antigo que nunca foi observado assassinaria o retry no primeiro tick.
+     */
+    @Override
+    public boolean rearmForManualRetry(ExecutionId id, Instant scheduledAt) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(scheduledAt, "scheduledAt");
+        return jdbcTemplate.update("""
+                UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', scheduled_at = :scheduledAt, cancel_requested = :cancelRequested
+                WHERE id = :id AND state = 'FAILED' AND batch_id IS NULL
+                  AND EXISTS (SELECT 1 FROM mohs_job_definitions j
+                              WHERE j.job_key = mohs_executions.job_key AND j.retired = :retired)
+                """, new MapSqlParameterSource()
+                .addValue("id", id.value())
+                .addValue("scheduledAt", JdbcTimestamps.toUtcLocalDateTime(scheduledAt))
+                .addValue("cancelRequested", false)
+                .addValue("retired", false)) > 0;
+    }
+
+    @Override
+    public Set<ExecutionId> findCancelRequested(List<ExecutionId> ids) {
+        Objects.requireNonNull(ids, "ids");
+        if (ids.isEmpty()) {
+            return Set.of();
+        }
+        Set<ExecutionId> flagged = new LinkedHashSet<>();
+        for (List<String> chunk : chunksOf(ids.stream().map(ExecutionId::value).toList())) {
+            flagged.addAll(jdbcTemplate.query("""
+                    SELECT id FROM mohs_executions WHERE id IN (:ids) AND cancel_requested = :requested
+                    """,
+                    new MapSqlParameterSource().addValue("ids", chunk).addValue("requested", true),
+                    (rs, _) -> ExecutionId.of(rs.getString("id"))));
+        }
+        return flagged;
+    }
+
+    /** Particiona por presença de fence — mesmo par de templates do caminho unitário; na prática o lote do reaper é uniformemente fenced. */
+    private Set<ExecutionId> transitionAll(List<ExecutionStore.CompletionRequest> requests) {
+        Map<Boolean, List<ExecutionStore.CompletionRequest>> byFence = requests.stream()
+                .collect(Collectors.partitioningBy(r -> r.expectedLeaseExpiresAt() != null));
+        Set<ExecutionId> confirmed = new LinkedHashSet<>();
+        confirmed.addAll(transitionBatch(byFence.get(Boolean.FALSE), COMPLETE_CAS));
+        confirmed.addAll(transitionBatch(byFence.get(Boolean.TRUE), COMPLETE_CAS_FENCED));
+        return confirmed;
+    }
+
+    /** O {@code int[]} do batch é a confirmação exata do CAS; {@code SUCCESS_NO_INFO} (JDBC permite) recai na confirmação por {@code SELECT}. */
+    private Set<ExecutionId> transitionBatch(List<ExecutionStore.CompletionRequest> batch, String sql) {
+        if (batch.isEmpty()) {
+            return Set.of();
+        }
+        MapSqlParameterSource[] params = batch.stream()
+                .map(JdbcExecutionStore::completionParams)
+                .toArray(MapSqlParameterSource[]::new);
+        int[] updated = jdbcTemplate.batchUpdate(sql, params);
+        Set<ExecutionId> confirmed = new LinkedHashSet<>();
+        for (int i = 0; i < updated.length; i++) {
+            if (updated[i] == Statement.SUCCESS_NO_INFO) {
+                return confirmBySelect(batch);
+            }
+            if (updated[i] > 0) {
+                confirmed.add(batch.get(i).id());
+            }
+        }
+        return confirmed;
+    }
+
+    /**
+     * Fallback raro do {@code SUCCESS_NO_INFO}: confirma por estado, em
+     * chunks (DB-11). Sob READ COMMITTED pode confirmar como nossa uma
+     * transição que outro ator commitou no meio — e o raio de dano real não
+     * é só imprecisão: o id mal-atribuído entra no INSERT em lote de
+     * attempts, colide com a PK do attempt que o outro ator gravou e
+     * reverte a transação inteira do {@code completeAll} (auto-cicatriza no
+     * tick seguinte). Aceito só porque este caminho exige driver que
+     * devolva {@code SUCCESS_NO_INFO}; o caminho normal usa o {@code int[]}
+     * exato.
+     */
+    private Set<ExecutionId> confirmBySelect(List<ExecutionStore.CompletionRequest> batch) {
+        Set<ExecutionId> confirmed = new LinkedHashSet<>();
+        batch.stream().collect(Collectors.groupingBy(ExecutionStore.CompletionRequest::newState))
+                .forEach((newState, group) -> {
+                    for (List<String> chunk : chunksOf(group.stream().map(r -> r.id().value()).toList())) {
+                        confirmed.addAll(jdbcTemplate.query(
+                                "SELECT id FROM mohs_executions WHERE id IN (:ids) AND state = :newState",
+                                new MapSqlParameterSource().addValue("ids", chunk).addValue("newState", newState.name()),
+                                (rs, _) -> ExecutionId.of(rs.getString("id"))));
+                    }
+                });
+        return confirmed;
+    }
+
+    private static MapSqlParameterSource completionParams(ExecutionStore.CompletionRequest request) {
+        return new MapSqlParameterSource()
+                .addValue("newState", request.newState().name())
+                .addValue("retryAt", request.retryAt() == null ? null : JdbcTimestamps.toUtcLocalDateTime(request.retryAt()), Types.TIMESTAMP)
+                .addValue("expectedLease", request.expectedLeaseExpiresAt() == null ? null : JdbcTimestamps.toUtcLocalDateTime(request.expectedLeaseExpiresAt()), Types.TIMESTAMP)
+                .addValue("id", request.id().value());
+    }
+
+    /** Fatias de no máximo {@link #MAX_IDS_PER_QUERY} ids pro {@code IN (:ids)} (DB-11) — views de {@code subList}, sem cópia. */
+    private static List<List<String>> chunksOf(List<String> ids) {
+        List<List<String>> chunks = new ArrayList<>();
+        for (int start = 0; start < ids.size(); start += MAX_IDS_PER_QUERY) {
+            chunks.add(ids.subList(start, Math.min(start + MAX_IDS_PER_QUERY, ids.size())));
+        }
+        return chunks;
+    }
+
+    private static MapSqlParameterSource attemptParams(ExecutionId id, Attempt attempt) {
+        return new MapSqlParameterSource()
+                .addValue("executionId", id.value())
+                .addValue("number", attempt.number())
+                .addValue("startedAt", JdbcTimestamps.toUtcLocalDateTime(attempt.startedAt()))
+                .addValue("finishedAt", attempt.finishedAt() == null ? null : JdbcTimestamps.toUtcLocalDateTime(attempt.finishedAt()))
+                .addValue("outcome", attempt.outcome().name())
+                .addValue("error", attempt.error());
+    }
+
+    @Override
+    public Optional<Execution> find(ExecutionId id) {
+        Objects.requireNonNull(id, "id");
+        Optional<ExecutionRow> row = JdbcSupport.findOne(jdbcTemplate,
+                "SELECT " + EXECUTION_COLUMNS + " FROM mohs_executions WHERE id = :id",
+                new MapSqlParameterSource("id", id.value()),
+                JdbcExecutionStore::mapRow);
+        return row.map(r -> hydrate(r, fetchAttempts(r.id())));
+    }
+
+    /** No máximo uma linha — unicidade garantida por {@code uq_mohs_executions_idem} no schema. */
+    @Override
+    public Optional<Execution> findByIdempotencyKey(JobKey jobKey, String idempotencyKey) {
+        Objects.requireNonNull(jobKey, "jobKey");
+        Objects.requireNonNull(idempotencyKey, "idempotencyKey");
+        Optional<ExecutionRow> row = JdbcSupport.findOne(jdbcTemplate,
+                "SELECT " + EXECUTION_COLUMNS + " FROM mohs_executions WHERE job_key = :jobKey AND idempotency_key = :idempotencyKey",
+                new MapSqlParameterSource()
+                        .addValue("jobKey", jobKey.value())
+                        .addValue("idempotencyKey", idempotencyKey),
+                JdbcExecutionStore::mapRow);
+        return row.map(r -> hydrate(r, fetchAttempts(r.id())));
+    }
+
+    /**
+     * DBTUNE-3: busca as linhas em lote e SÓ DEPOIS, com o cursor da query
+     * externa já fechado, busca os attempts de todas elas numa segunda
+     * consulta em lote (mesmo chunking de {@link #MAX_IDS_PER_QUERY}) — não
+     * mais uma query de attempts por linha dentro do row mapper, que além
+     * do N+1 mantinha uma segunda conexão do pool presa enquanto a primeira
+     * ainda segurava o {@code ResultSet} externo (risco real de pool
+     * deadlock sob concorrência, documentado no HikariCP).
+     */
+    @Override
+    public List<Execution> findByIds(List<ExecutionId> ids) {
+        Objects.requireNonNull(ids, "ids");
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        List<String> rawIds = ids.stream().map(ExecutionId::value).toList();
+        List<ExecutionRow> rows = new ArrayList<>(rawIds.size());
+        for (List<String> chunk : chunksOf(rawIds)) {
+            rows.addAll(jdbcTemplate.query(
+                    "SELECT " + EXECUTION_COLUMNS + " FROM mohs_executions WHERE id IN (:ids)",
+                    new MapSqlParameterSource("ids", chunk),
+                    (rs, _) -> mapRow(rs)));
+        }
+        return hydrateAll(rows);
+    }
+
+    /**
+     * Continua N+1 de propósito, ao contrário de {@link #findByIds}
+     * (DBTUNE-3): streama sobre um cursor aberto, e batchar os attempts
+     * aqui exigiria materializar a tabela inteira antes da primeira linha
+     * (perde o cursor) ou uma janela de chunking manual — trabalho real
+     * sem caller de produção ainda para medir contra. Nada chama isto em
+     * produção nesta etapa (entra no wiring REST de M3) — mede com um
+     * caller de verdade antes de trocar.
+     */
+    @Override
+    public Stream<Execution> findByJobKey(JobKey jobKey) {
+        Objects.requireNonNull(jobKey, "jobKey");
+        return jdbcTemplate.queryForStream(
+                "SELECT " + EXECUTION_COLUMNS + " FROM mohs_executions WHERE job_key = :jobKey",
+                new MapSqlParameterSource("jobKey", jobKey.value()),
+                (rs, _) -> hydrateEagerly(mapRow(rs)));
+    }
+
+    /** Ver Javadoc de {@link #findByJobKey} sobre o N+1 deliberado. */
+    @Override
+    public Stream<Execution> findAll() {
+        return jdbcTemplate.queryForStream(
+                "SELECT " + EXECUTION_COLUMNS + " FROM mohs_executions",
+                new MapSqlParameterSource(),
+                (rs, _) -> hydrateEagerly(mapRow(rs)));
+    }
+
+    /**
+     * Sem lock, sem cursor aberto (ao contrário de {@link #findAll}/
+     * {@link #findByJobKey}) — resultado limitado por {@code limit}.
+     * SUMÁRIO de propósito (DBTUNE-21): attempts NÃO são hidratados —
+     * pertencem ao detalhe ({@link #find}), como a tabela do design REST
+     * sempre disse. Hidratar aqui custava uma segunda query em lote POR
+     * PÁGINA e punha {@code error} (TEXT de tamanho arbitrário) viajando
+     * em toda listagem e em todo tick do stream do dashboard.
+     */
+    @Override
+    public List<Execution> findPage(@Nullable JobKey jobKey, @Nullable ExecutionState status, @Nullable Instant from,
+            @Nullable Instant to, @Nullable ExecutionId cursor, int limit) {
+        MapSqlParameterSource params = new MapSqlParameterSource().addValue("limit", limit);
+        List<String> conditions = new ArrayList<>();
+        if (jobKey != null) {
+            conditions.add("job_key = :jobKey");
+            params.addValue("jobKey", jobKey.value());
+        }
+        if (status != null) {
+            conditions.add("state = :status");
+            params.addValue("status", status.name());
+        }
+        if (from != null) {
+            conditions.add("scheduled_at >= :from");
+            params.addValue("from", JdbcTimestamps.toUtcLocalDateTime(from));
+        }
+        if (to != null) {
+            conditions.add("scheduled_at <= :to");
+            params.addValue("to", JdbcTimestamps.toUtcLocalDateTime(to));
+        }
+        if (cursor != null) {
+            conditions.add("id < :cursor");
+            params.addValue("cursor", cursor.value());
+        }
+        String where = conditions.isEmpty() ? "" : " WHERE " + String.join(" AND ", conditions);
+
+        String sql = "SELECT " + dialect.topClause() + EXECUTION_COLUMNS + " FROM mohs_executions" + where
+                + " ORDER BY id DESC " + dialect.limitClause();
+
+        List<ExecutionRow> rows = jdbcTemplate.query(sql, params, (rs, _) -> mapRow(rs));
+        return rows.stream().map(row -> hydrate(row, List.of())).toList();
+    }
+
+    /**
+     * Duas queries, não uma com {@code IN} dos três estados: o predicado
+     * {@code state IN ('ENQUEUED', 'RETRY_SCHEDULED')} é EXATAMENTE o do
+     * índice parcial de claim (implicação trivial — a mesma regra de
+     * elegibilidade da DBTUNE-5/ADR-0033), e {@code RUNNING} entra pelo
+     * índice parcial do reaper; juntar os três num {@code IN} só não
+     * implica predicado nenhum e degrada pra scan da tabela inteira.
+     * {@code lease_expires_at IS NOT NULL} no predicado de {@code RUNNING}
+     * é o que torna o índice do reaper elegível (DBTUNE-17) — não filtra
+     * nada de verdade: toda linha {@code RUNNING} chegou lá pelo UPDATE de
+     * claim, que grava a lease na mesma escrita ({@code JdbcDialect}).
+     * Os literais de estado inlinados (não bind) são deliberados: no SQL
+     * Server, índice filtrado só casa com predicado de literal — trocar
+     * por parâmetro "por limpeza" degrada o plano em silêncio.
+     */
+    @Override
+    public Map<ExecutionState, Long> countActiveByState() {
+        Map<ExecutionState, Long> counts = countGroupedBy("state",
+                "SELECT state, COUNT(*) AS total FROM mohs_executions " + dialect.lockFreeCountHint()
+                        + "WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') GROUP BY state",
+                new MapSqlParameterSource());
+        Long running = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM mohs_executions " + dialect.lockFreeCountHint()
+                        + "WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL",
+                new MapSqlParameterSource(), Long.class);
+        counts.put(ExecutionState.RUNNING, Objects.requireNonNull(running, "COUNT(*) never returns NULL"));
+        return counts;
+    }
+
+    /** Range curto em {@code idx_mohs_attempts_throughput} — custo proporcional à atividade da janela, nunca ao histórico. Mesmo hint sem lock das outras contagens ({@code JdbcDialect#lockFreeCountHint}). */
+    @Override
+    public Map<ExecutionState, Long> countTerminalOutcomesSince(Instant since) {
+        Objects.requireNonNull(since, "since");
+        return countGroupedBy("outcome",
+                "SELECT outcome, COUNT(*) AS total FROM mohs_attempts " + dialect.lockFreeCountHint()
+                        + "WHERE finished_at >= :since AND outcome IN ('SUCCEEDED', 'FAILED') GROUP BY outcome",
+                new MapSqlParameterSource("since", JdbcTimestamps.toUtcLocalDateTime(since)));
+    }
+
+    private Map<ExecutionState, Long> countGroupedBy(String column, String sql, MapSqlParameterSource params) {
+        Map<ExecutionState, Long> counts = new EnumMap<>(ExecutionState.class);
+        jdbcTemplate.query(sql, params,
+                rs -> { counts.put(ExecutionState.valueOf(rs.getString(column)), rs.getLong("total")); });
+        return counts;
+    }
+
+    /** DBTUNE-3: attempts de todas as linhas numa segunda consulta em lote — nunca uma query de attempts por linha (N+1). */
+    private List<Execution> hydrateAll(List<ExecutionRow> rows) {
+        Map<String, List<Attempt>> attemptsByExecutionId = fetchAttemptsByExecutionIds(rows.stream().map(r -> r.id().value()).toList());
+        return rows.stream()
+                .map(row -> hydrate(row, attemptsByExecutionId.getOrDefault(row.id().value(), List.of())))
+                .toList();
+    }
+
+    private Execution hydrateEagerly(ExecutionRow row) {
+        return hydrate(row, fetchAttempts(row.id()));
+    }
+
+    private static Execution hydrate(ExecutionRow row, List<Attempt> attempts) {
+        return new Execution(row.id(), row.jobKey(), row.state(), row.scheduledAt(), row.firedAt(), attempts,
+                row.actor(), row.priority(), row.idempotencyKey(), row.batchId());
+    }
+
+    /** DBTUNE-6: colunas explícitas em vez de {@code SELECT *} — {@code payload} sozinho é JSON de tamanho arbitrário que nenhum destes métodos lê, transferido e descartado à toa em todo poll do claim. */
+    private static ExecutionRow mapRow(ResultSet rs) throws SQLException {
+        LocalDateTime firedAt = rs.getObject("fired_at", LocalDateTime.class);
+        return new ExecutionRow(
+                ExecutionId.of(rs.getString("id")),
+                JobKey.of(rs.getString("job_key")),
+                ExecutionState.valueOf(rs.getString("state")),
+                JdbcTimestamps.fromUtcLocalDateTime(rs.getObject("scheduled_at", LocalDateTime.class)),
+                firedAt == null ? null : JdbcTimestamps.fromUtcLocalDateTime(firedAt),
+                rs.getString("actor"),
+                Priority.fromValue(rs.getInt("priority")),
+                rs.getString("idempotency_key"),
+                rs.getString("batch_id"));
+    }
+
+    private List<Attempt> fetchAttempts(ExecutionId executionId) {
+        return jdbcTemplate.query(
+                "SELECT number, started_at, finished_at, outcome, error FROM mohs_attempts WHERE execution_id = :executionId ORDER BY number",
+                new MapSqlParameterSource("executionId", executionId.value()),
+                JdbcExecutionStore::mapAttemptRow);
+    }
+
+    private Map<String, List<Attempt>> fetchAttemptsByExecutionIds(List<String> executionIds) {
+        if (executionIds.isEmpty()) {
+            return Map.of();
+        }
+        List<ExecutionIdAndAttempt> rows = new ArrayList<>();
+        for (List<String> chunk : chunksOf(executionIds)) {
+            rows.addAll(jdbcTemplate.query(
+                    "SELECT execution_id, number, started_at, finished_at, outcome, error FROM mohs_attempts WHERE execution_id IN (:executionIds) ORDER BY execution_id, number",
+                    new MapSqlParameterSource("executionIds", chunk),
+                    (rs, rowNum) -> new ExecutionIdAndAttempt(rs.getString("execution_id"), mapAttemptRow(rs, rowNum))));
+        }
+        return rows.stream().collect(Collectors.groupingBy(
+                ExecutionIdAndAttempt::executionId,
+                Collectors.mapping(ExecutionIdAndAttempt::attempt, Collectors.toList())));
+    }
+
+    private static Attempt mapAttemptRow(ResultSet rs, int rowNum) throws SQLException {
+        LocalDateTime finishedAt = rs.getObject("finished_at", LocalDateTime.class);
+        return new Attempt(
+                rs.getInt("number"),
+                JdbcTimestamps.fromUtcLocalDateTime(rs.getObject("started_at", LocalDateTime.class)),
+                finishedAt == null ? null : JdbcTimestamps.fromUtcLocalDateTime(finishedAt),
+                ExecutionState.valueOf(rs.getString("outcome")),
+                rs.getString("error"));
+    }
+
+    /** Linha crua de {@code mohs_executions}, sem attempts — hidratada por {@link #hydrate}/{@link #hydrateEagerly}. */
+    private record ExecutionRow(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt, @Nullable Instant firedAt, String actor,
+                                 Priority priority, @Nullable String idempotencyKey, @Nullable String batchId) {
+    }
+
+    private record ExecutionIdAndAttempt(String executionId, Attempt attempt) {
+    }
+}

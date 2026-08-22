@@ -24,7 +24,7 @@
              MohsAutoConfiguration não tem o que ligar. -->
         <dependency>
             <groupId>io.mohs</groupId>
-            <artifactId>mohs-jdbc</artifactId>
+            <artifactId>mohs-store-jdbc</artifactId>
         </dependency>
         <!-- REST também não é optional: MohsRestAutoConfiguration referencia os controllers
              fora de qualquer @ConditionalOnClass deles. O que é opcional é o stack web

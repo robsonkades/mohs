@@ -1,0 +1,76 @@
+package io.mohs.store.jdbc.dialect;
+
+import java.time.Instant;
+import java.util.List;
+
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+
+import io.mohs.store.jdbc.JdbcTimestamps;
+
+/**
+ * SQL Server: sem {@code LIMIT} — usa {@code TOP (:batchSize)} logo após
+ * {@code SELECT}, mudando a posição na query, não só o texto. Sem
+ * {@code SKIP LOCKED} — usa o hint de tabela {@code WITH (UPDLOCK,
+ * ROWLOCK, READPAST)}, confirmado via jOOQ (é o que jOOQ gera pra emular
+ * {@code SKIP LOCKED} em SQL Server — ADR-0023). {@code BIT} compara com
+ * {@code 1}, não {@code TRUE}.
+ */
+public final class SqlServerJdbcDialect implements JdbcDialect {
+
+    @Override
+    public String migrationLocation() {
+        return "classpath:io/mohs/store/jdbc/migration/sqlserver";
+    }
+
+    @Override
+    public List<Candidate> selectCandidates(NamedParameterJdbcTemplate jdbcTemplate, Instant now, int batchSize) {
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("now", JdbcTimestamps.toUtcLocalDateTime(now))
+                .addValue("batchSize", batchSize);
+        // e.priority já é Priority.value() (menor reivindica primeiro) —
+        // NOT NULL DEFAULT 20 no schema, então ordena direto, sem CASE.
+        // j.retired = 0: job aposentado (Mohs.remove) nunca volta a ser candidato.
+        return jdbcTemplate.query("""
+                SELECT TOP (:batchSize) e.id AS id, e.job_key AS job_key,
+                       j.allow_concurrent_executions AS allow_concurrent_executions,
+                       j.window_name AS window_name,
+                       j.rate_limit AS rate_limit
+                FROM mohs_executions e WITH (UPDLOCK, ROWLOCK, READPAST)
+                JOIN mohs_job_definitions j ON j.job_key = e.job_key
+                WHERE e.state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+                  AND e.scheduled_at <= :now
+                  AND j.retired = 0
+                  AND (j.allow_concurrent_executions = 1 OR j.running_execution_count < j.max_concurrent_executions)
+                ORDER BY e.priority ASC, e.scheduled_at ASC
+                """, params, Candidate::fromResultSet);
+    }
+
+    @Override
+    public String topClause() {
+        return "TOP (:limit) ";
+    }
+
+    @Override
+    public String limitClause() {
+        return "";
+    }
+
+    /**
+     * {@code NOLOCK} (read uncommitted), não {@code READPAST}: skip de
+     * linha lockada subconta sistematicamente sob carga. O erro aceito é o
+     * do pior caso do mecanismo, não só "±1 em transição": sem ordem
+     * exigida ({@code COUNT}/{@code GROUP BY}) o otimizador pode escolher
+     * allocation-order scan, que sob page split concorrente conta linha
+     * duas vezes ou perde — erro proporcional ao churn de escrita; e o
+     * scan pode falhar com o erro 601 ("data movement"), que aqui vira
+     * falha transitória da leitura (500 no GET; WARN + retry no próximo
+     * tick no stream) — aceito, sem retry automático. Deployment com RCSI
+     * ({@code READ_COMMITTED_SNAPSHOT ON}) torna o hint redundante —
+     * decisão do operador, não da biblioteca.
+     */
+    @Override
+    public String lockFreeCountHint() {
+        return "WITH (NOLOCK) ";
+    }
+}

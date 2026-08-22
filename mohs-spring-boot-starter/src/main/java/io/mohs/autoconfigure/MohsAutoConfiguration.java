@@ -6,6 +6,8 @@ import java.util.List;
 
 import javax.sql.DataSource;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -48,27 +50,28 @@ import io.mohs.engine.RateLimitStore;
 import io.mohs.engine.Reaper;
 import io.mohs.engine.RunnerRegistry;
 import io.mohs.engine.TriggerFirer;
-import io.mohs.jdbc.DatabaseClock;
-import io.mohs.jdbc.JdbcBatchStore;
-import io.mohs.jdbc.JdbcClaimer;
-import io.mohs.jdbc.JdbcExecutionStore;
-import io.mohs.jdbc.JdbcJobStore;
-import io.mohs.jdbc.JdbcNodeStore;
-import io.mohs.jdbc.JdbcRateLimitStore;
-import io.mohs.jdbc.JdbcReaper;
-import io.mohs.jdbc.JdbcTriggerFirer;
-import io.mohs.jdbc.dialect.H2JdbcDialect;
-import io.mohs.jdbc.dialect.JdbcDialect;
-import io.mohs.jdbc.dialect.MySqlJdbcDialect;
-import io.mohs.jdbc.dialect.PostgresJdbcDialect;
-import io.mohs.jdbc.dialect.SqlServerJdbcDialect;
+import io.mohs.store.jdbc.DatabaseClock;
+import io.mohs.store.jdbc.JdbcBatchStore;
+import io.mohs.store.jdbc.JdbcClaimer;
+import io.mohs.store.jdbc.JdbcExecutionStore;
+import io.mohs.store.jdbc.JdbcJobStore;
+import io.mohs.store.jdbc.JdbcNodeStore;
+import io.mohs.store.jdbc.JdbcRateLimitStore;
+import io.mohs.store.jdbc.JdbcReaper;
+import io.mohs.store.jdbc.JdbcTriggerFirer;
+import io.mohs.store.jdbc.MohsFlyway;
+import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.dialect.JdbcDialect;
+import io.mohs.store.jdbc.dialect.MySqlJdbcDialect;
+import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
+import io.mohs.store.jdbc.dialect.SqlServerJdbcDialect;
 
 /**
- * Liga o motor M3 ({@code io.mohs.engine}/{@code io.mohs.jdbc}) a um
+ * Liga o motor M3 ({@code io.mohs.engine}/{@code io.mohs.store.jdbc}) a um
  * {@link DataSource} Spring Boot real. Livre pra depender de internos —
  * {@code ArchitectureTest.PUBLIC_API} exclui {@code io.mohs.autoconfigure}
  * da lista de pacotes barrados de enxergar {@code io.mohs.engine}/
- * {@code io.mohs.jdbc}, é exatamente o papel deste pacote.
+ * {@code io.mohs.store.jdbc}, é exatamente o papel deste pacote.
  *
  * <p>Validações de boot, wiring do REST e enforcement de rate limit ainda
  * não existem — {@link Mohs#batch} lança
@@ -106,6 +109,8 @@ import io.mohs.jdbc.dialect.SqlServerJdbcDialect;
 @EnableConfigurationProperties(MohsProperties.class)
 public class MohsAutoConfiguration {
 
+    private static final Logger log = LoggerFactory.getLogger(MohsAutoConfiguration.class);
+
     @Bean
     public JdbcDialect mohsJdbcDialect(MohsProperties properties) {
         MohsProperties.Jdbc.Dialect dialect = properties.jdbc().dialect();
@@ -113,6 +118,14 @@ public class MohsAutoConfiguration {
             throw new IllegalStateException(
                     "mohs.jdbc.dialect must be set (h2, postgresql, mysql or sqlserver) — "
                             + "ADR-0023: the JDBC dialect is never auto-detected from the DataSource");
+        }
+        // ADR-0050 (tiering): H2 é Tier 3 — teste/dev apenas. O SKIP LOCKED
+        // dele tem corrida real medida (~33% de double-lock, Javadoc de
+        // JdbcClaimer); a corretude do claim vem do CAS guardado, mas ninguém
+        // deve descobrir isso em produção. WARN, não erro: o demo e o dev
+        // loop dependem dele de propósito.
+        if (dialect == MohsProperties.Jdbc.Dialect.H2) {
+            log.warn("mohs.jdbc.dialect=h2: H2 is Tier 3 — a test/dev backend, NOT supported in production (ADR-0050)");
         }
         return switch (dialect) {
             case H2 -> new H2JdbcDialect();
@@ -165,8 +178,31 @@ public class MohsAutoConfiguration {
         }
     }
 
+    /**
+     * ADR-0048: as migrações do Mohs rodam na criação DESTE bean, e a ordem
+     * é garantida pelo GRAFO, não pela ordem de registro: todo bean que
+     * toca tabela do Mohs (stores, claimer, reaper, trigger firer) recebe
+     * {@code MohsFlyway} como parâmetro — um bean do host que injete
+     * {@code Mohs} e escreva no construtor força a cadeia inteira e ainda
+     * assim passa por aqui primeiro (review da Phase 2: os escritores do
+     * Mohs já eram tardios por construção — scanner/registrador são
+     * {@code afterSingletonsInstantiated}, engine é {@code SmartLifecycle}
+     * — mas o host não tinha aresta nenhuma). Bean sempre presente;
+     * {@code mohs.jdbc.migrate=false} só pula o {@code migrate()}.
+     * Instância e histórico próprios ({@code mohs_schema_history}) — ver
+     * Javadoc de {@link MohsFlyway} sobre por que nunca o Flyway do host.
+     */
     @Bean
-    public JobStore mohsJobStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock) {
+    public MohsFlyway mohsFlyway(DataSource dataSource, JdbcDialect mohsJdbcDialect, MohsProperties properties) {
+        MohsFlyway flyway = new MohsFlyway(dataSource, mohsJdbcDialect);
+        if (properties.jdbc().migrate()) {
+            flyway.migrate();
+        }
+        return flyway;
+    }
+
+    @Bean
+    public JobStore mohsJobStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, MohsFlyway mohsFlyway) {
         return new JdbcJobStore(dataSource, mohsClock);
     }
 
@@ -178,12 +214,12 @@ public class MohsAutoConfiguration {
      * quebraria a leitura de payloads já gravados quando ela mudar.
      */
     @Bean
-    public ExecutionStore mohsExecutionStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, JdbcDialect mohsJdbcDialect) {
+    public ExecutionStore mohsExecutionStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, JdbcDialect mohsJdbcDialect, MohsFlyway mohsFlyway) {
         return new JdbcExecutionStore(dataSource, mohsClock, JsonMapper.builder().build(), mohsJdbcDialect);
     }
 
     @Bean
-    public NodeStore mohsNodeStore(DataSource dataSource) {
+    public NodeStore mohsNodeStore(DataSource dataSource, MohsFlyway mohsFlyway) {
         return new JdbcNodeStore(dataSource);
     }
 
@@ -208,21 +244,22 @@ public class MohsAutoConfiguration {
     @Bean
     public Claimer mohsClaimer(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock,
             ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsProperties properties,
-            ExecutionWindowRegistry mohsExecutionWindowRegistry, RateLimitStore mohsRateLimitStore) {
+            ExecutionWindowRegistry mohsExecutionWindowRegistry, RateLimitStore mohsRateLimitStore, MohsFlyway mohsFlyway) {
         return new JdbcClaimer(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore,
                 properties.engine().leaseTtl(), mohsExecutionWindowRegistry, mohsRateLimitStore);
     }
 
     @Bean
-    public RateLimitStore mohsRateLimitStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock) {
+    public RateLimitStore mohsRateLimitStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, MohsFlyway mohsFlyway) {
         return new JdbcRateLimitStore(dataSource, mohsClock);
     }
 
     /**
      * Registro dos limites declarados DEPOIS de todos os singletons, como
      * {@link MohsJobScanner} faz com as definições: escrita em banco no
-     * boot só é segura quando a inicialização de schema do Boot já
-     * aconteceu. A montagem, essa sim, roda na criação do bean — property
+     * boot só é segura quando o schema já existe — desde a ADR-0048, quem
+     * o garante é o Flyway do próprio Mohs ({@link #mohsFlyway}), criado
+     * antes de qualquer singleton que toque as tabelas. A montagem, essa sim, roda na criação do bean — property
      * malformada derruba o boot cedo, com o nome da propriedade que falta.
      */
     @Bean
@@ -239,12 +276,12 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    public Reaper mohsReaper(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock, ExecutionStore mohsExecutionStore, JobStore mohsJobStore) {
+    public Reaper mohsReaper(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock, ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsFlyway mohsFlyway) {
         return new JdbcReaper(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore);
     }
 
     @Bean
-    public TriggerFirer mohsTriggerFirer(DataSource dataSource, ExecutionStore mohsExecutionStore) {
+    public TriggerFirer mohsTriggerFirer(DataSource dataSource, ExecutionStore mohsExecutionStore, MohsFlyway mohsFlyway) {
         return new JdbcTriggerFirer(dataSource, mohsExecutionStore);
     }
 
@@ -326,7 +363,7 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    public BatchStore mohsBatchStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock) {
+    public BatchStore mohsBatchStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, MohsFlyway mohsFlyway) {
         return new JdbcBatchStore(dataSource, mohsClock);
     }
 

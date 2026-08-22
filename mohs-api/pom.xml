@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.mohs</groupId>
+        <artifactId>mohs-parent</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>mohs-api</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Mohs :: API</name>
+    <description>API pública: contratos de job, schedule, definition, execution, event e resource (ADR-0015).</description>
+
+    <dependencies>
+        <!-- @AliasFor/@CheckReturnValue nas annotations públicas (@MohsJob, @OnExecution).
+             Só spring-core: a API pública não conhece contexto, transação nem web. -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-core</artifactId>
+        </dependency>
+    </dependencies>
+</project>

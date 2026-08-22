@@ -7,7 +7,7 @@
 // the working tree carries long-lived changes, including read-only turns.
 //
 //   .java changed                  -> java-refactorer + java-code-reviewer
-//   .sql / io/mohs/jdbc/ changed   -> db-tuner, before the review
+//   .sql / io/mohs/store/jdbc/ changed   -> db-tuner, before the review
 
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -167,7 +167,7 @@ function wasTouched(dirtyPath) {
 const pending = uncommitted.filter(wasTouched);
 const java = pending.filter((p) => /\.java$/i.test(p));
 const persistence = pending.filter(
-    (p) => /\.sql$/i.test(p) || normalize(p).includes("src/main/java/io/mohs/jdbc/")
+    (p) => /\.sql$/i.test(p) || normalize(p).includes("src/main/java/io/mohs/store/jdbc/")
 );
 
 if (java.length === 0 && persistence.length === 0) process.exit(0);

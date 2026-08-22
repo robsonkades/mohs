@@ -22,7 +22,7 @@ import io.mohs.engine.StoredJob;
  * {@link JobStore} em memória — a implementação "storage em memória" do
  * test kit (§5.14 do documento mestre, {@code @MohsTest}). Mesma
  * precisão definicional×operacional da ADR-0006 que {@code JdbcJobStore}
- * (io.mohs.jdbc), sem tocar banco nenhum — prova que {@link JobStore}
+ * (io.mohs.store.jdbc), sem tocar banco nenhum — prova que {@link JobStore}
  * não vazou nada específico de JDBC.
  *
  * <p>O construtor com {@link Clock} existe pro estado do trigger

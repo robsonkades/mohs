@@ -8,7 +8,7 @@ import io.mohs.core.execution.Execution;
 
 /**
  * Registro de heartbeat de node (ADR-0012) — Repository (PoEAA), porta
- * que {@code io.mohs.jdbc} implementa. Só informativo: nenhuma lógica de
+ * que {@code io.mohs.store.jdbc} implementa. Só informativo: nenhuma lógica de
  * claim/reclaim consulta esta porta, é o relógio "cluster-wide" separado
  * do lease funcional de {@link Execution} que a ADR-0012 distingue.
  */

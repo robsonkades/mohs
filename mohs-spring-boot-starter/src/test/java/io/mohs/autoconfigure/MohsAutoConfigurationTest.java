@@ -40,8 +40,8 @@ import io.mohs.core.job.JobKey;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.engine.HandlerRegistry;
-import io.mohs.jdbc.DatabaseClock;
-import io.mohs.jdbc.JdbcJobStore;
+import io.mohs.store.jdbc.DatabaseClock;
+import io.mohs.store.jdbc.JdbcJobStore;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;

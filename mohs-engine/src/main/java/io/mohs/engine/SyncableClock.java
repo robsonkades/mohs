@@ -9,7 +9,7 @@ import java.time.Duration;
  * constrói o {@code Clock} ({@code io.mohs.autoconfigure}) é dono de
  * chamar {@link #sync()} no intervalo configurado (`mohs.time.sync-interval`)
  * — este contrato existe pra isso não precisar conhecer o tipo concreto
- * (ex.: {@code DatabaseClock}, em {@code io.mohs.jdbc}) nem nenhuma
+ * (ex.: {@code DatabaseClock}, em {@code io.mohs.store.jdbc}) nem nenhuma
  * dependência de JDBC.
  */
 public interface SyncableClock {

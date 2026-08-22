@@ -55,14 +55,14 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
 <!-- FILL IN during the first session: validate/complete with the repo's real commands -->
 - Full build: `./mvnw clean verify` (whole reactor, from the root)
 - Test suite: `./mvnw test`
-- Single module: `./mvnw verify -pl mohs-jdbc` (add `-am` to build what it
+- Single module: `./mvnw verify -pl mohs-store-jdbc` (add `-am` to build what it
   depends on; `-rf :mohs-rest` resumes the reactor from that module)
 - Backend only, no npm: `./mvnw verify -Dskip.frontend=true` — skips Node,
   `npm ci` and the bundle. Never build a published jar with it: `mohs-ui`
   would ship empty. Dashboard dev loop: `npm run dev` in `mohs-ui/frontend`
   (proxies `/api/mohs` to localhost:8080, SSE included).
 - Single test: `./mvnw test -pl <module> -Dtest=ClassNameTest`
-- `mohs-jdbc`'s Testcontainers tests need Docker up (Rancher Desktop here);
+- `mohs-store-jdbc`'s Testcontainers tests need Docker up (Rancher Desktop here);
   without it they error on `Could not initialize class *TestSupport`, which
   is environment, not regression.
 - Benchmarks/harnesses live in `mohs-benchmark` (never published). Query
@@ -90,7 +90,7 @@ For any task that changes code:
   1. Subagent **`java-refactorer`** on the touched files — explicit path
      list in the prompt; behavior preserved.
   2. Subagent **`db-tuner`** — only when the change touched persistence: any
-     `.sql` file or code under `io.mohs.jdbc`. It applies result-equivalent
+     `.sql` file or code under `io.mohs.store.jdbc`. It applies result-equivalent
      rewrites and index migrations on its own; what it flags for approval
      comes to me, it does not land in the tree. A `.sql`-only change runs
      this step alone.
@@ -131,7 +131,7 @@ For any task that changes code:
 - GitHub org: mohs-io · Maven groupId: `io.mohs` · domains: mohs.io / mohs.dev
 - Multi-module reactor under `io.mohs:mohs-parent`, full Spring Boot
   (ADR-0044, which revokes ADR-0001's single artifact): `mohs-cron`,
-  `mohs-core`, `mohs-engine`, `mohs-jdbc`, `mohs-rest`, `mohs-test`,
+  `mohs-api`, `mohs-engine`, `mohs-store-jdbc`, `mohs-rest`, `mohs-test`,
   `mohs-ui`, `mohs-spring-boot-starter`, `mohs-demo` (app, never published)
   and `mohs-bom`. An application declares `mohs-spring-boot-starter`, plus
   `mohs-ui` if it wants the dashboard.
@@ -159,8 +159,9 @@ Public API (contracts, M1 — see
 
 Every package below maps 1:1 to a Maven module (ADR-0044); the module name is
 the package with `.` swapped for `-`, except `io.mohs.autoconfigure` →
-`mohs-spring-boot-starter` and the `io.mohs`/`io.mohs.demo` pair →
-`mohs-demo`.
+`mohs-spring-boot-starter`, the `io.mohs`/`io.mohs.demo` pair →
+`mohs-demo`, and `io.mohs.core` → `mohs-api` (Phase 2 do redesign renomeou
+o artifact; o PACOTE público de M1 é imutável — §18.1 do plano).
 
 Outside `core` (not job vocabulary):
 - `io.mohs` (root) — only `mohs-demo`'s Spring Boot bootstrap
@@ -175,7 +176,7 @@ Internals and infrastructure (M0 skeleton, implementation lands in M3, except
 `io.mohs.rest` which is M2, already implemented as a contract):
 - `io.mohs.engine` — engine: claim, runners, misfire, retry,
   `NextFireCalculator`
-- `io.mohs.jdbc` — JDBC persistence of jobs and executions
+- `io.mohs.store.jdbc` — JDBC persistence of jobs and executions (module `mohs-store-jdbc`; era `io.mohs.jdbc` até a Phase 2)
 - `io.mohs.autoconfigure` — auto-config, properties, boot validations
 - `io.mohs.rest` — operational REST API. One subpackage per controller
   (1:1 navigability with `docs/REST-API-DESIGN.md`), plus root and `error`
@@ -196,11 +197,11 @@ Internals and infrastructure (M0 skeleton, implementation lands in M3, except
   worse than either language (ADR-0045 §6).
 
 Public/internal boundaries are executable twice over: by the reactor itself
-(`mohs-core` has no `mohs-engine` on its compile classpath) and by
+(`mohs-api` has no `mohs-engine` on its compile classpath) and by
 `mohs-demo/src/test/java/io/mohs/ArchitectureTest.java` (ArchUnit) — the one
 module that sees every other on a single classpath. The ADR-0043 source scan
 lives apart, in
-`mohs-jdbc/src/test/java/io/mohs/jdbc/TerminalStateWriteScanTest.java`: it
+`mohs-store-jdbc/src/test/java/io/mohs/store/jdbc/TerminalStateWriteScanTest.java`: it
 reads `src/main/java` of the module it runs in, and the SQL it guards is
 there.
 
@@ -235,7 +236,7 @@ when it is exactly what the code does:
   sequences, green suite at every step.
 - **PoEAA** (Fowler): persistence/domain vocabulary (Repository, Unit of
   Work, Data Mapper, Identity Map, Value Object, Domain Model vs.
-  Transaction Script) guides `io.mohs.jdbc` and the engine. Don't force
+  Transaction Script) guides `io.mohs.store.jdbc` and the engine. Don't force
   PoEAA onto pure contracts (the ones in `io.mohs.core` are Value Objects —
   there is no Repository to cite).
 - **DDIA** (Kleppmann): the reliability/consistency vocabulary

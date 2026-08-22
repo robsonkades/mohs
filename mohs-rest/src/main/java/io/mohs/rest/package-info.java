@@ -2,7 +2,7 @@
  * API REST operacional (M2 — contrato; ver
  * {@code docs/adr/0010-rest-api-v1.md}). Depende só da API pública em
  * {@code io.mohs.core} — nunca diretamente de {@code io.mohs.engine} ou
- * {@code io.mohs.jdbc} (regra ArchUnit).
+ * {@code io.mohs.store.jdbc} (regra ArchUnit).
  *
  * <p>Este pacote carrega só o que é transversal — usado por mais de um
  * subpacote de recurso, então não pertence a nenhum em particular:

@@ -50,10 +50,10 @@ public class MohsApplication {
      */
     public static void main(String[] args) {
         SpringApplication app = new SpringApplication(MohsApplication.class);
+        // schema por conta do Flyway próprio do Mohs (ADR-0048) — o
+        // spring.sql.init que morava aqui saiu junto com a Phase 2
         app.setDefaultProperties(Map.of(
                 "spring.application.name", "mohs",
-                "spring.sql.init.schema-locations", "classpath:schema-h2.sql",
-                "spring.sql.init.mode", "always",
                 "mohs.jdbc.dialect", "h2"));
         app.run(args);
     }

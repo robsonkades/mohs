@@ -22,7 +22,7 @@ import com.tngtech.archunit.lang.SimpleConditionEvent;
 import com.tngtech.archunit.library.dependencies.SlicesRuleDefinition;
 import org.jspecify.annotations.NullMarked;
 
-import io.mohs.jdbc.DatabaseClock;
+import io.mohs.store.jdbc.DatabaseClock;
 
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -40,23 +40,47 @@ class ArchitectureTest {
     private static final DescribedPredicate<JavaClass> PUBLIC_API =
             JavaClass.Predicates.resideInAPackage("io.mohs..")
                     .and(DescribedPredicate.not(JavaClass.Predicates.resideInAnyPackage(
-                            "io.mohs.engine..", "io.mohs.jdbc..", "io.mohs.autoconfigure..",
+                            "io.mohs.engine..", "io.mohs.store.jdbc..", "io.mohs.autoconfigure..",
                             "io.mohs.rest..", "io.mohs.test..")));
 
     @ArchTest
     static final ArchRule internal_packages_do_not_leak_into_public_api =
         noClasses().that(PUBLIC_API)
-            .should().dependOnClassesThat().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..");
+            .should().dependOnClassesThat().resideInAnyPackage("io.mohs.engine..", "io.mohs.store.jdbc..");
 
     @ArchTest
     static final ArchRule rest_only_sees_public_api =
         noClasses().that().resideInAPackage("io.mohs.rest..")
-            .should().dependOnClassesThat().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..");
+            .should().dependOnClassesThat().resideInAnyPackage("io.mohs.engine..", "io.mohs.store.jdbc..");
 
     @ArchTest
     static final ArchRule test_kit_does_not_leak_into_production =
         noClasses().that().resideOutsideOfPackage("io.mohs.test..")
             .should().dependOnClassesThat().resideInAPackage("io.mohs.test..");
+
+    /**
+     * §18.2 do redesign (Phase 2): o engine nunca vê JDBC — as portas dele
+     * são vocabulário puro e é o módulo de store quem fala SQL. O reator já
+     * impede o inverso (mohs-jdbc depende de mohs-engine); esta regra
+     * impede o vazamento por tipo (um {@code ResultSet} numa assinatura de
+     * porta, por exemplo).
+     */
+    @ArchTest
+    static final ArchRule engine_is_free_of_jdbc =
+        noClasses().that().resideInAPackage("io.mohs.engine..")
+            .should().dependOnClassesThat().resideInAnyPackage("java.sql..", "javax.sql..");
+
+    /**
+     * §18.2 do redesign (Phase 2): só o starter conhece auto-configuration
+     * — nenhum outro módulo pode crescer um {@code @AutoConfiguration}
+     * escondido. Exceção única e nominal: o bootstrap do app demo
+     * ({@code MohsApplication}), que é aplicação, não biblioteca.
+     */
+    @ArchTest
+    static final ArchRule only_the_starter_speaks_boot_autoconfigure =
+        noClasses().that().resideOutsideOfPackage("io.mohs.autoconfigure..")
+            .and(DescribedPredicate.not(JavaClass.Predicates.equivalentTo(MohsApplication.class)))
+            .should().dependOnClassesThat().resideInAPackage("org.springframework.boot.autoconfigure..");
 
     /**
      * {@link DatabaseClock} é a única exceção: é o próprio relógio
@@ -75,7 +99,7 @@ class ArchitectureTest {
      */
     @ArchTest
     static final ArchRule engine_never_reads_wall_clock_directly =
-        noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..")
+        noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.store.jdbc..")
             .and(DescribedPredicate.not(IS_DATABASE_CLOCK))
             .should().callMethod(Instant.class, "now")
             .orShould().callMethod(System.class, "currentTimeMillis");
@@ -94,7 +118,7 @@ class ArchitectureTest {
      */
     @ArchTest
     static final ArchRule no_synchronized_methods_in_concurrency_critical_code =
-        noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..")
+        noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.store.jdbc..")
             .should(new ArchCondition<JavaClass>("declare no synchronized methods") {
                 @Override
                 public void check(JavaClass javaClass, ConditionEvents events) {
@@ -108,7 +132,7 @@ class ArchitectureTest {
     /** "ScopedValue em vez de ThreadLocal" (CLAUDE.md). */
     @ArchTest
     static final ArchRule no_thread_local_in_concurrency_critical_code =
-        noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.jdbc..")
+        noClasses().that().resideInAnyPackage("io.mohs.engine..", "io.mohs.store.jdbc..")
             .should().dependOnClassesThat().belongToAnyOf(ThreadLocal.class, InheritableThreadLocal.class);
 
     /**
