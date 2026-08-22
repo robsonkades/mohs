@@ -2428,6 +2428,32 @@ harness are checkpoint-noisy and are NOT evidence — WAL per execution remains
 E1's job. E3's declared 32-claimer point was not run: the degradation the
 criterion asks about already shows at 16, which decides it.
 
+**E1 results (2026-08-22, BASELINE "E1 — replay fim a fim nos dois schemas"):**
+`TableSplitExperimentHarness` replayed the 500 k lifecycle on both schemas,
+three arms (current via the real store/claimer; split with per-execution
+completion; split + §7.6 group commit), three rounds — rounds 1→3 were
+measurement-methodology fixes (round 1's trivial payload was the adversarial
+case for the WAL metric; round 2 exposed that idle pooled backends never
+flush pg_stat pending counters, inflating the split's numbers; round 3, with
+connections evicted before every snapshot, closes the books at exactly
+1.000 counters/execution). Round of record (491 B payload): **throughput
+passes** — end-to-end 1.79× (≥ 1.5×), drain 25.8× (5.3 k → 136.6 k exec/s);
+**§3.3 confirmed exactly** — big-table tuple versions 4.00 → 2.00; **the WAL
+kill criterion FIRES** — lifecycle WAL 3,829 → 2,437 B/exec = −36.4%, short
+of the ≥ 40% bar (payload-dependent by construction: −31.6% at `'{}'`,
+growing with inline payload, regime-inverting past ~2 KB via TOAST).
+Attribution the ADR must carry: split WITHOUT group commit clears neither
+bar (1.46× / −35.3%) — the throughput is ADR-C's, which Phase 3 also delivers
+on the current schema; what only the split buys is ~−1 KB WAL/exec, exactly
+two versions on the big table, and being the prerequisite of E3's validated
+sharding. **Decision (2026-08-22): ADR-A stands with a revised gate** — the
+−40% WAL bar was a point prediction of a payload-dependent quantity; the gate
+becomes the measured reality: end-to-end throughput ≥ 1.5× (measured 1.79×),
+exactly 2 big-table tuple versions (measured 2.00), WAL/execution down ≥ 30%
+across the inline-payload range (measured −31.6% to −36.4%). ADR-A itself is
+still born with Phase 5, carrying this result and its attribution — no
+round 4 to rescue the original number.
+
 **Two things that need measurement but do not gate the design:**
 
 - The `/overview/stream` endpoint, which `DASHBOARD-STREAM-REVIEW.md` correctly notes

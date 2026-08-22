@@ -837,12 +837,122 @@ em `mohs-benchmark/docs/performance/explain-e2-ready-claim.txt`.
   mediana de 3) — os valores de 1 claimer variaram até 2,7× entre
   rodadas e não sustentam conclusão nenhuma.
 
+## E1 — replay fim a fim nos dois schemas (Phase 1 do redesign) — 2026-08-22
+
+Experimento E1 do `ARCHITECTURE_REDESIGN_PLAN.md` §20.3 — o gate da
+Phase 5 (ADR-A, o split de tabelas do §7). `TableSplitExperimentHarness`
+(`mohs-benchmark`), Postgres 16 (Testcontainers), mesmo container por
+run: replay do MESMO workload de 500k execuções fim a fim (enqueue →
+claim → conclusão), 100 jobs on-demand sem cap, 8 claimers, batch 100,
+dispatch ≤ 256, pool Hikari 100, mediana de 3 por braço, warmup de JVM
+descartado, `ANALYZE` pós-seed, `max_wal_size` 16GB via `ALTER SYSTEM`
+(checkpoint fora da janela; FPI residual reportado por fase). Três
+braços: **current** (caminho real — `JdbcExecutionStore.insert/markFired/
+complete` + `JdbcClaimer`), **split-sync** (schema §7.2 `e1_ready`/
+`e1_lease`/`e1_execution`/`e1_attempt` particionadas, claim single-shard
+round-robin do E2 com leitura batched de payload, conclusão em transação
+própria — a ADR-A isolada) e **split-group** (idem + group commit §7.6,
+flush 256 via `unnest` com a cerca `RETURNING` — o alvo do plano, onde
+os kill criteria se avaliam).
+
+### As três rodadas foram refinamento de metodologia, cada delta com causa
+
+- **Rodada 1** (payload `'{}'`): vazão drain 28,8×, WAL −31,6%, tuple
+  versions 3,99→1,94. Dois defeitos de medição: payload trivial é o caso
+  adversarial para WAL (o PG loga a tupla INTEIRA por versão — as ~3
+  versões/exec do current crescem com o payload, a ~1 do split não) e
+  ~6% dos contadores do braço group (drain de 3,3s) não tinham chegado
+  ao `pg_stat` no snapshot. Artefato:
+  `mohs-benchmark/docs/performance/e1-table-split-results-round1.txt`.
+- **Rodada 2** (payload 491 B + loop de estabilização de snapshot): fim a
+  fim 1,80×, WAL −41,2%. Mas os deltas de tabela do group ainda perdiam
+  ~16%: backend idle do pool NÃO descarrega stats pendentes (o
+  `pgstat_report_stat` roda antes do sono com throttle de 1s; quem
+  termina o último comando e fica idle segura os pendentes para sempre)
+  — o loop "convergia" num estado estável-porém-incompleto, e o WAL usa
+  o mesmo mecanismo de flush, então o −41,2% estava inflado a favor do
+  split. Artefato: `...-round2.txt`.
+- **Rodada 3 — registro** (+ `softEvictConnections` antes de cada
+  snapshot: backend encerrado descarrega tudo no
+  `pgstat_beshutdown_hook`): contadores fecham em 1,000/execução exatos
+  nos quatro grupos de tabela. Artefato:
+  `mohs-benchmark/docs/performance/e1-table-split-results.txt`.
+
+### Rodada 3 (medianas; payload 491 B)
+
+| braço | fase | s | exec/s | WAL B/exec | WAL rec/exec |
+|---|---|---:|---:|---:|---:|
+| current | enqueue | 23,7 | 21.056 | 1.100 | 7,04 |
+| current | drain | 94,5 | 5.291 | 2.729 | 21,67 |
+| split-sync | enqueue | 63,4 | 7.887 | 1.237 | 8,13 |
+| split-sync | drain | 64,9 | 7.707 | 1.240 | 13,74 |
+| split-group | enqueue | 62,5 | 8.003 | 1.234 | 8,07 |
+| split-group | drain | 3,7 | 136.583 | 1.203 | 12,59 |
+
+Deltas de tabela por execução (ciclo completo): current
+`mohs_executions` ins 1,00 + upd 3,00 (HOT 0,55); split `e1_execution`
+ins 1,00 + upd 1,00 (HOT 0,76-0,79), `e1_ready` e `e1_lease` ins 1,00 +
+del 1,00 cada.
+
+### Vereditos
+
+- **Vazão: PASSA.** Fim a fim (enqueue+drain, a leitura do §20.3):
+  split-group/current = **1,79×** (critério ≥ 1,5×). Drain isolado:
+  **25,8×** (5,3k → 136,6k exec/s — o drain do group não paga commit por
+  execução). split-sync sozinho: 1,46× — abaixo da barra.
+- **WAL: o kill criterion DISPARA.** Ciclo completo 3.829 → 2.437
+  B/exec = **−36,4%**, abaixo da barra de ≥ 40% (split-sync: −35,3%). A
+  redução é função do tamanho do payload por construção: −31,6% com
+  `'{}'` (rodada 1), −36,4% com 491 B; cresce com payload inline maior
+  (o current reescreve a tupla inteira ~3×, o split ~1×) e inverte de
+  regime acima de ~2 KB (TOAST tira o payload da tupla — os UPDATEs do
+  current param de reescrevê-lo). 491 B é escolha declarada de ponto de
+  operação, não constante da natureza.
+- **§3.3 (falsificável do plano): CONFIRMADO EXATO.** Tuple versions na
+  tabela grande 4,00 → **2,00** (insert + update terminal; falsificaria
+  se > 3).
+- **Atribuição que a ADR-A deve carregar:** o split SEM group commit não
+  passa o E1 (1,46× / −35,3%) — a vazão vem da ADR-C (§7.6), e a Phase 3
+  entrega group commit também no schema atual. O que só o split dá:
+  −1 KB/exec de WAL, 2 versões exatas na tabela grande (histórico não
+  contamina mais o heap do claim), e ser o pré-requisito do sharding que
+  o E3 já validou (487k rows/s a 16 claimers).
+
+### Limitações declaradas
+
+- O braço current NÃO paga a cerimônia de leitura do Dispatcher real
+  (~1,9 round trips autocommit/exec, Phase 0) — viés a favor do current;
+  e roda com pool 100/dispatch 256, abaixo do ponto de operação
+  (300/1024). Os 5,3k exec/s de drain aqui não são comparáveis aos
+  3,0-4,2k fim a fim do app real.
+- No braço group o flush roda no thread do claimer (o design real usa
+  fila) — viés contra o split-group.
+- Replay de nó único: reaper, retry e renovação de lease não exercitados;
+  vazio → cheio → vazio, não regime permanente (o vacuum tail entra só
+  parcialmente, dentro da janela de estabilização do snapshot).
+- O evict de conexões pré-snapshot faz cada fase recriar o pool dentro da
+  janela seguinte (<1% do tempo de fase, simétrico entre braços).
+- Decisão de registro: mediana escolhida por vazão de drain; o WAL do
+  run mediano é o reportado (todas as rodadas impressas no artefato).
+- **Governança do resultado:** rodadas 1→3 foram correção de metodologia
+  (payload, depois flush); o −36,4% da rodada 3 é o número honesto e não
+  haverá rodada 4 para "recuperar" o veredito.
+- **Decisão (2026-08-22): ADR-A mantida, gate revisado.** O −40% era
+  previsão pontual de uma grandeza payload-dependente; o gate da ADR-A
+  passa a ser o medido: vazão fim a fim ≥ 1,5× (medido 1,79×), exatas 2
+  tuple versions na tabela grande (§3.3, medido 2,00) e queda de WAL
+  ≥ 30% na faixa de payload inline (medido −31,6% a −36,4%). A ADR-A em
+  si nasce com a Phase 5, carregando este resultado e a atribuição acima
+  (o ganho de vazão é da ADR-C; o split é o pré-requisito do sharding do
+  E3 e da retenção por partição).
+
 ## Como reproduzir
 
 Os harnesses moram em `mohs-benchmark` desde 2026-08-21 (Phase 0 do
 redesign — antes viviam nos test sources de `mohs-jdbc`):
 
 ```
+./mvnw -pl mohs-benchmark test -Dtest=TableSplitExperimentHarness   # E1 (~17 min, 3 braços × 3)
 ./mvnw -pl mohs-benchmark test -Dtest=ClaimQueryLoadHarness
 ./mvnw -pl mohs-benchmark test -Dtest=ClaimQueryExplainHarness
 ./mvnw -pl mohs-benchmark test -Dtest=ClaimIndexTuningHarness#postgres
