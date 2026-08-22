@@ -117,6 +117,7 @@ public final class Engine implements MohsLifecycle {
     private final Clock clock;
     private final EngineSettings settings;
     private final String nodeId;
+    private final EngineMetrics metrics;
 
     private final AtomicReference<EngineState> state = new AtomicReference<>(EngineState.CREATED);
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
@@ -152,7 +153,8 @@ public final class Engine implements MohsLifecycle {
             Clock clock,
             EngineSettings settings,
             TaskScheduler tickScheduler,
-            RunnerRegistry runnerRegistry
+            RunnerRegistry runnerRegistry,
+            EngineMetrics metrics
     ) {
         this.claimer = Objects.requireNonNull(claimer, "claimer");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
@@ -166,7 +168,9 @@ public final class Engine implements MohsLifecycle {
         this.firingPlanner = new FiringPlanner(new NextFireCalculator(), settings.misfireThreshold());
         this.tickScheduler = Objects.requireNonNull(tickScheduler, "tickScheduler");
         this.runnerRegistry = Objects.requireNonNull(runnerRegistry, "runnerRegistry");
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.nodeId = UUIDv7.randomUUID().toString();
+        metrics.bindNodeGauges(inFlightAttempts::size, settings.dispatchConcurrency());
     }
 
     @Override
@@ -361,6 +365,7 @@ public final class Engine implements MohsLifecycle {
                 return;
             }
             for (Reaper.Reclaimed reclaimed : reaper.reclaimExpired()) {
+                metrics.leaseReclaimed(reclaimed.execution().state(), reclaimed.attemptsExhausted());
                 publishReclaimOutcome(reclaimed);
             }
             purgeStaleNodeRows();
@@ -418,7 +423,9 @@ public final class Engine implements MohsLifecycle {
             if (claimLimit <= 0) {
                 return;
             }
+            long claimStartNanos = System.nanoTime();
             List<Execution> claimed = claimer.claim(nodeId, claimLimit);
+            metrics.claimRound(System.nanoTime() - claimStartNanos, claimed.size());
             for (Execution execution : claimed) {
                 submitDispatch(execution, definitionsByKey);
             }

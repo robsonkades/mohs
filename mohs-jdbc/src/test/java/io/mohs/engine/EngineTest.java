@@ -25,6 +25,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 import ch.qos.logback.core.read.ListAppender;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.h2.jdbcx.JdbcDataSource;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
@@ -131,10 +132,11 @@ class EngineTest {
             RunnerRegistry runnerRegistry, EngineSettings settings) {
         JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
-        Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor);
+        EngineMetrics metrics = new EngineMetrics(new SimpleMeterRegistry());
+        Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor, metrics);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
         return new Engine(claimer, dispatcher, executionStore, jobStore, nodeStoreOverride, reaper,
-                new JdbcTriggerFirer(dataSource, executionStore), clock, settings, tickScheduler, runnerRegistry);
+                new JdbcTriggerFirer(dataSource, executionStore), clock, settings, tickScheduler, runnerRegistry, metrics);
     }
 
     private JdbcClaimer newClaimer(Duration leaseTtl) {
@@ -210,11 +212,12 @@ class EngineTest {
         JdbcClaimer claimer = newClaimer(LEASE_TTL);
         JdbcReaper reaper = new JdbcReaper(dataSource, new H2JdbcDialect(), clock, executionStore, jobStore);
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
-        Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor);
+        EngineMetrics metrics = new EngineMetrics(new SimpleMeterRegistry());
+        Dispatcher dispatcher = new Dispatcher(executionStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor, metrics);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
         return new Engine(claimer, dispatcher, executionStoreOverride, jobStoreOverride, nodeStoreOverride, reaper,
                 new JdbcTriggerFirer(dataSource, executionStore), clock,
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), tickScheduler, defaultRunnerRegistry());
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), tickScheduler, defaultRunnerRegistry(), metrics);
     }
 
     private void seedEnqueuedExecution(String id, String jobKey, Object payload) {

@@ -18,6 +18,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.Mohs;
@@ -31,6 +33,7 @@ import io.mohs.engine.BatchStore;
 import io.mohs.engine.Claimer;
 import io.mohs.engine.Dispatcher;
 import io.mohs.engine.Engine;
+import io.mohs.engine.EngineMetrics;
 import io.mohs.engine.EngineSettings;
 import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.ExecutionWindowRegistry;
@@ -249,6 +252,17 @@ public class MohsAutoConfiguration {
         return new HandlerRegistry();
     }
 
+    /**
+     * §14.4 do redesign: métricas sempre ligadas. O host com Micrometer no
+     * contexto (actuator) enxerga tudo em {@code mohs.*}; sem registry, um
+     * {@link SimpleMeterRegistry} local mantém o engine idêntico — inerte
+     * para o host, sem caminho condicional no código quente.
+     */
+    @Bean
+    public EngineMetrics mohsEngineMetrics(ObjectProvider<MeterRegistry> meterRegistry) {
+        return new EngineMetrics(meterRegistry.getIfAvailable(SimpleMeterRegistry::new));
+    }
+
     @Bean
     public Dispatcher mohsDispatcher(
             ExecutionStore mohsExecutionStore,
@@ -257,9 +271,11 @@ public class MohsAutoConfiguration {
             @Qualifier("mohsClock") Clock mohsClock,
             List<ExecutionInterceptor> interceptors,
             List<ExecutionListener> listeners,
-            @Qualifier("mohsEventExecutor") AsyncTaskExecutor mohsEventExecutor
+            @Qualifier("mohsEventExecutor") AsyncTaskExecutor mohsEventExecutor,
+            EngineMetrics mohsEngineMetrics
     ) {
-        return new Dispatcher(mohsExecutionStore, mohsJobStore, mohsHandlerRegistry, mohsClock, interceptors, listeners, mohsEventExecutor);
+        return new Dispatcher(mohsExecutionStore, mohsJobStore, mohsHandlerRegistry, mohsClock, interceptors, listeners,
+                mohsEventExecutor, mohsEngineMetrics);
     }
 
     @Bean
@@ -274,14 +290,15 @@ public class MohsAutoConfiguration {
             @Qualifier("mohsClock") Clock mohsClock,
             MohsProperties properties,
             @Qualifier("mohsTickScheduler") ThreadPoolTaskScheduler mohsTickScheduler,
-            RunnerRegistry mohsRunnerRegistry
+            RunnerRegistry mohsRunnerRegistry,
+            EngineMetrics mohsEngineMetrics
     ) {
         MohsProperties.Engine engineProperties = properties.engine();
         EngineSettings settings = new EngineSettings(engineProperties.pollInterval(), engineProperties.batchSize(),
                 engineProperties.dispatchConcurrency(), engineProperties.claimRounds(), engineProperties.leaseTtl(),
                 engineProperties.watchdogTimeout(), engineProperties.misfireThreshold());
         return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper,
-                mohsTriggerFirer, mohsClock, settings, mohsTickScheduler, mohsRunnerRegistry);
+                mohsTriggerFirer, mohsClock, settings, mohsTickScheduler, mohsRunnerRegistry, mohsEngineMetrics);
     }
 
     /** {@link SmartLifecycle} — ver Javadoc de {@link MohsEngineLifecycle} sobre a adaptação e o WARN de lease × timeout. */

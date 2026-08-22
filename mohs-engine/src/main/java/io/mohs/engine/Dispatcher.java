@@ -1,6 +1,7 @@
 package io.mohs.engine;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -60,15 +61,18 @@ public final class Dispatcher {
     private final Clock clock;
     private final List<ExecutionInterceptor> interceptors;
     private final ExecutionEventPublisher events;
+    private final EngineMetrics metrics;
 
     public Dispatcher(ExecutionStore executionStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
-            List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor) {
+            List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
+            EngineMetrics metrics) {
         this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.interceptors = List.copyOf(Objects.requireNonNull(interceptors, "interceptors"));
         this.events = new ExecutionEventPublisher(Objects.requireNonNull(listeners, "listeners"), Objects.requireNonNull(eventExecutor, "eventExecutor"));
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
     }
 
     /** Forma sem fonte externa de cancelamento — sinal próprio, nada o levanta. Conveniência de teste e de chamador avulso. */
@@ -84,6 +88,7 @@ public final class Dispatcher {
 
         Instant firedAt = clock.instant();
         executionStore.markFired(execution.id(), firedAt);
+        metrics.dispatchLatency(execution.jobKey(), Duration.between(execution.scheduledAt(), firedAt));
 
         int attemptNumber = execution.attempts().size() + 1;
         JobContext ctx = new DefaultJobContext(execution.jobKey(), execution.id(), attemptNumber, execution.scheduledAt(), firedAt, signal);
@@ -309,6 +314,7 @@ public final class Dispatcher {
     private void completeOrDiscard(ExecutionStore.CompletionRequest request, Runnable publishEvents) {
         ExecutionStore.Completion completion = executionStore.complete(request, jobStore);
         if (completion.applied()) {
+            metrics.attemptFinished(request.jobKey(), request.attempt(), request.newState());
             publishEvents.run();
             publishBatchCompletedIfClosed(completion);
         } else {

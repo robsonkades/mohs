@@ -32,6 +32,12 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
         </dependency>
+        <!-- Métricas §14.4 do redesign (EngineMetrics). Facade neutra de framework,
+             sem transitivas de Spring; versão da BOM do Boot. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
         <!-- TaskExecutor/SimpleAsyncTaskExecutor (dispatch) e as exceções de acesso a dados
              que o motor propaga sem conhecer o backend. -->
         <dependency>

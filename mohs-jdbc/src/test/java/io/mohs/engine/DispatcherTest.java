@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.sql.DataSource;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.h2.jdbcx.JdbcDataSource;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
@@ -91,7 +92,8 @@ class DispatcherTest {
     }
 
     private Dispatcher newDispatcher(List<ExecutionInterceptor> interceptors) {
-        return new Dispatcher(executionStore, jobStore, handlerRegistry, clock, interceptors, List.of(listener), eventExecutor);
+        return new Dispatcher(executionStore, jobStore, handlerRegistry, clock, interceptors, List.of(listener), eventExecutor,
+                new EngineMetrics(new SimpleMeterRegistry()));
     }
 
     private Execution seedRunningExecution(String id, String jobKey) {
@@ -336,7 +338,7 @@ class DispatcherTest {
             throw new RuntimeException("listener blew up");
         };
         Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(),
-                List.of(throwingListener, listener), eventExecutor);
+                List.of(throwingListener, listener), eventExecutor, new EngineMetrics(new SimpleMeterRegistry()));
 
         dispatcher.dispatch(execution, onDemand("welcome-email"), "hello");
 
@@ -429,7 +431,8 @@ class DispatcherTest {
                 signal.requestCancellation(CancellationSignal.Reason.MANUAL, false));
         ExecutionStore blinkingStore = mock(ExecutionStore.class, delegatesTo(executionStore));
         doThrow(new RuntimeException("simulated database error on the success write")).when(blinkingStore).complete(any(), any());
-        Dispatcher dispatcher = new Dispatcher(blinkingStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener), eventExecutor);
+        Dispatcher dispatcher = new Dispatcher(blinkingStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener),
+                eventExecutor, new EngineMetrics(new SimpleMeterRegistry()));
 
         assertThatThrownBy(() -> dispatcher.dispatch(execution, onDemand("welcome-email"), "hello", signal))
                 .hasMessageContaining("simulated database error");
