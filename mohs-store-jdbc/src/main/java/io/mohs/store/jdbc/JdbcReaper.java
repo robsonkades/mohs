@@ -142,7 +142,7 @@ public final class JdbcReaper implements Reaper {
      * termina {@code CANCELLED} — o nó morreu, mas a ordem do operador já
      * estava dada; reagendar seria desobedecê-la (attempt {@code CANCELLED}
      * com error nulo, invariante de {@link Attempt}) — e job aposentado
-     * ({@code retired}) nunca reagenda: {@code RETRY_SCHEDULED} de job
+     * ({@code retired}) nunca reagenda: {@code RETRY_WAITING} de job
      * removido ficaria preso pra sempre (claim filtra retired, o cancel do
      * remove já passou). Todo request leva a posse observada —
      * {@code (node_id, fired_at)} — como fence anti-ABA (ADR-0051): se um
@@ -177,7 +177,7 @@ public final class JdbcReaper implements Reaper {
         }
         return RetrySchedule.nextRetryAt(attemptNumber, candidate.retries(), now)
                 .map(retryAt -> new ExecutionStore.CompletionRequest(id, jobKey, attempt,
-                        ExecutionState.RETRY_SCHEDULED, retryAt, candidate.fence()))
+                        ExecutionState.RETRY_WAITING, retryAt, candidate.fence()))
                 .orElseGet(() -> new ExecutionStore.CompletionRequest(id, jobKey, attempt, ExecutionState.FAILED, null,
                         candidate.fence(), rearmNextFireAt))
                 .inBatch(batchId);

@@ -32,7 +32,7 @@ public interface Reaper {
      * Reclama {@code Execution RUNNING} com lease expirada, até o teto por
      * ciclo da implementação: grava um {@code Attempt} {@code FAILED}
      * sintético ("lease expirada — node presumido morto") e transiciona
-     * para {@code RETRY_SCHEDULED} com backoff quando há orçamento
+     * para {@code RETRY_WAITING} com backoff quando há orçamento
      * (ADR-0033) ou {@code FAILED} terminal quando não há (ou o job foi
      * aposentado). O teto limita o lote de uma morte de nó em massa —
      * comportamento definido em toda borda; o excedente drena nos ciclos

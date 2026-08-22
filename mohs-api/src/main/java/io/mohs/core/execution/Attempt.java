@@ -20,7 +20,7 @@ public record Attempt(int number, Instant startedAt, @Nullable Instant finishedA
         }
         Objects.requireNonNull(startedAt, "startedAt");
         Objects.requireNonNull(outcome, "outcome");
-        if (outcome == ExecutionState.ENQUEUED || outcome == ExecutionState.RETRY_SCHEDULED) {
+        if (outcome == ExecutionState.ENQUEUED || outcome == ExecutionState.RETRY_WAITING) {
             throw new IllegalArgumentException(
                     "outcome " + outcome + " does not describe a single attempt's result — it describes the owning Execution's state");
         }

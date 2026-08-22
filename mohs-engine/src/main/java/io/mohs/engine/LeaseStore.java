@@ -29,8 +29,8 @@ import io.mohs.core.job.JobKey;
  */
 public interface LeaseStore {
 
-    /** Uma lease viva. {@code attemptNumber} veio da entrada de fila que o claim consumiu (§5.3). */
-    record Lease(ExecutionId executionId, JobKey jobKey, String nodeId, long epoch, int attemptNumber,
+    /** Uma lease viva. {@code attemptNumber} e {@code priority} vieram da entrada de fila que o claim consumiu (§5.3) — é o que deixa o reaper reconstruir a entrada de requeue sem ler a história. */
+    record Lease(ExecutionId executionId, JobKey jobKey, String nodeId, long epoch, int attemptNumber, int priority,
             Instant claimedAt, boolean cancelRequested) {
         public Lease {
             Objects.requireNonNull(executionId, "executionId");
@@ -56,12 +56,18 @@ public interface LeaseStore {
      * {@code mohs_ready}.
      * {@code executionCreatedAt} poda a partição do UPDATE advisory —
      * carregado em memória desde a leitura de payload (PLAN.md S5.1: a
-     * poda é por IGUALDADE; derivar do id só funciona pra UUIDv7 real).
+     * poda é por IGUALDADE; derivar do id só funciona pra UUIDv7 real);
+     * {@code null} = atualizar sem poda (caminho frio do reaper, que não
+     * carregou a história — o índice de {@code execution_id} sonda as
+     * partições). {@code batchId} faz a conclusão terminal contar no lote
+     * (ADR-0043) na MESMA transação, como sempre; {@code rearmNextFireAt}
+     * rearma a corrente fixed-delay (ADR-0035) idem — escrita separada
+     * entre o commit e um crash se perderia.
      */
     record CompletionResult(ExecutionId executionId, JobKey jobKey, String nodeId, long epoch, int attemptNumber,
             Instant startedAt, Instant finishedAt, ExecutionState outcome, @Nullable String errorType, @Nullable String error,
-            @Nullable ExecutionState terminalState, Instant executionCreatedAt,
-            WorkQueue.@Nullable ReadyEntry retry) {
+            @Nullable ExecutionState terminalState, @Nullable Instant executionCreatedAt,
+            WorkQueue.@Nullable ReadyEntry retry, @Nullable String batchId, @Nullable Instant rearmNextFireAt) {
         public CompletionResult {
             Objects.requireNonNull(executionId, "executionId");
             Objects.requireNonNull(jobKey, "jobKey");
@@ -69,7 +75,6 @@ public interface LeaseStore {
             Objects.requireNonNull(outcome, "outcome");
             Objects.requireNonNull(startedAt, "startedAt");
             Objects.requireNonNull(finishedAt, "finishedAt");
-            Objects.requireNonNull(executionCreatedAt, "executionCreatedAt");
             if (terminalState != null && retry != null) {
                 throw new IllegalArgumentException("a result is terminal OR schedules a retry — never both");
             }
@@ -77,23 +82,65 @@ public interface LeaseStore {
                 throw new IllegalArgumentException("a non-terminal result must carry the retry entry — "
                         + "without it the execution would end up owned by nobody and queued nowhere");
             }
+            if (terminalState == null && rearmNextFireAt != null) {
+                throw new IllegalArgumentException("rearmNextFireAt only applies to terminal results — the retry chain is still alive");
+            }
+        }
+
+        /** Forma sem lote nem rearme — a maioria das conclusões. */
+        public CompletionResult(ExecutionId executionId, JobKey jobKey, String nodeId, long epoch, int attemptNumber,
+                Instant startedAt, Instant finishedAt, ExecutionState outcome, @Nullable String errorType,
+                @Nullable String error, @Nullable ExecutionState terminalState, @Nullable Instant executionCreatedAt,
+                WorkQueue.@Nullable ReadyEntry retry) {
+            this(executionId, jobKey, nodeId, epoch, attemptNumber, startedAt, finishedAt, outcome, errorType, error,
+                    terminalState, executionCreatedAt, retry, null, null);
+        }
+    }
+
+    /**
+     * O que a conclusão produziu (mesmo contrato da era pré-split,
+     * ADR-0043/0047): {@code owned} é o veredito do fence — falso quando a
+     * encarnação já era de outro (reaper/requeue passou antes) e NADA foi
+     * gravado; {@code closedBatch} só vem preenchido pra ÚNICA conclusão
+     * que zerou os pendentes do lote — o saldo sobe da própria transação,
+     * nunca de releitura (duas releituras concorrentes se achariam ambas a
+     * fechadora).
+     */
+    record Completion(boolean owned, @Nullable BatchCounters closedBatch) {
+
+        public static final Completion FENCED_OUT = new Completion(false, null);
+
+        public static Completion owned(@Nullable BatchCounters closedBatch) {
+            return new Completion(true, closedBatch);
         }
     }
 
     /**
      * A transação de conclusão (§7.5-3, em lote §7.6): {@code DELETE} das
-     * leases cercado por {@code (node_id, epoch)} — o {@code RETURNING}
-     * diz exatamente quais este chamador ainda possuía —, {@code INSERT}
-     * dos attempts confirmados e {@code UPDATE} terminal advisory da
-     * história (podado por partição via {@code executionCreatedAt}).
-     * Devolve os ids cujo fence VENCEU; um resultado fora do conjunto foi
-     * de encarnação perdida (reaper/requeue passou antes) e é descartado —
-     * detectado, nunca silenciosamente perdido (§7.6).
+     * leases cercado por {@code (node_id, epoch)} — a contagem diz
+     * exatamente quais este chamador ainda possuía —, {@code INSERT} dos
+     * attempts confirmados, {@code UPDATE} terminal advisory da história
+     * (podado por partição via {@code executionCreatedAt}), contagem de
+     * lote (ADR-0043) e rearme fixed-delay (ADR-0035) — tudo ou nada.
+     * Resultado com {@code owned = false} foi de encarnação perdida e é
+     * descartado — detectado, nunca silenciosamente perdido (§7.6).
+     * {@code jobStore} entra pelo mesmo motivo da era pré-split: o rearme
+     * participa da transação por compartilhar o {@code DataSource}.
      */
-    Set<ExecutionId> complete(List<CompletionResult> results);
+    Map<ExecutionId, Completion> complete(List<CompletionResult> results, JobStore jobStore);
 
-    /** As leases destes nós — a matéria-prima do reaper (nós mortos) e do drain visível em {@code GET /nodes}. */
+    /** As leases destes nós — a matéria-prima do drain visível em {@code GET /nodes}. */
     List<Lease> findByNodes(Collection<String> nodeIds);
+
+    /**
+     * As leases cujo dono NÃO está em {@code aliveNodeIds} — a seleção de
+     * candidatos do reaper (ADR-0051 sobre a mesa nova): node ausente da
+     * lista é morto por definição (linha purgada, promessa vencida — quem
+     * decide vivo/morto é o chamador, lendo {@code mohs_nodes}). Limitada
+     * a {@code limit} por chamada, mais antiga primeiro ({@code claimed_at})
+     * — morte em massa drena em passadas, nunca numa transação sem teto.
+     */
+    List<Lease> findOrphaned(Collection<String> aliveNodeIds, int limit);
 
     /** Cap derivado (§5.7): contagem por job das leases vivas, lida UMA vez por rodada — nunca por candidato. */
     Map<JobKey, Integer> countByJob(Collection<JobKey> jobKeys);

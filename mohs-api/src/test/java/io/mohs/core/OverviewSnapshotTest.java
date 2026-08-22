@@ -23,7 +23,7 @@ class OverviewSnapshotTest {
         assertThat(snapshot.executionCountsByState()).containsExactly(
                 entry(ExecutionState.ENQUEUED, 0L),
                 entry(ExecutionState.RUNNING, 3L),
-                entry(ExecutionState.RETRY_SCHEDULED, 0L));
+                entry(ExecutionState.RETRY_WAITING, 0L));
     }
 
     /** A defesa em código da decisão do doc v0.6: contagem all-time de terminal não entra — histórico sem teto numa âncora de polling. */

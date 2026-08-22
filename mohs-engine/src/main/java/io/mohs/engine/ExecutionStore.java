@@ -94,12 +94,12 @@ public interface ExecutionStore {
 
     /**
      * Transiciona uma {@code Execution RUNNING} para um estado terminal ou
-     * para {@code RETRY_SCHEDULED} (ADR-0033), grava o {@link Attempt} e
+     * para {@code RETRY_WAITING} (ADR-0033), grava o {@link Attempt} e
      * libera a vaga de concorrência do job na mesma operação
      * ({@code JobStore.decrementRunningExecutions}, ADR-0025) — único
      * caminho de conclusão, usado tanto pelo reclaim do reaper (ADR-0012)
      * quanto pelo dispatch normal. Quando o destino é
-     * {@code RETRY_SCHEDULED}, {@link CompletionRequest#retryAt} vira o
+     * {@code RETRY_WAITING}, {@link CompletionRequest#retryAt} vira o
      * novo {@code scheduled_at} na mesma transição: o backoff aterrissa
      * junto do CAS, nunca numa escrita separada que poderia se perder.
      *
@@ -162,13 +162,13 @@ public interface ExecutionStore {
     /**
      * Um pedido de conclusão — a forma única de {@link #complete} e
      * {@link #completeAll}. {@code retryAt} anda junto do estado que o
-     * exige: {@code RETRY_SCHEDULED} sem hora de retry seria re-claim
+     * exige: {@code RETRY_WAITING} sem hora de retry seria re-claim
      * imediato sem backoff, e hora de retry num estado terminal seria
      * escrita silenciosamente ignorada — as duas combinações são bug do
      * chamador, rejeitadas na construção.
      *
      * <p>{@code fence} é o cercamento de posse (ADR-0033 revista pela
-     * ADR-0051; DDIA cap. 8): com {@code RETRY_SCHEDULED} re-claimável,
+     * ADR-0051; DDIA cap. 8): com {@code RETRY_WAITING} re-claimável,
      * "state = RUNNING" deixou de identificar <em>qual</em> encarnação
      * está rodando. O token é {@code (node_id, fired_at)} — desde a
      * ADR-0047 o claim grava {@code fired_at} no próprio CAS, então o par
@@ -185,7 +185,7 @@ public interface ExecutionStore {
      * crash se perde. Quem calcula é quem tem a definição em mãos
      * (Dispatcher/reaper); só se aplica se o CAS vencer, guardado por
      * {@code next_fire_at IS NULL} ({@code JobStore#armNextFire}).
-     * {@code RETRY_SCHEDULED} nunca rearma — a corrente continua pelo
+     * {@code RETRY_WAITING} nunca rearma — a corrente continua pelo
      * retry.
      */
     record CompletionRequest(ExecutionId id, JobKey jobKey, Attempt attempt, ExecutionState newState,
@@ -197,13 +197,13 @@ public interface ExecutionStore {
             Objects.requireNonNull(jobKey, "jobKey");
             Objects.requireNonNull(attempt, "attempt");
             Objects.requireNonNull(newState, "newState");
-            if (newState == ExecutionState.RETRY_SCHEDULED && retryAt == null) {
-                throw new IllegalArgumentException("RETRY_SCHEDULED requires retryAt — the rescheduled scheduled_at is the backoff");
+            if (newState == ExecutionState.RETRY_WAITING && retryAt == null) {
+                throw new IllegalArgumentException("RETRY_WAITING requires retryAt — the rescheduled scheduled_at is the backoff");
             }
-            if (newState != ExecutionState.RETRY_SCHEDULED && retryAt != null) {
-                throw new IllegalArgumentException("retryAt only applies to RETRY_SCHEDULED, got " + newState);
+            if (newState != ExecutionState.RETRY_WAITING && retryAt != null) {
+                throw new IllegalArgumentException("retryAt only applies to RETRY_WAITING, got " + newState);
             }
-            if (newState == ExecutionState.RETRY_SCHEDULED && rearmNextFireAt != null) {
+            if (newState == ExecutionState.RETRY_WAITING && rearmNextFireAt != null) {
                 throw new IllegalArgumentException("rearmNextFireAt only applies to terminal states — the retry chain is still alive");
             }
         }
@@ -267,7 +267,7 @@ public interface ExecutionStore {
 
     /**
      * Cancela uma execução que ainda não roda — CAS
-     * {@code ENQUEUED/RETRY_SCHEDULED → CANCELLED}, o mesmo padrão que
+     * {@code ENQUEUED/RETRY_WAITING → CANCELLED}, o mesmo padrão que
      * {@code JobStore.remove} aplica por job (ADR-0034, por id). Perde para
      * qualquer claim concorrente (a linha já virou {@code RUNNING}) — o
      * chamador então cai no caminho da flag ({@link #requestCancellation}).
@@ -292,7 +292,7 @@ public interface ExecutionStore {
 
     /**
      * Retry manual do operador (M3 sobre a ADR-0033): CAS
-     * {@code FAILED → RETRY_SCHEDULED} reescrevendo {@code scheduled_at} —
+     * {@code FAILED → RETRY_WAITING} reescrevendo {@code scheduled_at} —
      * dali em diante a execução viaja pelo caminho normal do claim, como
      * qualquer retry. Bypassa o orçamento de {@code retries} de propósito:
      * a política protege o sistema de loops automáticos; aqui quem decide é
@@ -357,7 +357,7 @@ public interface ExecutionStore {
 
     /**
      * Contagem por estado do trabalho vivo — {@code ENQUEUED}, {@code
-     * RUNNING} e {@code RETRY_SCHEDULED}; estado sem linha pode ficar fora
+     * RUNNING} e {@code RETRY_WAITING}; estado sem linha pode ficar fora
      * do mapa OU vir presente com zero — ausente e zero são a mesma
      * informação, quem normaliza é o chamador ({@code OverviewSnapshot});
      * nenhuma implementação deve tratar as duas formas como distintas. Alimenta
@@ -372,7 +372,7 @@ public interface ExecutionStore {
     /**
      * Contagem de attempts terminais ({@code SUCCEEDED}/{@code FAILED})
      * com {@code finished_at >= since} — a vazão da janela recente de
-     * {@code GET /overview}. Outcome {@code RETRY_SCHEDULED} não conta
+     * {@code GET /overview}. Outcome {@code RETRY_WAITING} não conta
      * (não é desfecho, a execução continua viva no backlog), e attempt sem
      * {@code finished_at} (reclaim do reaper sem hora de fim conhecida)
      * fica fora da janela por construção. Ausente = zero, como em

@@ -257,7 +257,7 @@ public final class JdbcJobStore implements JobStore {
     private boolean hasLiveSchedulerOccurrence(JobKey key) {
         Integer live = jdbcTemplate.queryForObject("""
                 SELECT COUNT(*) FROM mohs_executions
-                WHERE job_key = :jobKey AND actor = :actor AND state IN ('ENQUEUED', 'RETRY_SCHEDULED', 'RUNNING')
+                WHERE job_key = :jobKey AND actor = :actor AND state IN ('ENQUEUED', 'RETRY_WAITING', 'RUNNING')
                 """,
                 new MapSqlParameterSource("jobKey", key.value()).addValue("actor", Execution.SCHEDULER_ACTOR),
                 Integer.class);
@@ -430,12 +430,12 @@ public final class JdbcJobStore implements JobStore {
         transactionTemplate.executeWithoutResult(_ -> {
             MapSqlParameterSource jobParam = new MapSqlParameterSource("jobKey", key.value());
             List<Map<String, Object>> membersPerBatch = pendingBatchMembers(jobParam);
-            // os DOIS estados claimáveis (ADR-0033) — RETRY_SCHEDULED fora daqui
+            // os DOIS estados claimáveis (ADR-0033) — RETRY_WAITING fora daqui
             // ficaria preso pra sempre: claim filtra retired, reaper só vê RUNNING
             // batch-counted: countCancelledMembers, com o agrupamento colhido antes deste UPDATE
             jdbcTemplate.update("""
                     UPDATE mohs_executions SET state = 'CANCELLED'
-                    WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+                    WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_WAITING')
                     """, jobParam);
             countCancelledMembers(membersPerBatch);
             jdbcTemplate.update("UPDATE mohs_job_definitions SET retired = :retired, updated_at = :now WHERE job_key = :jobKey",
@@ -503,7 +503,7 @@ public final class JdbcJobStore implements JobStore {
     private List<Map<String, Object>> pendingBatchMembers(MapSqlParameterSource jobParam) {
         return jdbcTemplate.queryForList("""
                 SELECT batch_id, COUNT(*) AS pending FROM mohs_executions
-                WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND batch_id IS NOT NULL
+                WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_WAITING') AND batch_id IS NOT NULL
                 GROUP BY batch_id ORDER BY batch_id
                 """, jobParam);
     }

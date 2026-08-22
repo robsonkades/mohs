@@ -1,9 +1,10 @@
 package io.mohs.store.jdbc;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 
 import javax.sql.DataSource;
@@ -34,13 +35,17 @@ class JdbcLeaseStoreTest {
     private JdbcTemplate rawJdbcTemplate;
     private JdbcLeaseStore store;
     private JdbcWorkQueue queue;
+    private JdbcJobStore jobStore;
 
     @BeforeEach
     void setUp() {
         DataSource dataSource = freshH2DataSource();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        store = new JdbcLeaseStore(dataSource, new H2JdbcDialect());
-        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect());
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
+        store = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
+        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
+        jobStore = new JdbcJobStore(dataSource, clock);
     }
 
     private static DataSource freshH2DataSource() {
@@ -72,10 +77,10 @@ class JdbcLeaseStoreTest {
     void completeDeletesTheLeaseRecordsTheAttemptAndUpdatesTheAdvisoryState() {
         seedLeased("exec-1", "job-a", "node-a", 1, 1);
 
-        Set<ExecutionId> owned = store.complete(List.of(
-                terminal("exec-1", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null)));
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(
+                terminal("exec-1", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null)), jobStore);
 
-        assertThat(owned).containsExactly(ExecutionId.of("exec-1"));
+        assertThat(verdicts.get(ExecutionId.of("exec-1")).owned()).isTrue();
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isZero();
         assertThat(rawJdbcTemplate.queryForObject(
                 "SELECT outcome FROM mohs_attempt WHERE execution_id = 'exec-1' AND number = 1", String.class))
@@ -89,10 +94,10 @@ class JdbcLeaseStoreTest {
     void completeWithAStaleEpochIsFencedOutEntirely() {
         seedLeased("exec-1", "job-a", "node-a", 2, 1);
 
-        Set<ExecutionId> owned = store.complete(List.of(
-                terminal("exec-1", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null)));
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(
+                terminal("exec-1", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null)), jobStore);
 
-        assertThat(owned).isEmpty();
+        assertThat(verdicts.get(ExecutionId.of("exec-1"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isEqualTo(1);
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_attempt", Integer.class)).isZero();
         assertThat(rawJdbcTemplate.queryForObject(
@@ -105,11 +110,12 @@ class JdbcLeaseStoreTest {
         seedLeased("exec-win", "job-a", "node-a", 1, 1);
         seedLeased("exec-lose", "job-a", "node-b", 5, 1);
 
-        Set<ExecutionId> owned = store.complete(List.of(
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(
                 terminal("exec-win", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null),
-                terminal("exec-lose", "job-a", "node-b", 4, 1, ExecutionState.SUCCEEDED, null, null)));
+                terminal("exec-lose", "job-a", "node-b", 4, 1, ExecutionState.SUCCEEDED, null, null)), jobStore);
 
-        assertThat(owned).containsExactly(ExecutionId.of("exec-win"));
+        assertThat(verdicts.get(ExecutionId.of("exec-win")).owned()).isTrue();
+        assertThat(verdicts.get(ExecutionId.of("exec-lose"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
         assertThat(rawJdbcTemplate.queryForList("SELECT execution_id FROM mohs_lease", String.class))
                 .containsExactly("exec-lose");
     }
@@ -119,13 +125,13 @@ class JdbcLeaseStoreTest {
     void completeWithARetryRebirthsTheReadyEntryAtomically() {
         seedLeased("exec-1", "job-a", "node-a", 1, 1);
 
-        Set<ExecutionId> owned = store.complete(List.of(new LeaseStore.CompletionResult(
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(new LeaseStore.CompletionResult(
                 ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-a", 1, 1,
                 NOW.minusSeconds(2), NOW, ExecutionState.FAILED, "java.lang.IllegalStateException", "boom",
                 null, CREATED_AT,
-                new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("job-a"), 0, 20, 2, NOW.plusSeconds(30)))));
+                new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("job-a"), 0, 20, 2, NOW.plusSeconds(30)))), jobStore);
 
-        assertThat(owned).containsExactly(ExecutionId.of("exec-1"));
+        assertThat(verdicts.get(ExecutionId.of("exec-1")).owned()).isTrue();
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isZero();
         assertThat(rawJdbcTemplate.queryForObject(
                 "SELECT error_type FROM mohs_attempt WHERE execution_id = 'exec-1'", String.class))
@@ -176,6 +182,6 @@ class JdbcLeaseStoreTest {
 
     @Test
     void completeOfNothingIsANoOp() {
-        assertThat(store.complete(List.of())).isEmpty();
+        assertThat(store.complete(List.of(), jobStore)).isEmpty();
     }
 }

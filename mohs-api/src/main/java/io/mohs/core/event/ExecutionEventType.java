@@ -10,7 +10,7 @@ public enum ExecutionEventType {
     ENQUEUED,
     STARTED,
     ATTEMPT_FAILED,
-    RETRY_SCHEDULED,
+    RETRY_WAITING,
     SUCCEEDED,
     FAILED,
     CANCELLED,

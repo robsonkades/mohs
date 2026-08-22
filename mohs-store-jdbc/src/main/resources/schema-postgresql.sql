@@ -65,11 +65,11 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
 -- state sai das colunas porque o WHERE já fixa esse valor (DBTUNE-5,
 -- medido: -95.2% Postgres / -84.2% SQL Server no tamanho do índice,
 -- throughput de claim estável — docs/performance/BASELINE.md).
--- ADR-0033: RETRY_SCHEDULED entrou no predicado do claim — índice parcial só é
+-- ADR-0033: RETRY_WAITING entrou no predicado do claim — índice parcial só é
 -- elegível quando o predicado da query IMPLICA o do índice; IN (E, R) não
 -- implica = E, e sem o par o plano degrada pra Seq Scan + Sort da tabela
 -- inteira a cada tick.
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED');
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_WAITING');
 -- Índice parcial pro reaper (DBTUNE-10): só a execução RUNNING é
 -- candidata a reclaim — mesmo raciocínio da DBTUNE-5, WHERE em vez de
 -- coluna porque o predicado já fixa o state.
@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS mohs_lease (
     node_id          VARCHAR(255) NOT NULL,
     epoch            BIGINT       NOT NULL,
     attempt_number   INT          NOT NULL,
+    priority         INT          NOT NULL DEFAULT 20, -- viaja fila->posse: o requeue do reaper reconstroi a entrada sem ler historia (S5.3)
     claimed_at       TIMESTAMPTZ  NOT NULL,
     cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE
 ) WITH (fillfactor = 70,
@@ -196,7 +197,8 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     PRIMARY KEY (created_at, execution_id)
 ) PARTITION BY RANGE (created_at);
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_id   ON mohs_execution (execution_id);
-CREATE INDEX IF NOT EXISTS idx_mohs_execution_job  ON mohs_execution (job_key, created_at DESC);
+-- (job_key, execution_id): serve o ORDER BY/cursor do findPage — ver o V3 do Postgres
+CREATE INDEX IF NOT EXISTS idx_mohs_execution_job  ON mohs_execution (job_key, execution_id DESC);
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_corr ON mohs_execution (correlation_id)
     WHERE correlation_id IS NOT NULL;
 

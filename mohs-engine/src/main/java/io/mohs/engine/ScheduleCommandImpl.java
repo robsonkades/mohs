@@ -15,21 +15,27 @@ import io.mohs.core.ScheduleCommand;
 import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
-import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
 
 /**
- * {@link ScheduleCommand} sobre {@link JobStore}/{@link ExecutionStore} —
- * acumula {@code priority}/{@code actor}/{@code idempotencyKey} até um
- * terminal ({@code now}/{@code at}/{@code after}) gravar a execução; uma
- * cadeia abandonada antes do terminal nunca toca o banco (mesmo contrato
- * documentado por {@code @CheckReturnValue} na interface).
+ * {@link ScheduleCommand} sobre as portas da Phase 5 — acumula
+ * {@code priority}/{@code actor}/{@code idempotencyKey} até um terminal
+ * ({@code now}/{@code at}/{@code after}) gravar a execução; uma cadeia
+ * abandonada antes do terminal nunca toca o banco.
+ *
+ * <p>O terminal é a unidade de enqueue do §7.5-1 — história + fila (+
+ * idempotência) numa ÚNICA transação via {@link StoreTransactions}, que se
+ * junta à transação do host quando existe (ADR-0003 §4). É o que torna
+ * estruturalmente impossível a chave órfã e a execução sem fila que o
+ * modo autocommit permitiria (review S5.2).
  */
 final class ScheduleCommandImpl implements ScheduleCommand {
 
     private final JobStore jobStore;
-    private final ExecutionStore executionStore;
+    private final HistoryStore historyStore;
+    private final WorkQueue workQueue;
+    private final StoreTransactions storeTransactions;
     private final Clock clock;
     private final JobKey jobKey;
     private final Object payload;
@@ -38,9 +44,12 @@ final class ScheduleCommandImpl implements ScheduleCommand {
     private String actor = MohsImpl.DEFAULT_ACTOR;
     private @Nullable String idempotencyKey;
 
-    ScheduleCommandImpl(JobStore jobStore, ExecutionStore executionStore, Clock clock, JobKey jobKey, Object payload) {
+    ScheduleCommandImpl(JobStore jobStore, HistoryStore historyStore, WorkQueue workQueue,
+            StoreTransactions storeTransactions, Clock clock, JobKey jobKey, Object payload) {
         this.jobStore = jobStore;
-        this.executionStore = executionStore;
+        this.historyStore = historyStore;
+        this.workQueue = workQueue;
+        this.storeTransactions = storeTransactions;
         this.clock = clock;
         this.jobKey = jobKey;
         this.payload = payload;
@@ -85,27 +94,31 @@ final class ScheduleCommandImpl implements ScheduleCommand {
     @Override
     public Enqueued at(Instant when) {
         Objects.requireNonNull(when, "when");
-        // job precisa existir antes do disparo, não só no boot — mohs_executions.job_key
-        // tem FK pra mohs_job_definitions; sem esta checagem, o erro que o chamador veria
-        // seria uma violação de FK crua, não uma mensagem que ensina.
+        // job precisa existir antes do disparo, não só no boot — sem esta
+        // checagem, o erro que o chamador veria seria cru, não uma mensagem
+        // que ensina.
         jobStore.find(jobKey).orElseThrow(() -> new IllegalArgumentException(
                 "no job registered for id '" + jobKey.value() + "' — call Mohs.define first"));
 
         ExecutionId id = ExecutionId.of(UUIDv7.randomUUIDString());
-        Execution execution = new Execution(id, jobKey, ExecutionState.ENQUEUED, when, null, List.of(), actor, priority, idempotencyKey);
+        Instant createdAt = clock.instant();
         try {
-            executionStore.insert(execution, payload);
+            storeTransactions.inTransaction(() -> {
+                historyStore.record(List.of(new HistoryStore.NewExecution(id, jobKey, 0, priority.value(),
+                        when, createdAt, actor, null, idempotencyKey, payload)));
+                workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, jobKey, 0, priority.value(), 1, when)));
+            });
             return new Enqueued(id, jobKey, when, actor);
         } catch (DuplicateKeyException e) {
             if (idempotencyKey == null) {
                 throw e;
             }
-            // Idempotent Receiver (EIP): o índice único uq_mohs_executions_idem
+            // Idempotent Receiver (EIP): o conflito de PK de mohs_idempotency
             // resolveu a corrida — devolve o recibo da execução original, mesma
             // resposta pro retry do cliente, zero duplicação. Corrida decidida
             // pelo banco, nunca por SELECT prévio (mesmo espírito do CONC-2).
-            Execution existing = executionStore.findByIdempotencyKey(jobKey, idempotencyKey)
-                    .orElseThrow(() -> e);
+            ExecutionId winner = historyStore.findByIdempotencyKey(jobKey, idempotencyKey).orElseThrow(() -> e);
+            Execution existing = historyStore.find(winner, clock.instant()).orElseThrow(() -> e);
             return new Enqueued(existing.id(), existing.jobKey(), existing.scheduledAt(), existing.actor());
         }
     }

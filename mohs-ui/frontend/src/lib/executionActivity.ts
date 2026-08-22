@@ -7,7 +7,7 @@ export interface ActivitySample {
   at: number;
   ENQUEUED: number;
   RUNNING: number;
-  RETRY_SCHEDULED: number;
+  RETRY_WAITING: number;
 }
 
 /**
@@ -56,7 +56,7 @@ export function recordActivitySample(asOf: string, counts: Partial<Record<Execut
     at,
     ENQUEUED: counts.ENQUEUED ?? 0,
     RUNNING: counts.RUNNING ?? 0,
-    RETRY_SCHEDULED: counts.RETRY_SCHEDULED ?? 0,
+    RETRY_WAITING: counts.RETRY_WAITING ?? 0,
   };
 
   // The retention predicate applies to what is already held, never to what is coming in — the new

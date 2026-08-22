@@ -79,7 +79,7 @@ CREATE TABLE mohs_executions (
 -- (DBTUNE-5, medido: -95.2% Postgres / -84.2% SQL Server no tamanho do
 -- índice, throughput de claim estável — docs/performance/BASELINE.md).
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_claim' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED'); -- ADR-0033: par de estados claimáveis, ver schema-postgresql.sql
+CREATE INDEX idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_WAITING'); -- ADR-0033: par de estados claimáveis, ver schema-postgresql.sql
 -- Índice filtrado pro reaper (DBTUNE-10): só a execução RUNNING é
 -- candidata a reclaim — mesmo raciocínio da DBTUNE-5, WHERE em vez de
 -- coluna porque o predicado já fixa o state.
@@ -177,6 +177,7 @@ CREATE TABLE mohs_lease (
     node_id          VARCHAR(255) NOT NULL,
     epoch            BIGINT       NOT NULL,
     attempt_number   INT          NOT NULL,
+    priority         INT          NOT NULL DEFAULT 20, -- viaja fila->posse: o requeue do reaper reconstroi a entrada sem ler historia (S5.3)
     claimed_at       DATETIME2    NOT NULL,
     cancel_requested BIT          NOT NULL DEFAULT 0,
     INDEX idx_mohs_lease_node NONCLUSTERED (node_id, epoch),
@@ -199,7 +200,7 @@ CREATE TABLE mohs_execution (
     payload         VARCHAR(MAX) NOT NULL,
     payload_type    VARCHAR(500) NOT NULL,
     INDEX idx_mohs_execution_created NONCLUSTERED (created_at),
-    INDEX idx_mohs_execution_job NONCLUSTERED (job_key, created_at DESC),
+    INDEX idx_mohs_execution_job NONCLUSTERED (job_key, execution_id DESC), -- ORDER BY/cursor do findPage — ver o V3 do Postgres
     INDEX idx_mohs_execution_corr NONCLUSTERED (correlation_id)
 );
 

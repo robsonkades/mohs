@@ -51,17 +51,17 @@ export function JobPausedBadge({ paused }: { paused: boolean }) {
 export const EXECUTION_STATE_TONE: Record<ExecutionState, Tone> = {
   ENQUEUED: "neutral",
   RUNNING: "info",
-  RETRY_SCHEDULED: "warning",
+  RETRY_WAITING: "warning",
   SUCCEEDED: "good",
   FAILED: "critical",
   CANCELLED: "cancelled",
 };
 
-/** RETRY_SCHEDULED has an underscore; titleCase alone would render "Retry_scheduled". */
+/** RETRY_WAITING has an underscore; titleCase alone would render "Retry_scheduled". */
 const EXECUTION_STATE_LABEL: Record<ExecutionState, string> = {
   ENQUEUED: "Enqueued",
   RUNNING: "Running",
-  RETRY_SCHEDULED: "Retry scheduled",
+  RETRY_WAITING: "Retry scheduled",
   SUCCEEDED: "Succeeded",
   FAILED: "Failed",
   CANCELLED: "Cancelled",

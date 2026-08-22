@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS mohs_lease (
     node_id          VARCHAR(255) NOT NULL,
     epoch            BIGINT       NOT NULL,
     attempt_number   INT          NOT NULL,
+    priority         INT          NOT NULL DEFAULT 20, -- viaja fila->posse: o requeue do reaper reconstroi a entrada sem ler historia (S5.3)
     claimed_at       TIMESTAMPTZ  NOT NULL,
     cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE
 ) WITH (fillfactor = 70,
@@ -68,7 +69,13 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     PRIMARY KEY (created_at, execution_id)  -- a partition key precisa liderar a PK (§7.3)
 ) PARTITION BY RANGE (created_at);
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_id   ON mohs_execution (execution_id); -- point lookup por id
-CREATE INDEX IF NOT EXISTS idx_mohs_execution_job  ON mohs_execution (job_key, created_at DESC);
+-- (job_key, execution_id) e não (job_key, created_at): o único consumidor de
+-- job_key aqui é o findPage, que ordena e pagina por execution_id (UUIDv7,
+-- time-ordered) — igualdade primeiro, ORDER BY depois serve listagem E cursor
+-- como Index Cond (medido no S5.3: 0.61 ms → 0.24 ms no job seletivo, e o
+-- plano vira O(limit) em vez de O(linhas do job)); created_at na 2ª posição
+-- não servia a query nenhuma (from/to filtra scheduled_at; retenção é DROP).
+CREATE INDEX IF NOT EXISTS idx_mohs_execution_job  ON mohs_execution (job_key, execution_id DESC);
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_corr ON mohs_execution (correlation_id)
     WHERE correlation_id IS NOT NULL;
 

@@ -9,7 +9,9 @@ import java.util.Optional;
 import org.jspecify.annotations.Nullable;
 
 import io.mohs.core.execution.Attempt;
+import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 
 /**
@@ -70,18 +72,32 @@ public interface HistoryStore {
 
     /**
      * A leitura em lote que segue cada rodada de claim (§5.4): payload +
-     * chave de partição dos ids reivindicados. Infra e linha separadas
-     * como na ADR-0047: falha de deserialização de UMA linha não derruba o
-     * lote — a linha entra em {@code failed} e o resto despacha.
+     * cabeçalho dos ids reivindicados (o dispatch precisa de
+     * {@code scheduledAt}/{@code actor}/{@code priority}/{@code batchId}
+     * pra eventos, rearme e conclusão — uma leitura só, nunca N). Infra e
+     * linha separadas como na ADR-0047: falha de deserialização de UMA
+     * linha não derruba o lote — a linha entra em {@code unreadable} e o
+     * resto despacha.
      */
     PayloadBatch findPayloads(List<ExecutionId> ids);
 
-    /** Payload hidratado + o {@code created_at} que a conclusão vai precisar pra podar a partição do UPDATE terminal. */
-    record PayloadRow(ExecutionId executionId, Instant createdAt, Object payload) {
+    /** Payload hidratado + o cabeçalho da execução ({@code createdAt} poda a partição do UPDATE terminal; o resto alimenta dispatch/eventos/conclusão). */
+    record PayloadRow(ExecutionHead head, Object payload) {
         public PayloadRow {
-            Objects.requireNonNull(executionId, "executionId");
-            Objects.requireNonNull(createdAt, "createdAt");
+            Objects.requireNonNull(head, "head");
             Objects.requireNonNull(payload, "payload");
+        }
+    }
+
+    /** O cabeçalho de uma linha de história — tudo menos payload e attempts; {@code correlationId} carrega o lote (ADR-0043) até a Phase 8. */
+    record ExecutionHead(ExecutionId executionId, JobKey jobKey, Instant scheduledAt, Instant createdAt, String actor,
+            int priority, @Nullable String correlationId) {
+        public ExecutionHead {
+            Objects.requireNonNull(executionId, "executionId");
+            Objects.requireNonNull(jobKey, "jobKey");
+            Objects.requireNonNull(scheduledAt, "scheduledAt");
+            Objects.requireNonNull(createdAt, "createdAt");
+            Objects.requireNonNull(actor, "actor");
         }
     }
 
@@ -93,8 +109,52 @@ public interface HistoryStore {
         }
     }
 
+    /** Só os cabeçalhos — o caminho frio do reaper (rearme/lote/poda dos candidatos terminais) sem pagar deserialização de payload. */
+    List<ExecutionHead> findHeads(List<ExecutionId> ids);
+
     /** Attempts de uma execução, em ordem de número — o detail view (servido por {@code idx_mohs_attempt_exec} no PG). */
     List<Attempt> findAttempts(ExecutionId executionId);
+
+    // ─── read model (§6.2): estado advisory + verdade da fila/posse ─────────
+
+    /**
+     * A execução como a API pública a vê — com attempts, e com o estado
+     * DERIVADO: a coluna {@code state} da história é advisory (PENDING até
+     * o terminal); em voo, a verdade é a fila e a posse. A derivação
+     * (§4.3): lease presente → {@code RUNNING} (com {@code owner} =
+     * node dono e {@code firedAt} = claim); entrada de fila com
+     * {@code attempt > 1} ainda invisível → {@code RETRY_WAITING}; entrada
+     * de fila caso contrário → {@code ENQUEUED}; coluna terminal → ela
+     * mesma. Linha PENDING sem fila nem posse é a janela de um flush de
+     * conclusão em curso — lê {@code ENQUEUED} (staleness limitada e
+     * documentada do modelo, §6.2). {@code now} decide {@code ENQUEUED} ×
+     * {@code RETRY_WAITING} (a regra de visibilidade) — do {@code Clock}
+     * injetado do chamador, como todo "quando" do projeto.
+     */
+    Optional<Execution> find(ExecutionId id, Instant now);
+
+    /**
+     * Página do dashboard — mesma derivação de {@link #find}, sem attempts
+     * (sumário por contrato, como na era pré-split); ordenada por id
+     * decrescente (UUIDv7 = mais recente primeiro), keyset por
+     * {@code id < cursor}. Filtro de {@code status} sobre o estado
+     * DERIVADO: terminal filtra na coluna; {@code RUNNING} filtra por
+     * posse; {@code ENQUEUED}/{@code RETRY_WAITING} filtram pela fila.
+     */
+    List<Execution> findPage(@Nullable JobKey jobKey, @Nullable ExecutionState status, @Nullable Instant from,
+            @Nullable Instant to, @Nullable ExecutionId cursor, int limit, Instant now);
+
+    /**
+     * Contagem por estado do trabalho vivo pro {@code GET /overview} —
+     * custo proporcional ao trabalho vivo por construção na mesa nova:
+     * {@code RUNNING} = tamanho de {@code mohs_lease}; {@code ENQUEUED}/
+     * {@code RETRY_WAITING} = {@code mohs_ready} partida pela regra de
+     * visibilidade. Nenhuma leitura toca a história.
+     */
+    Map<ExecutionState, Long> countActiveByState(Instant now);
+
+    /** Vazão da janela recente ({@code GET /overview}): attempts terminais com {@code finished_at >= since}, por outcome — o índice de throughput serve por construção. */
+    Map<ExecutionState, Long> countTerminalOutcomesSince(Instant since);
 
     /** Poda de {@code mohs_idempotency} pela janela de idempotência (§7.2) — chamada pelo housekeeping, não pelo caminho quente. */
     int pruneIdempotencyBefore(Instant cutoff);

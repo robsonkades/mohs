@@ -30,7 +30,7 @@ class AttemptTest {
     void rejectsEnqueuedAndRetryScheduledAsOutcome() {
         assertThatThrownBy(() -> new Attempt(1, Instant.now(), null, ExecutionState.ENQUEUED, null))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new Attempt(1, Instant.now(), null, ExecutionState.RETRY_SCHEDULED, null))
+        assertThatThrownBy(() -> new Attempt(1, Instant.now(), null, ExecutionState.RETRY_WAITING, null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

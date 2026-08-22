@@ -20,7 +20,7 @@ import io.mohs.core.execution.ExecutionState;
  * em {@code succeededInWindow}/{@code failedInWindow}.
  *
  * <p>{@code executionCountsByState} sempre carrega os três estados vivos
- * ({@code ENQUEUED}, {@code RUNNING}, {@code RETRY_SCHEDULED}), com zero
+ * ({@code ENQUEUED}, {@code RUNNING}, {@code RETRY_WAITING}), com zero
  * quando não há linha — chave ausente e zero são a mesma informação, e um
  * contrato de polling não deve obrigar o consumidor a distinguir as duas.
  */
@@ -29,7 +29,7 @@ public record OverviewSnapshot(Map<ExecutionState, Long> executionCountsByState,
 
     /** Os estados que o mapa sempre carrega — o trabalho vivo. */
     private static final Set<ExecutionState> ACTIVE_STATES =
-            Set.of(ExecutionState.ENQUEUED, ExecutionState.RUNNING, ExecutionState.RETRY_SCHEDULED);
+            Set.of(ExecutionState.ENQUEUED, ExecutionState.RUNNING, ExecutionState.RETRY_WAITING);
 
     public OverviewSnapshot {
         Objects.requireNonNull(executionCountsByState, "executionCountsByState");
@@ -44,7 +44,7 @@ public record OverviewSnapshot(Map<ExecutionState, Long> executionCountsByState,
             }
         }
         // EnumMap + unmodifiableMap, não Map.copyOf: a ordem de declaração do
-        // enum (ENQUEUED antes de RUNNING antes de RETRY_SCHEDULED) é a ordem
+        // enum (ENQUEUED antes de RUNNING antes de RETRY_WAITING) é a ordem
         // do ciclo de vida, e ordem exposta em API é contrato.
         Map<ExecutionState, Long> normalized = new EnumMap<>(ExecutionState.class);
         for (ExecutionState state : ACTIVE_STATES) {

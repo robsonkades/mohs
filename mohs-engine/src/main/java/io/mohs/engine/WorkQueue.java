@@ -20,9 +20,9 @@ import io.mohs.core.job.JobKey;
  *
  * <p>Retry, delayed, requeue de reaper e enqueue imediato são a MESMA
  * operação com {@code visibleAt} diferente (§5.8) — uma regra de
- * visibilidade ({@code visible_at <= now}), zero estados: é o que matou o
- * {@code RETRY_SCHEDULED} claimável e a regressão de 3× do predicado
- * {@code IN} de dois valores no MySQL (§4.3).
+ * visibilidade ({@code visible_at <= now}), zero estados: é o que tirou o
+ * retry do predicado de claim ({@code RETRY_WAITING} não é claimável) e
+ * matou a regressão de 3× do {@code IN} de dois valores no MySQL (§4.3).
  */
 public interface WorkQueue {
 
@@ -44,8 +44,8 @@ public interface WorkQueue {
         }
     }
 
-    /** O que o claim devolve: identidade, nunca payload (§5.4 — o dispatcher segue com UMA leitura em lote na história). */
-    record ClaimedWork(ExecutionId executionId, JobKey jobKey, int attemptNumber) {
+    /** O que o claim devolve: identidade, nunca payload (§5.4 — o dispatcher segue com UMA leitura em lote na história). {@code priority} viaja de volta pro requeue de perda de admissão reconstruir a entrada sem leitura extra. */
+    record ClaimedWork(ExecutionId executionId, JobKey jobKey, int attemptNumber, int priority) {
         public ClaimedWork {
             Objects.requireNonNull(executionId, "executionId");
             Objects.requireNonNull(jobKey, "jobKey");
@@ -106,4 +106,28 @@ public interface WorkQueue {
             Objects.requireNonNull(entry, "entry");
         }
     }
+
+    /**
+     * Cancela uma execução ainda na FILA (ADR-0034, metade "pendente"):
+     * numa transação, remove a entrada e grava o terminal advisory
+     * {@code CANCELLED} na história. Perde pra qualquer claim concorrente
+     * (a entrada já saiu da fila) — o chamador cai então na flag
+     * cooperativa da posse ({@code LeaseStore#requestCancellation}).
+     *
+     * @return {@code true} se ESTA chamada removeu a entrada
+     */
+    boolean cancelQueued(ExecutionId id, Instant now);
+
+    /**
+     * Retry manual do operador (ADR-0033 na mesa nova): numa transação,
+     * CAS do advisory {@code FAILED → PENDING} — guardado por job não
+     * aposentado, o mesmo guard do CAS antigo — e renascimento na fila com
+     * {@code attempt = attempts gravados + 1} e a prioridade original.
+     * Bypassa o orçamento de propósito: quem decide é o operador.
+     *
+     * @return {@code true} se ESTA chamada armou; {@code false} = id
+     *         inexistente, estado ≠ {@code FAILED} ou job aposentado — o
+     *         chamador distingue com uma leitura
+     */
+    boolean rearmForManualRetry(ExecutionId id, Instant now);
 }

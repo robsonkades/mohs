@@ -235,7 +235,7 @@ class ClaimShapeExperimentHarness {
         }
     }
 
-    /** Mesmo seed misto do {@link ClaimQueryLoadHarness} (~20% RETRY_SCHEDULED — desde a ADR-0033 retry é claimável). */
+    /** Mesmo seed misto do {@link ClaimQueryLoadHarness} (~20% RETRY_WAITING — desde a ADR-0033 retry é claimável). */
     private void seedCurrentBacklog(JdbcTemplate jdbc, JdbcJobStore jobStore) {
         List<Object[]> rows = new ArrayList<>(BACKLOG);
         int perJob = BACKLOG / JOB_COUNT;
@@ -243,7 +243,7 @@ class ClaimShapeExperimentHarness {
             String jobKey = "e2-job-" + j;
             jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
             for (int e = 0; e < perJob; e++) {
-                String state = e % 5 == 0 ? "RETRY_SCHEDULED" : "ENQUEUED";
+                String state = e % 5 == 0 ? "RETRY_WAITING" : "ENQUEUED";
                 rows.add(new Object[] {
                         UUIDv7.randomUUID().toString(), jobKey, state,
                         JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(1)),

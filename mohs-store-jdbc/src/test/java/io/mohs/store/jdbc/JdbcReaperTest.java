@@ -212,17 +212,17 @@ class JdbcReaperTest {
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
         assertThat(reclaimed).hasSize(1);
-        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.RETRY_WAITING);
         assertThat(reclaimed.get(0).execution().attempts()).hasSize(1);
         assertThat(reclaimed.get(0).execution().attempts().get(0).error()).contains("lease expired");
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
         LocalDateTime retryAt = rawJdbcTemplate.queryForObject(
                 "SELECT scheduled_at FROM mohs_executions WHERE id = ?", LocalDateTime.class, "exec-1");
         // bound do backoff da 1ª falha (full jitter): [now, now + 1s]
         assertThat(JdbcTimestamps.fromUtcLocalDateTime(retryAt)).isBetween(NOW, NOW.plusSeconds(1));
     }
 
-    /** Job aposentado nunca reagenda: RETRY_SCHEDULED de job removido ficaria preso pra sempre (claim filtra retired, o cancel do remove já passou) — mesmo com orçamento sobrando, o reclaim é terminal, e o flag diz que NÃO foi por orçamento. */
+    /** Job aposentado nunca reagenda: RETRY_WAITING de job removido ficaria preso pra sempre (claim filtra retired, o cancel do remove já passou) — mesmo com orçamento sobrando, o reclaim é terminal, e o flag diz que NÃO foi por orçamento. */
     @Test
     void reclaimOfARetiredJobIsTerminalEvenWithBudgetRemaining() {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(5)));
@@ -303,7 +303,7 @@ class JdbcReaperTest {
         List<Reaper.Reclaimed> reclaimed = reaper.reclaimExpired();
 
         assertThat(reclaimed).hasSize(1);
-        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(reclaimed.get(0).execution().state()).isEqualTo(ExecutionState.RETRY_WAITING);
         LocalDateTime nextFireAt = rawJdbcTemplate.queryForObject(
                 "SELECT next_fire_at FROM mohs_job_definitions WHERE job_key = ?", LocalDateTime.class, "poll");
         assertThat(nextFireAt).isNull();

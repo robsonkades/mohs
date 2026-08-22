@@ -1,6 +1,8 @@
 package io.mohs.store.jdbc;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 
 import javax.sql.DataSource;
@@ -28,7 +30,7 @@ class JdbcWorkQueueMySqlTest {
     void setUp() {
         DataSource dataSource = MySqlTestSupport.freshSchema();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        queue = new JdbcWorkQueue(dataSource, new MySqlJdbcDialect());
+        queue = new JdbcWorkQueue(dataSource, new MySqlJdbcDialect(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC)));
     }
 
     private WorkQueue.ReadyEntry entry(String id, String jobKey, int priority, int attempt, Instant visibleAt) {

@@ -43,7 +43,7 @@ import io.mohs.test.MutableClock;
  * tabela inteira a cada poll do dashboard.
  *
  * <p>O que cada plano tem que mostrar: backlog pelo índice parcial de
- * claim (o predicado {@code IN (ENQUEUED, RETRY_SCHEDULED)} é o do
+ * claim (o predicado {@code IN (ENQUEUED, RETRY_WAITING)} é o do
  * índice); {@code RUNNING} pelo índice parcial do reaper (o {@code
  * lease_expires_at IS NOT NULL} está lá só pra isso — DBTUNE-17); janela
  * pelo range curto de {@code idx_mohs_attempts_throughput}.
@@ -66,7 +66,7 @@ class OverviewQueryExplainHarness {
     private static final int TERMINAL_COUNT = 100_000;
     private static final int ENQUEUED_COUNT = 500;
     private static final int RUNNING_COUNT = 100;
-    private static final int RETRY_SCHEDULED_COUNT = 50;
+    private static final int RETRY_WAITING_COUNT = 50;
     private static final Path OUTPUT_DIR = Path.of("docs", "performance");
 
     @Test
@@ -102,9 +102,9 @@ class OverviewQueryExplainHarness {
      */
     private static Map<String, String> shapes(String sinceLiteral, String lockHint) {
         Map<String, String> shapes = new LinkedHashMap<>();
-        shapes.put("backlog (ENQUEUED + RETRY_SCHEDULED, indice parcial de claim)",
+        shapes.put("backlog (ENQUEUED + RETRY_WAITING, indice parcial de claim)",
                 "SELECT state, COUNT(*) AS total FROM mohs_executions " + lockHint
-                        + "WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') GROUP BY state");
+                        + "WHERE state IN ('ENQUEUED', 'RETRY_WAITING') GROUP BY state");
         shapes.put("RUNNING (indice parcial do reaper via IS NOT NULL)",
                 "SELECT COUNT(*) FROM mohs_executions " + lockHint
                         + "WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL");
@@ -195,8 +195,8 @@ class OverviewQueryExplainHarness {
         for (int i = 0; i < ENQUEUED_COUNT; i++) {
             executions.add(executionRow(UUIDv7.randomUUIDString(), "overview-job-" + (i % JOB_COUNT), "ENQUEUED", NOW));
         }
-        for (int i = 0; i < RETRY_SCHEDULED_COUNT; i++) {
-            executions.add(executionRow(UUIDv7.randomUUIDString(), "overview-job-" + (i % JOB_COUNT), "RETRY_SCHEDULED", NOW));
+        for (int i = 0; i < RETRY_WAITING_COUNT; i++) {
+            executions.add(executionRow(UUIDv7.randomUUIDString(), "overview-job-" + (i % JOB_COUNT), "RETRY_WAITING", NOW));
         }
         jdbcTemplate.batchUpdate("""
                 INSERT INTO mohs_executions (

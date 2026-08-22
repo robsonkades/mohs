@@ -65,11 +65,11 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
 -- state sai das colunas porque o WHERE já fixa esse valor (DBTUNE-5,
 -- medido: -95.2% Postgres / -84.2% SQL Server no tamanho do índice,
 -- throughput de claim estável — docs/performance/BASELINE.md).
--- ADR-0033: RETRY_SCHEDULED entrou no predicado do claim — índice parcial só é
+-- ADR-0033: RETRY_WAITING entrou no predicado do claim — índice parcial só é
 -- elegível quando o predicado da query IMPLICA o do índice; IN (E, R) não
 -- implica = E, e sem o par o plano degrada pra Seq Scan + Sort da tabela
 -- inteira a cada tick.
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED');
+CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_WAITING');
 -- Índice parcial pro reaper (DBTUNE-10): só a execução RUNNING é
 -- candidata a reclaim — mesmo raciocínio da DBTUNE-5, WHERE em vez de
 -- coluna porque o predicado já fixa o state.

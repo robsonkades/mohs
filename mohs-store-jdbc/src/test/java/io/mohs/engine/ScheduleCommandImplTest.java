@@ -29,9 +29,13 @@ import io.mohs.core.definition.JobSpec;
 import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.resource.MohsRunner;
-import io.mohs.store.jdbc.JdbcExecutionStore;
+import io.mohs.store.jdbc.JdbcBatchStore;
+import io.mohs.store.jdbc.JdbcHistoryStore;
 import io.mohs.store.jdbc.JdbcJobStore;
+import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcNodeStore;
+import io.mohs.store.jdbc.JdbcStoreTransactions;
+import io.mohs.store.jdbc.JdbcWorkQueue;
 import io.mohs.store.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
@@ -41,9 +45,9 @@ import static org.mockito.Mockito.mock;
 
 /**
  * O terminal de {@code ScheduleCommand} contra as portas JDBC reais (H2) —
- * o contrato do Idempotent Receiver (EIP) depende do índice único
- * {@code uq_mohs_executions_idem} do schema, então mock de store não
- * provaria nada aqui.
+ * o contrato do Idempotent Receiver (EIP) depende do conflito de PK de
+ * {@code mohs_idempotency} do schema, então mock de store não provaria
+ * nada aqui.
  */
 class ScheduleCommandImplTest {
 
@@ -60,8 +64,14 @@ class ScheduleCommandImplTest {
         dataSource = freshH2DataSource();
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcExecutionStore executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
-        mohs = new MohsImpl(jobStore, executionStore, new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock, mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())));
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
+        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
+        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
+        JdbcLeaseStore leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
+        mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
+                new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock,
+                mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks(),
+                new RunnerRegistry(List.of(MohsRunner.io("io").build())));
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));
     }
 
@@ -75,7 +85,7 @@ class ScheduleCommandImplTest {
     }
 
     private int executionCount() {
-        Integer count = new JdbcTemplate(dataSource).queryForObject("SELECT COUNT(*) FROM mohs_executions", Integer.class);
+        Integer count = new JdbcTemplate(dataSource).queryForObject("SELECT COUNT(*) FROM mohs_execution", Integer.class);
         return count == null ? 0 : count;
     }
 
@@ -130,6 +140,31 @@ class ScheduleCommandImplTest {
         mohs.schedule("welcome-email", "hello").now();
 
         assertThat(executionCount()).isEqualTo(2);
+    }
+
+    /**
+     * ADR-0003 §4, o cenário-vitrine: dedup DENTRO da transação do host. O
+     * conflito de PK do Idempotent Receiver não pode condenar a transação
+     * de quem chamou — o savepoint (NESTED em {@code JdbcStoreTransactions})
+     * desfaz só a unidade de enqueue, a conexão continua sã (no Postgres,
+     * sem savepoint ela estaria abortada — 25P02) e o commit do host segue
+     * possível. Com REQUIRED isto estourava {@code UnexpectedRollbackException}
+     * DEPOIS de devolvermos um recibo de sucesso.
+     */
+    @Test
+    void duplicateIdempotencyKeyInsideAHostTransactionLeavesItCommittable() {
+        org.springframework.transaction.support.TransactionTemplate host =
+                new org.springframework.transaction.support.TransactionTemplate(
+                        new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
+        Enqueued[] receipts = new Enqueued[2];
+
+        host.executeWithoutResult(_ -> {
+            receipts[0] = mohs.schedule("welcome-email", "hello").idempotencyKey("req-1").now();
+            receipts[1] = mohs.schedule("welcome-email", "hello").idempotencyKey("req-1").now();
+        });
+
+        assertThat(receipts[1].executionId()).isEqualTo(receipts[0].executionId());
+        assertThat(executionCount()).isEqualTo(1);
     }
 
     /** A corrida real do retry: dois POSTs simultâneos com a mesma chave — o banco decide, os dois recebem o mesmo recibo. */

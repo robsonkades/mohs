@@ -204,7 +204,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
     /**
      * O CAS de conclusão (ADR-0024/0033): {@code COALESCE} grava o
      * {@code retryAt} como novo {@code scheduled_at} na mesma transição
-     * (invariante do record: só presente em {@code RETRY_SCHEDULED}).
+     * (invariante do record: só presente em {@code RETRY_WAITING}).
      * A variante cercada acrescenta o par de posse
      * {@code (node_id, fired_at)} ao predicado (ADR-0051, que revisa o
      * fence de lease da ADR-0033 — ver Javadoc de
@@ -241,7 +241,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
     }
 
     /**
-     * O membro só conta quando ACABA: {@code RETRY_SCHEDULED} continua vivo,
+     * O membro só conta quando ACABA: {@code RETRY_WAITING} continua vivo,
      * e contá-lo fecharia o lote antes da hora. {@code CANCELLED} entra como
      * falha porque o lote tem duas colunas e um membro cancelado não teve
      * êxito — a contagem responde "quantos deram certo", não "por que os
@@ -261,7 +261,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
      */
     private @Nullable BatchCounters countIntoBatch(ExecutionStore.CompletionRequest request) {
         String batchId = request.batchId();
-        if (batchId == null || request.newState() == ExecutionState.RETRY_SCHEDULED) {
+        if (batchId == null || request.newState() == ExecutionState.RETRY_WAITING) {
             return null;
         }
         BatchCounters counters = request.newState() == ExecutionState.SUCCEEDED
@@ -351,7 +351,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
             // batch-counted: countCancelledIntoBatch, logo abaixo, nesta transação
             if (jdbcTemplate.update("""
                     UPDATE mohs_executions SET state = 'CANCELLED'
-                    WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+                    WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_WAITING')
                     """, params) == 0) {
                 return false;
             }
@@ -396,7 +396,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
      * no próprio CAS ESTREITA a janela contra um {@code remove} concorrente
      * (commitou antes: o guard barra; começou depois: o sweep dele apanha a
      * linha) — não a fecha: sob READ COMMITTED, um rearm que commita entre
-     * o sweep e o commit do remove deixa RETRY_SCHEDULED de job aposentado
+     * o sweep e o commit do remove deixa RETRY_WAITING de job aposentado
      * (janela sub-ms; {@code cancelIfPending} é o remédio do operador —
      * predicado só estreita, quem fecha janela é lock).
      * (2) {@code cancel_requested} stale é LIMPO no mesmo UPDATE — o retry
@@ -408,7 +408,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(scheduledAt, "scheduledAt");
         return jdbcTemplate.update("""
-                UPDATE mohs_executions SET state = 'RETRY_SCHEDULED', scheduled_at = :scheduledAt, cancel_requested = :cancelRequested
+                UPDATE mohs_executions SET state = 'RETRY_WAITING', scheduled_at = :scheduledAt, cancel_requested = :cancelRequested
                 WHERE id = :id AND state = 'FAILED' AND batch_id IS NULL
                   AND EXISTS (SELECT 1 FROM mohs_job_definitions j
                               WHERE j.job_key = mohs_executions.job_key AND j.retired = :retired)
@@ -643,7 +643,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
 
     /**
      * Duas queries, não uma com {@code IN} dos três estados: o predicado
-     * {@code state IN ('ENQUEUED', 'RETRY_SCHEDULED')} é EXATAMENTE o do
+     * {@code state IN ('ENQUEUED', 'RETRY_WAITING')} é EXATAMENTE o do
      * índice parcial de claim (implicação trivial — a mesma regra de
      * elegibilidade da DBTUNE-5/ADR-0033), e {@code RUNNING} entra pelo
      * índice parcial do reaper; juntar os três num {@code IN} só não
@@ -660,7 +660,7 @@ public final class JdbcExecutionStore implements ExecutionStore {
     public Map<ExecutionState, Long> countActiveByState() {
         Map<ExecutionState, Long> counts = countGroupedBy("state",
                 "SELECT state, COUNT(*) AS total FROM mohs_executions " + dialect.lockFreeCountHint()
-                        + "WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') GROUP BY state",
+                        + "WHERE state IN ('ENQUEUED', 'RETRY_WAITING') GROUP BY state",
                 new MapSqlParameterSource());
         Long running = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM mohs_executions " + dialect.lockFreeCountHint()

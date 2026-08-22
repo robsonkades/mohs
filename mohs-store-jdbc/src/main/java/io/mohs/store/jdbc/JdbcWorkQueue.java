@@ -15,6 +15,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
+import io.mohs.engine.BatchStore;
 import io.mohs.engine.WorkQueue;
 import io.mohs.store.jdbc.dialect.ClaimedReady;
 import io.mohs.store.jdbc.dialect.JdbcDialect;
@@ -33,9 +34,11 @@ public final class JdbcWorkQueue implements WorkQueue {
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate claimTransaction;
     private final JdbcDialect dialect;
+    private final BatchStore batchStore;
 
-    public JdbcWorkQueue(DataSource dataSource, JdbcDialect dialect) {
+    public JdbcWorkQueue(DataSource dataSource, JdbcDialect dialect, BatchStore batchStore) {
         Objects.requireNonNull(dataSource, "dataSource");
+        this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.claimTransaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         // §7.5: claim é transação PRÓPRIA, sempre — REQUIRES_NEW torna isso
@@ -65,7 +68,7 @@ public final class JdbcWorkQueue implements WorkQueue {
         List<ClaimedReady> claimed = Objects.requireNonNull(claimTransaction.execute(
                 _ -> dialect.claimReady(jdbcTemplate, shard, nodeId, epoch, limit, inadmissibleKeys, now)));
         return claimed.stream()
-                .map(row -> new ClaimedWork(ExecutionId.of(row.executionId()), JobKey.of(row.jobKey()), row.attempt()))
+                .map(row -> new ClaimedWork(ExecutionId.of(row.executionId()), JobKey.of(row.jobKey()), row.attempt(), row.priority()))
                 .toList();
     }
 
@@ -96,6 +99,75 @@ public final class JdbcWorkQueue implements WorkQueue {
                 }
             }
             return requeued;
+        }));
+    }
+
+    @Override
+    public boolean cancelQueued(ExecutionId id, Instant now) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(now, "now");
+        // requireNonNull: mesmo invariante de claim()
+        return Objects.requireNonNull(claimTransaction.execute(_ -> {
+            MapSqlParameterSource idParam = new MapSqlParameterSource("executionId", id.value());
+            if (jdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = :executionId", idParam) == 0) {
+                return false;
+            }
+            // terminal advisory sem poda de partição — caminho frio, por id
+            // (mesmo racional do TERMINAL_UPDATE_UNPRUNED do LeaseStore)
+            // batch-counted: incrementFailed logo abaixo, nesta transação
+            jdbcTemplate.update("""
+                    UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :finishedAt
+                    WHERE execution_id = :executionId
+                    """, idParam.addValue("finishedAt", dialect.splitTimestamp(now)));
+            // ADR-0043: cancelar é terminal e um fim que não conta deixa o lote
+            // aberto pra sempre — conta como falha na MESMA transação do delete
+            // (sem o delete ter pego a entrada, não se chega aqui = conta uma vez)
+            String batchId = jdbcTemplate.queryForObject(
+                    "SELECT correlation_id FROM mohs_execution WHERE execution_id = :executionId", idParam, String.class);
+            if (batchId != null) {
+                batchStore.incrementFailed(batchId);
+            }
+            return true;
+        }));
+    }
+
+    /**
+     * O CAS e o renascimento na fila num único par guardado: o UPDATE só
+     * vence com o advisory {@code FAILED} e o job vivo (EXISTS estreita a
+     * janela contra um {@code remove} concorrente — mesma semântica do CAS
+     * da era anterior); o INSERT deriva attempt e prioridade da própria
+     * história ({@code attempts gravados + 1}; a prioridade original), sem
+     * o chamador carregar nada.
+     */
+    @Override
+    public boolean rearmForManualRetry(ExecutionId id, Instant now) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(now, "now");
+        // requireNonNull: mesmo invariante de claim()
+        return Objects.requireNonNull(claimTransaction.execute(_ -> {
+            MapSqlParameterSource params = new MapSqlParameterSource("executionId", id.value());
+            // correlation_id IS NULL: membro de lote não rearma (ADR-0043) — o
+            // lote já contou esta falha; re-rodar contaria o desfecho DUAS vezes
+            // num lote possivelmente já fechado (pending negativo, segundo
+            // BatchCompleted). Mesmo guard do CAS da era anterior.
+            int rearmed = jdbcTemplate.update("""
+                    UPDATE mohs_execution SET state = 'PENDING', finished_at = NULL
+                    WHERE execution_id = :executionId AND state = 'FAILED'
+                      AND correlation_id IS NULL
+                      AND EXISTS (SELECT 1 FROM mohs_job_definitions j
+                                  WHERE j.job_key = mohs_execution.job_key AND j.retired = :retired)
+                    """, params.addValue("retired", false));
+            if (rearmed == 0) {
+                return false;
+            }
+            jdbcTemplate.update("""
+                    INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
+                    SELECT e.execution_id, e.job_key, e.shard, e.priority,
+                           (SELECT COUNT(*) + 1 FROM mohs_attempt a WHERE a.execution_id = e.execution_id),
+                           :visibleAt
+                    FROM mohs_execution e WHERE e.execution_id = :executionId
+                    """, params.addValue("visibleAt", dialect.splitTimestamp(now)));
+            return true;
         }));
     }
 }

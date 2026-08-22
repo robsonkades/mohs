@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     created_at       DATETIME(6)  NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
 -- MySQL não tem índice parcial/filtrado — Postgres e SQL Server usam
--- WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') aqui (DBTUNE-5, ADR-0033); MySQL fica com a composta cheia.
+-- WHERE state IN ('ENQUEUED', 'RETRY_WAITING') aqui (DBTUNE-5, ADR-0033); MySQL fica com a composta cheia.
 SET @mohs_sql = IF(EXISTS(SELECT 1 FROM information_schema.statistics
                           WHERE table_schema = DATABASE() AND table_name = 'mohs_executions'
                             AND index_name = 'idx_mohs_executions_claim'),

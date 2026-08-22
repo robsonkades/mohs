@@ -397,7 +397,7 @@ class MohsAutoConfigurationTest {
                 });
     }
 
-    /** ADR-0033 ponta a ponta: 1ª tentativa falha, a execução volta como RETRY_SCHEDULED com backoff, o mesmo caminho de claim a reivindica de novo e a 2ª sucede. */
+    /** ADR-0033 ponta a ponta: 1ª tentativa falha, a execução volta como RETRY_WAITING com backoff, o mesmo caminho de claim a reivindica de novo e a 2ª sucede. */
     @Test
     void failedExecutionIsRetriedThroughTheRealEngineUntilItSucceeds() {
         CountDownLatch succeeded = new CountDownLatch(1);

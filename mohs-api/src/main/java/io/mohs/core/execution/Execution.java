@@ -15,10 +15,13 @@ import org.jspecify.annotations.Nullable;
  * trilha de actor é inegociável em toda invocação (ver
  * {@code docs/API-DESIGN.md} §"Actor e regressão ergonômica assumida").
  * {@code firedAt} é o instante em que a execução foi reivindicada por um
- * node — o CAS do claim o grava (ADR-0047) — e fica {@code null} enquanto
- * isso não ocorreu (ex.: estado {@link ExecutionState#ENQUEUED}); o
- * início real de cada attempt é {@link Attempt#startedAt}, dezenas de ms
- * depois sob carga.
+ * node e fica {@code null} enquanto isso não ocorreu (ex.: estado
+ * {@link ExecutionState#ENQUEUED}); desde a Phase 5 do redesign (posse em
+ * {@code mohs_lease}) ele também volta a {@code null} DEPOIS do término —
+ * a pergunta histórica "quando cada attempt começou" é de
+ * {@link Attempt#startedAt}. {@code owner} (§16.3-2 do redesign) responde
+ * "QUEM está executando isto agora": o {@code node_id} dono da posse
+ * enquanto {@link ExecutionState#RUNNING}, {@code null} fora disso.
  */
 public record Execution(
         ExecutionId id,
@@ -30,7 +33,8 @@ public record Execution(
         String actor,
         Priority priority,
         @Nullable String idempotencyKey,
-        @Nullable String batchId) {
+        @Nullable String batchId,
+        @Nullable String owner) {
 
     /**
      * O actor das ocorrências materializadas pelo trigger recorrente
@@ -56,10 +60,10 @@ public record Execution(
         attempts = List.copyOf(attempts); // cópia defensiva (Effective Java, Item 50)
     }
 
-    /** {@link Priority#NORMAL}, sem {@code idempotencyKey} e fora de lote — mesmo default do schema (`DEFAULT 20`). */
+    /** {@link Priority#NORMAL}, sem {@code idempotencyKey}, fora de lote e sem dono corrente — mesmo default do schema (`DEFAULT 20`). */
     public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
             @Nullable Instant firedAt, List<Attempt> attempts, String actor) {
-        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, Priority.NORMAL, null, null);
+        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, Priority.NORMAL, null, null, null);
     }
 
     /**
@@ -71,6 +75,13 @@ public record Execution(
     public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
             @Nullable Instant firedAt, List<Attempt> attempts, String actor, Priority priority,
             @Nullable String idempotencyKey) {
-        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, priority, idempotencyKey, null);
+        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, priority, idempotencyKey, null, null);
+    }
+
+    /** Sem dono corrente — a forma da era pré-split, preservada pra quem constrói leituras históricas (o dono só existe em {@code RUNNING}). */
+    public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
+            @Nullable Instant firedAt, List<Attempt> attempts, String actor, Priority priority,
+            @Nullable String idempotencyKey, @Nullable String batchId) {
+        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, priority, idempotencyKey, batchId, null);
     }
 }

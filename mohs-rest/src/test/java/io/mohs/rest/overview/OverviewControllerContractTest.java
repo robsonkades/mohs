@@ -76,7 +76,7 @@ class OverviewControllerContractTest {
                 .andExpect(jsonPath("$.executionCountsByStatus.length()").value(3))
                 .andExpect(jsonPath("$.executionCountsByStatus.ENQUEUED").value(12))
                 .andExpect(jsonPath("$.executionCountsByStatus.RUNNING").value(3))
-                .andExpect(jsonPath("$.executionCountsByStatus.RETRY_SCHEDULED").value(0))
+                .andExpect(jsonPath("$.executionCountsByStatus.RETRY_WAITING").value(0))
                 .andExpect(jsonPath("$.throughput.window").value("PT1M"))
                 .andExpect(jsonPath("$.throughput.succeeded").value(240))
                 .andExpect(jsonPath("$.throughput.failed").value(5));

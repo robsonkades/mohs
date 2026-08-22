@@ -33,33 +33,36 @@ import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.BatchCompletionCallbacks;
 import io.mohs.engine.BatchStore;
-import io.mohs.engine.Claimer;
 import io.mohs.engine.CompletionBatcher;
 import io.mohs.engine.Dispatcher;
 import io.mohs.engine.Engine;
 import io.mohs.engine.EngineMetrics;
 import io.mohs.engine.EngineSettings;
-import io.mohs.engine.ExecutionStore;
 import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.engine.HandlerRegistry;
+import io.mohs.engine.HistoryStore;
 import io.mohs.engine.JobStore;
+import io.mohs.engine.LeaseStore;
 import io.mohs.engine.MohsExecutors;
 import io.mohs.engine.MohsImpl;
 import io.mohs.engine.NodeStore;
 import io.mohs.engine.RateLimitStore;
-import io.mohs.engine.Reaper;
 import io.mohs.engine.RunnerRegistry;
+import io.mohs.engine.StoreTransactions;
 import io.mohs.engine.TriggerFirer;
+import io.mohs.engine.WorkQueue;
 import io.mohs.store.jdbc.DatabaseClock;
 import io.mohs.store.jdbc.JdbcBatchStore;
-import io.mohs.store.jdbc.JdbcClaimer;
-import io.mohs.store.jdbc.JdbcExecutionStore;
+import io.mohs.store.jdbc.JdbcHistoryStore;
 import io.mohs.store.jdbc.JdbcJobStore;
+import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcNodeStore;
 import io.mohs.store.jdbc.JdbcRateLimitStore;
-import io.mohs.store.jdbc.JdbcReaper;
+import io.mohs.store.jdbc.JdbcStoreTransactions;
 import io.mohs.store.jdbc.JdbcTriggerFirer;
+import io.mohs.store.jdbc.JdbcWorkQueue;
 import io.mohs.store.jdbc.MohsFlyway;
+import io.mohs.store.jdbc.PostgresPartitionManager;
 import io.mohs.store.jdbc.dialect.H2JdbcDialect;
 import io.mohs.store.jdbc.dialect.JdbcDialect;
 import io.mohs.store.jdbc.dialect.MySqlJdbcDialect;
@@ -73,11 +76,8 @@ import io.mohs.store.jdbc.dialect.SqlServerJdbcDialect;
  * da lista de pacotes barrados de enxergar {@code io.mohs.engine}/
  * {@code io.mohs.store.jdbc}, é exatamente o papel deste pacote.
  *
- * <p>Validações de boot, wiring do REST e enforcement de rate limit ainda
- * não existem — {@link Mohs#batch} lança
- * {@link UnsupportedOperationException} (ver Javadoc de {@link MohsImpl}).
- * Escaneamento de {@code @MohsJob} ({@link MohsJobScanner}) e runners
- * nomeados ({@link RunnerRegistry}) já existem e são montados aqui.
+ * <p>Escaneamento de {@code @MohsJob} ({@link MohsJobScanner}) e runners
+ * nomeados ({@link RunnerRegistry}) são montados aqui.
  *
  * <p>Dois beans compartilham o tipo {@link ThreadPoolTaskScheduler} (tick
  * do {@link Engine} vs. resync do {@link DatabaseClock}), e o
@@ -214,8 +214,40 @@ public class MohsAutoConfiguration {
      * quebraria a leitura de payloads já gravados quando ela mudar.
      */
     @Bean
-    public ExecutionStore mohsExecutionStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, JdbcDialect mohsJdbcDialect, MohsFlyway mohsFlyway) {
-        return new JdbcExecutionStore(dataSource, mohsClock, JsonMapper.builder().build(), mohsJdbcDialect);
+    public HistoryStore mohsHistoryStore(DataSource dataSource, JdbcDialect mohsJdbcDialect, MohsFlyway mohsFlyway) {
+        return new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), mohsJdbcDialect);
+    }
+
+    @Bean
+    public WorkQueue mohsWorkQueue(DataSource dataSource, JdbcDialect mohsJdbcDialect, BatchStore mohsBatchStore, MohsFlyway mohsFlyway) {
+        return new JdbcWorkQueue(dataSource, mohsJdbcDialect, mohsBatchStore);
+    }
+
+    @Bean
+    public LeaseStore mohsLeaseStore(DataSource dataSource, JdbcDialect mohsJdbcDialect, BatchStore mohsBatchStore, MohsFlyway mohsFlyway) {
+        return new JdbcLeaseStore(dataSource, mohsJdbcDialect, mohsBatchStore);
+    }
+
+    /** A fronteira transacional da unidade de enqueue (§7.5-1) — REQUIRED: junta-se à transação do host (ADR-0003 §4) ou abre a própria. */
+    @Bean
+    public StoreTransactions mohsStoreTransactions(DataSource dataSource, MohsFlyway mohsFlyway) {
+        return new JdbcStoreTransactions(dataSource);
+    }
+
+    /**
+     * Tier 1 apenas: as partições semanais da história são criadas AQUI, no
+     * boot — antes de qualquer enqueue (o gestor depende do Flyway pelo
+     * grafo, e todo escritor depende dele) — e re-garantidas a cada boot; a
+     * DEFAULT das migrações é o backstop (PLAN.md S5.1). Sem bean nos
+     * demais dialetos: os equivalentes funcionais não particionam
+     * (ADR-0050).
+     */
+    @Bean
+    @ConditionalOnProperty(prefix = "mohs.jdbc", name = "dialect", havingValue = "postgresql")
+    public PostgresPartitionManager mohsPartitionManager(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, MohsFlyway mohsFlyway) {
+        PostgresPartitionManager manager = new PostgresPartitionManager(dataSource);
+        manager.ensureWeeklyPartitions(mohsClock.instant());
+        return manager;
     }
 
     @Bean
@@ -239,14 +271,6 @@ public class MohsAutoConfiguration {
     @Bean(destroyMethod = "close")
     public RunnerRegistry mohsRunnerRegistry(MohsProperties properties, List<MohsRunner> mohsRunnerBeans) {
         return new RunnerRegistry(MohsRunners.assemble(properties, mohsRunnerBeans));
-    }
-
-    @Bean
-    public Claimer mohsClaimer(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock,
-            ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsProperties properties,
-            ExecutionWindowRegistry mohsExecutionWindowRegistry, RateLimitStore mohsRateLimitStore, MohsFlyway mohsFlyway) {
-        return new JdbcClaimer(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore,
-                properties.engine().leaseTtl(), mohsExecutionWindowRegistry, mohsRateLimitStore);
     }
 
     @Bean
@@ -275,15 +299,9 @@ public class MohsAutoConfiguration {
         return new ExecutionWindowRegistry(mohsExecutionWindowBeans);
     }
 
-    /** O corte legado ({@code lease-ttl}) só vale pra linha de node de jar antigo, sem {@code expires_at} (ADR-0051). */
     @Bean
-    public Reaper mohsReaper(DataSource dataSource, JdbcDialect mohsJdbcDialect, @Qualifier("mohsClock") Clock mohsClock, ExecutionStore mohsExecutionStore, JobStore mohsJobStore, MohsProperties properties, MohsFlyway mohsFlyway) {
-        return new JdbcReaper(dataSource, mohsJdbcDialect, mohsClock, mohsExecutionStore, mohsJobStore, properties.engine().leaseTtl());
-    }
-
-    @Bean
-    public TriggerFirer mohsTriggerFirer(DataSource dataSource, ExecutionStore mohsExecutionStore, MohsFlyway mohsFlyway) {
-        return new JdbcTriggerFirer(dataSource, mohsExecutionStore);
+    public TriggerFirer mohsTriggerFirer(DataSource dataSource, HistoryStore mohsHistoryStore, WorkQueue mohsWorkQueue, MohsFlyway mohsFlyway) {
+        return new JdbcTriggerFirer(dataSource, mohsHistoryStore, mohsWorkQueue);
     }
 
     /** Nasce vazio — {@link MohsJobScanner} povoa em {@code afterSingletonsInstantiated}, antes do {@link Engine} iniciar. */
@@ -305,7 +323,7 @@ public class MohsAutoConfiguration {
 
     @Bean
     public Dispatcher mohsDispatcher(
-            ExecutionStore mohsExecutionStore,
+            LeaseStore mohsLeaseStore,
             JobStore mohsJobStore,
             HandlerRegistry mohsHandlerRegistry,
             @Qualifier("mohsClock") Clock mohsClock,
@@ -315,7 +333,7 @@ public class MohsAutoConfiguration {
             EngineMetrics mohsEngineMetrics,
             ObjectProvider<CompletionBatcher> mohsCompletionBatcher
     ) {
-        return new Dispatcher(mohsExecutionStore, mohsJobStore, mohsHandlerRegistry, mohsClock, interceptors, listeners,
+        return new Dispatcher(mohsLeaseStore, mohsJobStore, mohsHandlerRegistry, mohsClock, interceptors, listeners,
                 mohsEventExecutor, mohsEngineMetrics, mohsCompletionBatcher.getIfAvailable());
     }
 
@@ -328,19 +346,21 @@ public class MohsAutoConfiguration {
      */
     @Bean(initMethod = "start", destroyMethod = "close")
     @ConditionalOnProperty(name = "mohs.engine.completion-flush-on-every-result", havingValue = "false", matchIfMissing = true)
-    public CompletionBatcher mohsCompletionBatcher(ExecutionStore mohsExecutionStore, JobStore mohsJobStore) {
-        return new CompletionBatcher(mohsExecutionStore, mohsJobStore, 256, Duration.ofMillis(5));
+    public CompletionBatcher mohsCompletionBatcher(LeaseStore mohsLeaseStore, JobStore mohsJobStore) {
+        return new CompletionBatcher(mohsLeaseStore, mohsJobStore, 256, Duration.ofMillis(5));
     }
 
     @Bean
     public Engine mohsEngine(
-            Claimer mohsClaimer,
+            WorkQueue mohsWorkQueue,
             Dispatcher mohsDispatcher,
-            ExecutionStore mohsExecutionStore,
+            HistoryStore mohsHistoryStore,
+            LeaseStore mohsLeaseStore,
             JobStore mohsJobStore,
             NodeStore mohsNodeStore,
-            Reaper mohsReaper,
             TriggerFirer mohsTriggerFirer,
+            ExecutionWindowRegistry mohsExecutionWindowRegistry,
+            RateLimitStore mohsRateLimitStore,
             @Qualifier("mohsClock") Clock mohsClock,
             MohsProperties properties,
             @Qualifier("mohsTickScheduler") ThreadPoolTaskScheduler mohsTickScheduler,
@@ -351,8 +371,9 @@ public class MohsAutoConfiguration {
         EngineSettings settings = new EngineSettings(engineProperties.pollInterval(), engineProperties.batchSize(),
                 engineProperties.dispatchConcurrency(), engineProperties.claimRounds(), engineProperties.leaseTtl(),
                 engineProperties.nodeLeaseTtl(), engineProperties.watchdogTimeout(), engineProperties.misfireThreshold());
-        return new Engine(mohsClaimer, mohsDispatcher, mohsExecutionStore, mohsJobStore, mohsNodeStore, mohsReaper,
-                mohsTriggerFirer, mohsClock, settings, mohsTickScheduler, mohsRunnerRegistry, mohsEngineMetrics);
+        return new Engine(mohsWorkQueue, mohsDispatcher, mohsHistoryStore, mohsLeaseStore, mohsJobStore, mohsNodeStore,
+                mohsTriggerFirer, mohsExecutionWindowRegistry, mohsRateLimitStore, mohsClock, settings,
+                mohsTickScheduler, mohsRunnerRegistry, mohsEngineMetrics);
     }
 
     /** {@link SmartLifecycle} — ver Javadoc de {@link MohsEngineLifecycle} sobre a adaptação e o WARN de lease × timeout. */
@@ -380,11 +401,13 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    public Mohs mohs(JobStore mohsJobStore, ExecutionStore mohsExecutionStore, NodeStore mohsNodeStore,
+    public Mohs mohs(JobStore mohsJobStore, WorkQueue mohsWorkQueue, HistoryStore mohsHistoryStore,
+            LeaseStore mohsLeaseStore, StoreTransactions mohsStoreTransactions, NodeStore mohsNodeStore,
             RateLimitStore mohsRateLimitStore, HandlerRegistry mohsHandlerRegistry,
             @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine, BatchStore mohsBatchStore,
             BatchCompletionCallbacks mohsBatchCompletionCallbacks, RunnerRegistry mohsRunnerRegistry) {
-        return new MohsImpl(mohsJobStore, mohsExecutionStore, mohsNodeStore, mohsRateLimitStore, mohsHandlerRegistry,
+        return new MohsImpl(mohsJobStore, mohsWorkQueue, mohsHistoryStore, mohsLeaseStore, mohsStoreTransactions,
+                mohsNodeStore, mohsRateLimitStore, mohsHandlerRegistry,
                 mohsClock, mohsEngine, mohsBatchStore, mohsBatchCompletionCallbacks, mohsRunnerRegistry);
     }
 

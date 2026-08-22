@@ -156,7 +156,7 @@ class JdbcClaimerTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.ENQUEUED);
     }
 
-    /** ADR-0033 (destrava a ADR-0026): retry viaja pelo mesmo caminho do claim — RETRY_SCHEDULED com scheduled_at vencido é candidato como qualquer ENQUEUED. */
+    /** ADR-0033 (destrava a ADR-0026): retry viaja pelo mesmo caminho do claim — RETRY_WAITING com scheduled_at vencido é candidato como qualquer ENQUEUED. */
     @Test
     void claimsRetryScheduledExecutionWhoseTimeHasCome() {
         seedJob("report", policy -> {
@@ -179,14 +179,14 @@ class JdbcClaimerTest {
         List<Execution> claimed = claimer.claim("node-a", 10);
 
         assertThat(claimed).isEmpty();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
     }
 
     private void seedRetryScheduledExecution(String id, String jobKey, Instant retryAt) {
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_executions (
                     id, job_key, state, scheduled_at, actor, payload, payload_type, created_at)
-                VALUES (?, ?, 'RETRY_SCHEDULED', ?, 'test', '{}', 'java.lang.Object', ?)
+                VALUES (?, ?, 'RETRY_WAITING', ?, 'test', '{}', 'java.lang.Object', ?)
                 """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(retryAt), JdbcTimestamps.toUtcLocalDateTime(NOW));
     }
 

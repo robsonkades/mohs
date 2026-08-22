@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS mohs_lease (
     node_id          VARCHAR(255) NOT NULL,
     epoch            BIGINT       NOT NULL,
     attempt_number   INT          NOT NULL,
+    priority         INT          NOT NULL DEFAULT 20, -- viaja fila->posse: o requeue do reaper reconstroi a entrada sem ler historia (S5.3)
     claimed_at       TIMESTAMP    NOT NULL,
     cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE
 );
@@ -43,7 +44,8 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     payload_type    VARCHAR(500) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_created ON mohs_execution (created_at);
-CREATE INDEX IF NOT EXISTS idx_mohs_execution_job     ON mohs_execution (job_key, created_at DESC);
+-- (job_key, execution_id): serve o ORDER BY/cursor do findPage — ver o V3 do Postgres
+CREATE INDEX IF NOT EXISTS idx_mohs_execution_job     ON mohs_execution (job_key, execution_id DESC);
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_corr    ON mohs_execution (correlation_id);
 
 CREATE TABLE IF NOT EXISTS mohs_attempt (

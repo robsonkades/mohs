@@ -10,10 +10,10 @@ import java.sql.SQLException;
  * na história). Par de {@link Candidate}, que é a forma da era da tabela
  * única e morre com ela no S5.4 (PLAN.md).
  */
-public record ClaimedReady(String executionId, String jobKey, int attempt) {
+public record ClaimedReady(String executionId, String jobKey, int attempt, int priority) {
 
-    /** Linha de {@code mohs_ready} (coluna {@code attempt}) — mapeamento único dos quatro dialetos: desde o review do S5.2, o statement único do Postgres também devolve do SELECT ordenado sobre {@code picked}, não do {@code RETURNING} da lease. */
+    /** Linha de {@code mohs_ready} (colunas {@code attempt}/{@code priority}) — mapeamento único dos quatro dialetos: desde o review do S5.2, o statement único do Postgres também devolve do SELECT ordenado sobre {@code picked}, não do {@code RETURNING} da lease. */
     static ClaimedReady fromReadyRow(ResultSet rs, int rowNum) throws SQLException {
-        return new ClaimedReady(rs.getString("execution_id"), rs.getString("job_key"), rs.getInt("attempt"));
+        return new ClaimedReady(rs.getString("execution_id"), rs.getString("job_key"), rs.getInt("attempt"), rs.getInt("priority"));
     }
 }

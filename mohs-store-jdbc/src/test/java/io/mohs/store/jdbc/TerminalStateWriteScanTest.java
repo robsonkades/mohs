@@ -20,9 +20,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class TerminalStateWriteScanTest {
 
-    /** Estados que encerram uma execução — escrevê-los é o gatilho da contagem de lote. */
+    /** Estados que encerram uma execução — escrevê-los é o gatilho da contagem de lote. Cobre a mesa antiga ({@code mohs_executions}) e a advisory da Phase 5 ({@code mohs_execution}). */
     private static final Pattern TERMINAL_STATE_WRITE = Pattern.compile(
-            "UPDATE\\s+mohs_executions\\s+SET\\s+state\\s*=\\s*(:newState|'SUCCEEDED'|'FAILED'|'CANCELLED')");
+            "UPDATE\\s+mohs_executions?\\s+SET\\s+state\\s*=\\s*(:newState|:state|'SUCCEEDED'|'FAILED'|'CANCELLED')");
 
     /** O marcador que cada ponto de escrita terminal precisa carregar, com o porquê ao lado. */
     private static final String BATCH_COUNTED_MARKER = "batch-counted:";

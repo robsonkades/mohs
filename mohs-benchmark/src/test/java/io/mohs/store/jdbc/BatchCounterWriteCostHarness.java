@@ -78,7 +78,7 @@ class BatchCounterWriteCostHarness {
 
     private static final String COMPOSITE_INDEX = "idx_bench_batch_state";
 
-    private static final String LIVE_STATES = "'ENQUEUED', 'RUNNING', 'RETRY_SCHEDULED'";
+    private static final String LIVE_STATES = "'ENQUEUED', 'RUNNING', 'RETRY_WAITING'";
 
     private static final String COMPLETE_EXECUTION =
             "UPDATE mohs_executions SET state = 'SUCCEEDED' WHERE id = ?";

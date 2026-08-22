@@ -135,7 +135,7 @@ class ExecutionsControllerContractTest {
     @Test
     void retryReturns202WithTheRearmedExecutionAndALocationHeader() throws Exception {
         JobKey key = JobKey.of("welcome-email");
-        Execution rearmed = new Execution(ExecutionId.of("exec-1"), key, ExecutionState.RETRY_SCHEDULED, NOW, null, List.of(), "tester");
+        Execution rearmed = new Execution(ExecutionId.of("exec-1"), key, ExecutionState.RETRY_WAITING, NOW, null, List.of(), "tester");
         when(mohs.retry(ExecutionId.of("exec-1"))).thenReturn(Optional.of(rearmed));
 
         mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/retry"))

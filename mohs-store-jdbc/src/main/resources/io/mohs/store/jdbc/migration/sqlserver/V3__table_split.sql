@@ -23,6 +23,7 @@ CREATE TABLE mohs_lease (
     node_id          VARCHAR(255) NOT NULL,
     epoch            BIGINT       NOT NULL,
     attempt_number   INT          NOT NULL,
+    priority         INT          NOT NULL DEFAULT 20, -- viaja fila->posse: o requeue do reaper reconstroi a entrada sem ler historia (S5.3)
     claimed_at       DATETIME2    NOT NULL,
     cancel_requested BIT          NOT NULL DEFAULT 0,
     INDEX idx_mohs_lease_node NONCLUSTERED (node_id, epoch),
@@ -45,7 +46,7 @@ CREATE TABLE mohs_execution (
     payload         VARCHAR(MAX) NOT NULL,
     payload_type    VARCHAR(500) NOT NULL,
     INDEX idx_mohs_execution_created NONCLUSTERED (created_at),
-    INDEX idx_mohs_execution_job NONCLUSTERED (job_key, created_at DESC),
+    INDEX idx_mohs_execution_job NONCLUSTERED (job_key, execution_id DESC), -- ORDER BY/cursor do findPage — ver o V3 do Postgres
     INDEX idx_mohs_execution_corr NONCLUSTERED (correlation_id)
 );
 

@@ -48,7 +48,7 @@ const ACTION_COPY: Record<
 };
 
 /** States that can still be cancelled: the non-terminal ones. */
-const CANCELLABLE: readonly ExecutionState[] = ["ENQUEUED", "RUNNING", "RETRY_SCHEDULED"];
+const CANCELLABLE: readonly ExecutionState[] = ["ENQUEUED", "RUNNING", "RETRY_WAITING"];
 
 export const TIME_WINDOWS = {
   "1h": 60 * 60 * 1000,
@@ -303,7 +303,7 @@ export function ExecutionsPage() {
             <SelectItem value="all">All states</SelectItem>
             <SelectItem value="ENQUEUED">Enqueued</SelectItem>
             <SelectItem value="RUNNING">Running</SelectItem>
-            <SelectItem value="RETRY_SCHEDULED">Retry scheduled</SelectItem>
+            <SelectItem value="RETRY_WAITING">Retry scheduled</SelectItem>
             <SelectItem value="SUCCEEDED">Succeeded</SelectItem>
             <SelectItem value="FAILED">Failed</SelectItem>
             <SelectItem value="CANCELLED">Cancelled</SelectItem>

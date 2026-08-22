@@ -92,7 +92,7 @@ class JdbcClaimerSqlServerTest {
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_executions (
                     id, job_key, state, scheduled_at, actor, payload, payload_type, created_at)
-                VALUES (?, ?, 'RETRY_SCHEDULED', ?, 'test', '{}', 'java.lang.Object', ?)
+                VALUES (?, ?, 'RETRY_WAITING', ?, 'test', '{}', 'java.lang.Object', ?)
                 """, "exec-retry", "report", JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(5)), JdbcTimestamps.toUtcLocalDateTime(NOW));
 
         List<Execution> claimed = newClaimer().claim("node-a", 10);

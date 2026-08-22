@@ -179,7 +179,7 @@ class ClaimQueryLoadHarness {
     /**
      * Todo job com {@code allowConcurrentExecutions = true} (default) —
      * isola o custo da query do mutex de job. Seed misto (~20%
-     * {@code RETRY_SCHEDULED}, determinístico): desde a ADR-0033 retry é
+     * {@code RETRY_WAITING}, determinístico): desde a ADR-0033 retry é
      * claimável — semear só {@code ENQUEUED} mediria o predicado, não o
      * cenário (limitação declarada na rodada 08-15 do BASELINE.md).
      */
@@ -189,7 +189,7 @@ class ClaimQueryLoadHarness {
             String jobKey = prefix + "-job-" + j;
             jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
             for (int e = 0; e < executionsPerJob; e++) {
-                String state = e % 5 == 0 ? "RETRY_SCHEDULED" : "ENQUEUED";
+                String state = e % 5 == 0 ? "RETRY_WAITING" : "ENQUEUED";
                 batchArgs.add(new Object[] {
                         UUID.randomUUID().toString(), jobKey, state, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(1)),
                         Priority.NORMAL.value(), JdbcTimestamps.toUtcLocalDateTime(NOW)

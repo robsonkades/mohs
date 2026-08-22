@@ -63,7 +63,7 @@ class EngineMetricsTest {
     void retryCountsTheAttemptButNotAnExecutionOutcome() {
         Attempt attempt = new Attempt(1, STARTED, STARTED.plusMillis(30), ExecutionState.FAILED, "boom");
 
-        metrics.attemptFinished(JOB, attempt, ExecutionState.RETRY_SCHEDULED);
+        metrics.attemptFinished(JOB, attempt, ExecutionState.RETRY_WAITING);
 
         assertThat(registry.get("mohs.attempt.total").tag("outcome", "failed").counter().count()).isEqualTo(1.0);
         assertThat(registry.get("mohs.execution.duration").tag("outcome", "failed").timer().count()).isEqualTo(1);
@@ -72,7 +72,7 @@ class EngineMetricsTest {
 
     @Test
     void leaseReclaimedSeparatesExhaustedBudgetFromRetiredJob() {
-        metrics.leaseReclaimed(ExecutionState.RETRY_SCHEDULED, false);
+        metrics.leaseReclaimed(ExecutionState.RETRY_WAITING, false);
         metrics.leaseReclaimed(ExecutionState.FAILED, true);
         metrics.leaseReclaimed(ExecutionState.FAILED, false);
         metrics.leaseReclaimed(ExecutionState.CANCELLED, false);

@@ -19,7 +19,7 @@ class ExecutionEventTypeTest {
         // ExecutionEvent.java: permits Enqueued, Started, AttemptFailed,
         // RetryScheduled, Succeeded, Failed, Cancelled, BatchCompleted
         assertThat(ExecutionEventType.values()).extracting(Enum::name).containsExactly(
-                "ENQUEUED", "STARTED", "ATTEMPT_FAILED", "RETRY_SCHEDULED",
+                "ENQUEUED", "STARTED", "ATTEMPT_FAILED", "RETRY_WAITING",
                 "SUCCEEDED", "FAILED", "CANCELLED", "BATCH_COMPLETED");
     }
 }

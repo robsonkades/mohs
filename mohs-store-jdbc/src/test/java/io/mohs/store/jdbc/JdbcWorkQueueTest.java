@@ -1,6 +1,8 @@
 package io.mohs.store.jdbc;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -14,6 +16,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
+import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.WorkQueue;
@@ -28,18 +31,38 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class JdbcWorkQueueTest {
 
+    record Handler() {
+    }
+
     private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");
     private static final String NODE = "node-a";
     private static final long EPOCH = 1;
 
+    private DataSource dataSource;
     private JdbcTemplate rawJdbcTemplate;
     private JdbcWorkQueue queue;
 
     @BeforeEach
     void setUp() {
-        DataSource dataSource = freshH2DataSource();
+        dataSource = freshH2DataSource();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect());
+        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC)));
+    }
+
+    /** ADR-0043: membro de lote não rearma — o lote já contou esta falha; re-rodar contaria o desfecho DUAS vezes num lote possivelmente já fechado (mesmo guard do CAS da era anterior). */
+    @Test
+    void rearmForManualRetryRefusesABatchMember() {
+        new JdbcJobStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC))
+                .upsert(JobDefinition.of("job-a", Handler.class, spec -> spec.onDemand()));
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, correlation_id, payload, payload_type)
+                VALUES ('exec-member', 'job-a', 'FAILED', ?, ?, 'test', 'batch-1', '{}', 'java.lang.Object')
+                """, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW));
+
+        assertThat(queue.rearmForManualRetry(ExecutionId.of("exec-member"), NOW)).isFalse();
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-member'", String.class)).isEqualTo("FAILED");
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_ready", Integer.class)).isZero();
     }
 
     private static DataSource freshH2DataSource() {

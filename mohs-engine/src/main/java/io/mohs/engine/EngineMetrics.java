@@ -76,7 +76,7 @@ public final class EngineMetrics {
             registry.timer("mohs.execution.duration", "job", job.value(), "outcome", outcome)
                     .record(Duration.between(attempt.startedAt(), finishedAt));
         }
-        if (newState != ExecutionState.RETRY_SCHEDULED) {
+        if (newState != ExecutionState.RETRY_WAITING) {
             registry.counter("mohs.execution.total", "job", job.value(), "outcome", labelValue(newState)).increment();
         }
     }
@@ -91,13 +91,25 @@ public final class EngineMetrics {
      */
     void leaseReclaimed(ExecutionState postReclaimState, boolean attemptsExhausted) {
         String reason = switch (postReclaimState) {
-            case RETRY_SCHEDULED -> "retry";
+            case RETRY_WAITING -> "retry";
             case FAILED -> attemptsExhausted ? "attempts_exhausted" : "job_retired";
             case CANCELLED -> "cancelled";
             // inalcançáveis pós-reclaim; braços explícitos para o compilador acusar um ExecutionState novo
             case ENQUEUED, RUNNING, SUCCEEDED -> labelValue(postReclaimState);
         };
         registry.counter("mohs.lease.reclaimed", "reason", reason).increment();
+    }
+
+    /**
+     * §5.4 (Phase 5): perdas de admissão pós-claim — o cap virou no meio da
+     * rodada, ou o rate limit foi levado por outro nó entre as duas fases.
+     * Churn esperado e limitado a uma rodada por virada de guard; valor
+     * CRESCENTE sustentado significa a lista de inadmissíveis chegando
+     * atrasada (cabeça da fila dominada por job travado — a nota de design
+     * do tuning do S5.2).
+     */
+    void claimRequeued(String reason, int count) {
+        registry.counter("mohs.claim.requeued", "reason", reason).increment(count);
     }
 
     private static String labelValue(ExecutionState state) {

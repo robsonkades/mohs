@@ -109,7 +109,7 @@ class JdbcExecutionStoreTest {
         new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET state = 'FAILED' WHERE id = ?", id);
     }
 
-    /** ADR-0033/M3: retry manual rearma FAILED como RETRY_SCHEDULED com o scheduled_at reescrito — o claim faz o resto. */
+    /** ADR-0033/M3: retry manual rearma FAILED como RETRY_WAITING com o scheduled_at reescrito — o claim faz o resto. */
     @Test
     void rearmForManualRetryFlipsAFailedExecution() {
         seedFailedExecution("019abc-retry-1", "welcome-email");
@@ -119,7 +119,7 @@ class JdbcExecutionStoreTest {
 
         assertThat(armed).isTrue();
         Execution found = store.find(ExecutionId.of("019abc-retry-1")).orElseThrow();
-        assertThat(found.state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(found.state()).isEqualTo(ExecutionState.RETRY_WAITING);
         assertThat(found.scheduledAt()).isEqualTo(retryAt);
     }
 
@@ -373,7 +373,7 @@ class JdbcExecutionStoreTest {
         assertThat(found.attempts()).containsExactly(firstAttempt);
     }
 
-    /** ADR-0033: o backoff aterrissa junto do CAS — RETRY_SCHEDULED reescreve scheduled_at pra hora do retry na mesma transição. */
+    /** ADR-0033: o backoff aterrissa junto do CAS — RETRY_WAITING reescreve scheduled_at pra hora do retry na mesma transição. */
     @Test
     void completeToRetryScheduledRewritesScheduledAtToTheRetryTime() {
         seedRunningExecution("019abc-retry-1", "welcome-email");
@@ -382,16 +382,16 @@ class JdbcExecutionStoreTest {
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
         boolean completed = store.complete(new ExecutionStore.CompletionRequest(
-                ExecutionId.of("019abc-retry-1"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_SCHEDULED, retryAt), jobStore).applied();
+                ExecutionId.of("019abc-retry-1"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_WAITING, retryAt), jobStore).applied();
 
         assertThat(completed).isTrue();
         Execution found = store.find(ExecutionId.of("019abc-retry-1")).orElseThrow();
-        assertThat(found.state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(found.state()).isEqualTo(ExecutionState.RETRY_WAITING);
         assertThat(found.scheduledAt()).isEqualTo(retryAt);
         assertThat(found.attempts()).containsExactly(attempt);
     }
 
-    /** Lote misto do reaper: exauridos viram FAILED, os com orçamento viram RETRY_SCHEDULED cada um com seu retryAt. */
+    /** Lote misto do reaper: exauridos viram FAILED, os com orçamento viram RETRY_WAITING cada um com seu retryAt. */
     @Test
     void completeAllHandlesMixedTerminalAndRetryRequests() {
         seedRunningExecution("019abc-retry-2", "welcome-email");
@@ -403,14 +403,14 @@ class JdbcExecutionStoreTest {
 
         Map<ExecutionId, ExecutionStore.Completion> completed = store.completeAll(List.of(
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-retry-2"), JobKey.of("welcome-email"), failedAttempt, ExecutionState.FAILED),
-                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-retry-3"), JobKey.of("welcome-email"), retryAttempt, ExecutionState.RETRY_SCHEDULED, retryAt)),
+                new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-retry-3"), JobKey.of("welcome-email"), retryAttempt, ExecutionState.RETRY_WAITING, retryAt)),
                 jobStore);
 
         assertThat(completed).containsOnlyKeys(ExecutionId.of("019abc-retry-2"), ExecutionId.of("019abc-retry-3"));
         assertThat(completed.values()).allMatch(ExecutionStore.Completion::applied);
         assertThat(store.find(ExecutionId.of("019abc-retry-2")).orElseThrow().state()).isEqualTo(ExecutionState.FAILED);
         Execution retried = store.find(ExecutionId.of("019abc-retry-3")).orElseThrow();
-        assertThat(retried.state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(retried.state()).isEqualTo(ExecutionState.RETRY_WAITING);
         assertThat(retried.scheduledAt()).isEqualTo(retryAt);
     }
 
@@ -459,7 +459,7 @@ class JdbcExecutionStoreTest {
         store.insert(execution("019abc-cancel-1", "welcome-email"), new WelcomeEmail("a", 1));
         seedRunningExecution("019abc-cancel-2", "welcome-email");
         store.insert(execution("019abc-cancel-3", "welcome-email"), new WelcomeEmail("a", 1));
-        raw.update("UPDATE mohs_executions SET state = 'RETRY_SCHEDULED' WHERE id = '019abc-cancel-3'");
+        raw.update("UPDATE mohs_executions SET state = 'RETRY_WAITING' WHERE id = '019abc-cancel-3'");
 
         assertThat(store.cancelIfPending(ExecutionId.of("019abc-cancel-1"))).isTrue();
         assertThat(store.cancelIfPending(ExecutionId.of("019abc-cancel-2"))).isFalse();
@@ -510,7 +510,7 @@ class JdbcExecutionStoreTest {
         seedRunningExecution("019abc-noinfo-2", "welcome-email");
         // o CAS do segundo perde de propósito (a linha já saiu de RUNNING) —
         // prova que o SELECT de confirmação discrimina, não confirma o lote inteiro
-        raw.update("UPDATE mohs_executions SET state = 'RETRY_SCHEDULED' WHERE id = '019abc-noinfo-2'");
+        raw.update("UPDATE mohs_executions SET state = 'RETRY_WAITING' WHERE id = '019abc-noinfo-2'");
         AtomicBoolean rewroteCounts = new AtomicBoolean();
         JdbcExecutionStore noInfoStore = new JdbcExecutionStore(
                 successNoInfoDataSource(dataSource, rewroteCounts), clock, JsonMapper.builder().build(), new H2JdbcDialect());
@@ -528,7 +528,7 @@ class JdbcExecutionStoreTest {
         assertThat(verdicts.get(ExecutionId.of("019abc-noinfo-1")).applied()).isTrue();
         assertThat(verdicts.get(ExecutionId.of("019abc-noinfo-2")).applied()).isFalse();
         assertThat(store.find(ExecutionId.of("019abc-noinfo-1")).orElseThrow().state()).isEqualTo(ExecutionState.SUCCEEDED);
-        assertThat(store.find(ExecutionId.of("019abc-noinfo-2")).orElseThrow().state()).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(store.find(ExecutionId.of("019abc-noinfo-2")).orElseThrow().state()).isEqualTo(ExecutionState.RETRY_WAITING);
     }
 
     private static DataSource successNoInfoDataSource(DataSource delegate, AtomicBoolean rewroteCounts) {
@@ -569,13 +569,13 @@ class JdbcExecutionStoreTest {
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
         assertThatThrownBy(() -> new ExecutionStore.CompletionRequest(
-                ExecutionId.of("x"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_SCHEDULED, null))
+                ExecutionId.of("x"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_WAITING, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("requires retryAt");
         assertThatThrownBy(() -> new ExecutionStore.CompletionRequest(
                 ExecutionId.of("x"), JobKey.of("welcome-email"), attempt, ExecutionState.FAILED, clock.instant()))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("only applies to RETRY_SCHEDULED");
+                .hasMessageContaining("only applies to RETRY_WAITING");
     }
 
     /** ADR-0035: rearme fixed-delay só em estado terminal — com retry a corrente ainda está viva. */
@@ -584,7 +584,7 @@ class JdbcExecutionStoreTest {
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
 
         assertThatThrownBy(() -> new ExecutionStore.CompletionRequest(
-                ExecutionId.of("x"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_SCHEDULED,
+                ExecutionId.of("x"), JobKey.of("welcome-email"), attempt, ExecutionState.RETRY_WAITING,
                 clock.instant(), null, clock.instant()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("rearmNextFireAt");
@@ -864,16 +864,16 @@ class JdbcExecutionStoreTest {
         new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET lease_expires_at = ? WHERE id = ?",
                 JdbcTimestamps.toUtcLocalDateTime(clock.instant().plusSeconds(30)), "019abc-count-3");
         store.insert(execution("019abc-count-4", "welcome-email"), new WelcomeEmail("a", 1));
-        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET state = 'RETRY_SCHEDULED' WHERE id = ?", "019abc-count-4");
+        new JdbcTemplate(dataSource).update("UPDATE mohs_executions SET state = 'RETRY_WAITING' WHERE id = ?", "019abc-count-4");
         seedFailedExecution("019abc-count-5", "welcome-email");
 
         assertThat(store.countActiveByState()).containsOnly(
                 entry(ExecutionState.ENQUEUED, 2L),
                 entry(ExecutionState.RUNNING, 1L),
-                entry(ExecutionState.RETRY_SCHEDULED, 1L));
+                entry(ExecutionState.RETRY_WAITING, 1L));
     }
 
-    /** GET /overview: a vazão conta só desfechos terminais DENTRO da janela — RETRY_SCHEDULED não é desfecho (a execução segue viva no backlog) e attempt sem finished_at fica fora por construção. */
+    /** GET /overview: a vazão conta só desfechos terminais DENTRO da janela — RETRY_WAITING não é desfecho (a execução segue viva no backlog) e attempt sem finished_at fica fora por construção. */
     @Test
     void countTerminalOutcomesSinceCountsOnlyWindowedTerminalAttempts() {
         store.insert(execution("019abc-tput-1", "welcome-email"), new WelcomeEmail("a", 1));
@@ -882,7 +882,7 @@ class JdbcExecutionStoreTest {
         insertAttempt("019abc-tput-1", 2, since, "SUCCEEDED");
         insertAttempt("019abc-tput-1", 3, since.plusSeconds(10), "SUCCEEDED");
         insertAttempt("019abc-tput-1", 4, since.plusSeconds(20), "FAILED");
-        insertAttempt("019abc-tput-1", 5, since.plusSeconds(30), "RETRY_SCHEDULED");
+        insertAttempt("019abc-tput-1", 5, since.plusSeconds(30), "RETRY_WAITING");
         insertAttempt("019abc-tput-1", 6, null, "FAILED");
 
         assertThat(store.countTerminalOutcomesSince(since)).containsOnly(
@@ -934,7 +934,7 @@ class JdbcExecutionStoreTest {
         Attempt attempt = new Attempt(1, clock.instant(), clock.instant(), ExecutionState.FAILED, "boom");
         ExecutionStore.Completion completion = store.complete(new ExecutionStore.CompletionRequest(
                 ExecutionId.of("019abc-member-3"), JobKey.of("welcome-email"), attempt,
-                ExecutionState.RETRY_SCHEDULED, clock.instant()).inBatch("b2"), jobStore);
+                ExecutionState.RETRY_WAITING, clock.instant()).inBatch("b2"), jobStore);
 
         assertThat(completion.applied()).isTrue();
         assertThat(completion.closedBatch()).isNull();
@@ -979,7 +979,7 @@ class JdbcExecutionStoreTest {
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-reclaim-2"), JobKey.of("welcome-email"),
                         attempt, ExecutionState.CANCELLED).inBatch("b3"),
                 new ExecutionStore.CompletionRequest(ExecutionId.of("019abc-reclaim-3"), JobKey.of("welcome-email"),
-                        attempt, ExecutionState.RETRY_SCHEDULED, clock.instant().plusSeconds(30)).inBatch("b3")),
+                        attempt, ExecutionState.RETRY_WAITING, clock.instant().plusSeconds(30)).inBatch("b3")),
                 jobStore);
 
         BatchCounters counters = batches.find("b3").orElseThrow();

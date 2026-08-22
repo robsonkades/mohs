@@ -39,11 +39,13 @@ import io.mohs.core.event.Succeeded;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
-import io.mohs.core.execution.JobContext;
 import io.mohs.core.job.JobKey;
-import io.mohs.store.jdbc.JdbcExecutionStore;
+import io.mohs.store.jdbc.JdbcBatchStore;
+import io.mohs.store.jdbc.JdbcHistoryStore;
 import io.mohs.store.jdbc.JdbcJobStore;
+import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcTimestamps;
+import io.mohs.store.jdbc.JdbcWorkQueue;
 import io.mohs.store.jdbc.dialect.H2JdbcDialect;
 import io.mohs.test.MutableClock;
 
@@ -54,18 +56,28 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
+/**
+ * {@link Dispatcher} contra as portas JDBC reais (H2, Phase 5): cada
+ * desfecho vira um {@link LeaseStore.CompletionResult} cercado pela posse
+ * do {@link Dispatcher.Grant} — a posse dos seeds nasce pelo caminho real
+ * (história → fila → claim), então o fence dos testes é o de verdade.
+ */
 class DispatcherTest {
 
     record Handler() {
     }
 
     private static final Instant NOW = Instant.parse("2026-08-14T12:00:00Z");
+    private static final String NODE = "node-a";
+    private static final long EPOCH = 1;
 
     private DataSource dataSource;
     private MutableClock clock;
     private JdbcTemplate rawJdbcTemplate;
     private JdbcJobStore jobStore;
-    private JdbcExecutionStore executionStore;
+    private JdbcHistoryStore historyStore;
+    private JdbcWorkQueue workQueue;
+    private JdbcLeaseStore leaseStore;
     private HandlerRegistry handlerRegistry;
     private RecordingListener listener;
     private AsyncTaskExecutor eventExecutor;
@@ -76,7 +88,10 @@ class DispatcherTest {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         jobStore = new JdbcJobStore(dataSource, clock);
-        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
+        historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
+        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
         handlerRegistry = new HandlerRegistry();
         listener = new RecordingListener();
         eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
@@ -92,8 +107,13 @@ class DispatcherTest {
     }
 
     private Dispatcher newDispatcher(List<ExecutionInterceptor> interceptors) {
-        return new Dispatcher(executionStore, jobStore, handlerRegistry, clock, interceptors, List.of(listener), eventExecutor,
+        return new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, interceptors, List.of(listener), eventExecutor,
                 new EngineMetrics(new SimpleMeterRegistry()));
+    }
+
+    /** A posse que o claim dos seeds entregou — o mesmo fence (NODE, EPOCH) da lease gravada. */
+    private static Dispatcher.Grant grant(int attemptNumber) {
+        return new Dispatcher.Grant(NODE, EPOCH, attemptNumber, NOW, NOW);
     }
 
     /**
@@ -107,12 +127,12 @@ class DispatcherTest {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
         });
-        CompletionBatcher batcher = new CompletionBatcher(executionStore, jobStore, 1, Duration.ofMillis(5));
+        CompletionBatcher batcher = new CompletionBatcher(leaseStore, jobStore, 1, Duration.ofMillis(5));
         batcher.start();
         try {
-            new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener), eventExecutor,
+            new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener), eventExecutor,
                     new EngineMetrics(new SimpleMeterRegistry()), batcher)
-                    .dispatch(execution, onDemand("welcome-email"), "hello");
+                    .dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
 
             assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
             assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
@@ -121,19 +141,27 @@ class DispatcherTest {
         }
     }
 
+    /** História + fila + claim — a posse nasce pelo caminho real, com o fence (NODE, EPOCH). */
     private Execution seedRunningExecution(String id, String jobKey) {
-        jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
-        rawJdbcTemplate.update("""
-                INSERT INTO mohs_executions (
-                    id, job_key, state, scheduled_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
-                VALUES (?, ?, 'RUNNING', ?, 'test', 'node-a', ?, '{}', 'java.lang.Object', ?)
-                """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW.plusSeconds(30)), JdbcTimestamps.toUtcLocalDateTime(NOW));
-        return executionStore.find(ExecutionId.of(id)).orElseThrow();
+        return seedRunningExecution(id, jobKey, 1, "test");
     }
 
+    private Execution seedRunningExecution(String id, String jobKey, int attempt, String actor) {
+        if (jobStore.find(JobKey.of(jobKey)).isEmpty()) {
+            jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
+        }
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                VALUES (?, ?, 'PENDING', ?, ?, ?, '{}', 'java.lang.Object')
+                """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW), actor);
+        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, 20, attempt, NOW.minusSeconds(1))));
+        workQueue.claim(0, NODE, EPOCH, 10, List.of(), NOW);
+        return historyStore.find(ExecutionId.of(id), NOW).orElseThrow();
+    }
+
+    /** Estado do read model derivado (§4.3): advisory + lease + fila, exatamente o que a API pública vê. */
     private ExecutionState stateOf(String id) {
-        return ExecutionState.valueOf(rawJdbcTemplate.queryForObject(
-                "SELECT state FROM mohs_executions WHERE id = ?", String.class, id));
+        return historyStore.find(ExecutionId.of(id), clock.instant()).orElseThrow().state();
     }
 
     /** retries default 0 — primeira falha esgota o orçamento, o comportamento terminal de sempre. */
@@ -141,7 +169,7 @@ class DispatcherTest {
         return JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand());
     }
 
-    /** ADR-0033: falha com orçamento vira RETRY_SCHEDULED com backoff dentro do bound (1s pra 1ª falha), e publica AttemptFailed + RetryScheduled — nunca Failed. */
+    /** ADR-0033: falha com orçamento renasce na fila com backoff dentro do bound (1s pra 1ª falha) — RETRY_WAITING derivado — e publica AttemptFailed + RetryScheduled, nunca Failed. */
     @Test
     void failureWithRemainingBudgetSchedulesARetryWithBackoff() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -150,22 +178,27 @@ class DispatcherTest {
             throw new IllegalStateException("boom");
         });
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
-        Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
+        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
         assertThat(found.attempts()).hasSize(1);
         assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.FAILED);
-        assertThat(found.scheduledAt()).isBetween(NOW, NOW.plusSeconds(1));
+        // o renascimento aterrissou na fila: attempt 2, visível no backoff
+        Instant retryVisibleAt = JdbcTimestamps.fromUtcLocalDateTime(rawJdbcTemplate.queryForObject(
+                "SELECT visible_at FROM mohs_ready WHERE execution_id = 'exec-1'", LocalDateTime.class));
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT attempt FROM mohs_ready WHERE execution_id = 'exec-1'", Integer.class)).isEqualTo(2);
+        assertThat(retryVisibleAt).isBetween(NOW, NOW.plusSeconds(1));
 
         RetryScheduled retryScheduled = listener.awaitEvent(RetryScheduled.class);
         assertThat(retryScheduled.nextAttempt()).isEqualTo(2);
-        assertThat(retryScheduled.retryAt()).isEqualTo(found.scheduledAt());
+        assertThat(retryScheduled.retryAt()).isEqualTo(retryVisibleAt);
         assertThat(listener.events().stream().filter(AttemptFailed.class::isInstance)).hasSize(1);
         assertThat(listener.events().stream().filter(Failed.class::isInstance)).isEmpty();
     }
 
-    /** A última tentativa do orçamento falhando é FAILED terminal com Failed(exhausted=true) — o attemptNumber conta os attempts já gravados. */
+    /** A última tentativa do orçamento falhando é FAILED terminal com Failed(exhausted=true) — o attemptNumber veio da lease (§5.3), não de contagem. */
     @Test
     void failureOnTheLastBudgetedAttemptFailsTerminally() throws Exception {
         Execution execution = seedRunningExecutionWithPriorFailedAttempt("exec-1", "welcome-email");
@@ -174,7 +207,7 @@ class DispatcherTest {
             throw new IllegalStateException("boom again");
         });
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(2));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         Failed event = listener.awaitEvent(Failed.class);
@@ -187,7 +220,7 @@ class DispatcherTest {
     void failBeforeDispatchPublishesFailedWithoutTheExhaustedFlag() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
 
-        newDispatcher(List.of()).failBeforeDispatch(execution, null, new IllegalStateException("payload could not be read"), null);
+        newDispatcher(List.of()).failBeforeDispatch(execution, null, new IllegalStateException("payload could not be read"), grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         Failed event = listener.awaitEvent(Failed.class);
@@ -198,11 +231,12 @@ class DispatcherTest {
     @Test
     void terminalCompletionOfASchedulerOccurrenceRearmsTheAfterFinishChain() {
         JobDefinition definition = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
-        Execution execution = seedRunningOccurrence("exec-1", definition, "scheduler");
+        jobStore.upsert(definition);
+        Execution execution = seedRunningExecution("exec-1", "poll", 1, Execution.SCHEDULER_ACTOR);
         disarmTrigger("poll"); // NULL-until-finish: o disparo desarmou o trigger (ADR-0035)
         handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { });
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(nextFireAtOf("poll")).isEqualTo(NOW.plus(Duration.ofMinutes(5)));
@@ -212,11 +246,12 @@ class DispatcherTest {
     @Test
     void terminalCompletionOfAManualExecutionDoesNotRearmTheChain() {
         JobDefinition definition = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
-        Execution execution = seedRunningOccurrence("exec-1", definition, "api:user");
+        jobStore.upsert(definition);
+        Execution execution = seedRunningExecution("exec-1", "poll", 1, "api:user");
         disarmTrigger("poll");
         handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { });
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(nextFireAtOf("poll")).isNull();
@@ -227,27 +262,17 @@ class DispatcherTest {
     void aBudgetedFailureOfASchedulerOccurrenceDoesNotRearm() {
         JobDefinition definition = JobDefinition.of("poll", Handler.class,
                 spec -> spec.everyAfterFinish(Duration.ofMinutes(5)).retries(2));
-        Execution execution = seedRunningOccurrence("exec-1", definition, "scheduler");
+        jobStore.upsert(definition);
+        Execution execution = seedRunningExecution("exec-1", "poll", 1, Execution.SCHEDULER_ACTOR);
         disarmTrigger("poll");
         handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> {
             throw new IllegalStateException("boom");
         });
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello");
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
         assertThat(nextFireAtOf("poll")).isNull();
-    }
-
-    private Execution seedRunningOccurrence(String id, JobDefinition definition, String actor) {
-        jobStore.upsert(definition);
-        rawJdbcTemplate.update("""
-                INSERT INTO mohs_executions (
-                    id, job_key, state, scheduled_at, actor, node_id, lease_expires_at, payload, payload_type, created_at)
-                VALUES (?, ?, 'RUNNING', ?, ?, 'node-a', ?, '{}', 'java.lang.Object', ?)
-                """, id, definition.key().value(), JdbcTimestamps.toUtcLocalDateTime(NOW), actor,
-                JdbcTimestamps.toUtcLocalDateTime(NOW.plusSeconds(30)), JdbcTimestamps.toUtcLocalDateTime(NOW));
-        return executionStore.find(ExecutionId.of(id)).orElseThrow();
     }
 
     private void disarmTrigger(String jobKey) {
@@ -260,14 +285,20 @@ class DispatcherTest {
         return stored == null ? null : JdbcTimestamps.fromUtcLocalDateTime(stored);
     }
 
-    /** Segunda tentativa: um attempt FAILED já gravado — o dispatch seguinte é o attempt 2. */
+    /** Segunda tentativa: um attempt FAILED já gravado e a entrada de fila do attempt 2 — o claim entrega a lease com attempt_number 2. */
     private Execution seedRunningExecutionWithPriorFailedAttempt(String id, String jobKey) {
-        Execution execution = seedRunningExecution(id, jobKey);
+        jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_attempts (execution_id, number, started_at, finished_at, outcome, error)
-                VALUES (?, 1, ?, ?, 'FAILED', 'boom')
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                VALUES (?, ?, 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW));
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome, error_type, error)
+                VALUES (?, 1, 'node-a', ?, ?, 'FAILED', 'java.lang.IllegalStateException', 'boom')
                 """, id, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(10)), JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(9)));
-        return executionStore.find(ExecutionId.of(id)).orElseThrow();
+        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, 20, 2, NOW.minusSeconds(1))));
+        workQueue.claim(0, NODE, EPOCH, 10, List.of(), NOW);
+        return historyStore.find(ExecutionId.of(id), NOW).orElseThrow();
     }
 
     @Test
@@ -276,15 +307,13 @@ class DispatcherTest {
         List<Object> received = new CopyOnWriteArrayList<>();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> received.add(payload));
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello");
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
 
         assertThat(received).containsExactly("hello");
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
-        Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
+        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
         assertThat(found.attempts()).hasSize(1);
         assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.SUCCEEDED);
-        // fired_at não é mais escrito aqui — nasce no CAS do claim (ADR-0047);
-        // a cobertura mora em JdbcClaimerTest.claimReturnsDueEnqueuedExecutionsAsRunning
         assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
     }
 
@@ -295,10 +324,10 @@ class DispatcherTest {
             throw new IllegalStateException("boom");
         });
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello");
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
-        Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
+        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
         assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.FAILED);
         assertThat(found.attempts().get(0).error()).isEqualTo("boom");
         Failed event = listener.awaitEvent(Failed.class);
@@ -310,10 +339,10 @@ class DispatcherTest {
     void dispatchFailsTerminallyWhenNoHandlerIsRegistered() {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello");
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
-        Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
+        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
         assertThat(found.attempts().get(0).error()).contains("no handler registered").contains("welcome-email");
     }
 
@@ -327,10 +356,10 @@ class DispatcherTest {
             throw new RuntimeException("interceptor blew up");
         };
 
-        newDispatcher(List.of(failingInterceptor)).dispatch(execution, onDemand("welcome-email"), "hello");
+        newDispatcher(List.of(failingInterceptor)).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
-        Execution found = executionStore.find(ExecutionId.of("exec-1")).orElseThrow();
+        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
         assertThat(found.attempts().get(0).error()).isEqualTo("interceptor blew up");
     }
 
@@ -350,7 +379,7 @@ class DispatcherTest {
             order.add("second-after");
         };
 
-        newDispatcher(List.of(first, second)).dispatch(execution, onDemand("welcome-email"), "hello");
+        newDispatcher(List.of(first, second)).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
 
         assertThat(order).containsExactly("first-before", "second-before", "handler", "second-after", "first-after");
     }
@@ -363,10 +392,10 @@ class DispatcherTest {
         ExecutionListener throwingListener = event -> {
             throw new RuntimeException("listener blew up");
         };
-        Dispatcher dispatcher = new Dispatcher(executionStore, jobStore, handlerRegistry, clock, List.of(),
+        Dispatcher dispatcher = new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, List.of(),
                 List.of(throwingListener, listener), eventExecutor, new EngineMetrics(new SimpleMeterRegistry()));
 
-        dispatcher.dispatch(execution, onDemand("welcome-email"), "hello");
+        dispatcher.dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
@@ -384,7 +413,7 @@ class DispatcherTest {
             throw new IllegalStateException("stopping at the operator's request");
         });
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal);
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal, grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
         Cancelled cancelled = listener.awaitEvent(Cancelled.class);
@@ -403,9 +432,9 @@ class DispatcherTest {
             throw new InterruptedException("interrupted mid-await");
         });
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal);
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal, grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
         AttemptFailed failed = listener.awaitEvent(AttemptFailed.class);
         assertThat(failed.error().getMessage()).contains("exceeded job timeout PT5M");
         assertThat(Thread.currentThread().isInterrupted()).isFalse();
@@ -421,7 +450,7 @@ class DispatcherTest {
             throw new InterruptedException("interrupted by drain escalation");
         });
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal);
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal, grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         Failed failed = listener.awaitEvent(Failed.class);
@@ -436,7 +465,7 @@ class DispatcherTest {
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) ->
                 signal.requestCancellation(CancellationSignal.Reason.MANUAL, false));
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal);
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal, grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
         listener.awaitEvent(Succeeded.class);
@@ -444,8 +473,8 @@ class DispatcherTest {
 
     /**
      * Aprovado no review do ciclo ADR-0034: falha da ESCRITA de sucesso não
-     * é falha do handler — propaga (o Engine loga e a execução fica RUNNING
-     * pro reaper, indistinguível de crash pré-conclusão) em vez de ser
+     * é falha do handler — propaga (o Engine loga e a lease fica de pé pro
+     * reaper, indistinguível de crash pré-conclusão) em vez de ser
      * reclassificada pelo sinal (CANCELLED de trabalho concluído) ou pelo
      * orçamento (FAILED→retry fabricando duplicata).
      */
@@ -455,12 +484,12 @@ class DispatcherTest {
         CancellationSignal signal = new CancellationSignal();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) ->
                 signal.requestCancellation(CancellationSignal.Reason.MANUAL, false));
-        ExecutionStore blinkingStore = mock(ExecutionStore.class, delegatesTo(executionStore));
+        LeaseStore blinkingStore = mock(LeaseStore.class, delegatesTo(leaseStore));
         doThrow(new RuntimeException("simulated database error on the success write")).when(blinkingStore).complete(any(), any());
         Dispatcher dispatcher = new Dispatcher(blinkingStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener),
                 eventExecutor, new EngineMetrics(new SimpleMeterRegistry()));
 
-        assertThatThrownBy(() -> dispatcher.dispatch(execution, onDemand("welcome-email"), "hello", signal))
+        assertThatThrownBy(() -> dispatcher.dispatch(execution, onDemand("welcome-email"), "hello", signal, grant(1)))
                 .hasMessageContaining("simulated database error");
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
@@ -475,7 +504,7 @@ class DispatcherTest {
         AtomicBoolean handlerRan = new AtomicBoolean();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerRan.set(true));
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal);
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal, grant(1));
 
         assertThat(handlerRan).isFalse();
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
@@ -492,10 +521,10 @@ class DispatcherTest {
         AtomicBoolean handlerRan = new AtomicBoolean();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerRan.set(true));
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal);
+        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal, grant(1));
 
         assertThat(handlerRan).isFalse();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_SCHEDULED);
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
         AttemptFailed failed = listener.awaitEvent(AttemptFailed.class);
         assertThat(failed.error().getMessage()).contains("before attempt 1 started");
     }

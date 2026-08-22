@@ -39,7 +39,7 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
                        j.rate_limit AS rate_limit
                 FROM mohs_executions e WITH (UPDLOCK, ROWLOCK, READPAST)
                 JOIN mohs_job_definitions j ON j.job_key = e.job_key
-                WHERE e.state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+                WHERE e.state IN ('ENQUEUED', 'RETRY_WAITING')
                   AND e.scheduled_at <= :now
                   AND j.retired = 0
                   AND (j.allow_concurrent_executions = 1 OR j.running_execution_count < j.max_concurrent_executions)
@@ -67,7 +67,7 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
      * {@code CLAIM_READY_FILTERED} do Postgres.
      */
     private static final String TSQL_READY_CANDIDATES = """
-            SELECT TOP (:limit) execution_id, job_key, attempt
+            SELECT TOP (:limit) execution_id, job_key, attempt, priority
             FROM mohs_ready WITH (UPDLOCK, ROWLOCK, READPAST)
             WHERE shard = :shard AND visible_at <= :now
             ORDER BY priority, visible_at

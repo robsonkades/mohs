@@ -79,7 +79,7 @@ CREATE TABLE mohs_executions (
 -- (DBTUNE-5, medido: -95.2% Postgres / -84.2% SQL Server no tamanho do
 -- índice, throughput de claim estável — docs/performance/BASELINE.md).
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_claim' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED'); -- ADR-0033: par de estados claimáveis, ver schema-postgresql.sql
+CREATE INDEX idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_WAITING'); -- ADR-0033: par de estados claimáveis, ver schema-postgresql.sql
 -- Índice filtrado pro reaper (DBTUNE-10): só a execução RUNNING é
 -- candidata a reclaim — mesmo raciocínio da DBTUNE-5, WHERE em vez de
 -- coluna porque o predicado já fixa o state.

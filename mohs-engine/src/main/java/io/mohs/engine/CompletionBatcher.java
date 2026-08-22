@@ -13,13 +13,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.mohs.core.execution.ExecutionId;
-import io.mohs.engine.ExecutionStore.Completion;
-import io.mohs.engine.ExecutionStore.CompletionRequest;
+import io.mohs.engine.LeaseStore.Completion;
+import io.mohs.engine.LeaseStore.CompletionResult;
 
 /**
  * Group commit da conclusão (ADR-0047; §7.6 do redesign, antecipado para o
  * schema atual): resultados de dispatch entram numa fila limitada e são
- * descarregados numa única transação de {@link ExecutionStore#completeAll}
+ * descarregados numa única transação de {@link LeaseStore#complete}
  * — {@code flushSize} resultados ou {@code flushInterval} decorrido desde
  * o primeiro pendente, o que vier primeiro. Era isto ou um commit síncrono
  * por execução no topo do perfil de waits ({@code LWLock:WALWrite},
@@ -53,10 +53,10 @@ public final class CompletionBatcher implements AutoCloseable {
     /** Espera do poll ocioso — só define a latência de percepção do close, não o gatilho de flush. */
     private static final Duration IDLE_POLL = Duration.ofMillis(50);
 
-    private record Pending(CompletionRequest request, Consumer<Completion> onOutcome) {
+    private record Pending(CompletionResult result, Consumer<Completion> onOutcome) {
     }
 
-    private final ExecutionStore executionStore;
+    private final LeaseStore leaseStore;
     private final JobStore jobStore;
     private final int flushSize;
     private final Duration flushInterval;
@@ -64,8 +64,8 @@ public final class CompletionBatcher implements AutoCloseable {
     private final Thread flusher;
     private volatile boolean closed;
 
-    public CompletionBatcher(ExecutionStore executionStore, JobStore jobStore, int flushSize, Duration flushInterval) {
-        this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
+    public CompletionBatcher(LeaseStore leaseStore, JobStore jobStore, int flushSize, Duration flushInterval) {
+        this.leaseStore = Objects.requireNonNull(leaseStore, "leaseStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         if (flushSize <= 0) {
             throw new IllegalArgumentException("flushSize must be positive, got " + flushSize);
@@ -94,21 +94,21 @@ public final class CompletionBatcher implements AutoCloseable {
      * "publica só o que ficou durável" do caminho síncrono. Depois do
      * {@code close()}, conclui síncrono na própria thread chamadora.
      */
-    public void submit(CompletionRequest request, Consumer<Completion> onOutcome) {
-        Objects.requireNonNull(request, "request");
+    public void submit(CompletionResult result, Consumer<Completion> onOutcome) {
+        Objects.requireNonNull(result, "result");
         Objects.requireNonNull(onOutcome, "onOutcome");
         if (closed) {
-            onOutcome.accept(executionStore.complete(request, jobStore));
+            onOutcome.accept(completeOne(result));
             return;
         }
         try {
-            queue.put(new Pending(request, onOutcome));
+            queue.put(new Pending(result, onOutcome));
         } catch (InterruptedException e) {
             // completa ANTES de re-armar a flag: com ela de pé o acquire do
             // JDBC lançaria (mesmo racional do flushLoop) e o fallback se
             // derrotaria; o status restaurado é para o CHAMADOR observar
             // depois (JCIP §7.1.3)
-            onOutcome.accept(executionStore.complete(request, jobStore));
+            onOutcome.accept(completeOne(result));
             Thread.currentThread().interrupt();
         }
     }
@@ -182,7 +182,7 @@ public final class CompletionBatcher implements AutoCloseable {
         }
         Map<ExecutionId, Completion> verdicts;
         try {
-            verdicts = executionStore.completeAll(buffer.stream().map(Pending::request).toList(), jobStore);
+            verdicts = leaseStore.complete(buffer.stream().map(Pending::result).toList(), jobStore);
         } catch (RuntimeException e) {
             log.warn("group completion flush of {} result(s) failed — falling back to one completion per result", buffer.size(), e);
             for (Pending pending : buffer) {
@@ -191,17 +191,22 @@ public final class CompletionBatcher implements AutoCloseable {
             return;
         }
         for (Pending pending : buffer) {
-            deliverOutcome(pending, verdicts.getOrDefault(pending.request().id(), Completion.NOT_APPLIED));
+            deliverOutcome(pending, verdicts.getOrDefault(pending.result().executionId(), Completion.FENCED_OUT));
         }
     }
 
     private void completeIndividually(Pending pending) {
         try {
-            deliverOutcome(pending, executionStore.complete(pending.request(), jobStore));
+            deliverOutcome(pending, completeOne(pending.result()));
         } catch (RuntimeException e) {
-            log.error("could not record the completion of execution {} — it will sit RUNNING until the reaper reclaims it on lease expiry",
-                    pending.request().id(), e);
+            log.error("could not record the completion of execution {} — its lease stands until a reaper reclaims it",
+                    pending.result().executionId(), e);
         }
+    }
+
+    private Completion completeOne(CompletionResult result) {
+        return leaseStore.complete(List.of(result), jobStore)
+                .getOrDefault(result.executionId(), Completion.FENCED_OUT);
     }
 
     private static void deliverOutcome(Pending pending, Completion completion) {
@@ -209,7 +214,7 @@ public final class CompletionBatcher implements AutoCloseable {
             pending.onOutcome().accept(completion);
         } catch (RuntimeException e) {
             log.error("completion outcome callback of execution {} threw — the result IS durable, only its follow-up (events/metrics) was lost",
-                    pending.request().id(), e);
+                    pending.result().executionId(), e);
         }
     }
 

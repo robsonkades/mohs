@@ -71,7 +71,7 @@ class BatchCounterDesignHarness {
     private static final Duration WRITE_RUN = Duration.ofSeconds(5);
 
     /** Estados não terminais — o predicado da sonda de conclusão. */
-    private static final String LIVE_STATES = "'ENQUEUED', 'RUNNING', 'RETRY_SCHEDULED'";
+    private static final String LIVE_STATES = "'ENQUEUED', 'RUNNING', 'RETRY_WAITING'";
 
     private static final String DERIVED_COUNT =
             "SELECT state, count(*) FROM mohs_executions WHERE batch_id = ? GROUP BY state";

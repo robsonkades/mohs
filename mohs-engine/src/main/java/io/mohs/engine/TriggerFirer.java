@@ -28,11 +28,15 @@ public interface TriggerFirer {
      * CAS-avança {@code next_fire_at} de {@code observedNextFireAt} para
      * {@code newNextFireAt} ({@code null} = desarma — fixed-delay
      * aguardando o fim) e, vencendo, insere {@code occurrences} com
-     * {@code payload} na mesma transação.
+     * {@code payload} na mesma transação — desde a Phase 5, história
+     * ({@code mohs_execution}) + fila ({@code mohs_ready}), a unidade de
+     * enqueue do §7.5-1 com o CAS como guarda. {@code now} é o instante do
+     * disparo (chave de partição da história); {@code scheduledAt} de cada
+     * ocorrência vira o {@code visible_at} da fila.
      *
      * @return {@code true} se ESTA chamada avançou o trigger (e inseriu);
      *         {@code false} se outro nó venceu a corrida — nada inserido.
      */
     boolean fire(JobKey key, Instant observedNextFireAt, @Nullable Instant newNextFireAt,
-            List<Execution> occurrences, Object payload);
+            List<Execution> occurrences, Object payload, Instant now);
 }

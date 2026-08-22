@@ -3,7 +3,8 @@
 # Runs the recovery scenarios against the CURRENT engine, on the same
 # bench as BASELINE.md "Tuning fim a fim no Postgres": demo app on the host
 # at the documented operating point, container 'postgres', seed by SQL with
-# a unique prefix per round, measurement by mohs_attempts timestamps.
+# a unique prefix per round, measurement by mohs_attempt timestamps
+# (Phase 5 split tables: mohs_execution/mohs_ready/mohs_lease/mohs_attempt).
 #
 #   S6 — node kill -9 mid-drain. Pass: 100% of the seed reaches a terminal
 #        state; re-executions (attempts > 1) only for executions that were
@@ -99,7 +100,7 @@ Add-Type -Namespace Chaos -Name Native -MemberDefinition @'
 '@
 
 function Get-Pending([string]$Prefix) {
-    [int](Invoke-Psql "SELECT count(*) FROM mohs_executions WHERE id LIKE '$Prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
+    [int](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE execution_id LIKE '$Prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
 }
 
 function Wait-Fraction([string]$Prefix, [double]$Fraction) {
@@ -136,10 +137,15 @@ function Show-ExceptionProfile([string]$LogName) {
     }
 }
 
+# Phase 5 (S5.3): a unidade de enqueue do §7.5-1 — história advisory PENDING
+# + entrada na fila, como o ScheduleCommand faria (created_at = now cai na
+# partição semanal que o boot do app garantiu)
 function Seed([string]$Prefix) {
-    Invoke-Psql ("INSERT INTO mohs_executions (id, job_key, state, scheduled_at, actor, priority, payload, payload_type, created_at) " +
-        "SELECT '$Prefix'||lpad(n::text,7,'0'), 'every-job', 'ENQUEUED', now(), 'anonymous', 20, '{}', " +
-        "'java.util.Collections`$UnmodifiableMap', now() FROM generate_series(1,$SeedSize) n") | Out-Null
+    Invoke-Psql ("INSERT INTO mohs_execution (execution_id, job_key, shard, priority, state, scheduled_at, created_at, actor, payload, payload_type) " +
+        "SELECT '$Prefix'||lpad(n::text,7,'0'), 'every-job', 0, 20, 'PENDING', now(), now(), 'anonymous', '{}', " +
+        "'java.util.Collections`$UnmodifiableMap' FROM generate_series(1,$SeedSize) n") | Out-Null
+    Invoke-Psql ("INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at) " +
+        "SELECT '$Prefix'||lpad(n::text,7,'0'), 'every-job', 0, 20, 1, now() FROM generate_series(1,$SeedSize) n") | Out-Null
 }
 
 # ── S6: node kill -9 mid-drain ───────────────────────────────────────────────
@@ -158,8 +164,11 @@ function Invoke-S6 {
     # process is dead, nothing mutates the seed rows until restart — the
     # snapshot taken now IS the state at the kill
     Invoke-Psql "DROP TABLE IF EXISTS chaos_s6_snapshot" | Out-Null
-    Invoke-Psql ("CREATE TABLE chaos_s6_snapshot AS SELECT id, state FROM mohs_executions " +
-        "WHERE id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')") | Out-Null
+    # estado DERIVADO (§4.3): RUNNING = lease de pé; o advisory fica PENDING até o terminal
+    Invoke-Psql ("CREATE TABLE chaos_s6_snapshot AS SELECT e.execution_id AS id, " +
+        "CASE WHEN l.execution_id IS NOT NULL THEN 'RUNNING' ELSE 'ENQUEUED' END AS state " +
+        "FROM mohs_execution e LEFT JOIN mohs_lease l ON l.execution_id = e.execution_id " +
+        "WHERE e.execution_id LIKE '$prefix%' AND e.state NOT IN ('SUCCEEDED','FAILED','CANCELLED')") | Out-Null
     Write-Host "--- state at kill ---"
     Invoke-Psql "SELECT state||': '||count(*) FROM chaos_s6_snapshot GROUP BY state ORDER BY state"
 
@@ -170,15 +179,15 @@ function Invoke-S6 {
     $endClock = Get-Date
 
     Write-Host "--- S6 results ---"
-    Invoke-Psql "SELECT 'terminal '||state||': '||count(*) FROM mohs_executions WHERE id LIKE '$prefix%' GROUP BY state ORDER BY state"
-    $lost = [int](Invoke-Psql "SELECT count(*) FROM mohs_executions WHERE id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
-    $multi = [int](Invoke-Psql ("SELECT count(*) FROM (SELECT execution_id FROM mohs_attempts " +
+    Invoke-Psql "SELECT 'terminal '||state||': '||count(*) FROM mohs_execution WHERE execution_id LIKE '$prefix%' GROUP BY state ORDER BY state"
+    $lost = [int](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE execution_id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
+    $multi = [int](Invoke-Psql ("SELECT count(*) FROM (SELECT execution_id FROM mohs_attempt " +
         "WHERE execution_id LIKE '$prefix%' GROUP BY execution_id HAVING count(*) > 1) m"))
-    $violations = [int](Invoke-Psql ("SELECT count(*) FROM (SELECT execution_id FROM mohs_attempts " +
+    $violations = [int](Invoke-Psql ("SELECT count(*) FROM (SELECT execution_id FROM mohs_attempt " +
         "WHERE execution_id LIKE '$prefix%' GROUP BY execution_id HAVING count(*) > 1) m " +
         "LEFT JOIN chaos_s6_snapshot s ON s.id = m.execution_id AND s.state = 'RUNNING' WHERE s.id IS NULL"))
-    $reaped = [int](Invoke-Psql "SELECT count(*) FROM mohs_attempts WHERE execution_id LIKE '$prefix%' AND outcome = 'FAILED' AND error LIKE '%lease%'")
-    $timeline = Invoke-Psql ("SELECT 'reclaim wave: '||min(started_at)||' -> '||max(started_at) FROM mohs_attempts a " +
+    $reaped = [int](Invoke-Psql "SELECT count(*) FROM mohs_attempt WHERE execution_id LIKE '$prefix%' AND outcome = 'FAILED' AND error LIKE '%lease%'")
+    $timeline = Invoke-Psql ("SELECT 'reclaim wave: '||min(started_at)||' -> '||max(started_at) FROM mohs_attempt a " +
         "JOIN chaos_s6_snapshot s ON s.id = a.execution_id AND s.state = 'RUNNING' WHERE a.number > 1")
     "seed fully terminal      : $(if ($lost -eq 0) { 'YES' } else { "NO — $lost non-terminal" })"
     "re-executed (attempts>1) : $multi (in-flight at kill: see RUNNING above — criterion: multi <= in-flight)"
@@ -213,16 +222,16 @@ function Invoke-S8 {
 
     Write-Host "--- S8 results ---"
     "app survived             : $(if ($proc.HasExited) { 'NO — process exited' } else { 'YES' })"
-    Invoke-Psql "SELECT 'terminal '||state||': '||count(*) FROM mohs_executions WHERE id LIKE '$prefix%' GROUP BY state ORDER BY state"
-    $lost = [int](Invoke-Psql "SELECT count(*) FROM mohs_executions WHERE id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
-    $multi = [int](Invoke-Psql ("SELECT count(*) FROM (SELECT execution_id FROM mohs_attempts " +
+    Invoke-Psql "SELECT 'terminal '||state||': '||count(*) FROM mohs_execution WHERE execution_id LIKE '$prefix%' GROUP BY state ORDER BY state"
+    $lost = [int](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE execution_id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
+    $multi = [int](Invoke-Psql ("SELECT count(*) FROM (SELECT execution_id FROM mohs_attempt " +
         "WHERE execution_id LIKE '$prefix%' GROUP BY execution_id HAVING count(*) > 1) m"))
     $resume = Invoke-Psql ("SELECT 'first completion after unpause: '||min(finished_at)||' (unpause $unpauseTsUtc)' " +
-        "FROM mohs_attempts WHERE execution_id LIKE '$prefix%' AND finished_at > '$unpauseTsUtc'")
+        "FROM mohs_attempt WHERE execution_id LIKE '$prefix%' AND finished_at > '$unpauseTsUtc'")
     "seed fully terminal      : $(if ($lost -eq 0) { 'YES' } else { "NO — $lost non-terminal" })"
     "re-executed (attempts>1) : $multi (node-lease-ttl 15s vs pause ${PauseSeconds}s — ADR-0051's heartbeat-first tick order should make this 0)"
     $resume
-    Invoke-Psql ("SELECT 'completions in first 10s after unpause: '||count(*) FROM mohs_attempts " +
+    Invoke-Psql ("SELECT 'completions in first 10s after unpause: '||count(*) FROM mohs_attempt " +
         "WHERE execution_id LIKE '$prefix%' AND finished_at BETWEEN '$unpauseTsUtc' AND ('$unpauseTsUtc'::timestamp + interval '10 seconds')")
 
     Stop-Process -Id $proc.Id -Force
@@ -251,10 +260,10 @@ function Invoke-Suspend {
     $endClock = Get-Date
 
     Write-Host "--- SUSPEND results ---"
-    Invoke-Psql "SELECT 'terminal '||state||': '||count(*) FROM mohs_executions WHERE id LIKE '$prefix%' GROUP BY state ORDER BY state"
-    $lost = [int](Invoke-Psql "SELECT count(*) FROM mohs_executions WHERE id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
-    $reaped = [int](Invoke-Psql "SELECT count(*) FROM mohs_attempts WHERE execution_id LIKE '$prefix%' AND outcome = 'FAILED' AND error LIKE '%lease%'")
-    $doubleCompleted = [int](Invoke-Psql ("SELECT count(*) FROM (SELECT execution_id FROM mohs_attempts " +
+    Invoke-Psql "SELECT 'terminal '||state||': '||count(*) FROM mohs_execution WHERE execution_id LIKE '$prefix%' GROUP BY state ORDER BY state"
+    $lost = [int](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE execution_id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
+    $reaped = [int](Invoke-Psql "SELECT count(*) FROM mohs_attempt WHERE execution_id LIKE '$prefix%' AND outcome = 'FAILED' AND error LIKE '%lease%'")
+    $doubleCompleted = [int](Invoke-Psql ("SELECT count(*) FROM (SELECT execution_id FROM mohs_attempt " +
         "WHERE execution_id LIKE '$prefix%' AND outcome = 'SUCCEEDED' GROUP BY execution_id HAVING count(*) > 1) d"))
     $epochBumped = (Get-Content (Join-Path $logDir "sp-$prefix-node1.log") -ErrorAction SilentlyContinue |
         Select-String -Pattern 'epoch bumped' | Measure-Object).Count

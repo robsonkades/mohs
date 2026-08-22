@@ -149,7 +149,7 @@ export function OverviewPage() {
         />
         <StatCard
           label="Retry scheduled"
-          value={statValue(overview.isPending, !!overview.error, counts?.RETRY_SCHEDULED ?? 0)}
+          value={statValue(overview.isPending, !!overview.error, counts?.RETRY_WAITING ?? 0)}
           icon={<IconClock className="h-4 w-4" />}
         />
         <StatCard

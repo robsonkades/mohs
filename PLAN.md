@@ -76,7 +76,27 @@ Phases 0–4 commitadas (1756933), E1/E2 decididos (BASELINE).
       + attempt insert + update advisory), reaper §4.3 (delete leases do nó
       morto + reinsert ready com attempt+1), gestão de partição (criação
       antecipada). Testes de store completos. Engine ainda no caminho velho.
-- [ ] **S5.3 — Flip do engine.** Poll loop/dispatch/completion/reaper/firer/
+- [x] **S5.3 — Flip do engine.** *(2026-08-22. Pipeline: refactorer ✅ (4
+      aplicadas: admitFor/Admitted no Engine, batchTerminalUpdate no
+      LeaseStore, imports, Javadoc obsoleto do starter); db-tuner ✅ 1
+      mudança medida (`idx_mohs_execution_job` → `(job_key, execution_id
+      DESC)`: findPage seletivo 0,61→0,24ms, cursor vira Index Cond; 3
+      gatilhos registrados: findPage jobKey+terminal raro 8,7ms@100k,
+      findCancelRequested ≫10k in-flight, findOrphaned ≫10k leases);
+      reviewer ❌→✅ em 1 ciclo — 3 críticos corrigidos com teste cada:
+      guard `correlation_id IS NULL` de volta no rearm (ADR-0043),
+      `reconcileOwnStrayLeases` no tick (lease presa em nó VIVO não tinha
+      caminho de recuperação — o sucessor da expiração por execução),
+      `PROPAGATION_NESTED` no enqueue (savepoint: dedup de idempotência não
+      condena mais a transação do host); 🟡: watchdog/pré-dispatch concluem
+      síncronos fora do batcher, teto de 1000 no filtro de inadmissíveis,
+      partition create-ahead segue só-boot (pendência com gatilho abaixo).
+      E6 re-rodado no build final: S6 16,8s/fence 0 violações, SUSPEND 0
+      duplo-SUCCEEDED/244 reclaims/epoch bump, S8 0 re-execuções/drain
+      imediato — critério de duplicatas do E5 coberto pelo S6 no flush do
+      ponto de operação. NOTA: V3 editada in place (priority na lease +
+      swap de índice) — banco local que aplicou a V3 antiga precisa de
+      flyway repair/reset.)* Poll loop/dispatch/completion/reaper/firer/
       cancel sobre as portas novas; `RETRY_WAITING` na API; `Execution.owner()`;
       caps derivados de `mohs_lease` (ADR-D) e fim do contador
       `running_execution_count`; facade/REST/dashboard leem o modelo novo
@@ -89,6 +109,22 @@ Phases 0–4 commitadas (1756933), E1/E2 decididos (BASELINE).
 - [ ] **S5.5 — Validação e registro.** S1 ≥ 12k/s, tuple versions = 2 na
       história, S5 (claim independe do tamanho da história); BASELINE
       "Phase 5"; ADR-A/C/D escritas; plano §21 com o resultado.
+
+## Pendências registradas (com gatilho)
+
+- **Partições semanais: create-ahead só no boot.** O `PostgresPartitionManager`
+  roda no bean do starter; uptime > ~2 semanas sem restart derrama história
+  nova na DEFAULT (WARN no boot seguinte + move-out manual). Fechar = carona
+  no tick guardada por virada de semana, o que exige atravessar o gestor como
+  porta do engine. **Gatilho:** primeiro deploy com uptime esperado > 1 semana.
+- **`cancelQueued` que fecha o lote não publica `BatchCompleted`** (o
+  callback one-shot não dispara quando o cancel do último membro pendente
+  zera o `pending` fora do caminho de conclusão). Comportamento idêntico ao
+  da era pré-split — dívida da ADR-0043, candidata a registro formal na
+  `BATCH-ARCHITECTURE-REVIEW.md`.
+- **`MohsImpl.enqueueMembers` grava membro a membro** (N×2 statements na
+  mesma transação onde 2 bastariam — `record`/`offer` já aceitam lote).
+  **Gatilho:** medição com o harness de write amplification num lote ≥ 1k.
 
 ## Gate da fase (do plano)
 

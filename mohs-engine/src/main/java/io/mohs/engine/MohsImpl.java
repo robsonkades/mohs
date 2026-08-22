@@ -42,16 +42,17 @@ import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.schedule.Schedule;
 
 /**
- * {@link Mohs} sobre {@link JobStore}/{@link ExecutionStore} — {@code
- * define}/{@code remove} delegam direto; {@code schedule} monta um
- * {@link ScheduleCommandImpl}. {@link #lifecycle()} devolve o {@link Engine}
- * já injetado, que implementa {@link MohsLifecycle} diretamente — sem
- * adapter, {@code io.mohs.autoconfigure} injeta o mesmo bean nos dois
- * papéis.
+ * {@link Mohs} sobre as portas da Phase 5 ({@link WorkQueue}/
+ * {@link HistoryStore}/{@link LeaseStore}) — {@code define}/{@code remove}
+ * delegam direto; {@code schedule} monta um {@link ScheduleCommandImpl}.
+ * {@link #lifecycle()} devolve o {@link Engine} já injetado, que implementa
+ * {@link MohsLifecycle} diretamente.
  *
- * <p>{@link #batch} escreve a linha do lote e os membros; a contagem de
- * conclusão é do {@code ExecutionStore.complete}, na mesma transação do CAS
- * de estado (ADR-0043) — aqui não há contador nenhum.
+ * <p>{@link #batch} escreve a linha do lote e os membros — história + fila
+ * — numa ÚNICA transação ({@link StoreTransactions}): a falha parcial
+ * "lote gravado com só parte dos membros" da BATCH-ARCHITECTURE-REVIEW
+ * item 1 vira estruturalmente impossível (§7.5-1). A contagem de conclusão
+ * segue na transação de conclusão (ADR-0043) — aqui não há contador.
  */
 public final class MohsImpl implements Mohs {
 
@@ -61,7 +62,10 @@ public final class MohsImpl implements Mohs {
     static final String DEFAULT_ACTOR = "application";
 
     private final JobStore jobStore;
-    private final ExecutionStore executionStore;
+    private final WorkQueue workQueue;
+    private final HistoryStore historyStore;
+    private final LeaseStore leaseStore;
+    private final StoreTransactions storeTransactions;
     private final NodeStore nodeStore;
     private final RateLimitStore rateLimitStore;
     private final HandlerRegistry handlerRegistry;
@@ -71,11 +75,15 @@ public final class MohsImpl implements Mohs {
     private final BatchCompletionCallbacks callbacks;
     private final RunnerRegistry runnerRegistry;
 
-    public MohsImpl(JobStore jobStore, ExecutionStore executionStore, NodeStore nodeStore, RateLimitStore rateLimitStore,
+    public MohsImpl(JobStore jobStore, WorkQueue workQueue, HistoryStore historyStore, LeaseStore leaseStore,
+            StoreTransactions storeTransactions, NodeStore nodeStore, RateLimitStore rateLimitStore,
             HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle, BatchStore batchStore,
             BatchCompletionCallbacks callbacks, RunnerRegistry runnerRegistry) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
-        this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
+        this.workQueue = Objects.requireNonNull(workQueue, "workQueue");
+        this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
+        this.leaseStore = Objects.requireNonNull(leaseStore, "leaseStore");
+        this.storeTransactions = Objects.requireNonNull(storeTransactions, "storeTransactions");
         this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
         this.rateLimitStore = Objects.requireNonNull(rateLimitStore, "rateLimitStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
@@ -90,14 +98,14 @@ public final class MohsImpl implements Mohs {
     public <T> ScheduleCommand schedule(JobRef<T> ref, T payload) {
         Objects.requireNonNull(ref, "ref");
         Objects.requireNonNull(payload, "payload");
-        return new ScheduleCommandImpl(jobStore, executionStore, clock, ref.key(), payload);
+        return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, ref.key(), payload);
     }
 
     @Override
     public ScheduleCommand schedule(String jobId, Object payload) {
         Objects.requireNonNull(jobId, "jobId");
         Objects.requireNonNull(payload, "payload");
-        return new ScheduleCommandImpl(jobStore, executionStore, clock, JobKey.of(jobId), payload);
+        return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, JobKey.of(jobId), payload);
     }
 
     /**
@@ -119,8 +127,13 @@ public final class MohsImpl implements Mohs {
         requireAllDefined(members);
 
         String batchId = UUIDv7.randomUUIDString();
-        batchStore.insert(batchId, members.size());
-        enqueueMembers(members, batchId);
+        // linha do lote + membros (historia E fila) numa unica transacao
+        // (§7.5-1): a falha parcial que deixava o lote gravado com M < N
+        // membros — e um BatchCompleted que nunca vem — morre por construcao
+        storeTransactions.inTransaction(() -> {
+            batchStore.insert(batchId, members.size());
+            enqueueMembers(members, batchId);
+        });
         return new BatchImpl(batchId, callbacks);
     }
 
@@ -138,9 +151,10 @@ public final class MohsImpl implements Mohs {
     private void enqueueMembers(List<Member> members, String batchId) {
         Instant scheduledAt = clock.instant();
         for (Member member : members) {
-            executionStore.insert(new Execution(ExecutionId.of(UUIDv7.randomUUIDString()), member.key(),
-                    ExecutionState.ENQUEUED, scheduledAt, null, List.of(), DEFAULT_ACTOR, Priority.NORMAL, null, batchId),
-                    member.payload());
+            ExecutionId id = ExecutionId.of(UUIDv7.randomUUIDString());
+            historyStore.record(List.of(new HistoryStore.NewExecution(id, member.key(), 0, Priority.NORMAL.value(),
+                    scheduledAt, scheduledAt, DEFAULT_ACTOR, batchId, null, member.payload())));
+            workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, member.key(), 0, Priority.NORMAL.value(), 1, scheduledAt)));
         }
     }
 
@@ -284,24 +298,30 @@ public final class MohsImpl implements Mohs {
      * cooperativa de {@code RUNNING}. Os dois predicados particionam o
      * espaço de estados, mas o estado pode migrar ENTRE as checagens
      * (TOCTOU — DDIA cap. 7: um CAS cobre um predicado, não uma sequência):
-     * uma conclusão de attempt que leva {@code RUNNING → RETRY_SCHEDULED}
+     * uma conclusão de attempt que leva {@code RUNNING → RETRY_WAITING}
      * no meio do par faria a ordem do operador cair no vazio. A segunda
      * passada fecha a janela — outra migração exigiria um ciclo de attempt
      * inteiro dentro de microssegundos. Em terminal ambas continuam no-op:
      * cancelar o que já decidiu não muda nada, e o retorno mostra o estado
      * que valeu.
+     *
+     * <p>Janela declarada da Phase 5: a flag cooperativa mora na LEASE e
+     * morre com ela — um cancel que aterrissa entre o fim do handler e o
+     * commit do flush (≤ flush-interval) se perde, e um eventual retry
+     * roda. Aceitável para cancel cooperativo (o operador re-cancela o
+     * retry); a era da flag na linha da execução não tinha essa janela.
      */
     @Override
     public Optional<Execution> cancel(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
-        boolean cancelledPending = executionStore.cancelIfPending(executionId);
-        if (!cancelledPending && !executionStore.requestCancellation(executionId)) {
-            cancelledPending = executionStore.cancelIfPending(executionId);
+        boolean cancelledPending = workQueue.cancelQueued(executionId, clock.instant());
+        if (!cancelledPending && !leaseStore.requestCancellation(executionId)) {
+            cancelledPending = workQueue.cancelQueued(executionId, clock.instant());
             if (!cancelledPending) {
-                executionStore.requestCancellation(executionId);
+                leaseStore.requestCancellation(executionId);
             }
         }
-        Optional<Execution> result = executionStore.find(executionId);
+        Optional<Execution> result = historyStore.find(executionId, clock.instant());
         if (cancelledPending) {
             result.ifPresent(this::rearmAfterFinishChain);
         }
@@ -336,7 +356,7 @@ public final class MohsImpl implements Mohs {
     @Override
     public Optional<Execution> findExecution(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
-        return executionStore.find(executionId);
+        return historyStore.find(executionId, clock.instant());
     }
 
     /**
@@ -344,19 +364,19 @@ public final class MohsImpl implements Mohs {
      * derrota (inexistente × job aposentado × estado errado) — nunca
      * decide. Derrota com a linha ainda {@code FAILED} = o guard de
      * {@code retired} barrou (o CAS só recusa FAILED por essa via);
-     * {@code RETRY_SCHEDULED} = provável POST duplicado. Perder a corrida
+     * {@code RETRY_WAITING} = provável POST duplicado. Perder a corrida
      * pra outra mutação entre o CAS e a leitura muda a mensagem, não o
      * desfecho: quem venceu o CAS foi ela.
      */
     @Override
     public Optional<Execution> retry(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
-        if (executionStore.rearmForManualRetry(executionId, clock.instant())) {
+        if (workQueue.rearmForManualRetry(executionId, clock.instant())) {
             log.info("execution {} manually rearmed for retry — rejoins the claim path bypassing the retries budget (ADR-0033)",
                     executionId.value());
-            return executionStore.find(executionId);
+            return historyStore.find(executionId, clock.instant());
         }
-        Execution current = executionStore.find(executionId).orElse(null);
+        Execution current = historyStore.find(executionId, clock.instant()).orElse(null);
         if (current == null) {
             return Optional.empty();
         }
@@ -365,8 +385,8 @@ public final class MohsImpl implements Mohs {
                     ? batchMemberNotRetryable(executionId, current.batchId())
                     : new IllegalStateException("execution " + executionId + " belongs to a removed job — "
                             + "a retried execution of a retired job would never be claimed (ADR-0033)");
-            case RETRY_SCHEDULED -> new IllegalStateException("execution " + executionId
-                    + " is already rearmed for retry — likely a duplicate retry request");
+            case ENQUEUED, RETRY_WAITING -> new IllegalStateException("execution " + executionId
+                    + " is already queued to run again — likely a duplicate retry request");
             default -> new IllegalStateException("execution " + executionId + " is " + current.state()
                     + " — only FAILED executions can be manually retried (a cancelled execution was an explicit "
                     + "decision; the other states are owned by the engine)");
@@ -379,7 +399,7 @@ public final class MohsImpl implements Mohs {
         // cursor em branco (ex.: ?cursor= na REST) = primeira página, não IAE de ExecutionId.of
         String rawCursor = query.cursor();
         ExecutionId cursor = rawCursor == null || rawCursor.isBlank() ? null : ExecutionId.of(rawCursor);
-        return executionStore.findPage(query.jobKey(), query.status(), query.from(), query.to(), cursor, query.limit());
+        return historyStore.findPage(query.jobKey(), query.status(), query.from(), query.to(), cursor, query.limit(), clock.instant());
     }
 
     /** Mais recente primeiro (empate por nodeId — ordem exposta em API é contrato, nunca a ordem física da tabela): o vivo interessa antes do suspeito — a idade do heartbeat É a informação (ADR-0012). */
@@ -439,8 +459,8 @@ public final class MohsImpl implements Mohs {
             throw new IllegalArgumentException("throughputWindow must be positive, got " + throughputWindow);
         }
         Map<ExecutionState, Long> outcomes =
-                executionStore.countTerminalOutcomesSince(clock.instant().minus(throughputWindow));
-        return new OverviewSnapshot(executionStore.countActiveByState(), throughputWindow,
+                historyStore.countTerminalOutcomesSince(clock.instant().minus(throughputWindow));
+        return new OverviewSnapshot(historyStore.countActiveByState(clock.instant()), throughputWindow,
                 outcomes.getOrDefault(ExecutionState.SUCCEEDED, 0L),
                 outcomes.getOrDefault(ExecutionState.FAILED, 0L));
     }

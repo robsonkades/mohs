@@ -6,13 +6,13 @@
 export type ExecutionState =
   | "ENQUEUED"
   | "RUNNING"
-  | "RETRY_SCHEDULED"
+  | "RETRY_WAITING"
   | "SUCCEEDED"
   | "FAILED"
   | "CANCELLED";
 
 /** The three states /overview always carries: the live work. Terminal states have no all-time count. */
-export const LIVE_STATES = ["ENQUEUED", "RUNNING", "RETRY_SCHEDULED"] as const satisfies readonly ExecutionState[];
+export const LIVE_STATES = ["ENQUEUED", "RUNNING", "RETRY_WAITING"] as const satisfies readonly ExecutionState[];
 
 export type Priority = "CRITICAL" | "HIGH" | "NORMAL" | "LOW" | "BACKGROUND";
 

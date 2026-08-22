@@ -30,7 +30,7 @@ public final class PostgresJdbcDialect implements JdbcDialect {
     public static final String BATCH_TRANSITION_TO_RUNNING = """
             UPDATE mohs_executions
             SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId, fired_at = :now
-            WHERE id IN (:ids) AND state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND scheduled_at <= :now
+            WHERE id IN (:ids) AND state IN ('ENQUEUED', 'RETRY_WAITING') AND scheduled_at <= :now
             RETURNING id
             """;
 
@@ -102,10 +102,10 @@ public final class PostgresJdbcDialect implements JdbcDialect {
                  WHERE r.execution_id = p.execution_id
             ),
             leased AS (
-                INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, claimed_at)
-                SELECT execution_id, job_key, :nodeId, :epoch, attempt, :now FROM picked
+                INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at)
+                SELECT execution_id, job_key, :nodeId, :epoch, attempt, priority, :now FROM picked
             )
-            SELECT execution_id, job_key, attempt FROM picked
+            SELECT execution_id, job_key, attempt, priority FROM picked
             ORDER BY priority, visible_at
             """;
 

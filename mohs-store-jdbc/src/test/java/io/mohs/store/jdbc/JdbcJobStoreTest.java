@@ -319,12 +319,12 @@ class JdbcJobStoreTest {
         assertThat(raw.queryForObject("SELECT state FROM mohs_executions WHERE id = ?", String.class, "exec-queued")).isEqualTo("CANCELLED");
     }
 
-    /** ADR-0033: RETRY_SCHEDULED também é claimável — fora do cancel do remove, ficaria presa pra sempre (claim filtra retired, reaper só vê RUNNING). */
+    /** ADR-0033: RETRY_WAITING também é claimável — fora do cancel do remove, ficaria presa pra sempre (claim filtra retired, reaper só vê RUNNING). */
     @Test
     void removeCancelsRetryScheduledExecutionsToo() {
         JobKey key = JobKey.of("welcome-email");
         store.upsert(definition("welcome-email", new OnDemandSpec()));
-        seedExecution("exec-retry", "welcome-email", "RETRY_SCHEDULED");
+        seedExecution("exec-retry", "welcome-email", "RETRY_WAITING");
 
         store.remove(key);
 
@@ -812,7 +812,7 @@ class JdbcJobStoreTest {
         store.upsert(definition("welcome-email", new OnDemandSpec()));
         new JdbcBatchStore(dataSource, clock).insert("b6", 3);
         seedExecution("m1", "welcome-email", "ENQUEUED");
-        seedExecution("m2", "welcome-email", "RETRY_SCHEDULED");
+        seedExecution("m2", "welcome-email", "RETRY_WAITING");
         seedExecution("m3", "welcome-email", "SUCCEEDED");
         raw.update("UPDATE mohs_executions SET batch_id = ? WHERE id IN (?, ?, ?)", "b6", "m1", "m2", "m3");
 

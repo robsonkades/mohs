@@ -108,7 +108,7 @@ class JdbcHistoryStoreTest {
 
         assertThat(batch.rows()).containsOnlyKeys(ExecutionId.of("exec-ok"));
         assertThat(batch.rows().get(ExecutionId.of("exec-ok")).payload()).isEqualTo(new WelcomeEmail("a@b.c", 1));
-        assertThat(batch.rows().get(ExecutionId.of("exec-ok")).createdAt()).isEqualTo(NOW);
+        assertThat(batch.rows().get(ExecutionId.of("exec-ok")).head().createdAt()).isEqualTo(NOW);
         assertThat(batch.unreadable()).containsOnlyKeys(ExecutionId.of("exec-bad"));
         assertThat(batch.unreadable().get(ExecutionId.of("exec-bad"))).hasMessageContaining("com.example.DoesNotExist");
     }

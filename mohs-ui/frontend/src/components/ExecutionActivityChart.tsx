@@ -17,7 +17,7 @@ import type { ExecutionState } from "../types/api";
 const chartConfig = {
   ENQUEUED: { label: "Enqueued", color: "var(--status-neutral)" },
   RUNNING: { label: "Running", color: "var(--status-info)" },
-  RETRY_SCHEDULED: { label: "Retry scheduled", color: "var(--status-warning)" },
+  RETRY_WAITING: { label: "Retry scheduled", color: "var(--status-warning)" },
 } satisfies ChartConfig;
 
 const timeFormatter = new Intl.DateTimeFormat("en", {

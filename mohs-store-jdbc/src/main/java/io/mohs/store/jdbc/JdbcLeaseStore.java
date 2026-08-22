@@ -3,18 +3,21 @@ package io.mohs.store.jdbc;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.function.Predicate;
 
 import javax.sql.DataSource;
 
+import org.jspecify.annotations.Nullable;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -22,7 +25,11 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.engine.BatchCounters;
+import io.mohs.engine.BatchStore;
+import io.mohs.engine.JobStore;
 import io.mohs.engine.LeaseStore;
 import io.mohs.store.jdbc.dialect.JdbcDialect;
 
@@ -42,8 +49,9 @@ public final class JdbcLeaseStore implements LeaseStore {
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
     private final JdbcDialect dialect;
+    private final BatchStore batchStore;
 
-    public JdbcLeaseStore(DataSource dataSource, JdbcDialect dialect) {
+    public JdbcLeaseStore(DataSource dataSource, JdbcDialect dialect, BatchStore batchStore) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -54,6 +62,7 @@ public final class JdbcLeaseStore implements LeaseStore {
         // DBTUNE-4: fence assume "última escrita vence" em READ COMMITTED explícito
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.dialect = Objects.requireNonNull(dialect, "dialect");
+        this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
     }
 
     private static final String ATTEMPT_INSERT = """
@@ -61,32 +70,73 @@ public final class JdbcLeaseStore implements LeaseStore {
             VALUES (:executionId, :number, :nodeId, :startedAt, :finishedAt, :outcome, :errorType, :error)
             """;
 
+    // batch-counted: countIntoBatch, na mesma transação do complete
     private static final String TERMINAL_UPDATE = """
             UPDATE mohs_execution SET state = :state, finished_at = :finishedAt
             WHERE execution_id = :executionId AND created_at = :createdAt
             """;
 
+    /** O caminho frio do reaper, que não carregou {@code created_at}: o índice de {@code execution_id} sonda as partições — aceitável fora do hot path (medição do S5.2). */
+    // batch-counted: countIntoBatch, na mesma transação do complete
+    private static final String TERMINAL_UPDATE_UNPRUNED = """
+            UPDATE mohs_execution SET state = :state, finished_at = :finishedAt
+            WHERE execution_id = :executionId
+            """;
+
     @Override
-    public Set<ExecutionId> complete(List<CompletionResult> results) {
+    public Map<ExecutionId, Completion> complete(List<CompletionResult> results, JobStore jobStore) {
+        Objects.requireNonNull(jobStore, "jobStore");
         if (results.isEmpty()) {
-            return Set.of();
+            return Map.of();
         }
         // requireNonNull documenta o invariante pro @NullMarked (JAVA-8)
-        return Objects.requireNonNull(transactionTemplate.execute(_ -> completeWithinTransaction(results)));
+        return Objects.requireNonNull(transactionTemplate.execute(_ -> completeWithinTransaction(results, jobStore)));
     }
 
-    private Set<ExecutionId> completeWithinTransaction(List<CompletionResult> results) {
-        List<CompletionResult> winners = deleteLeasesKeepingFenceWinners(results);
-        Set<ExecutionId> owned = winners.stream()
-                .map(CompletionResult::executionId)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
+    private Map<ExecutionId, Completion> completeWithinTransaction(List<CompletionResult> results, JobStore jobStore) {
+        // lock-ordering (JCIP cap. 10, aplicado a row locks): flusher (ordem de
+        // chegada) e reaper (claimed_at) concorrentes sobre conjuntos sobrepostos
+        // — exatamente zumbi × reclaim — travariam linhas em ordens opostas;
+        // a ordem canônica por executionId elimina a classe de deadlock inteira
+        List<CompletionResult> ordered = results.stream()
+                .sorted(Comparator.comparing(result -> result.executionId().value()))
+                .toList();
+        List<CompletionResult> winners = deleteLeasesKeepingFenceWinners(ordered);
+        Map<ExecutionId, Completion> verdicts = LinkedHashMap.newLinkedHashMap(results.size());
+        for (CompletionResult result : results) {
+            verdicts.put(result.executionId(), Completion.FENCED_OUT);
+        }
         if (winners.isEmpty()) {
-            return owned;
+            return verdicts;
         }
         insertAttempts(winners);
         updateTerminalStates(winners);
         offerRetries(winners);
-        return owned;
+        for (CompletionResult winner : winners) {
+            if (winner.rearmNextFireAt() != null) {
+                // ADR-0035: o rearme aterrissa na MESMA transação — jobStore
+                // participa por compartilhar o DataSource; guard IS NULL é dele
+                jobStore.armNextFire(winner.jobKey(), winner.rearmNextFireAt());
+            }
+            verdicts.put(winner.executionId(), Completion.owned(countIntoBatch(winner)));
+        }
+        return verdicts;
+    }
+
+    /**
+     * ADR-0043 na mesa nova, contrato intacto: o membro só conta quando
+     * ACABA (retry não conta — fecharia o lote antes da hora), cancelado
+     * conta como falha (o lote responde "quantos deram certo"), e o
+     * fechador é eleito pelo saldo DESTA transação, nunca por releitura.
+     */
+    private @Nullable BatchCounters countIntoBatch(CompletionResult result) {
+        if (result.batchId() == null || result.terminalState() == null) {
+            return null;
+        }
+        BatchCounters counters = result.terminalState() == ExecutionState.SUCCEEDED
+                ? batchStore.incrementSucceeded(result.batchId())
+                : batchStore.incrementFailed(result.batchId());
+        return counters.pending() == 0 ? counters : null;
     }
 
     private List<CompletionResult> deleteLeasesKeepingFenceWinners(List<CompletionResult> results) {
@@ -130,21 +180,31 @@ public final class JdbcLeaseStore implements LeaseStore {
     }
 
     private void updateTerminalStates(List<CompletionResult> winners) {
-        MapSqlParameterSource[] terminals = winners.stream()
+        batchTerminalUpdate(winners, r -> r.executionCreatedAt() != null, TERMINAL_UPDATE);
+        batchTerminalUpdate(winners, r -> r.executionCreatedAt() == null, TERMINAL_UPDATE_UNPRUNED);
+    }
+
+    private void batchTerminalUpdate(List<CompletionResult> winners, Predicate<CompletionResult> prunability, String sql) {
+        MapSqlParameterSource[] updates = winners.stream()
                 .filter(r -> r.terminalState() != null)
+                .filter(prunability)
                 .map(this::terminalUpdateParams)
                 .toArray(MapSqlParameterSource[]::new);
-        if (terminals.length > 0) {
-            jdbcTemplate.batchUpdate(TERMINAL_UPDATE, terminals);
+        if (updates.length > 0) {
+            jdbcTemplate.batchUpdate(sql, updates);
         }
     }
 
     private MapSqlParameterSource terminalUpdateParams(CompletionResult result) {
-        return new MapSqlParameterSource()
+        MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("state", Objects.requireNonNull(result.terminalState()).name())
                 .addValue("finishedAt", dialect.splitTimestamp(result.finishedAt()))
-                .addValue("executionId", result.executionId().value())
-                .addValue("createdAt", dialect.splitTimestamp(result.executionCreatedAt()));
+                .addValue("executionId", result.executionId().value());
+        Instant createdAt = result.executionCreatedAt();
+        if (createdAt != null) {
+            params.addValue("createdAt", dialect.splitTimestamp(createdAt));
+        }
+        return params;
     }
 
     private void offerRetries(List<CompletionResult> winners) {
@@ -163,9 +223,33 @@ public final class JdbcLeaseStore implements LeaseStore {
             return List.of();
         }
         return jdbcTemplate.query("""
-                SELECT execution_id, job_key, node_id, epoch, attempt_number, claimed_at, cancel_requested
+                SELECT execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested
                 FROM mohs_lease WHERE node_id IN (:nodeIds)
                 """, new MapSqlParameterSource("nodeIds", nodeIds), (rs, _) -> mapLease(rs));
+    }
+
+    @Override
+    public List<Lease> findOrphaned(Collection<String> aliveNodeIds, int limit) {
+        // claimed_at líder: morte em massa drena mais antigo primeiro; TOP/LIMIT
+        // do dialeto — mesmo par de cláusulas do findPage da era anterior
+        MapSqlParameterSource params = new MapSqlParameterSource().addValue("limit", limit);
+        String sql;
+        if (aliveNodeIds.isEmpty()) {
+            sql = """
+                    SELECT %sexecution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested
+                    FROM mohs_lease
+                    ORDER BY claimed_at
+                    %s""".formatted(dialect.topClause(), dialect.limitClause());
+        } else {
+            sql = """
+                    SELECT %sexecution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested
+                    FROM mohs_lease
+                    WHERE node_id NOT IN (:aliveNodeIds)
+                    ORDER BY claimed_at
+                    %s""".formatted(dialect.topClause(), dialect.limitClause());
+            params.addValue("aliveNodeIds", aliveNodeIds);
+        }
+        return jdbcTemplate.query(sql, params, (rs, _) -> mapLease(rs));
     }
 
     @Override
@@ -214,6 +298,7 @@ public final class JdbcLeaseStore implements LeaseStore {
                 rs.getString("node_id"),
                 rs.getLong("epoch"),
                 rs.getInt("attempt_number"),
+                rs.getInt("priority"),
                 Objects.requireNonNull(dialect.readSplitTimestamp(rs, "claimed_at"), "claimed_at"),
                 rs.getBoolean("cancel_requested"));
     }

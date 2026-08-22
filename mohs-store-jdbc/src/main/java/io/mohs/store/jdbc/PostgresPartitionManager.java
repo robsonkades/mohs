@@ -20,8 +20,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * (Phase 5, ADR-A §7.3) — Postgres apenas: os equivalentes funcionais de
  * Tier 2/3 não particionam (PLAN.md, decisão 3). As migrações criam só o
  * esqueleto + DEFAULT (SQL procedural não sobrevive aos dois caminhos de
- * instalação); criar adiante é responsabilidade DESTE gestor, no boot —
- * ANTES de qualquer enqueue — e periodicamente de carona no housekeeping.
+ * instalação); criar adiante é responsabilidade DESTE gestor — hoje SÓ no
+ * boot, ANTES de qualquer enqueue. Create-ahead cobre semana corrente + 1:
+ * uptime além de ~2 semanas sem re-execução derrama história nova na
+ * DEFAULT (o modo de falha abaixo). A carona periódica no tick do engine
+ * está registrada no PLAN.md (gatilho: uptime &gt; 1 semana em produção) —
+ * exige atravessar o gestor como porta do engine, cirurgia que não cabe
+ * no S5.3.
  *
  * <p>Modo de falha documentado (medido no tuning do S5.1): linha na
  * DEFAULT **bloqueia** o {@code CREATE PARTITION} da semana que cobre o

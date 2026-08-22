@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     created_at       DATETIME(6)  NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
 -- MySQL não tem índice parcial/filtrado — Postgres e SQL Server usam
--- WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') aqui (DBTUNE-5, ADR-0033); MySQL fica com a composta cheia.
+-- WHERE state IN ('ENQUEUED', 'RETRY_WAITING') aqui (DBTUNE-5, ADR-0033); MySQL fica com a composta cheia.
 SET @mohs_sql = IF(EXISTS(SELECT 1 FROM information_schema.statistics
                           WHERE table_schema = DATABASE() AND table_name = 'mohs_executions'
                             AND index_name = 'idx_mohs_executions_claim'),
@@ -196,6 +196,7 @@ CREATE TABLE IF NOT EXISTS mohs_lease (
     node_id          VARCHAR(255) NOT NULL,
     epoch            BIGINT       NOT NULL,
     attempt_number   INT          NOT NULL,
+    priority         INT          NOT NULL DEFAULT 20, -- viaja fila->posse: o requeue do reaper reconstroi a entrada sem ler historia (S5.3)
     claimed_at       DATETIME(6)  NOT NULL,
     cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE,
     INDEX idx_mohs_lease_node (node_id, epoch),
@@ -217,7 +218,7 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     payload         MEDIUMTEXT   NOT NULL,
     payload_type    VARCHAR(500) NOT NULL,
     INDEX idx_mohs_execution_created (created_at),
-    INDEX idx_mohs_execution_job (job_key, created_at DESC),
+    INDEX idx_mohs_execution_job (job_key, execution_id DESC), -- ORDER BY/cursor do findPage — ver o V3 do Postgres
     INDEX idx_mohs_execution_corr (correlation_id)
 );
 

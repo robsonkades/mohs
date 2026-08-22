@@ -15,51 +15,55 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.core.execution.Execution;
 import io.mohs.core.job.JobKey;
-import io.mohs.engine.ExecutionStore;
+import io.mohs.engine.HistoryStore;
 import io.mohs.engine.TriggerFirer;
+import io.mohs.engine.WorkQueue;
 
 /**
- * {@link TriggerFirer} sobre {@code mohs_job_definitions}/{@code
- * mohs_executions} (ADR-0035). Mesma forma de transação própria de
- * {@link JdbcClaimer}/{@link JdbcReaper}: quem chama (o tick do motor)
- * não tem transação ativa; {@code executionStore} precisa apontar pro
- * mesmo {@code DataSource} passado aqui — é assim que {@code insert}
- * participa da transação do CAS (cláusula 4 da ADR-0003).
+ * {@link TriggerFirer} sobre {@code mohs_job_definitions} + as mesas da
+ * Phase 5 (ADR-0035 no split): o CAS de avanço do trigger e o nascimento
+ * das ocorrências — história ({@code record}) e fila ({@code offer}) —
+ * numa única transação, exatamente a unidade de enqueue do §7.5-1 com o
+ * CAS como guarda de exclusão mútua cluster-wide. {@code historyStore}/
+ * {@code workQueue} precisam apontar pro mesmo {@code DataSource} passado
+ * aqui — é assim que participam da transação (mesmo padrão da era
+ * anterior).
  *
  * <p>O CAS compara {@code next_fire_at} com o valor que
  * {@code findDueRecurring} LEU da própria coluna — nunca um instante
- * calculado na JVM que não passou pelo banco: precisão temporal não faz
- * round-trip garantido entre JVM e os 4 dialetos (nanos do {@code
- * Instant} vs micros da coluna — mesma lição do
- * {@code confirmRenewalsBySelect}), mas valor lido e re-serializado por
- * {@link JdbcTimestamps} compara igual por construção.
+ * calculado na JVM que não passou pelo banco (precisão temporal não faz
+ * round-trip garantido entre JVM e os 4 dialetos; valor lido e
+ * re-serializado por {@link JdbcTimestamps} compara igual por construção).
  */
 public final class JdbcTriggerFirer implements TriggerFirer {
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
-    private final ExecutionStore executionStore;
+    private final HistoryStore historyStore;
+    private final WorkQueue workQueue;
 
-    public JdbcTriggerFirer(DataSource dataSource, ExecutionStore executionStore) {
+    public JdbcTriggerFirer(DataSource dataSource, HistoryStore historyStore, WorkQueue workQueue) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        // mesmo raciocínio da DBTUNE-4 em JdbcClaimer: CAS guardado assume
+        // mesmo raciocínio da DBTUNE-4 em JdbcWorkQueue: CAS guardado assume
         // "última escrita vence" (READ COMMITTED), não herda o default do banco.
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
-        this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
+        this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
+        this.workQueue = Objects.requireNonNull(workQueue, "workQueue");
     }
 
     @Override
     public boolean fire(JobKey key, Instant observedNextFireAt, @Nullable Instant newNextFireAt,
-            List<Execution> occurrences, Object payload) {
+            List<Execution> occurrences, Object payload, Instant now) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(observedNextFireAt, "observedNextFireAt");
         Objects.requireNonNull(occurrences, "occurrences");
         Objects.requireNonNull(payload, "payload");
+        Objects.requireNonNull(now, "now");
         return Boolean.TRUE.equals(transactionTemplate.execute(_ -> {
             // retired no predicado: um Mohs.remove entre a varredura e este CAS já
-            // cancelou as ENQUEUED existentes — inserir ocorrências DEPOIS dessa
+            // cancelou o que estava na fila — inserir ocorrências DEPOIS dessa
             // varredura as deixaria zumbis até uma eventual ressurreição.
             int advanced = jdbcTemplate.update("""
                     UPDATE mohs_job_definitions SET next_fire_at = :newNextFireAt
@@ -73,9 +77,19 @@ public final class JdbcTriggerFirer implements TriggerFirer {
             if (advanced == 0) {
                 return false;
             }
-            for (Execution occurrence : occurrences) {
-                executionStore.insert(occurrence, payload);
-            }
+            // createdAt = now (o instante do disparo, a chave de partição —
+            // scheduledAt pode estar no passado num FIRE_ALL de misfire e
+            // apontaria uma partição que a retenção pode já ter dropado);
+            // visible_at = scheduledAt: a ocorrência entra na fila já devida
+            historyStore.record(occurrences.stream()
+                    .map(occurrence -> new HistoryStore.NewExecution(occurrence.id(), occurrence.jobKey(), 0,
+                            occurrence.priority().value(), occurrence.scheduledAt(), now, occurrence.actor(),
+                            occurrence.batchId(), occurrence.idempotencyKey(), payload))
+                    .toList());
+            workQueue.offer(occurrences.stream()
+                    .map(occurrence -> new WorkQueue.ReadyEntry(occurrence.id(), occurrence.jobKey(), 0,
+                            occurrence.priority().value(), 1, occurrence.scheduledAt()))
+                    .toList());
             return true;
         }));
     }

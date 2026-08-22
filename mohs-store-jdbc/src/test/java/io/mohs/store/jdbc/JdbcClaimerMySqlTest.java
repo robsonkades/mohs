@@ -91,7 +91,7 @@ class JdbcClaimerMySqlTest {
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_executions (
                     id, job_key, state, scheduled_at, actor, payload, payload_type, created_at)
-                VALUES (?, ?, 'RETRY_SCHEDULED', ?, 'test', '{}', 'java.lang.Object', ?)
+                VALUES (?, ?, 'RETRY_WAITING', ?, 'test', '{}', 'java.lang.Object', ?)
                 """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(retryAt), JdbcTimestamps.toUtcLocalDateTime(NOW));
     }
 
@@ -135,7 +135,7 @@ class JdbcClaimerMySqlTest {
         assertThat(stateOf("exec-enqueued")).isEqualTo(ExecutionState.ENQUEUED);
     }
 
-    /** priority vem antes de scheduled_at na ordem global — ENQUEUED HIGH mais novo vence RETRY_SCHEDULED NORMAL mais antigo (a regressão silenciosa clássica de um template substituto). */
+    /** priority vem antes de scheduled_at na ordem global — ENQUEUED HIGH mais novo vence RETRY_WAITING NORMAL mais antigo (a regressão silenciosa clássica de um template substituto). */
     @Test
     void higherPriorityEnqueuedBeatsOlderNormalPriorityRetry() {
         seedJob("report", policy -> {

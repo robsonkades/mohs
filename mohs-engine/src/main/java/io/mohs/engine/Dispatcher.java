@@ -32,22 +32,22 @@ import io.mohs.core.job.JobKey;
 import io.mohs.core.schedule.IntervalSpec;
 
 /**
- * Invoca o handler de uma {@code Execution RUNNING} já reivindicada por
- * {@link Claimer} — a metade "dispatch" de M3 que o próprio Javadoc de
- * {@link Claimer} deixa em aberto. Classe concreta, não porta: ao contrário
- * de {@link Claimer}/{@link ExecutionStore}, não tem SQL próprio nenhum —
- * só orquestra portas que já existem.
+ * Invoca o handler de uma execução reivindicada — a metade "dispatch" do
+ * fluxo de job, agora sobre as portas da Phase 5: a conclusão é um
+ * {@link LeaseStore.CompletionResult} cercado pela posse
+ * {@code (node_id, epoch)} do {@link Grant} (§6.3 — o fencing token que
+ * sucedeu o {@code (node_id, fired_at)} da ADR-0051), entregue direto ou
+ * via {@link CompletionBatcher} (group commit, ADR-0047/§7.6).
  *
  * <p>Falha de attempt com orçamento ({@code JobDefinition.retries})
- * transiciona pra {@code RETRY_SCHEDULED} com backoff ({@link RetrySchedule},
- * ADR-0033 — que destravou a restrição da ADR-0026); orçamento esgotado é
- * {@code FAILED} terminal. {@code retryPolicy} (bean customizado) segue
- * sem efeito — SPI futura.
+ * renasce na fila com backoff ({@link RetrySchedule}, ADR-0033) — a
+ * entrada de retry viaja DENTRO do resultado e aterrissa na mesma
+ * transação da conclusão (ver {@code CompletionResult.retry}); orçamento
+ * esgotado é {@code FAILED} terminal. {@code retryPolicy} (bean
+ * customizado) segue sem efeito — SPI futura.
  *
- * <p>Síncrono e sem pool próprio: não gerencia {@code MohsRunner} nenhum —
- * quem decide quantos {@code dispatch} ficam em voo, e em que tipo de
- * thread, é o poll loop do {@link Engine}, mesma separação que
- * {@link Claimer} já tem (reivindica, não executa).
+ * <p>Síncrono e sem pool próprio: quem decide quantos {@code dispatch}
+ * ficam em voo, e em que tipo de thread, é o poll loop do {@link Engine}.
  */
 public final class Dispatcher {
 
@@ -55,7 +55,7 @@ public final class Dispatcher {
 
     private static final String NO_HANDLER_ERROR = "no handler registered for job ";
 
-    private final ExecutionStore executionStore;
+    private final LeaseStore leaseStore;
     private final JobStore jobStore;
     private final HandlerRegistry handlerRegistry;
     private final Clock clock;
@@ -64,17 +64,36 @@ public final class Dispatcher {
     private final EngineMetrics metrics;
     private final @Nullable CompletionBatcher completionBatcher;
 
-    /** Conclusão síncrona por resultado (pré-ADR-0047) — a forma dos testes e de {@code completion-flush-on-every-result}. */
-    public Dispatcher(ExecutionStore executionStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
-            List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
-            EngineMetrics metrics) {
-        this(executionStore, jobStore, handlerRegistry, clock, interceptors, listeners, eventExecutor, metrics, null);
+    /**
+     * A posse que o claim entregou (§6.2): {@code (nodeId, epoch)} é o
+     * fence de toda conclusão; {@code attemptNumber} veio da entrada de
+     * fila (§5.3 — nada conta attempts no hot path); {@code claimedAt}
+     * ancora o attempt sintético do watchdog; {@code executionCreatedAt}
+     * poda a partição do UPDATE terminal ({@code null} = sem poda, o
+     * caminho degradado de linha ilegível).
+     */
+    public record Grant(String nodeId, long epoch, int attemptNumber, Instant claimedAt,
+            @Nullable Instant executionCreatedAt) {
+        public Grant {
+            Objects.requireNonNull(nodeId, "nodeId");
+            Objects.requireNonNull(claimedAt, "claimedAt");
+            if (attemptNumber < 1) {
+                throw new IllegalArgumentException("attemptNumber must be >= 1");
+            }
+        }
     }
 
-    public Dispatcher(ExecutionStore executionStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
+    /** Conclusão síncrona por resultado (pré-ADR-0047) — a forma dos testes e de {@code completion-flush-on-every-result}. */
+    public Dispatcher(LeaseStore leaseStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
+            List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
+            EngineMetrics metrics) {
+        this(leaseStore, jobStore, handlerRegistry, clock, interceptors, listeners, eventExecutor, metrics, null);
+    }
+
+    public Dispatcher(LeaseStore leaseStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
             List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
             EngineMetrics metrics, @Nullable CompletionBatcher completionBatcher) {
-        this.executionStore = Objects.requireNonNull(executionStore, "executionStore");
+        this.leaseStore = Objects.requireNonNull(leaseStore, "leaseStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -85,35 +104,22 @@ public final class Dispatcher {
     }
 
     /** Forma sem fonte externa de cancelamento — sinal próprio, nada o levanta. Conveniência de teste e de chamador avulso. */
-    public void dispatch(Execution execution, JobDefinition definition, Object payload) {
-        dispatch(execution, definition, payload, new CancellationSignal(), null);
+    public void dispatch(Execution execution, JobDefinition definition, Object payload, Grant grant) {
+        dispatch(execution, definition, payload, new CancellationSignal(), grant);
     }
 
-    /** Conveniência de teste — sinal externo, sem fence (conclusão não cercada, semântica pré-ADR-0051). */
-    public void dispatch(Execution execution, JobDefinition definition, Object payload, CancellationSignal signal) {
-        dispatch(execution, definition, payload, signal, null);
-    }
-
-    /**
-     * A forma do {@link Engine} (ADR-0051): {@code fence} é a posse da
-     * encarnação reivindicada — {@code (node_id, fired_at)} — e cerca TODA
-     * conclusão que sai daqui: um zumbi (reclaim/pausa/partição) perde o
-     * CAS por construção, mesmo re-reivindicado pelo próprio node.
-     */
     public void dispatch(Execution execution, JobDefinition definition, Object payload, CancellationSignal signal,
-            ExecutionStore.@Nullable OwnerFence fence) {
+            Grant grant) {
         Objects.requireNonNull(execution, "execution");
         Objects.requireNonNull(definition, "definition");
         Objects.requireNonNull(payload, "payload");
         Objects.requireNonNull(signal, "signal");
+        Objects.requireNonNull(grant, "grant");
 
-        // fired_at persistido já saiu daqui (ADR-0047): o claim grava a coluna
-        // no próprio CAS pra RUNNING — este instante segue sendo o "início do
-        // attempt" (Started, JobContext, métrica), que é conceito do dispatch
         Instant firedAt = clock.instant();
         metrics.dispatchLatency(execution.jobKey(), Duration.between(execution.scheduledAt(), firedAt));
 
-        int attemptNumber = execution.attempts().size() + 1;
+        int attemptNumber = grant.attemptNumber();
         JobContext ctx = new DefaultJobContext(execution.jobKey(), execution.id(), attemptNumber, execution.scheduledAt(), firedAt, signal);
         events.publish(new Started(execution.id(), execution.jobKey(), attemptNumber, firedAt));
 
@@ -121,50 +127,48 @@ public final class Dispatcher {
         if (handler.isEmpty()) {
             // passa pelo orçamento de retry de propósito: em rolling update, outro
             // nó (com a versão que ainda registra o handler) pode reivindicar o retry
-            fail(execution, definition, attemptNumber, firedAt, new IllegalStateException(NO_HANDLER_ERROR + execution.jobKey().value()), fence);
+            fail(execution, definition, firedAt, new IllegalStateException(NO_HANDLER_ERROR + execution.jobKey().value()), grant);
             return;
         }
 
         CancellationSignal.Reason preStart = signal.reason();
         if (preStart != null) {
-            failBeforeStart(execution, definition, attemptNumber, firedAt, preStart, fence);
+            failBeforeStart(execution, definition, firedAt, preStart, grant);
             return;
         }
 
         // succeed() fora do try de propósito (review ADR-0034): o catch mapeia
         // por razão do sinal, e a precondição dele é "o HANDLER saiu anormal" —
         // falha da escrita de sucesso não é falha do handler; propaga (o Engine
-        // loga, a execução fica RUNNING e o reaper decide — indistinguível de
+        // loga, a lease fica de pé e o reaper decide — indistinguível de
         // crash pré-conclusão, que é o caminho honesto)
         try {
             invokeWithinInterruptWindow(handler.orElseThrow(), payload, ctx, signal);
         } catch (Exception e) {
-            failSignalAware(execution, definition, attemptNumber, firedAt, e, signal, fence);
+            failSignalAware(execution, definition, firedAt, e, signal, grant);
             return;
         }
-        succeed(execution, definition, attemptNumber, firedAt, fence);
+        succeed(execution, definition, firedAt, grant);
     }
 
     /**
      * Checagem pré-start (review ADR-0034): sinal levantado com a task ainda
      * na fila do runner é honrado ANTES de invocar o handler — não iniciar
-     * trabalho novo é o primeiro passo de shutdown gracioso (Burns), e rodar
-     * o que o operador mandou parar desperdiçaria a chance barata de honrar
-     * a ordem. {@code MANUAL} → {@code CANCELLED} sem rodar; {@code SHUTDOWN}
-     * → falha NodeShutdown sem rodar (trabalho não feito → retry limpo em
-     * outro node). {@code TIMEOUT} pré-start é inalcançável (o relógio só
-     * corre a partir do registro) — mapeado pelo mesmo caminho por
-     * exaustividade, nunca ignorado.
+     * trabalho novo é o primeiro passo de shutdown gracioso (Burns).
+     * {@code MANUAL} → {@code CANCELLED} sem rodar; {@code SHUTDOWN} →
+     * falha NodeShutdown sem rodar (trabalho não feito → retry limpo em
+     * outro node). {@code TIMEOUT} pré-start é inalcançável — mapeado pelo
+     * mesmo caminho por exaustividade, nunca ignorado.
      */
-    private void failBeforeStart(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt,
-            CancellationSignal.Reason reason, ExecutionStore.@Nullable OwnerFence fence) {
+    private void failBeforeStart(Execution execution, JobDefinition definition, Instant firedAt,
+            CancellationSignal.Reason reason, Grant grant) {
         switch (reason) {
-            case MANUAL -> cancelled(execution, definition, attemptNumber, firedAt,
-                    new IllegalStateException("cancel requested before the handler started"), fence);
-            case SHUTDOWN -> fail(execution, definition, attemptNumber, firedAt, new IllegalStateException(
-                    "node shutdown: drain grace elapsed before attempt " + attemptNumber + " started"), fence);
-            case TIMEOUT -> fail(execution, definition, attemptNumber, firedAt, timeoutError(definition, attemptNumber,
-                    new IllegalStateException("timeout signalled before the handler started — should be unreachable")), fence);
+            case MANUAL -> cancelled(execution, definition, firedAt,
+                    new IllegalStateException("cancel requested before the handler started"), grant);
+            case SHUTDOWN -> fail(execution, definition, firedAt, new IllegalStateException(
+                    "node shutdown: drain grace elapsed before attempt " + grant.attemptNumber() + " started"), grant);
+            case TIMEOUT -> fail(execution, definition, firedAt, timeoutError(definition, grant.attemptNumber(),
+                    new IllegalStateException("timeout signalled before the handler started — should be unreachable")), grant);
             // statement switch sobre enum não impõe exaustividade — razão nova
             // sem case cai aqui, nunca no silêncio (a promessa do Javadoc)
             default -> throw new IllegalStateException("unmapped cancellation reason: " + reason);
@@ -194,18 +198,18 @@ public final class Dispatcher {
      * qualquer falha; {@code MANUAL} é {@code CANCELLED} terminal — cancel
      * vence orçamento.
      */
-    private void failSignalAware(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt,
-            Exception error, CancellationSignal signal, ExecutionStore.@Nullable OwnerFence fence) {
+    private void failSignalAware(Execution execution, JobDefinition definition, Instant firedAt,
+            Exception error, CancellationSignal signal, Grant grant) {
         CancellationSignal.Reason reason = signal.reason();
         if (reason == null) {
-            fail(execution, definition, attemptNumber, firedAt, error, fence);
+            fail(execution, definition, firedAt, error, grant);
             return;
         }
         switch (reason) {
-            case TIMEOUT -> fail(execution, definition, attemptNumber, firedAt, timeoutError(definition, attemptNumber, error), fence);
-            case SHUTDOWN -> fail(execution, definition, attemptNumber, firedAt, new IllegalStateException(
-                    "node shutdown: drain grace elapsed before attempt " + attemptNumber + " finished", error), fence);
-            case MANUAL -> cancelled(execution, definition, attemptNumber, firedAt, error, fence);
+            case TIMEOUT -> fail(execution, definition, firedAt, timeoutError(definition, grant.attemptNumber(), error), grant);
+            case SHUTDOWN -> fail(execution, definition, firedAt, new IllegalStateException(
+                    "node shutdown: drain grace elapsed before attempt " + grant.attemptNumber() + " finished", error), grant);
+            case MANUAL -> cancelled(execution, definition, firedAt, error, grant);
         }
     }
 
@@ -217,25 +221,24 @@ public final class Dispatcher {
 
     /**
      * INFO, não WARN, e sem stack trace: cancelamento honrado é o sistema
-     * fazendo o que o operador pediu, não uma falha. O {@code Attempt}
+     * fazendo o que o operador pediu, não uma falha. O attempt
      * {@code CANCELLED} carrega {@code error} nulo (invariante de
      * {@code Attempt}) — a exceção com que o handler saiu vai no log.
      */
-    private void cancelled(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt, Exception error,
-            ExecutionStore.@Nullable OwnerFence fence) {
+    private void cancelled(Execution execution, JobDefinition definition, Instant firedAt, Exception error, Grant grant) {
         log.info("execution {} of job '{}' cancelled on attempt {} — cooperative cancellation honoured (handler exited with: {})",
-                execution.id().value(), execution.jobKey().value(), attemptNumber, error.toString());
+                execution.id().value(), execution.jobKey().value(), grant.attemptNumber(), error.toString());
         Instant finishedAt = clock.instant();
-        Attempt attempt = new Attempt(attemptNumber, firedAt, finishedAt, ExecutionState.CANCELLED, null);
-        completeOrDiscard(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.CANCELLED,
-                        null, fence, rearmNextFireAt(execution, definition, finishedAt)).inBatch(execution.batchId()),
-                () -> events.publish(new Cancelled(execution.id(), execution.jobKey(), attemptNumber)));
+        completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
+                grant.attemptNumber(), firedAt, finishedAt, ExecutionState.CANCELLED, null, null,
+                ExecutionState.CANCELLED, grant.executionCreatedAt(), null, execution.batchId(),
+                rearmNextFireAt(execution, definition, finishedAt)),
+                () -> events.publish(new Cancelled(execution.id(), execution.jobKey(), grant.attemptNumber())));
     }
 
     /**
      * O pipeline de eventos, para o {@link Engine} publicar os desfechos do
-     * reclaim pelo mesmo caminho do dispatch — package-private: o publisher
+     * reaper pelo mesmo caminho do dispatch — package-private: o publisher
      * continua interno ao pacote, só muda quem pode falar por ele.
      */
     ExecutionEventPublisher events() {
@@ -245,10 +248,7 @@ public final class Dispatcher {
     /**
      * Chain of Responsibility clássica (GoF): cada interceptor embrulha o
      * próximo, o mais interno chama o handler de verdade. Roda na própria
-     * thread do dispatch — Javadoc de {@link ExecutionInterceptor} já exige
-     * isso (lugar de MDC/tracing/{@code ScopedValue}); exceção de
-     * interceptor É falha de attempt, mesmo tratamento que exceção do
-     * handler.
+     * thread do dispatch; exceção de interceptor É falha de attempt.
      */
     private void runInterceptorChain(JobHandler handler, Object payload, JobContext ctx) throws Exception {
         ExecutionInterceptor.Chain chain = () -> handler.invoke(payload, ctx);
@@ -260,23 +260,20 @@ public final class Dispatcher {
         chain.proceed();
     }
 
-    private void succeed(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt,
-            ExecutionStore.@Nullable OwnerFence fence) {
+    private void succeed(Execution execution, JobDefinition definition, Instant firedAt, Grant grant) {
         Instant finishedAt = clock.instant();
-        Attempt attempt = new Attempt(attemptNumber, firedAt, finishedAt, ExecutionState.SUCCEEDED, null);
-        completeOrDiscard(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.SUCCEEDED,
-                        null, fence, rearmNextFireAt(execution, definition, finishedAt)).inBatch(execution.batchId()),
-                () -> events.publish(new Succeeded(execution.id(), execution.jobKey(), attemptNumber)));
+        completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
+                grant.attemptNumber(), firedAt, finishedAt, ExecutionState.SUCCEEDED, null, null,
+                ExecutionState.SUCCEEDED, grant.executionCreatedAt(), null, execution.batchId(),
+                rearmNextFireAt(execution, definition, finishedAt)),
+                () -> events.publish(new Succeeded(execution.id(), execution.jobKey(), grant.attemptNumber())));
     }
 
     /**
      * ADR-0035: conclusão terminal de ocorrência do scheduler em agenda
      * fixed-delay rearma a corrente — {@code fim + interval}, "ancorado no
      * fim da execução anterior" ao pé da letra. {@code null} nas demais
-     * agendas, em execução manual (não é a corrente — o guard
-     * {@code IS NULL} do rearme já protege, mas rearmar por ela anteciparia
-     * a série com a corrente ainda em voo) e sem definição em mãos
+     * agendas, em execução manual e sem definição em mãos
      * ({@link #failBeforeDispatch} com definição removida — job retired
      * não dispara, a ressurreição via upsert cura).
      */
@@ -287,24 +284,33 @@ public final class Dispatcher {
                 : null;
     }
 
-    /** Orçamento restante ({@link RetrySchedule}) decide: reagenda com backoff ou falha terminal ({@link #failTerminally}). */
-    private void fail(Execution execution, JobDefinition definition, int attemptNumber, Instant firedAt, Exception error,
-            ExecutionStore.@Nullable OwnerFence fence) {
+    /** Orçamento restante ({@link RetrySchedule}) decide: renasce na fila com backoff (na MESMA transação da conclusão) ou falha terminal ({@link #failTerminally}). */
+    private void fail(Execution execution, JobDefinition definition, Instant firedAt, Exception error, Grant grant) {
+        fail(execution, definition, firedAt, error, grant, true);
+    }
+
+    private void fail(Execution execution, JobDefinition definition, Instant firedAt, Exception error, Grant grant,
+            boolean throughBatcher) {
+        int attemptNumber = grant.attemptNumber();
         Optional<Instant> nextRetry = RetrySchedule.nextRetryAt(attemptNumber, definition.retries(), clock.instant());
         if (nextRetry.isEmpty()) {
-            failTerminally(execution, definition, attemptNumber, firedAt, error, true, fence);
+            failTerminally(execution, definition, firedAt, error, true, grant, throughBatcher);
             return;
         }
         Instant retryAt = nextRetry.orElseThrow();
         log.warn("execution {} of job '{}' failed on attempt {} — retry {} scheduled for {}", execution.id().value(),
                 execution.jobKey().value(), attemptNumber, attemptNumber + 1, retryAt, error);
-        Attempt attempt = failedAttempt(attemptNumber, firedAt, error);
-        completeOrDiscard(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.RETRY_SCHEDULED, retryAt, fence).inBatch(execution.batchId()),
+        completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
+                attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, error.getClass().getName(), errorMessage(error),
+                null, grant.executionCreatedAt(),
+                new WorkQueue.ReadyEntry(execution.id(), execution.jobKey(), 0, execution.priority().value(),
+                        attemptNumber + 1, retryAt),
+                execution.batchId(), null),
                 () -> {
                     events.publish(new AttemptFailed(execution.id(), execution.jobKey(), attemptNumber, error));
                     events.publish(new RetryScheduled(execution.id(), execution.jobKey(), attemptNumber + 1, retryAt));
-                });
+                },
+                throughBatcher);
     }
 
     /**
@@ -319,44 +325,65 @@ public final class Dispatcher {
      * disse "sem saldo"; falha terminal por natureza (pré-dispatch) publica
      * {@code false} — orçamento intacto não é orçamento esgotado.
      */
-    private void failTerminally(Execution execution, @Nullable JobDefinition definition, int attemptNumber, Instant firedAt,
-            Exception error, boolean attemptsExhausted, ExecutionStore.@Nullable OwnerFence fence) {
+    private void failTerminally(Execution execution, @Nullable JobDefinition definition, Instant firedAt,
+            Exception error, boolean attemptsExhausted, Grant grant) {
+        failTerminally(execution, definition, firedAt, error, attemptsExhausted, grant, true);
+    }
+
+    private void failTerminally(Execution execution, @Nullable JobDefinition definition, Instant firedAt,
+            Exception error, boolean attemptsExhausted, Grant grant, boolean throughBatcher) {
         log.warn("execution {} of job '{}' failed on attempt {}", execution.id().value(),
-                execution.jobKey().value(), attemptNumber, error);
-        Attempt attempt = failedAttempt(attemptNumber, firedAt, error);
-        // finishedAt do attempt é o "fim" que ancora o rearme fixed-delay (ADR-0035)
-        completeOrDiscard(
-                new ExecutionStore.CompletionRequest(execution.id(), execution.jobKey(), attempt, ExecutionState.FAILED,
-                        null, fence, rearmNextFireAt(execution, definition, Objects.requireNonNull(attempt.finishedAt())))
-                        .inBatch(execution.batchId()),
-                () -> events.publish(new Failed(execution.id(), execution.jobKey(), attemptNumber, error, attemptsExhausted)));
+                execution.jobKey().value(), grant.attemptNumber(), error);
+        Instant finishedAt = clock.instant();
+        completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
+                grant.attemptNumber(), firedAt, finishedAt, ExecutionState.FAILED, error.getClass().getName(), errorMessage(error),
+                ExecutionState.FAILED, grant.executionCreatedAt(), null, execution.batchId(),
+                rearmNextFireAt(execution, definition, finishedAt)),
+                () -> events.publish(new Failed(execution.id(), execution.jobKey(), grant.attemptNumber(), error, attemptsExhausted)),
+                throughBatcher);
     }
 
     /**
-     * Publica os eventos só se o CAS de conclusão passou — uma conclusão
-     * concorrente (reaper/outro caminho) descarta o resultado com WARN,
+     * Publica os eventos só se o fence de conclusão passou — uma encarnação
+     * perdida (reaper/requeue passou antes) descarta o resultado com WARN,
      * nunca publica evento de uma transição que não ocorreu. Com o
      * {@link CompletionBatcher} (ADR-0047) a escrita vira group commit e o
      * desfecho (métrica/eventos) roda na thread do flusher, DEPOIS do
      * commit do lote — mesma garantia, janela de durabilidade ≤ o
      * intervalo de flush.
      */
-    private void completeOrDiscard(ExecutionStore.CompletionRequest request, Runnable publishEvents) {
-        if (completionBatcher == null) {
-            handleOutcome(request, executionStore.complete(request, jobStore), publishEvents);
-            return;
-        }
-        completionBatcher.submit(request, completion -> handleOutcome(request, completion, publishEvents));
+    private void completeOrDiscard(LeaseStore.CompletionResult result, Runnable publishEvents) {
+        completeOrDiscard(result, publishEvents, true);
     }
 
-    private void handleOutcome(ExecutionStore.CompletionRequest request, ExecutionStore.Completion completion, Runnable publishEvents) {
-        if (completion.applied()) {
-            metrics.attemptFinished(request.jobKey(), request.attempt(), request.newState());
+    /**
+     * {@code throughBatcher = false} força a conclusão síncrona mesmo com o
+     * batcher ligado — os caminhos frios ({@link #failBeforeDispatch},
+     * {@link #abandonOwnership}) dependem do contrato "lançou = não
+     * aconteceu" dos chamadores (o retry do watchdog no tick seguinte, a
+     * guarda do Engine): roteá-los pela fila trocaria a exceção síncrona
+     * por um log no flusher que ninguém re-tenta (JCIP §6.3.2 — assíncrono
+     * muda o contrato de erro do chamador junto).
+     */
+    private void completeOrDiscard(LeaseStore.CompletionResult result, Runnable publishEvents, boolean throughBatcher) {
+        if (completionBatcher == null || !throughBatcher) {
+            handleOutcome(result, leaseStore.complete(List.of(result), jobStore)
+                    .getOrDefault(result.executionId(), LeaseStore.Completion.FENCED_OUT), publishEvents);
+            return;
+        }
+        completionBatcher.submit(result, completion -> handleOutcome(result, completion, publishEvents));
+    }
+
+    private void handleOutcome(LeaseStore.CompletionResult result, LeaseStore.Completion completion, Runnable publishEvents) {
+        if (completion.owned()) {
+            metrics.attemptFinished(result.jobKey(),
+                    new Attempt(result.attemptNumber(), result.startedAt(), result.finishedAt(), result.outcome(), result.error()),
+                    result.terminalState() != null ? result.terminalState() : ExecutionState.RETRY_WAITING);
             publishEvents.run();
             publishBatchCompletedIfClosed(completion);
         } else {
-            log.warn("attempt {} of execution {} finished {} but the state had already moved on (reaper/concurrent completion) — result discarded",
-                    request.attempt().number(), request.id().value(), request.attempt().outcome());
+            log.warn("attempt {} of execution {} finished {} but the incarnation was no longer ours (reaper/requeue passed first) — result discarded",
+                    result.attemptNumber(), result.executionId().value(), result.outcome());
         }
     }
 
@@ -366,15 +393,11 @@ public final class Dispatcher {
      * demais eventos da conclusão, porque evento não volta atrás se a
      * transação abortar.
      */
-    private void publishBatchCompletedIfClosed(ExecutionStore.Completion completion) {
+    private void publishBatchCompletedIfClosed(LeaseStore.Completion completion) {
         BatchCounters closed = completion.closedBatch();
         if (closed != null) {
             events.publish(new BatchCompleted(closed.batchId(), closed.total(), closed.succeeded(), closed.failed()));
         }
-    }
-
-    private Attempt failedAttempt(int attemptNumber, Instant firedAt, Exception error) {
-        return new Attempt(attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, errorMessage(error));
     }
 
     private static String errorMessage(Exception error) {
@@ -383,43 +406,40 @@ public final class Dispatcher {
 
     /**
      * Falha uma execução terminalmente sem ter passado por {@link #dispatch}
-     * — mesma síntese de {@link Attempt} e publicação de {@link Failed} que
-     * {@link #failTerminally} já usa, pra quando o chamador (ex.:
-     * {@link Engine}, quando o payload não pôde ser lido de volta) já sabe
-     * que a execução falhou antes do handler sequer poder rodar. Sempre
-     * terminal, sem consultar orçamento: definição removida não tem
-     * {@code retries} confiável pra ler, e payload ilegível não sara
-     * repetindo a leitura do mesmo dado. {@code Failed.attemptsExhausted}
-     * sai {@code false} — terminal por natureza, não por orçamento.
-     * {@code definition} nula quando o chamador não a tem (removida entre
-     * claim e dispatch) — sem rearme fixed-delay nesse caso (ADR-0035).
+     * — pra quando o chamador ({@link Engine}) já sabe que a execução
+     * falhou antes do handler sequer poder rodar (payload ilegível,
+     * definição removida entre claim e dispatch). Sempre terminal, sem
+     * consultar orçamento: payload ilegível não sara repetindo a leitura, e
+     * definição removida não tem {@code retries} confiável.
+     * {@code Failed.attemptsExhausted} sai {@code false} — terminal por
+     * natureza, não por orçamento.
      */
-    void failBeforeDispatch(Execution execution, @Nullable JobDefinition definition, Exception cause,
-            ExecutionStore.@Nullable OwnerFence fence) {
+    void failBeforeDispatch(Execution execution, @Nullable JobDefinition definition, Exception cause, Grant grant) {
         Objects.requireNonNull(execution, "execution");
         Objects.requireNonNull(cause, "cause");
-        int attemptNumber = execution.attempts().size() + 1;
-        failTerminally(execution, definition, attemptNumber, clock.instant(), cause, false, fence);
+        // síncrono de propósito: a guarda do Engine trata a exceção desta
+        // gravação ("loga e deixa a posse pro reconcile") — pela fila do
+        // batcher, a falha do flush nunca chegaria a ela
+        failTerminally(execution, definition, clock.instant(), cause, false, grant, false);
     }
 
     /**
-     * O Watchdog Bound pós-ADR-0051: o node LIBERA a posse de uma
-     * encarnação cujo runtime estourou o bound — attempt sintético FAILED
-     * pelo orçamento de retry (mesma decisão do reaper, ADR-0033), CAS
-     * cercado pela posse liberada. O zumbi local continua rodando até
-     * terminar sozinho; a conclusão dele carrega esta MESMA posse, mas o
-     * estado já saiu de RUNNING (e um re-claim grava {@code fired_at}
-     * novo), então o CAS dele perde por construção. Substitui o mecanismo
-     * antigo (parar de renovar a lease e esperar o reaper): sem renovação
-     * por execução, a liberação de posse é uma escrita explícita — uma por
-     * zumbi raro, não vinte mil por segundo.
+     * O Watchdog Bound (ADR-0051 sobre a posse nova): o node LIBERA a posse
+     * de uma encarnação cujo runtime estourou o bound — attempt sintético
+     * FAILED pelo orçamento de retry, cercado pela posse liberada. O zumbi
+     * local continua rodando até terminar sozinho; a conclusão dele carrega
+     * esta MESMA posse, mas a lease já caiu (e um re-claim grava dono/epoch
+     * próprios), então o fence dele perde por construção.
      */
-    void abandonOwnership(Execution execution, JobDefinition definition, ExecutionStore.OwnerFence fence, String reason) {
+    void abandonOwnership(Execution execution, JobDefinition definition, Grant grant, String reason) {
         Objects.requireNonNull(execution, "execution");
         Objects.requireNonNull(definition, "definition");
-        Objects.requireNonNull(fence, "fence");
-        int attemptNumber = execution.attempts().size() + 1;
-        fail(execution, definition, attemptNumber, fence.firedAt(), new IllegalStateException(reason), fence);
+        Objects.requireNonNull(grant, "grant");
+        // síncrono de propósito: o watchdog só marca a posse como liberada se
+        // esta chamada retornar — "falha na liberação não marca, o próximo
+        // tick re-tenta" exige exceção síncrona, não um enfileirar que
+        // sempre retorna (JCIP §6.3.2)
+        fail(execution, definition, grant.claimedAt(), new IllegalStateException(reason), grant, false);
     }
 
     /**

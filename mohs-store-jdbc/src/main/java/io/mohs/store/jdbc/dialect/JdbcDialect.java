@@ -67,7 +67,7 @@ public interface JdbcDialect {
                    j.rate_limit AS rate_limit
             FROM mohs_executions e
             JOIN mohs_job_definitions j ON j.job_key = e.job_key
-            WHERE e.state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+            WHERE e.state IN ('ENQUEUED', 'RETRY_WAITING')
               AND e.scheduled_at <= :now
               AND j.retired = FALSE
               AND (j.allow_concurrent_executions = TRUE OR j.running_execution_count < j.max_concurrent_executions)
@@ -93,7 +93,7 @@ public interface JdbcDialect {
     String ANSI_TRANSITION_TO_RUNNING = """
             UPDATE mohs_executions
             SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId, fired_at = :now
-            WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND scheduled_at <= :now
+            WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_WAITING') AND scheduled_at <= :now
             """;
 
     /**
@@ -195,7 +195,7 @@ public interface JdbcDialect {
      * vazia não expande.
      */
     String ANSI_READY_CANDIDATES = """
-            SELECT execution_id, job_key, attempt
+            SELECT execution_id, job_key, attempt, priority
             FROM mohs_ready
             WHERE shard = :shard AND visible_at <= :now
             ORDER BY priority, visible_at
@@ -204,7 +204,7 @@ public interface JdbcDialect {
             """;
 
     String ANSI_READY_CANDIDATES_FILTERED = """
-            SELECT execution_id, job_key, attempt
+            SELECT execution_id, job_key, attempt, priority
             FROM mohs_ready
             WHERE shard = :shard AND visible_at <= :now AND job_key NOT IN (:inadmissible)
             ORDER BY priority, visible_at
@@ -215,8 +215,8 @@ public interface JdbcDialect {
     String READY_DELETE = "DELETE FROM mohs_ready WHERE execution_id IN (:ids)";
 
     String LEASE_INSERT = """
-            INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, claimed_at)
-            VALUES (:executionId, :jobKey, :nodeId, :epoch, :attempt, :now)
+            INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at)
+            VALUES (:executionId, :jobKey, :nodeId, :epoch, :attempt, :priority, :now)
             """;
 
     default List<ClaimedReady> selectReadyCandidates(NamedParameterJdbcTemplate jdbcTemplate, int shard, int limit,
@@ -255,6 +255,7 @@ public interface JdbcDialect {
                         .addValue("nodeId", nodeId)
                         .addValue("epoch", epoch)
                         .addValue("attempt", row.attempt())
+                        .addValue("priority", row.priority())
                         .addValue("now", splitTimestamp(now)))
                 .toArray(MapSqlParameterSource[]::new);
         jdbcTemplate.batchUpdate(LEASE_INSERT, leases);

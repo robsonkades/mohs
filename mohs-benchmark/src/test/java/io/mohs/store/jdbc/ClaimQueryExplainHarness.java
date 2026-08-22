@@ -110,7 +110,7 @@ class ClaimQueryExplainHarness {
                    j.rate_limit AS rate_limit
             FROM mohs_executions e WITH (UPDLOCK, ROWLOCK, READPAST)
             JOIN mohs_job_definitions j ON j.job_key = e.job_key
-            WHERE e.state IN ('ENQUEUED', 'RETRY_SCHEDULED')
+            WHERE e.state IN ('ENQUEUED', 'RETRY_WAITING')
               AND e.scheduled_at <= '2026-08-14T12:00:00'
               AND j.retired = 0
               AND (j.allow_concurrent_executions = 1 OR j.running_execution_count < j.max_concurrent_executions)
@@ -154,7 +154,7 @@ class ClaimQueryExplainHarness {
         jdbcTemplate.execute("ANALYZE mohs_executions, mohs_job_definitions");
         List<String> ids = jdbcTemplate.queryForList("""
                 SELECT id FROM mohs_executions
-                WHERE state IN ('ENQUEUED', 'RETRY_SCHEDULED') AND scheduled_at <= TIMESTAMP '2026-08-14 12:00:00'
+                WHERE state IN ('ENQUEUED', 'RETRY_WAITING') AND scheduled_at <= TIMESTAMP '2026-08-14 12:00:00'
                 ORDER BY priority ASC, scheduled_at ASC
                 LIMIT 20
                 """, String.class);
@@ -287,7 +287,7 @@ class ClaimQueryExplainHarness {
     /**
      * Mesma forma de {@code JdbcJobStore.upsert} — todo job com
      * {@code allowConcurrentExecutions = true} (isola o custo da query do
-     * mutex de job). Seed misto (~20% {@code RETRY_SCHEDULED},
+     * mutex de job). Seed misto (~20% {@code RETRY_WAITING},
      * determinístico) — mesmo espelho do {@code ClaimQueryLoadHarness}: o
      * plano deve refletir a condição sob a qual os números foram medidos.
      */
@@ -300,7 +300,7 @@ class ClaimQueryExplainHarness {
             String jobKey = "explain-job-" + j;
             jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
             for (int e = 0; e < EXECUTIONS_PER_JOB; e++) {
-                String state = e % 5 == 0 ? "RETRY_SCHEDULED" : "ENQUEUED";
+                String state = e % 5 == 0 ? "RETRY_WAITING" : "ENQUEUED";
                 batchArgs.add(new Object[] {
                         UUID.randomUUID().toString(), jobKey, state, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(1)),
                         Priority.NORMAL.value(), JdbcTimestamps.toUtcLocalDateTime(NOW)

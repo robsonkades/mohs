@@ -85,7 +85,7 @@ public class ExecutionsController {
 
     /**
      * Retry manual (M3 sobre a ADR-0033): rearma a MESMA execução
-     * {@code FAILED} como {@code RETRY_SCHEDULED} devida agora — bypassa o
+     * {@code FAILED} como {@code RETRY_WAITING} devida agora — bypassa o
      * orçamento de retries; a nova tentativa disputa o claim como qualquer
      * candidato. Sem {@code Idempotency-Key} de propósito (o header do stub
      * M2 saiu): retry não passa pela dedupe — nada novo é inserido

@@ -6,7 +6,6 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import javax.sql.DataSource;
@@ -35,9 +34,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link JdbcTriggerFirer} — o CAS transacional da ADR-0035: avanço de
- * {@code next_fire_at} e inserção das ocorrências vencem ou perdem
- * juntos.
+ * {@link JdbcTriggerFirer} — o CAS transacional da ADR-0035 sobre as mesas
+ * da Phase 5: avanço de {@code next_fire_at}, história ({@code
+ * mohs_execution}) e fila ({@code mohs_ready}) vencem ou perdem juntos.
  */
 class JdbcTriggerFirerTest {
 
@@ -49,7 +48,6 @@ class JdbcTriggerFirerTest {
     private DataSource dataSource;
     private MutableClock clock;
     private JdbcJobStore jobStore;
-    private JdbcExecutionStore executionStore;
     private JdbcTriggerFirer firer;
     private JdbcTemplate rawJdbc;
 
@@ -58,8 +56,9 @@ class JdbcTriggerFirerTest {
         dataSource = freshH2DataSource();
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         jobStore = new JdbcJobStore(dataSource, clock);
-        executionStore = new JdbcExecutionStore(dataSource, clock, JsonMapper.builder().build(), new H2JdbcDialect());
-        firer = new JdbcTriggerFirer(dataSource, executionStore);
+        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
+        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), new JdbcBatchStore(dataSource, clock));
+        firer = new JdbcTriggerFirer(dataSource, historyStore, workQueue);
         rawJdbc = new JdbcTemplate(dataSource);
     }
 
@@ -89,21 +88,34 @@ class JdbcTriggerFirerTest {
         return stored == null ? null : JdbcTimestamps.fromUtcLocalDateTime(stored);
     }
 
+    private @Nullable String historyStateOf(String id) {
+        List<String> states = rawJdbc.queryForList(
+                "SELECT state FROM mohs_execution WHERE execution_id = ?", String.class, id);
+        return states.isEmpty() ? null : states.get(0);
+    }
+
     @Test
     void fireAdvancesTheTriggerAndInsertsTheOccurrences() {
         Instant observed = armEveryMinuteJob("poll");
         Instant newNextFire = observed.plus(Duration.ofMinutes(1));
 
         boolean fired = firer.fire(JobKey.of("poll"), observed, newNextFire,
-                List.of(occurrence("occ-1", "poll", observed)), new LinkedHashMap<String, Object>());
+                List.of(occurrence("occ-1", "poll", observed)), new LinkedHashMap<String, Object>(), NOW);
 
         assertThat(fired).isTrue();
         assertThat(nextFireAtOf("poll")).isEqualTo(newNextFire);
-        Execution inserted = executionStore.find(ExecutionId.of("occ-1")).orElseThrow();
-        assertThat(inserted.state()).isEqualTo(ExecutionState.ENQUEUED);
-        assertThat(inserted.scheduledAt()).isEqualTo(observed);
-        assertThat(inserted.actor()).isEqualTo(Execution.SCHEDULER_ACTOR);
-        assertThat(executionStore.findPayload(ExecutionId.of("occ-1"))).contains(Map.of());
+        // história advisory + fila devida em scheduledAt — a unidade de enqueue do §7.5-1
+        assertThat(historyStateOf("occ-1")).isEqualTo("PENDING");
+        assertThat(rawJdbc.queryForObject(
+                "SELECT actor FROM mohs_execution WHERE execution_id = 'occ-1'", String.class))
+                .isEqualTo(Execution.SCHEDULER_ACTOR);
+        assertThat(rawJdbc.queryForObject(
+                "SELECT visible_at FROM mohs_ready WHERE execution_id = 'occ-1'", LocalDateTime.class))
+                .isEqualTo(JdbcTimestamps.toUtcLocalDateTime(observed));
+        // createdAt = now do disparo (chave de partição), não o scheduledAt
+        assertThat(rawJdbc.queryForObject(
+                "SELECT created_at FROM mohs_execution WHERE execution_id = 'occ-1'", LocalDateTime.class))
+                .isEqualTo(JdbcTimestamps.toUtcLocalDateTime(NOW));
     }
 
     /** A corrida entre nós: quem observa um next_fire_at que já avançou perde e não insere nada. */
@@ -113,11 +125,11 @@ class JdbcTriggerFirerTest {
         Instant stale = observed.minus(Duration.ofMinutes(1));
 
         boolean fired = firer.fire(JobKey.of("poll"), stale, observed,
-                List.of(occurrence("occ-1", "poll", stale)), new LinkedHashMap<String, Object>());
+                List.of(occurrence("occ-1", "poll", stale)), new LinkedHashMap<String, Object>(), NOW);
 
         assertThat(fired).isFalse();
         assertThat(nextFireAtOf("poll")).isEqualTo(observed);
-        assertThat(executionStore.find(ExecutionId.of("occ-1"))).isEmpty();
+        assertThat(historyStateOf("occ-1")).isNull();
     }
 
     /** fixed-delay: o plano desarma o trigger — a conclusão rearma (ADR-0035). */
@@ -126,7 +138,7 @@ class JdbcTriggerFirerTest {
         Instant observed = armEveryMinuteJob("poll");
 
         boolean fired = firer.fire(JobKey.of("poll"), observed, null,
-                List.of(occurrence("occ-1", "poll", observed)), new LinkedHashMap<String, Object>());
+                List.of(occurrence("occ-1", "poll", observed)), new LinkedHashMap<String, Object>(), NOW);
 
         assertThat(fired).isTrue();
         assertThat(nextFireAtOf("poll")).isNull();
@@ -139,23 +151,28 @@ class JdbcTriggerFirerTest {
         jobStore.remove(JobKey.of("poll"));
 
         boolean fired = firer.fire(JobKey.of("poll"), observed, observed.plus(Duration.ofMinutes(1)),
-                List.of(occurrence("occ-1", "poll", observed)), new LinkedHashMap<String, Object>());
+                List.of(occurrence("occ-1", "poll", observed)), new LinkedHashMap<String, Object>(), NOW);
 
         assertThat(fired).isFalse();
-        assertThat(executionStore.find(ExecutionId.of("occ-1"))).isEmpty();
+        assertThat(historyStateOf("occ-1")).isNull();
     }
 
     /** Avanço e inserção são atômicos: inserção que falha desfaz o avanço — a ocorrência não é perdida, o próximo tick tenta de novo. */
     @Test
     void aFailedInsertRollsBackTheAdvance() {
         Instant observed = armEveryMinuteJob("poll");
+        // segunda ocorrência colide com uma execução pré-existente — PK viola no record
+        rawJdbc.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                VALUES ('occ-2', 'poll', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW));
 
         assertThatThrownBy(() -> firer.fire(JobKey.of("poll"), observed, observed.plus(Duration.ofMinutes(1)),
-                List.of(occurrence("occ-1", "poll", observed), occurrence("occ-2", "ghost-job", observed)),
-                new LinkedHashMap<String, Object>()))
+                List.of(occurrence("occ-1", "poll", observed), occurrence("occ-2", "poll", observed)),
+                new LinkedHashMap<String, Object>(), NOW))
                 .isInstanceOf(DataIntegrityViolationException.class);
 
         assertThat(nextFireAtOf("poll")).isEqualTo(observed);
-        assertThat(executionStore.find(ExecutionId.of("occ-1"))).isEmpty();
+        assertThat(historyStateOf("occ-1")).isNull();
     }
 }

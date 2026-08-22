@@ -1,8 +1,10 @@
 package io.mohs.store.jdbc;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 
 import javax.sql.DataSource;
 
@@ -33,14 +35,18 @@ class JdbcLeaseStorePostgresTest {
     private JdbcTemplate rawJdbcTemplate;
     private JdbcLeaseStore store;
     private JdbcWorkQueue queue;
+    private JdbcJobStore jobStore;
 
     @BeforeEach
     void setUp() {
         DataSource dataSource = PostgresTestSupport.freshSchema();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         new PostgresPartitionManager(dataSource).ensureWeeklyPartitions(NOW);
-        store = new JdbcLeaseStore(dataSource, new PostgresJdbcDialect());
-        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect());
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
+        store = new JdbcLeaseStore(dataSource, new PostgresJdbcDialect(), batchStore);
+        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect(), batchStore);
+        jobStore = new JdbcJobStore(dataSource, clock);
     }
 
     @Test
@@ -52,12 +58,12 @@ class JdbcLeaseStorePostgresTest {
         queue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("job-a"), 0, 20, 1, NOW.minusSeconds(1))));
         queue.claim(0, "node-pg", 1, 10, List.of(), NOW);
 
-        Set<ExecutionId> owned = store.complete(List.of(new LeaseStore.CompletionResult(
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(new LeaseStore.CompletionResult(
                 ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-pg", 1, 1,
                 NOW.minusSeconds(2), NOW, ExecutionState.SUCCEEDED, null, null,
-                ExecutionState.SUCCEEDED, CREATED_AT, null)));
+                ExecutionState.SUCCEEDED, CREATED_AT, null)), jobStore);
 
-        assertThat(owned).containsExactly(ExecutionId.of("exec-1"));
+        assertThat(verdicts.get(ExecutionId.of("exec-1")).owned()).isTrue();
         // a poda por IGUALDADE achou a linha na partição — created_at com precisão de micros atravessou verbatim
         assertThat(rawJdbcTemplate.queryForObject(
                 "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("SUCCEEDED");
@@ -75,12 +81,12 @@ class JdbcLeaseStorePostgresTest {
         queue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("job-a"), 0, 20, 1, NOW.minusSeconds(1))));
         queue.claim(0, "node-pg", 2, 10, List.of(), NOW);
 
-        Set<ExecutionId> owned = store.complete(List.of(new LeaseStore.CompletionResult(
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(new LeaseStore.CompletionResult(
                 ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-pg", 1, 1,
                 NOW.minusSeconds(2), NOW, ExecutionState.SUCCEEDED, null, null,
-                ExecutionState.SUCCEEDED, CREATED_AT, null)));
+                ExecutionState.SUCCEEDED, CREATED_AT, null)), jobStore);
 
-        assertThat(owned).isEmpty();
+        assertThat(verdicts.get(ExecutionId.of("exec-1"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
         assertThat(rawJdbcTemplate.queryForObject(
                 "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
     }

@@ -1,6 +1,8 @@
 package io.mohs.store.jdbc;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 
 import javax.sql.DataSource;
@@ -36,7 +38,7 @@ class JdbcWorkQueuePostgresTest {
     void setUp() {
         dataSource = PostgresTestSupport.freshSchema();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect());
+        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC)));
     }
 
     private WorkQueue.ReadyEntry entry(String id, String jobKey, int priority, int attempt, Instant visibleAt) {
