@@ -30,7 +30,7 @@ final class JdbcSupport {
      * {@code autoCommit = false} pra valer; Connector/J precisa da mesma
      * coisa, ou {@code useCursorFetch=true}). O valor é um meio-termo
      * (100-500 é a faixa recomendada) — nunca medido neste projeto, só
-     * fecha a lacuna entre o Javadoc de {@code ExecutionStore#findAll} e o
+     * fecha a lacuna entre o Javadoc de {@code HistoryStore#findAll} e o
      * que os drivers realmente fazem sem isto configurado.
      */
     static final int STREAM_FETCH_SIZE = 200;

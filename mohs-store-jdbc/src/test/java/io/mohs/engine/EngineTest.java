@@ -48,6 +48,7 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.store.jdbc.JdbcBatchStore;
 import io.mohs.store.jdbc.JdbcHistoryStore;
@@ -136,12 +137,26 @@ class EngineTest {
      */
     private Engine assembleEngine(WorkQueue workQueueOverride, LeaseStore leaseStoreOverride, HistoryStore historyStoreOverride,
             NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings) {
+        return assembleEngine(jobStore, workQueueOverride, leaseStoreOverride, historyStoreOverride, nodeStoreOverride,
+                listeners, runnerRegistry, settings);
+    }
+
+    private Engine assembleEngine(JobStore jobStoreOverride, WorkQueue workQueueOverride, LeaseStore leaseStoreOverride,
+            HistoryStore historyStoreOverride, NodeStore nodeStoreOverride, List<ExecutionListener> listeners,
+            RunnerRegistry runnerRegistry, EngineSettings settings) {
+        return assembleEngine(jobStoreOverride, workQueueOverride, leaseStoreOverride, historyStoreOverride,
+                nodeStoreOverride, new ExecutionWindowRegistry(List.of()), listeners, runnerRegistry, settings);
+    }
+
+    private Engine assembleEngine(JobStore jobStoreOverride, WorkQueue workQueueOverride, LeaseStore leaseStoreOverride,
+            HistoryStore historyStoreOverride, NodeStore nodeStoreOverride, ExecutionWindowRegistry windowRegistry,
+            List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings) {
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         EngineMetrics metrics = new EngineMetrics(new SimpleMeterRegistry());
-        Dispatcher dispatcher = new Dispatcher(leaseStoreOverride, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor, metrics);
+        Dispatcher dispatcher = new Dispatcher(leaseStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor, metrics);
         ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
-        return new Engine(workQueueOverride, dispatcher, historyStoreOverride, leaseStoreOverride, jobStore, nodeStoreOverride,
-                new JdbcTriggerFirer(dataSource, historyStore, workQueue), new ExecutionWindowRegistry(List.of()),
+        return new Engine(workQueueOverride, dispatcher, historyStoreOverride, leaseStoreOverride, jobStoreOverride, nodeStoreOverride,
+                new JdbcTriggerFirer(dataSource, historyStore, workQueue), windowRegistry,
                 rateLimitStore, clock, settings, tickScheduler, runnerRegistry, metrics);
     }
 
@@ -475,6 +490,130 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(terminalCount(ExecutionState.SUCCEEDED)).isEqualTo(5);
+    }
+
+    /**
+     * A corrida do define+schedule no mesmo tick (bug real do flip — ~50%
+     * de falha no E2E do starter que define e agenda em sequência): o
+     * snapshot de definições do tick PRECEDE o claim, então um job
+     * recém-nascido pode estar fora do snapshot com a entrada já na fila —
+     * e ele NÃO é um job removido. O miss do snapshot cura com consulta
+     * fresca ({@code jobStore.find}); sem ela, a execução morria FAILED
+     * terminal com a mensagem de "removed". O jobStore cego de findAll
+     * torna o miss determinístico.
+     */
+    @Test
+    void aJobBornAfterTheTickSnapshotStillDispatches() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+        });
+        JobStore snapshotBlind = mock(JobStore.class, delegatesTo(jobStore));
+        doAnswer(_ -> java.util.stream.Stream.<StoredJob>empty()).when(snapshotBlind).findAll();
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        Engine engine = assembleEngine(snapshotBlind, workQueue, leaseStore, historyStore, nodeStore, List.of(listener),
+                defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+
+        engine.start();
+        try {
+            assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("a just-born job dispatches despite the stale snapshot").isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+    }
+
+    /**
+     * O complemento do heal (review S5.4): o achado da consulta fresca é
+     * MEMOIZADO no snapshot — sem isso, a Admission das rodadas seguintes
+     * do mesmo tick não veria as leases do recém-nascido ({@code leaseCount}
+     * = 0) e o mutex de {@code maxConcurrentExecutions} viraria no-op, até
+     * {@code claimRounds × cap} execuções concorrentes num só nó.
+     * {@code batchSize=1 + claimRounds=2} força exatamente a rodada 2
+     * dentro do tick de nascimento (o findAll cego só na primeira chamada).
+     */
+    @Test
+    void aJobBornAfterTheSnapshotStillHonoursItsConcurrencyCapAcrossClaimRounds() throws Exception {
+        jobStore.upsert(JobDefinition.of("single-file", Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(1)));
+        recordAndOffer("exec-1", "single-file", "hello", NOW.minusSeconds(2));
+        recordAndOffer("exec-2", "single-file", "hello", NOW.minusSeconds(1));
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch releaseHandlers = new CountDownLatch(1);
+        CountDownLatch bothSucceeded = new CountDownLatch(2);
+        handlerRegistry.register(JobKey.of("single-file"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            releaseHandlers.await(10, TimeUnit.SECONDS);
+        });
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                bothSucceeded.countDown();
+            }
+        };
+        JobStore blindOnce = mock(JobStore.class, delegatesTo(jobStore));
+        AtomicBoolean firstSnapshot = new AtomicBoolean(true);
+        doAnswer(_ -> firstSnapshot.getAndSet(false) ? java.util.stream.Stream.<StoredJob>empty() : jobStore.findAll())
+                .when(blindOnce).findAll();
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
+        Engine engine = assembleEngine(blindOnce, workQueue, leaseStore, historyStore, counting, List.of(listener),
+                defaultRunnerRegistry(),
+                new EngineSettings(POLL_INTERVAL, 1, 10, 2, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            counting.resetLatch(new CountDownLatch(3));
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+
+            // a rodada 2 do tick cego NÃO furou o mutex: uma posse, um na fila
+            assertThat(leaseCount()).isEqualTo(1);
+            assertThat(readyCount()).isEqualTo(1);
+
+            releaseHandlers.countDown();
+            assertThat(bothSucceeded.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseHandlers.countDown();
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(rawJdbcTemplate.queryForList("SELECT number FROM mohs_attempt", Integer.class)).containsExactly(1, 1);
+    }
+
+    /**
+     * Janela como segunda linha de defesa (review S5.4): job recém-nascido
+     * (fora do snapshot) com janela FECHADA não roda — o {@code admitFor}
+     * barra e devolve pra fila com o MESMO attempt. É o único guard entre a
+     * fila e a janela quando o filtro pré-claim não conhece o job (ou foi
+     * descartado no modo degradado do {@code MAX_INADMISSIBLE_FILTER}).
+     */
+    @Test
+    void aJobBornAfterTheSnapshotInsideAClosedWindowIsRequeuedNotDispatched() throws Exception {
+        jobStore.upsert(JobDefinition.of("night-batch", Handler.class, spec -> spec.onDemand().window("night")));
+        recordAndOffer("exec-1", "night-batch", "hello", NOW.minusSeconds(1));
+        AtomicBoolean handlerRan = new AtomicBoolean();
+        handlerRegistry.register(JobKey.of("night-batch"), (payload, ctx) -> handlerRan.set(true));
+        JobStore alwaysBlind = mock(JobStore.class, delegatesTo(jobStore));
+        // cego SEMPRE: toda rodada exercita o caminho do heal — o pior caso do guard
+        doAnswer(_ -> java.util.stream.Stream.<StoredJob>empty()).when(alwaysBlind).findAll();
+        ExecutionWindowRegistry closedWindow = new ExecutionWindowRegistry(
+                List.of(new ExecutionWindow("night", List.of(_ -> true))));
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
+        Engine engine = assembleEngine(alwaysBlind, workQueue, leaseStore, historyStore, counting, closedWindow,
+                List.of(), defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+
+        engine.start();
+        try {
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(handlerRan.get()).isFalse();
+            assertThat(leaseCount()).isZero();
+            assertThat(readyCount()).isEqualTo(1);
+            assertThat(rawJdbcTemplate.queryForObject("SELECT attempt FROM mohs_ready", Integer.class)).isEqualTo(1);
+            assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_attempt", Integer.class)).isZero();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
     }
 
     /**

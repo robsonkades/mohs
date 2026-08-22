@@ -54,7 +54,7 @@ public interface RateLimitStore {
      * READ COMMITTED: a implementação relê a linha entre tentativas do CAS, e
      * sob REPEATABLE READ a releitura devolveria o mesmo snapshot — as
      * tentativas falhariam idênticas, o retry viraria no-op caro.
-     * {@code JdbcClaimer} garante isso explicitamente (DBTUNE-4); outro
+     * {@code JdbcWorkQueue} garante isso explicitamente (DBTUNE-4); outro
      * chamador que herde uma transação {@code @Transactional} do host precisa
      * garantir o mesmo. {@code false} significa
      * que outro nó alterou o balde entre as duas fases e não há saldo:

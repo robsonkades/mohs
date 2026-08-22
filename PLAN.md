@@ -102,7 +102,27 @@ Phases 0–4 commitadas (1756933), E1/E2 decididos (BASELINE).
       `running_execution_count`; facade/REST/dashboard leem o modelo novo
       (estado advisory + join de lease onde precisa verdade). Testes de
       engine/REST reformulados. E5/E6 re-rodados.
-- [ ] **S5.4 — Contract.** Caem: `mohs_executions`/`mohs_attempts` (tabelas e
+- [x] **S5.4 — Contract.** *(2026-08-22. Caíram: as 2 tabelas velhas +
+      `running_execution_count` (V4 guardada por dialeto pro caminho de
+      adoção — MySQL PREPARE, SQL Server COL_LENGTH + default constraint
+      sem nome), portas `Claimer`/`Reaper`/`ExecutionStore` + Jdbc* +
+      `Candidate` + SQL legado dos dialetos + 6 testes + 12 harnesses do
+      modelo velho (resultados preservados em BASELINE/git); contador de
+      mutex fora do `JobStore`/`StoredJob` (ADR-D); `remove()` drena
+      `mohs_ready` (dreno-primeiro: o row lock do DELETE arbitra contra
+      claim concorrente — review); round-trips/Flyway/guardião estrutural
+      re-apontados; gêmeo Postgres do teste NESTED (25P02). BÔNUS de
+      causa-raiz: E2E do starter falhava ~50% desde o flip — snapshot de
+      definições precede o claim e um job define+schedule no mesmo tick
+      morria como "removido"; heal `storedJobFor` (consulta fresca no miss,
+      MEMOIZADA no snapshot pro cap não ficar cego nas rodadas 2+) aplicado
+      em dispatch/admissão/reaper + guard de janela no `admitFor` (segunda
+      linha de defesa, cobre também o modo degradado do filtro); 8/8 verdes
+      após o fix. Pipeline: refactorer ✅ (extração `storedJobFor`);
+      db-tuner ✅ zero mudanças com planos reais (COUNT vs EXISTS medido
+      igual; índice de state rejeitado por proteger HOT; 2 gatilhos acima);
+      reviewer ❌→✅ em 1 ciclo (memoização do cap + dreno-primeiro no
+      remove + 2 testes de caracterização).)* Caem: `mohs_executions`/`mohs_attempts` (tabelas e
       código), portas velhas (`ExecutionStore`/`Claimer`/`Reaper`… → as 4),
       `TerminalStateWriteScanTest` re-apontado, ArchUnit atualizado,
       migração V4 de drop.
@@ -125,6 +145,22 @@ Phases 0–4 commitadas (1756933), E1/E2 decididos (BASELINE).
 - **`MohsImpl.enqueueMembers` grava membro a membro** (N×2 statements na
   mesma transação onde 2 bastariam — `record`/`offer` já aceitam lote).
   **Gatilho:** medição com o harness de write amplification num lote ≥ 1k.
+- **Churn de janela fechada no modo degradado do filtro** (S5.4): acima de
+  `MAX_INADMISSIBLE_FILTER` (1000) o claim roda sem filtro e entradas de
+  jobs com janela fechada são reivindicadas e devolvidas (`admitFor`,
+  reason `window-closed`) a cada rodada até a janela abrir. Correção
+  preserva-se pelo guard; o custo é churn. **Gatilho:** crescimento
+  sustentado de `mohs.claim.requeued{reason="window-closed"}`.
+- **`hasLiveSchedulerOccurrence` escala com a história retida** (db-tuner
+  S5.4: 6,5ms com job de 40k linhas em 100k; sem índice de `state` DE
+  PROPÓSITO — indexar `state` quebraria HOT update no UPDATE terminal, a
+  conquista de −70% da Phase 4). **Gatilho:** cura do upsert acima de
+  dezenas de ms na retenção real; alternativa preferida é derivar "vivo"
+  de `mohs_ready`+`mohs_lease` (mudança semântica — exige aprovação).
+- **`drainedBatchMembers`/aposentadoria em base grande** (db-tuner S5.4):
+  custo O(história de lotes) no join; a 3,9ms hoje. **Gatilho:**
+  `Mohs.remove` de job com milhões de execuções de lote passando de ~1s —
+  saída portável registrada no relatório do tuning.
 
 ## Gate da fase (do plano)
 

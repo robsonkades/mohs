@@ -44,7 +44,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
      * — MEDIDO em H2 (SQLState 50200, 2013ms) e Postgres 18 (57014, 2022ms),
      * não {@code CannotAcquireLockException}: o tradutor do Spring manda
      * timeout de statement e deadlock para ramos IRMÃOS da hierarquia. Por
-     * isso {@code JdbcClaimer#claimIdsWithDeadlockRetry} captura os dois
+     * isso o chamador do claim captura os dois
      * explicitamente — perde-se a rodada, nunca o heartbeat.
      *
      * <p>Dois segundos assumem {@code lease-ttl} folgado (30s no default): a

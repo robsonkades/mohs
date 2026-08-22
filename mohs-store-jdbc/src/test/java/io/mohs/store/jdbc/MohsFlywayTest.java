@@ -47,7 +47,7 @@ class MohsFlywayTest {
         new MohsFlyway(dataSource, new H2JdbcDialect()).migrate();
 
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM mohs_executions", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM mohs_execution", Integer.class)).isZero();
         assertThat(historyRows(dataSource)).isGreaterThanOrEqualTo(1);
     }
 
@@ -99,11 +99,15 @@ class MohsFlywayTest {
                 WHERE LOWER(table_name) LIKE 'mohs\\_%' AND LOWER(table_name) <> ?
                 ORDER BY 1
                 """, (rs, _) -> rs.getString(1), MohsFlyway.HISTORY_TABLE));
-        // nome de índice de PK é auto-gerado pelo H2 (sufixo aleatório) —
-        // normalizado; o que se compara é "a PK existe nestas colunas"
+        // nomes de índice de PK e de constraint UNIQUE são auto-gerados pelo
+        // H2 (sufixo posicional — mudou quando a V4 passou a criar e dropar
+        // objetos a mais na cadeia) — normalizados; o que se compara é
+        // "a PK/unicidade existe nestas colunas"
         structure.addAll(jdbc.query("""
                 SELECT LOWER(i.table_name) || '.'
-                       || CASE WHEN LOWER(i.index_name) LIKE 'primary\\_key%' THEN 'primary_key' ELSE LOWER(i.index_name) END
+                       || CASE WHEN LOWER(i.index_name) LIKE 'primary\\_key%' THEN 'primary_key'
+                               WHEN LOWER(i.index_name) LIKE 'constraint%' THEN 'unique_constraint'
+                               ELSE LOWER(i.index_name) END
                        || '(' || LOWER(ic.column_name) || '@' || ic.ordinal_position || ')'
                 FROM information_schema.indexes i
                 JOIN information_schema.index_columns ic

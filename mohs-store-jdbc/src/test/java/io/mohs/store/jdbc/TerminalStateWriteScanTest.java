@@ -15,21 +15,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Varredura de fonte que guarda um invariante da ADR-0043; mora neste módulo, e não no
  * {@code ArchitectureTest} de mohs-demo, porque varre {@code src/main/java} do módulo em
- * que roda — e todo SQL de escrita terminal em {@code mohs_executions} está aqui
- * ({@code JdbcExecutionStore}, {@code JdbcJobStore}).
+ * que roda — e todo SQL de escrita terminal no advisory {@code mohs_execution} está aqui
+ * ({@code JdbcLeaseStore}, {@code JdbcWorkQueue}, {@code JdbcJobStore}).
  */
 class TerminalStateWriteScanTest {
 
-    /** Estados que encerram uma execução — escrevê-los é o gatilho da contagem de lote. Cobre a mesa antiga ({@code mohs_executions}) e a advisory da Phase 5 ({@code mohs_execution}). */
+    /** Estados que encerram uma execução — escrevê-los é o gatilho da contagem de lote. O alvo é o advisory {@code mohs_execution} (a mesa antiga caiu no S5.4). */
     private static final Pattern TERMINAL_STATE_WRITE = Pattern.compile(
-            "UPDATE\\s+mohs_executions?\\s+SET\\s+state\\s*=\\s*(:newState|:state|'SUCCEEDED'|'FAILED'|'CANCELLED')");
+            "UPDATE\\s+mohs_execution\\s+SET\\s+state\\s*=\\s*(:state|'SUCCEEDED'|'FAILED'|'CANCELLED')");
 
     /** O marcador que cada ponto de escrita terminal precisa carregar, com o porquê ao lado. */
     private static final String BATCH_COUNTED_MARKER = "batch-counted:";
 
     /**
      * A regra que a ADR-0043 precisava e não tinha: <b>quem escreve estado
-     * terminal em {@code mohs_executions} conta no lote</b>. Quatro caminhos
+     * terminal em {@code mohs_execution} conta no lote</b>. Quatro caminhos
      * violaram isso na implementação — reaper, cancelamento, aposentadoria de
      * job e retry manual — e os três primeiros deixavam o lote aberto para
      * sempre, sem erro e sem varredura de reconciliação que curasse (a ADR
@@ -70,7 +70,7 @@ class TerminalStateWriteScanTest {
         }
 
         assertThat(unmarked)
-                .as("escritas de estado terminal em mohs_executions sem declarar a contagem de lote — "
+                .as("escritas de estado terminal em mohs_execution sem declarar a contagem de lote — "
                         + "acrescente '// " + BATCH_COUNTED_MARKER + " <quem conta>' acima, na MESMA transação, "
                         + "ou o lote desses membros nunca fecha (ADR-0043)")
                 .isEmpty();

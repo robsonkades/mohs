@@ -32,7 +32,7 @@ import io.mohs.core.schedule.Schedule;
  * <p>Fixed-delay ({@code afterFinish}) é uma corrente de ocorrência
  * única: materializou, o próximo disparo é desconhecido até a execução
  * terminar ({@code nextFireAt} do plano sai {@code null} — a conclusão
- * rearma, ver {@code ExecutionStore.CompletionRequest#rearmNextFireAt}).
+ * rearma, ver {@code LeaseStore.CompletionResult#rearmNextFireAt}).
  */
 public final class FiringPlanner {
 

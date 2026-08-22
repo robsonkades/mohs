@@ -66,7 +66,7 @@ public final class JdbcJobStore implements JobStore {
     public JdbcJobStore(DataSource dataSource, Clock clock) {
         this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        // mesmo raciocínio da DBTUNE-4 em JdbcClaimer: escrita guardada assume
+        // mesmo raciocínio da DBTUNE-4 em JdbcWorkQueue: escrita guardada assume
         // "última escrita vence" (READ COMMITTED), não herda o default do banco.
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -110,7 +110,7 @@ public final class JdbcJobStore implements JobStore {
         // id é gerado aqui mas só entra no INSERT — se cair no UPDATE, o
         // valor gerado fica sem uso; a linha existente mantém o id que já
         // tinha (PK estável pro ciclo de vida do job_key, nunca reescrita).
-        // UUIDv7 (io.github.robsonkades:uuidv7) — mesma geração de mohs_executions.id.
+        // UUIDv7 (io.github.robsonkades:uuidv7) — mesma geração de mohs_execution.execution_id.
         String id = UUIDv7.randomUUIDString();
 
         // tenta UPDATE primeiro; 0 linhas afetadas = chave nova, faz INSERT.
@@ -126,7 +126,7 @@ public final class JdbcJobStore implements JobStore {
         // de que uma fonte real (scan ou Mohs.define) quer este job de novo, então
         // define() depois de remove() ressuscita a definição com o histórico intacto.
         // Duas variantes por Preserve/Write (mesmo precedente do par COMPLETE_CAS/
-        // COMPLETE_CAS_FENCED em JdbcExecutionStore): preservar next_fire_at é NÃO
+        // TERMINAL_UPDATE_UNPRUNED em JdbcLeaseStore): preservar next_fire_at é NÃO
         // escrever a coluna — reescrever o valor lido seria lost update (DDIA cap. 7)
         // contra o CAS do disparo e o rearme guardado da conclusão (review ADR-0035).
         String updateSql = """
@@ -161,16 +161,16 @@ public final class JdbcJobStore implements JobStore {
                             interval_duration, interval_after_finish, runner, window_name, rate_limit,
                             misfire, start_paused, allow_concurrent_executions, max_concurrent_executions, retries,
                             timeout, retry_policy, source,
-                            orphaned, retired, paused, running_execution_count, next_fire_at, created_at, updated_at)
+                            orphaned, retired, paused, next_fire_at, created_at, updated_at)
                         VALUES (
                             :id, :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
                             :intervalDuration, :intervalAfterFinish, :runner, :windowName, :rateLimit,
                             :misfire, :startPaused, :allowConcurrentExecutions, :maxConcurrentExecutions, :retries,
                             :timeout, :retryPolicy, :source,
-                            :orphaned, :retired, :paused, :runningExecutionCount, :nextFireAt, :createdAt, :updatedAt)
+                            :orphaned, :retired, :paused, :nextFireAt, :createdAt, :updatedAt)
                         """, params.addValue("id", id).addValue("createdAt", now)
                                 // ADR-0037: startPaused só vale no nascimento — o UPDATE nunca toca paused
-                                .addValue("paused", definition.startPaused()).addValue("runningExecutionCount", 0));
+                                .addValue("paused", definition.startPaused()));
             } catch (DuplicateKeyException _) {
                 // o outro nó venceu o INSERT: re-decide contra a linha que agora existe —
                 // uma decisão tomada contra um snapshot morre com o snapshot (agenda igual
@@ -255,9 +255,12 @@ public final class JdbcJobStore implements JobStore {
     }
 
     private boolean hasLiveSchedulerOccurrence(JobKey key) {
+        // §4.3: no split, "vivo" é o advisory ainda PENDING — enfileirado
+        // (mohs_ready), rodando (mohs_lease) ou em backoff, todos PENDING até
+        // o desfecho terminal; caminho frio (upsert), a varredura por job serve
         Integer live = jdbcTemplate.queryForObject("""
-                SELECT COUNT(*) FROM mohs_executions
-                WHERE job_key = :jobKey AND actor = :actor AND state IN ('ENQUEUED', 'RETRY_WAITING', 'RUNNING')
+                SELECT COUNT(*) FROM mohs_execution
+                WHERE job_key = :jobKey AND actor = :actor AND state = 'PENDING'
                 """,
                 new MapSqlParameterSource("jobKey", key.value()).addValue("actor", Execution.SCHEDULER_ACTOR),
                 Integer.class);
@@ -415,29 +418,49 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /**
-     * Soft-retire, nunca {@code DELETE}: um job aposentado normalmente tem
-     * execuções, e a FK de {@code mohs_executions.job_key} derrubaria um
-     * hard delete — e "preservar histórico" ({@code Mohs#remove}) exige a
-     * linha viva de qualquer jeito. Transação própria: cancelar os
-     * {@code ENQUEUED} e marcar {@code retired} é um par indivisível
-     * (cancelar sem marcar deixa o job aceitando claim; marcar sem
-     * cancelar deixa execuções presas em {@code ENQUEUED} pra sempre,
-     * já que a claim query filtra {@code retired}).
+     * Soft-retire, nunca {@code DELETE}: "preservar histórico"
+     * ({@code Mohs#remove}) exige a linha do job viva de qualquer jeito —
+     * a história em {@code mohs_execution} continua apontando pra ela.
+     * Transação própria: drenar a FILA e marcar {@code retired} é um par
+     * indivisível (drenar sem marcar deixa o firer materializando
+     * ocorrências novas; marcar sem drenar deixaria entradas presas em
+     * {@code mohs_ready} pra sempre — a fila não filtra retired, quem
+     * filtra é este dreno). Lease em voo termina sozinha: o desfecho
+     * terminal grava normal, e um retry pós-retire morre no
+     * failBeforeDispatch — é o filtro {@code retired} de {@link #find} que
+     * o mata (o heal de snapshot do Engine consulta fresco, e um
+     * aposentado tem que continuar invisível ali; remover esse filtro
+     * ressuscitaria zumbis de fila).
      */
     @Override
     public void remove(JobKey key) {
         Objects.requireNonNull(key, "key");
         transactionTemplate.executeWithoutResult(_ -> {
             MapSqlParameterSource jobParam = new MapSqlParameterSource("jobKey", key.value());
-            List<Map<String, Object>> membersPerBatch = pendingBatchMembers(jobParam);
-            // os DOIS estados claimáveis (ADR-0033) — RETRY_WAITING fora daqui
-            // ficaria preso pra sempre: claim filtra retired, reaper só vê RUNNING
-            // batch-counted: countCancelledMembers, com o agrupamento colhido antes deste UPDATE
-            jdbcTemplate.update("""
-                    UPDATE mohs_executions SET state = 'CANCELLED'
-                    WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_WAITING')
-                    """, jobParam);
-            countCancelledMembers(membersPerBatch);
+            List<String> queued = jdbcTemplate.queryForList(
+                    "SELECT execution_id FROM mohs_ready WHERE job_key = :jobKey", jobParam, String.class);
+            List<String> drained = new ArrayList<>(queued.size());
+            for (String executionId : queued) {
+                // o DELETE decide a corrida contra um claim concorrente: 0 linhas
+                // = o claim levou a entrada e a lease termina sozinha — nunca
+                // CANCELLED sobre execução reivindicada (predicado por subquery
+                // avalia num snapshot e não serializa nada; o row lock do DELETE
+                // serializa — DDIA cap. 7; review S5.4). Caminho frio: N round
+                // trips por aposentadoria não importam
+                if (jdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = :executionId",
+                        new MapSqlParameterSource("executionId", executionId)) == 1) {
+                    drained.add(executionId);
+                }
+            }
+            if (!drained.isEmpty()) {
+                // batch-counted: countCancelledMembers, sobre o conjunto REALMENTE drenado
+                jdbcTemplate.update("""
+                        UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :now
+                        WHERE execution_id IN (:ids)
+                        """, new MapSqlParameterSource("ids", drained)
+                                .addValue("now", JdbcTimestamps.toUtcLocalDateTime(clock.instant())));
+                countCancelledMembers(drainedBatchMembers(drained));
+            }
             jdbcTemplate.update("UPDATE mohs_job_definitions SET retired = :retired, updated_at = :now WHERE job_key = :jobKey",
                     new MapSqlParameterSource("jobKey", key.value())
                             .addValue("retired", true)
@@ -445,67 +468,27 @@ public final class JdbcJobStore implements JobStore {
         });
     }
 
-    @Override
-    public boolean tryIncrementRunningExecutions(JobKey key) {
-        Objects.requireNonNull(key, "key");
-        int updated = jdbcTemplate.update(
-                "UPDATE mohs_job_definitions SET running_execution_count = running_execution_count + 1 "
-                      + "WHERE job_key = :jobKey AND running_execution_count < max_concurrent_executions",
-                new MapSqlParameterSource("jobKey", key.value()));
-        return updated == 1;
-    }
-
-    @Override
-    public void decrementRunningExecutions(JobKey key) {
-        Objects.requireNonNull(key, "key");
-        jdbcTemplate.update(
-                "UPDATE mohs_job_definitions SET running_execution_count = running_execution_count - 1 "
-                      + "WHERE job_key = :jobKey AND running_execution_count > 0",
-                new MapSqlParameterSource("jobKey", key.value()));
-    }
-
     /**
-     * ADR-0047 — {@code CASE}, não {@code GREATEST}: piso em zero portável
-     * nos 4 dialetos (SQL Server 2019, Tier 2, não tem {@code GREATEST}).
-     * N decrementos guardados e o bloco com piso terminam no mesmo valor.
-     */
-    @Override
-    public void decrementRunningExecutions(JobKey key, int permits) {
-        Objects.requireNonNull(key, "key");
-        if (permits < 0) {
-            throw new IllegalArgumentException("permits must be >= 0, got " + permits);
-        }
-        if (permits == 0) {
-            return;
-        }
-        jdbcTemplate.update("""
-                UPDATE mohs_job_definitions
-                SET running_execution_count = CASE WHEN running_execution_count >= :permits
-                    THEN running_execution_count - :permits ELSE 0 END
-                WHERE job_key = :jobKey AND running_execution_count > 0
-                """,
-                new MapSqlParameterSource().addValue("permits", permits).addValue("jobKey", key.value()));
-    }
-
-    /**
-     * Aposentar o job cancela as execuções pendentes dele, e cancelar é
-     * terminal: sem contar, o membro some do lote e {@code pending} nunca zera
-     * — o lote fica aberto para sempre, sem varredura de reconciliação que
-     * cure (ADR-0043). Contado ANTES do cancelamento porque depois já não há
-     * pendente para agrupar, e na mesma transação, que é o que impede contar
-     * duas vezes.
+     * Aposentar o job cancela o que estava NA FILA, e cancelar é terminal:
+     * sem contar, o membro some do lote e {@code pending} nunca zera — o
+     * lote fica aberto para sempre, sem varredura de reconciliação que
+     * cure (ADR-0043). Agrupado sobre o conjunto que o dreno REALMENTE
+     * levou (não sobre um snapshot pré-dreno): quem o claim concorrente
+     * arrancou da fila vai rodar e contar na própria conclusão — contá-lo
+     * aqui seria a dupla contagem que a era antiga aceitava como janela.
      *
      * <p>SQL de {@code mohs_batches} aqui em vez de {@code BatchStore}: o
      * incremento é em bloco ({@code + :n} por lote, não N chamadas), forma que
      * a porta não tem. Se um terceiro caso aparecer, vira
      * {@code incrementFailedBy} na porta.
      */
-    private List<Map<String, Object>> pendingBatchMembers(MapSqlParameterSource jobParam) {
+    private List<Map<String, Object>> drainedBatchMembers(List<String> drained) {
         return jdbcTemplate.queryForList("""
-                SELECT batch_id, COUNT(*) AS pending FROM mohs_executions
-                WHERE job_key = :jobKey AND state IN ('ENQUEUED', 'RETRY_WAITING') AND batch_id IS NOT NULL
-                GROUP BY batch_id ORDER BY batch_id
-                """, jobParam);
+                SELECT correlation_id AS batch_id, COUNT(*) AS pending
+                FROM mohs_execution
+                WHERE execution_id IN (:ids) AND correlation_id IS NOT NULL
+                GROUP BY correlation_id ORDER BY correlation_id
+                """, new MapSqlParameterSource("ids", drained));
     }
 
     /** Ordem estável por {@code batch_id} ({@code ORDER BY} acima): dois removes concorrentes tocando os mesmos lotes não se cruzam. */
@@ -581,7 +564,7 @@ public final class JdbcJobStore implements JobStore {
                 DefinitionSource.valueOf(rs.getString("source")));
 
         LocalDateTime nextFireAt = rs.getObject("next_fire_at", LocalDateTime.class);
-        return new StoredJob(definition, rs.getBoolean("orphaned"), rs.getBoolean("paused"), rs.getInt("running_execution_count"),
+        return new StoredJob(definition, rs.getBoolean("orphaned"), rs.getBoolean("paused"),
                 nextFireAt == null ? null : JdbcTimestamps.fromUtcLocalDateTime(nextFireAt));
     }
 }

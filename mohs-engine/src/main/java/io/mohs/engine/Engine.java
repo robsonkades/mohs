@@ -438,6 +438,36 @@ public final class Engine implements MohsLifecycle {
         return byKey;
     }
 
+    /**
+     * O {@link StoredJob} do snapshot do tick, com consulta fresca no miss:
+     * o snapshot pode PRECEDER um define+schedule do mesmo instante (o
+     * claim vê a fila fresca, o snapshot não) — sem a consulta fresca, um
+     * job recém-definido seria tratado como removido (bug real: ~50% de
+     * falha no E2E do starter que define e agenda em sequência). Job
+     * removido de verdade continua {@code null} — cada chamador decide o
+     * desfecho. Custo só no miss: recém-nascido ou removido, nunca o hot
+     * path.
+     *
+     * <p>O achado curado entra no snapshot (mapa mutável confinado à thread
+     * do tick, JCIP 3.3): sem a memoização, a {@code Admission} das rodadas
+     * seguintes do MESMO tick não incluiria o recém-nascido em
+     * {@code capped} — {@code leaseCount} devolveria 0 e o mutex de
+     * {@code maxConcurrentExecutions} viraria no-op até
+     * {@code claimRounds × cap} execuções concorrentes num só nó (review
+     * S5.4). Aposentado não é memoizado: {@code null} não é achado.
+     */
+    private @Nullable StoredJob storedJobFor(JobKey jobKey, Map<JobKey, StoredJob> definitions) {
+        StoredJob stored = definitions.get(jobKey);
+        if (stored != null) {
+            return stored;
+        }
+        StoredJob fresh = jobStore.find(jobKey).orElse(null);
+        if (fresh != null) {
+            definitions.put(jobKey, fresh);
+        }
+        return fresh;
+    }
+
     // ─── reaper (§4.3: recuperação e retry são o MESMO caminho) ─────────────
 
     /**
@@ -464,7 +494,10 @@ public final class Engine implements MohsLifecycle {
                 .forEach(head -> heads.put(head.executionId(), head));
 
         List<ReclaimDecision> decisions = orphans.stream()
-                .map(orphan -> decideReclaim(orphan, definitions.get(orphan.jobKey()), heads.get(orphan.executionId()), now))
+                // miss do snapshot → consulta fresca (storedJobFor): job
+                // recém-definido não é job aposentado
+                .map(orphan -> decideReclaim(orphan, storedJobFor(orphan.jobKey(), definitions),
+                        heads.get(orphan.executionId()), now))
                 .toList();
         Map<ExecutionId, LeaseStore.Completion> verdicts =
                 leaseStore.complete(decisions.stream().map(ReclaimDecision::result).toList(), jobStore);
@@ -695,9 +728,13 @@ public final class Engine implements MohsLifecycle {
         for (Map.Entry<JobKey, List<WorkQueue.ClaimedWork>> entry : byJob.entrySet()) {
             JobKey jobKey = entry.getKey();
             List<WorkQueue.ClaimedWork> ofJob = entry.getValue();
-            StoredJob stored = definitions.get(jobKey);
+            // consulta fresca no miss (storedJobFor): o recém-nascido passa
+            // pelos MESMOS guards — janela inclusive; sem ela, ele rodaria
+            // dentro de janela fechada, o bug que o E2E do starter pegou.
+            // Removido de verdade segue pro dispatch falhar com a mensagem certa
+            StoredJob stored = storedJobFor(jobKey, definitions);
             Admitted share = stored == null
-                    ? Admitted.all(ofJob.size()) // definição sumiu entre snapshot e admissão: deixa passar — o dispatch falha com a mensagem certa
+                    ? Admitted.all(ofJob.size())
                     : admitFor(stored.definition(), ofJob.size(), admission, now);
             admitted.addAll(ofJob.subList(0, share.count()));
             for (WorkQueue.ClaimedWork loser : ofJob.subList(share.count(), ofJob.size())) {
@@ -723,8 +760,19 @@ public final class Engine implements MohsLifecycle {
         }
     }
 
-    /** Os dois guards pós-claim do §5.4, na ordem: folga de cap (derivada de {@code mohs_lease}) e cobrança tudo-ou-nada do rate limit — quem reduziu por último assina o {@code reason}. */
+    /**
+     * Os guards pós-claim do §5.4, na ordem: janela, folga de cap (derivada
+     * de {@code mohs_lease}) e cobrança tudo-ou-nada do rate limit — quem
+     * reduziu por último assina o {@code reason}. A janela aqui é
+     * segunda linha de defesa, não redundância: o filtro pré-claim é um
+     * snapshot (e é DESCARTADO acima de {@link #MAX_INADMISSIBLE_FILTER}) —
+     * job recém-nascido ou rodada sem filtro chegam aqui como a única
+     * barreira entre a fila e uma janela fechada.
+     */
     private Admitted admitFor(JobDefinition definition, int requested, Admission admission, Instant now) {
+        if (windowRegistry.excludes(definition.window(), now)) {
+            return new Admitted(0, "window-closed");
+        }
         int allowed = requested;
         String reason = "";
         if (!definition.allowConcurrentExecutions()) {
@@ -825,7 +873,9 @@ public final class Engine implements MohsLifecycle {
         HistoryStore.PayloadRow row = payloads.rows().get(id);
         Dispatcher.Grant grant = new Dispatcher.Grant(nodeId, nodeEpoch, work.attemptNumber(), claimInstant,
                 row == null ? null : row.head().createdAt());
-        StoredJob storedJob = definitions.get(work.jobKey());
+        // consulta fresca no miss (storedJobFor) — sem ela, um job
+        // recém-nascido morreria FAILED terminal como se tivesse sido removido
+        StoredJob storedJob = storedJobFor(work.jobKey(), definitions);
         if (storedJob == null) {
             failBeforeDispatchGuarded(executionFor(work, row, claimInstant), null, new IllegalStateException(
                     "job definition for " + work.jobKey() + " was removed after this execution was claimed (e.g. Mohs.remove between claim and dispatch)"), grant);

@@ -286,27 +286,35 @@ class JdbcJobStoreTest {
         assertThat(store.find(key)).map(StoredJob::paused).contains(false);
     }
 
-    /** mohs_executions.job_key tem FK pra mohs_job_definitions — o caso normal de um job aposentado é ter execuções. */
-    private void seedExecution(String id, String jobKey, String state) {
-        new JdbcTemplate(dataSource).update("""
-                INSERT INTO mohs_executions (id, job_key, state, scheduled_at, actor, payload, payload_type, created_at)
-                VALUES (?, ?, ?, ?, 'test', '{}', 'java.lang.String', ?)
+    /** História advisory (+ entrada de fila quando ainda pendente) — o caso normal de um job aposentado é ter execuções. */
+    private void seedExecution(String id, String jobKey, String state, boolean queued) {
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        raw.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                VALUES (?, ?, ?, ?, ?, 'test', '{}', 'java.lang.String')
                 """, id, jobKey, state,
                 JdbcTimestamps.toUtcLocalDateTime(clock.instant()), JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
+        if (queued) {
+            raw.update("""
+                    INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
+                    VALUES (?, ?, 0, 20, 1, ?)
+                    """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
+        }
     }
 
     /**
      * Soft-retire ({@code Mohs.remove}: "cancela fires futuros, preserva
-     * histórico"): a definição some das leituras, mas a linha fica — a FK
-     * de {@code mohs_executions} nunca derruba a chamada — e as execuções
-     * {@code ENQUEUED} são canceladas, nunca deixadas na fila.
+     * histórico"): a definição some das leituras, mas a linha fica — a
+     * história em {@code mohs_execution} continua apontando pra ela — e a
+     * FILA é drenada: o enfileirado vira {@code CANCELLED} no advisory e
+     * sai de {@code mohs_ready}; o terminal fica intacto.
      */
     @Test
-    void removeRetiresTheJobCancellingEnqueuedAndPreservingHistory() {
+    void removeRetiresTheJobDrainingTheQueueAndPreservingHistory() {
         JobKey key = JobKey.of("welcome-email");
         store.upsert(definition("welcome-email", new OnDemandSpec()));
-        seedExecution("exec-done", "welcome-email", "SUCCEEDED");
-        seedExecution("exec-queued", "welcome-email", "ENQUEUED");
+        seedExecution("exec-done", "welcome-email", "SUCCEEDED", false);
+        seedExecution("exec-queued", "welcome-email", "PENDING", true);
 
         store.remove(key);
 
@@ -315,21 +323,9 @@ class JdbcJobStoreTest {
             assertThat(all).isEmpty();
         }
         JdbcTemplate raw = new JdbcTemplate(dataSource);
-        assertThat(raw.queryForObject("SELECT state FROM mohs_executions WHERE id = ?", String.class, "exec-done")).isEqualTo("SUCCEEDED");
-        assertThat(raw.queryForObject("SELECT state FROM mohs_executions WHERE id = ?", String.class, "exec-queued")).isEqualTo("CANCELLED");
-    }
-
-    /** ADR-0033: RETRY_WAITING também é claimável — fora do cancel do remove, ficaria presa pra sempre (claim filtra retired, reaper só vê RUNNING). */
-    @Test
-    void removeCancelsRetryScheduledExecutionsToo() {
-        JobKey key = JobKey.of("welcome-email");
-        store.upsert(definition("welcome-email", new OnDemandSpec()));
-        seedExecution("exec-retry", "welcome-email", "RETRY_WAITING");
-
-        store.remove(key);
-
-        JdbcTemplate raw = new JdbcTemplate(dataSource);
-        assertThat(raw.queryForObject("SELECT state FROM mohs_executions WHERE id = ?", String.class, "exec-retry")).isEqualTo("CANCELLED");
+        assertThat(raw.queryForObject("SELECT state FROM mohs_execution WHERE execution_id = ?", String.class, "exec-done")).isEqualTo("SUCCEEDED");
+        assertThat(raw.queryForObject("SELECT state FROM mohs_execution WHERE execution_id = ?", String.class, "exec-queued")).isEqualTo("CANCELLED");
+        assertThat(raw.queryForObject("SELECT COUNT(*) FROM mohs_ready", Integer.class)).isZero();
     }
 
     /** Mesmo racional de {@link #upsertClearsOrphanedOnReupsert}: o upsert acontecer prova que uma fonte real quer o job de novo. */
@@ -337,14 +333,14 @@ class JdbcJobStoreTest {
     void upsertAfterRemoveResurrectsTheDefinitionWithItsHistory() {
         JobKey key = JobKey.of("welcome-email");
         store.upsert(definition("welcome-email", new OnDemandSpec()));
-        seedExecution("exec-done", "welcome-email", "SUCCEEDED");
+        seedExecution("exec-done", "welcome-email", "SUCCEEDED", false);
         store.remove(key);
 
         store.upsert(definition("welcome-email", new OnDemandSpec()));
 
         assertThat(store.find(key)).isPresent();
         JdbcTemplate raw = new JdbcTemplate(dataSource);
-        assertThat(raw.queryForObject("SELECT COUNT(*) FROM mohs_executions WHERE job_key = ?", Integer.class, "welcome-email")).isEqualTo(1);
+        assertThat(raw.queryForObject("SELECT COUNT(*) FROM mohs_execution WHERE job_key = ?", Integer.class, "welcome-email")).isEqualTo(1);
     }
 
     /** CONC-2 — dois nós vendo 0 linhas no UPDATE e disputando o INSERT de primeira vez. */
@@ -368,91 +364,14 @@ class JdbcJobStoreTest {
         assertThat(store.find(JobKey.of("welcome-email"))).map(StoredJob::definition).contains(definitionToRegister);
     }
 
+    /** ADR-D: o teto persiste na definição; a contagem de vagas ocupadas deriva de {@code mohs_lease} — nenhum contador na linha do job. */
     @Test
-    void upsertRoundTripsMaxConcurrentExecutionsAndStartsWithZeroRunning() {
+    void upsertRoundTripsMaxConcurrentExecutions() {
         store.upsert(definitionWithCap("report-summary", 10));
 
         StoredJob stored = store.find(JobKey.of("report-summary")).orElseThrow();
 
         assertThat(stored.definition().maxConcurrentExecutions()).isEqualTo(10);
-        assertThat(stored.runningExecutionCount()).isZero();
-    }
-
-    @Test
-    void tryIncrementRunningExecutionsReservesASlotWhenBelowLimit() {
-        store.upsert(definitionWithCap("report-summary", 2));
-        JobKey key = JobKey.of("report-summary");
-
-        assertThat(store.tryIncrementRunningExecutions(key)).isTrue();
-
-        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(1);
-    }
-
-    @Test
-    void tryIncrementRunningExecutionsFailsWhenAtLimit() {
-        store.upsert(definitionWithCap("report-summary", 1));
-        JobKey key = JobKey.of("report-summary");
-        assertThat(store.tryIncrementRunningExecutions(key)).isTrue();
-
-        assertThat(store.tryIncrementRunningExecutions(key)).isFalse();
-
-        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(1);
-    }
-
-    @Test
-    void tryIncrementRunningExecutionsIsAtomicUnderConcurrentContention() throws InterruptedException {
-        store.upsert(definitionWithCap("report-summary", 10));
-        JobKey key = JobKey.of("report-summary");
-        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-        AtomicInteger accepted = new AtomicInteger();
-
-        IntStream.range(0, 100).forEach(i -> executor.submit(() -> {
-            if (store.tryIncrementRunningExecutions(key)) {
-                accepted.incrementAndGet();
-            }
-        }));
-        executor.shutdown();
-        assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
-
-        assertThat(accepted.get()).isEqualTo(10);
-        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(10);
-    }
-
-    @Test
-    void decrementRunningExecutionsReleasesAReservedSlot() {
-        store.upsert(definitionWithCap("report-summary", 2));
-        JobKey key = JobKey.of("report-summary");
-        store.tryIncrementRunningExecutions(key);
-
-        store.decrementRunningExecutions(key);
-
-        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(0);
-    }
-
-    @Test
-    void decrementRunningExecutionsNeverGoesBelowZero() {
-        store.upsert(definitionWithCap("report-summary", 2));
-        JobKey key = JobKey.of("report-summary");
-
-        store.decrementRunningExecutions(key);
-
-        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(0);
-    }
-
-    /** ADR-0047: o bloco devolve N vagas numa escrita, mesmo estado final de N decrementos guardados — inclusive o piso. */
-    @Test
-    void bulkDecrementReleasesSeveralSlotsAndFloorsAtZero() {
-        store.upsert(definitionWithCap("report-summary", 10));
-        JobKey key = JobKey.of("report-summary");
-        for (int i = 0; i < 3; i++) {
-            store.tryIncrementRunningExecutions(key);
-        }
-
-        store.decrementRunningExecutions(key, 2);
-        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(1);
-
-        store.decrementRunningExecutions(key, 5);
-        assertThat(store.find(key)).map(StoredJob::runningExecutionCount).contains(0);
     }
 
     @Test
@@ -608,7 +527,8 @@ class JdbcJobStoreTest {
             JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), true));
             store.upsert(definition);
             disarm("poll");
-            seedExecution("occ-1", "poll", "scheduler", "RUNNING");
+            // §4.3: "viva" = advisory ainda PENDING (na fila, rodando ou em backoff)
+            seedExecution("occ-1", "poll", "scheduler", "PENDING");
 
             store.upsert(definition);
 
@@ -621,7 +541,7 @@ class JdbcJobStoreTest {
             store.upsert(definition);
             disarm("poll");
             seedExecution("occ-1", "poll", "scheduler", "SUCCEEDED");
-            seedExecution("man-1", "poll", "api:user", "RUNNING"); // execução manual não é a corrente
+            seedExecution("man-1", "poll", "api:user", "PENDING"); // execução manual não é a corrente
 
             store.upsert(definition);
 
@@ -794,9 +714,9 @@ class JdbcJobStoreTest {
         private void seedExecution(String id, String jobKey, String actor, String state) {
             LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
             rawJdbc().update("""
-                    INSERT INTO mohs_executions (id, job_key, state, scheduled_at, actor, priority, payload, payload_type, created_at)
-                    VALUES (?, ?, ?, ?, ?, 20, '{}', 'java.util.LinkedHashMap', ?)
-                    """, id, jobKey, state, now, actor, now);
+                    INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, priority, payload, payload_type)
+                    VALUES (?, ?, ?, ?, ?, ?, 20, '{}', 'java.util.LinkedHashMap')
+                    """, id, jobKey, state, now, now, actor);
         }
     }
 
@@ -811,14 +731,14 @@ class JdbcJobStoreTest {
         JdbcTemplate raw = new JdbcTemplate(dataSource);
         store.upsert(definition("welcome-email", new OnDemandSpec()));
         new JdbcBatchStore(dataSource, clock).insert("b6", 3);
-        seedExecution("m1", "welcome-email", "ENQUEUED");
-        seedExecution("m2", "welcome-email", "RETRY_WAITING");
-        seedExecution("m3", "welcome-email", "SUCCEEDED");
-        raw.update("UPDATE mohs_executions SET batch_id = ? WHERE id IN (?, ?, ?)", "b6", "m1", "m2", "m3");
+        seedExecution("m1", "welcome-email", "PENDING", true);
+        seedExecution("m2", "welcome-email", "PENDING", true);
+        seedExecution("m3", "welcome-email", "SUCCEEDED", false);
+        raw.update("UPDATE mohs_execution SET correlation_id = ? WHERE execution_id IN (?, ?, ?)", "b6", "m1", "m2", "m3");
 
         store.remove(JobKey.of("welcome-email"));
 
-        // só os dois pendentes foram cancelados agora; o SUCCEEDED já era terminal
+        // só os dois na fila foram cancelados agora; o SUCCEEDED já era terminal
         assertThat(raw.queryForObject("SELECT failed FROM mohs_batches WHERE id = ?", Integer.class, "b6"))
                 .isEqualTo(2);
     }

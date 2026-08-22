@@ -101,7 +101,7 @@ public interface HistoryStore {
         }
     }
 
-    /** Mesma separação de {@code ExecutionStore.PayloadBatch} (ADR-0047): {@code unreadable} = linhas ilegíveis (falha PERMANENTE, com a causa pro attempt terminal), nunca infra — infra propaga como exceção da própria chamada. */
+    /** A separação da ADR-0047: {@code unreadable} = linhas ilegíveis (falha PERMANENTE, com a causa pro attempt terminal), nunca infra — infra propaga como exceção da própria chamada. */
     record PayloadBatch(Map<ExecutionId, PayloadRow> rows, Map<ExecutionId, RuntimeException> unreadable) {
         public PayloadBatch {
             rows = Map.copyOf(rows);

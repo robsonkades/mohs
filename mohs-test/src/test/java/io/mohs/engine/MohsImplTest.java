@@ -230,7 +230,7 @@ class MohsImplTest {
                 new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())));
         ExecutionId id = ExecutionId.of("exec-1");
         JobDefinition afterFinish = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
-        when(jobStoreMock.find(JobKey.of("poll"))).thenReturn(Optional.of(new StoredJob(afterFinish, false, false, 0, null)));
+        when(jobStoreMock.find(JobKey.of("poll"))).thenReturn(Optional.of(new StoredJob(afterFinish, false, false, null)));
         when(workQueue.cancelQueued(eq(id), any())).thenReturn(true);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(
                 new Execution(id, JobKey.of("poll"), ExecutionState.CANCELLED, NOW, null, List.of(), "scheduler")));

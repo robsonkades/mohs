@@ -44,8 +44,6 @@ final class MySqlTestSupport {
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-        jdbcTemplate.execute("DELETE FROM mohs_attempts");
-        jdbcTemplate.execute("DELETE FROM mohs_executions");
         jdbcTemplate.execute("DELETE FROM mohs_job_definitions");
         jdbcTemplate.execute("DELETE FROM mohs_batches");
         jdbcTemplate.execute("DELETE FROM mohs_rate_limits");

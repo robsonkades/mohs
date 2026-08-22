@@ -11,9 +11,10 @@ import io.mohs.core.job.JobKey;
 /**
  * Dispara um trigger devido (ADR-0035) — a etapa "trigger devido →
  * aquisição" do fluxo de job. Não é Repository de uma entidade só: avança
- * {@code mohs_job_definitions.next_fire_at} e insere em
- * {@code mohs_executions} numa única transação — porta própria, mesmo
- * padrão de {@link Claimer} ({@code io.mohs.store.jdbc} implementa).
+ * {@code mohs_job_definitions.next_fire_at} e insere história
+ * ({@code mohs_execution}) + fila ({@code mohs_ready}) numa única
+ * transação — porta própria, mesmo padrão de {@link WorkQueue}
+ * ({@code io.mohs.store.jdbc} implementa).
  *
  * <p>A exclusão mútua cluster-wide é o CAS do avanço: {@code UPDATE ...
  * WHERE next_fire_at = :observado} — só o nó que vence insere as

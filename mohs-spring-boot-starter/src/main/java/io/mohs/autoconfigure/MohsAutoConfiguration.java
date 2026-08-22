@@ -121,7 +121,7 @@ public class MohsAutoConfiguration {
         }
         // ADR-0050 (tiering): H2 é Tier 3 — teste/dev apenas. O SKIP LOCKED
         // dele tem corrida real medida (~33% de double-lock, Javadoc de
-        // JdbcClaimer); a corretude do claim vem do CAS guardado, mas ninguém
+        // JdbcWorkQueue); a corretude do claim vem do CAS guardado, mas ninguém
         // deve descobrir isso em produção. WARN, não erro: o demo e o dev
         // loop dependem dele de propósito.
         if (dialect == MohsProperties.Jdbc.Dialect.H2) {

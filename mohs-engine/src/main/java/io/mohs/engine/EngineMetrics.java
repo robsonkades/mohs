@@ -84,10 +84,11 @@ public final class EngineMetrics {
     /**
      * Qualquer valor não-zero aqui significa node morto ou parado (§14.4) —
      * o label diz o que o reclaim decidiu. {@code attemptsExhausted} separa
-     * o FAILED por orçamento esgotado do FAILED por job aposentado (o
-     * Javadoc de {@link Reaper.Reclaimed} explica por que a Execution
-     * sozinha não distingue) — confundi-los mandaria o operador investigar
-     * retry budget num retirement em massa.
+     * o FAILED por orçamento esgotado do FAILED por job aposentado (a
+     * Execution sozinha não distingue: nas duas o desfecho é FAILED — quem
+     * sabe o motivo é a decisão do reaper, e ela vira o label aqui) —
+     * confundi-los mandaria o operador investigar retry budget num
+     * retirement em massa.
      */
     void leaseReclaimed(ExecutionState postReclaimState, boolean attemptsExhausted) {
         String reason = switch (postReclaimState) {

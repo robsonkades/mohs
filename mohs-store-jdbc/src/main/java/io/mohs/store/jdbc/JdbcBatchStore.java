@@ -88,8 +88,9 @@ public final class JdbcBatchStore implements BatchStore {
         Objects.requireNonNull(batchId, "batchId");
         MapSqlParameterSource params = new MapSqlParameterSource("id", batchId);
         if (jdbcTemplate.update(incrementSql, params) == 0) {
-            // A FK de mohs_executions.batch_id torna isto impossível por construção;
-            // se acontecer, contar em silêncio perderia a conclusão do lote para sempre.
+            // Guard REAL desde o S5.4: mohs_execution.correlation_id não tem FK
+            // (a FK morreu com a mesa antiga) — um batchId órfão chega até aqui,
+            // e contar em silêncio perderia a conclusão do lote para sempre.
             throw new IllegalStateException("no batch '" + batchId + "' to count a member into");
         }
         return find(batchId).orElseThrow(() ->

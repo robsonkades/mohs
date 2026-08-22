@@ -14,7 +14,7 @@
 -- Timestamp.toInstant() direto), que normaliza pra UTC independente do
 -- fuso default da JVM de cada nó.
 
--- id é UUIDv7 (io.github.robsonkades:uuidv7), mesma geração de mohs_executions.id
+-- id é UUIDv7 (io.github.robsonkades:uuidv7), mesma geração de mohs_execution.execution_id
 -- — surrogate key estável; job_key continua sendo a chave de negócio (única).
 CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     id              VARCHAR(255) PRIMARY KEY,
@@ -32,15 +32,14 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     misfire         VARCHAR(20)  NOT NULL,
     start_paused    BOOLEAN      NOT NULL DEFAULT FALSE, -- definicional (ADR-0037): nasce pausado no 1º registro; 'paused' segue operacional
     allow_concurrent_executions BOOLEAN NOT NULL DEFAULT TRUE,
-    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE (ADR-0020)
-    running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job (ADR-0018/0020)
+    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE (ADR-0020); o cap deriva de mohs_lease (ADR-D)
     retries         INT          NOT NULL DEFAULT 0,
     timeout         VARCHAR(50),
     retry_policy    VARCHAR(255),
     source          VARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
     orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
     paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
-    retired         BOOLEAN      NOT NULL DEFAULT FALSE, -- aposentadoria explícita (Mohs.remove): some das leituras/claim, linha fica pela FK de mohs_executions (histórico preservado)
+    retired         BOOLEAN      NOT NULL DEFAULT FALSE, -- aposentadoria explícita (Mohs.remove): some das leituras, a fila é drenada; a linha fica (histórico preservado em mohs_execution)
     next_fire_at    TIMESTAMP,   -- estado do trigger (ADR-0035): NULL = nada a disparar (on-demand; fixed-delay aguardando o fim da execução anterior)
     created_at      TIMESTAMP    NOT NULL,
     updated_at      TIMESTAMP    NOT NULL
@@ -54,51 +53,6 @@ CREATE TABLE IF NOT EXISTS mohs_batches (
     created_at TIMESTAMP NOT NULL
 );
 
--- id é UUIDv7 (io.github.robsonkades:uuidv7) — time-ordered, mantém
--- inserts localizados no fim do índice da tabela mais quente do sistema.
-CREATE TABLE IF NOT EXISTS mohs_executions (
-    id               VARCHAR(255) PRIMARY KEY,
-    job_key          VARCHAR(255) NOT NULL REFERENCES mohs_job_definitions(job_key),
-    state            VARCHAR(20)  NOT NULL,
-    scheduled_at     TIMESTAMP    NOT NULL,
-    fired_at         TIMESTAMP,
-    actor            VARCHAR(255) NOT NULL,
-    idempotency_key  VARCHAR(255),
-    priority         INT          NOT NULL DEFAULT 20, -- Priority.value(); 20 = NORMAL
-    node_id          VARCHAR(255),  -- claim, etapa 3 (ADR-0016)
-    lease_expires_at TIMESTAMP,     -- claim, etapa 3 (ADR-0012/0016)
-    cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE, -- cancel cooperativo (ADR-0034): setado em RUNNING, polled pelo node dono a cada tick; fica TRUE em SUCCEEDED que venceu a corrida (histórico); limpo APENAS pelo rearm de retry manual (ordem mais nova do operador)
-    batch_id         VARCHAR(255) REFERENCES mohs_batches(id),
-    payload          TEXT         NOT NULL, -- não CLOB: não existe em Postgres, TEXT funciona em H2 e Postgres (DB-3)
-    payload_type     VARCHAR(500) NOT NULL,
-    created_at       TIMESTAMP    NOT NULL
-);
--- H2 não tem índice parcial/filtrado — Postgres e SQL Server usam
--- WHERE state IN ('ENQUEUED', 'RETRY_WAITING') aqui (DBTUNE-5, ADR-0033); H2 fica com a composta cheia.
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
--- Sem índice parcial (ver comentário acima) — composta cheia pro reaper
--- também (DBTUNE-10): state líder, igual à do claim.
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_reaper ON mohs_executions (state, lease_expires_at);
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_job_key ON mohs_executions (job_key);
--- Idempotent Receiver (EIP, DBTUNE-8): unicidade por (job_key, idempotency_key)
--- no lugar do índice comum — é o banco que sustenta o contrato do header
--- Idempotency-Key, nunca um SELECT prévio. NULLs são distintos no H2
--- (NULLS DISTINCT default): execuções sem chave nunca colidem.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_mohs_executions_idem ON mohs_executions (job_key, idempotency_key);
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_batch_id ON mohs_executions (batch_id);
-
-CREATE TABLE IF NOT EXISTS mohs_attempts (
-    execution_id VARCHAR(255) NOT NULL REFERENCES mohs_executions(id),
-    number       INT          NOT NULL,
-    started_at   TIMESTAMP    NOT NULL,
-    finished_at  TIMESTAMP,
-    outcome      VARCHAR(20)  NOT NULL,
-    error        TEXT, -- não CLOB: não existe em Postgres, TEXT funciona em H2 e Postgres (DB-3)
-    PRIMARY KEY (execution_id, number)
-);
--- Janela de vazão do GET /overview — ver schema-postgresql.sql pro raciocínio.
-CREATE INDEX IF NOT EXISTS idx_mohs_attempts_throughput ON mohs_attempts (finished_at, outcome);
-
 CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     name            VARCHAR(255) PRIMARY KEY,
     max_count       INT NOT NULL,
@@ -110,7 +64,7 @@ CREATE TABLE IF NOT EXISTS mohs_rate_limits (
 
 -- Heartbeat de node (ADR-0012). Desde a ADR-0051 deixou de ser só
 -- informativa: o reaper consulta expires_at/last_heartbeat_at para decidir
--- quem está morto (anti-join de JdbcReaper).
+-- quem está morto (aliveNodeIds do Engine).
 CREATE TABLE IF NOT EXISTS mohs_nodes (
     node_id           VARCHAR(255) PRIMARY KEY,
     state             VARCHAR(20) NOT NULL,
@@ -118,13 +72,11 @@ CREATE TABLE IF NOT EXISTS mohs_nodes (
     epoch             BIGINT      NOT NULL DEFAULT 0, -- encarnação do nó (ADR-0051)
     expires_at        TIMESTAMP                       -- lease do NÓ (ADR-0051)
 );
-CREATE INDEX IF NOT EXISTS idx_mohs_executions_owner ON mohs_executions (state, node_id);
 
 -- ─── Phase 5 (ADR-A): o hot path fora da história ────────────────────────────
 -- Quatro perfis de escrita, quatro tabelas (racional na migração
 -- V3__table_split.sql; H2 é o equivalente funcional Tier 3 — sem
--- partições, sem índice parcial/INCLUDE). Em transição (PLAN.md): o
--- engine flipa no S5.3; as tabelas antigas caem no S5.4.
+-- partições, sem índice parcial/INCLUDE).
 
 CREATE TABLE IF NOT EXISTS mohs_ready (
     execution_id VARCHAR(255) PRIMARY KEY,

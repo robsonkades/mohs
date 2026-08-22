@@ -29,8 +29,7 @@ CREATE TABLE mohs_job_definitions (
     misfire         NVARCHAR(20)  NOT NULL,
     start_paused    BIT           NOT NULL DEFAULT 0, -- definicional (ADR-0037) — ver schema-h2.sql
     allow_concurrent_executions BIT NOT NULL DEFAULT 1,
-    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = 0 (ADR-0020)
-    running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job (ADR-0018/0020)
+    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = 0 (ADR-0020); o cap deriva de mohs_lease (ADR-D)
     retries         INT           NOT NULL DEFAULT 0,
     timeout         NVARCHAR(50),
     retry_policy    NVARCHAR(255),
@@ -52,73 +51,6 @@ CREATE TABLE mohs_batches (
     created_at DATETIME2 NOT NULL
 );
 
--- id é UUIDv7 (io.github.robsonkades:uuidv7) — time-ordered, mantém
--- inserts localizados no fim do índice da tabela mais quente do sistema.
-IF OBJECT_ID('mohs_executions', 'U') IS NULL
-CREATE TABLE mohs_executions (
-    id               NVARCHAR(255) PRIMARY KEY,
-    job_key          NVARCHAR(255) NOT NULL REFERENCES mohs_job_definitions(job_key),
-    state            NVARCHAR(20)  NOT NULL,
-    scheduled_at     DATETIME2     NOT NULL,
-    fired_at         DATETIME2,
-    actor            NVARCHAR(255) NOT NULL,
-    idempotency_key  NVARCHAR(255),
-    priority         INT           NOT NULL DEFAULT 20, -- Priority.value(); 20 = NORMAL
-    node_id          NVARCHAR(255),  -- claim, etapa 3 (ADR-0016)
-    lease_expires_at DATETIME2,      -- claim, etapa 3 (ADR-0012/0016)
-    cancel_requested BIT           NOT NULL DEFAULT 0, -- cancel cooperativo (ADR-0034) — ver schema-h2.sql
-    batch_id         NVARCHAR(255) REFERENCES mohs_batches(id),
-    payload          NVARCHAR(MAX) NOT NULL, -- não CLOB/TEXT: deprecado em SQL Server
-    payload_type     NVARCHAR(500) NOT NULL,
-    created_at       DATETIME2     NOT NULL
-);
-
--- Índice filtrado: só o backlog ENQUEUED é candidato a claim — o resto
--- da tabela (execuções terminais) é peso morto que este índice não
--- carrega. state sai das colunas porque o WHERE já fixa esse valor
--- (DBTUNE-5, medido: -95.2% Postgres / -84.2% SQL Server no tamanho do
--- índice, throughput de claim estável — docs/performance/BASELINE.md).
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_claim' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_WAITING'); -- ADR-0033: par de estados claimáveis, ver schema-postgresql.sql
--- Índice filtrado pro reaper (DBTUNE-10): só a execução RUNNING é
--- candidata a reclaim — mesmo raciocínio da DBTUNE-5, WHERE em vez de
--- coluna porque o predicado já fixa o state.
--- INCLUDE (DBTUNE-19): sem covering, o custo do caminho do índice
--- (seek + key lookup por candidato) empata com o clustered scan quando o
--- parâmetro farejado casa muitos expirados (morte de nó, boot pós-
--- downtime) — o otimizador compila o SCAN da tabela inteira e o plano
--- fica preso no cache: TODO tick seguinte paga o scan mesmo com zero
--- expirado (medido: 3.549 logical reads/tick com 150k linhas → 3-6 com
--- o covering, nos dois regimes — explain-sqlserver-reaper-covering.txt).
--- id fica de fora do INCLUDE: chave clusterizada já vem em todo índice.
--- O trap do DBTUNE-17 (Postgres) NÃO se manifesta aqui: o CAS de
--- conclusão por id sempre cai na PK no SQL Server (medido, 5 reads) —
--- por isso o predicado não ganhou IS NOT NULL como lá.
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_reaper' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_reaper ON mohs_executions (lease_expires_at) INCLUDE (job_key, cancel_requested) WHERE state = 'RUNNING';
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_job_key' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_job_key ON mohs_executions (job_key);
--- Idempotent Receiver (EIP, DBTUNE-8) — ver schema-h2.sql. Filtrado:
--- índice único do SQL Server rejeitaria o SEGUNDO NULL sem o WHERE.
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'uq_mohs_executions_idem' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE UNIQUE INDEX uq_mohs_executions_idem ON mohs_executions (job_key, idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_batch_id' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_batch_id ON mohs_executions (batch_id);
-
-IF OBJECT_ID('mohs_attempts', 'U') IS NULL
-CREATE TABLE mohs_attempts (
-    execution_id NVARCHAR(255) NOT NULL REFERENCES mohs_executions(id),
-    number       INT           NOT NULL,
-    started_at   DATETIME2     NOT NULL,
-    finished_at  DATETIME2,
-    outcome      NVARCHAR(20)  NOT NULL,
-    error        NVARCHAR(MAX), -- não CLOB/TEXT: deprecado em SQL Server
-    PRIMARY KEY (execution_id, number)
-);
--- Janela de vazão do GET /overview — ver schema-postgresql.sql pro raciocínio.
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_attempts_throughput' AND object_id = OBJECT_ID('mohs_attempts'))
-CREATE INDEX idx_mohs_attempts_throughput ON mohs_attempts (finished_at, outcome);
 
 IF OBJECT_ID('mohs_rate_limits', 'U') IS NULL
 CREATE TABLE mohs_rate_limits (
@@ -132,7 +64,7 @@ CREATE TABLE mohs_rate_limits (
 
 -- Heartbeat de node (ADR-0012). Desde a ADR-0051 deixou de ser só
 -- informativa: o reaper consulta expires_at/last_heartbeat_at para decidir
--- quem está morto (anti-join de JdbcReaper).
+-- quem está morto (aliveNodeIds do Engine).
 IF OBJECT_ID('mohs_nodes', 'U') IS NULL
 CREATE TABLE mohs_nodes (
     node_id           NVARCHAR(255) PRIMARY KEY,
@@ -145,19 +77,11 @@ IF COL_LENGTH('mohs_nodes', 'epoch') IS NULL
 ALTER TABLE mohs_nodes ADD epoch BIGINT NOT NULL DEFAULT 0;
 IF COL_LENGTH('mohs_nodes', 'expires_at') IS NULL
 ALTER TABLE mohs_nodes ADD expires_at DATETIME2;
--- Reaper dirigido por nó (ADR-0051). lease_expires_at IS NOT NULL no
--- filtro (DBTUNE-22) — ver schema-postgresql.sql: torna o índice
--- inelegível pro CAS de conclusão cercado (que fica no seek do PK
--- clustered por construção); o reaper carrega o conjunct trivialmente
--- verdadeiro na query e segue elegível.
-IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_owner' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_owner ON mohs_executions (node_id) WHERE state = 'RUNNING' AND lease_expires_at IS NOT NULL;
 
 -- --- Phase 5 (ADR-A): o hot path fora da história -----------------------------
 -- Quatro perfis de escrita, quatro tabelas (racional na migração
 -- V3__table_split.sql; SQL Server é o equivalente funcional Tier 2 — sem
--- partições nesta fase). Em transição (PLAN.md): o engine flipa no S5.3;
--- as tabelas antigas caem no S5.4.
+-- partições nesta fase).
 
 IF OBJECT_ID('mohs_ready') IS NULL
 CREATE TABLE mohs_ready (

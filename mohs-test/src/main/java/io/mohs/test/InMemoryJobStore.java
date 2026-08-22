@@ -32,9 +32,9 @@ import io.mohs.engine.StoredJob;
  *
  * <p>Divergências deliberadas do adapter JDBC, documentadas: (1) a cura
  * de trigger desarmado não é implementada — sem {@code TriggerFirer} nem
- * {@code ExecutionStore} em memória, trigger recorrente desarmado é
- * estado inalcançável neste store, e a cura seria código morto; ela
- * entra junto do engine in-memory do kit (§5.14). (2) {@link #remove} é
+ * {@code HistoryStore}/{@code WorkQueue} em memória, trigger recorrente
+ * desarmado é estado inalcançável neste store, e a cura seria código
+ * morto; ela entra junto do engine in-memory do kit (§5.14). (2) {@link #remove} é
  * hard-delete (o JDBC faz soft-retire preservando a linha) — logo, aqui
  * "ressurreição" pós-remove é um nascimento e {@code startPaused}
  * re-aplica, enquanto no JDBC a linha é a memória e {@code paused} volta
@@ -68,11 +68,10 @@ public final class InMemoryJobStore implements JobStore {
         jobs.compute(definition.key(), (_, existing) -> {
             // ADR-0037: startPaused só vale no nascimento — reupsert preserva a decisão do operador
             boolean paused = existing != null ? existing.paused() : definition.startPaused();
-            int runningExecutionCount = existing != null ? existing.runningExecutionCount() : 0;
             Instant nextFireAt = existing != null && existing.definition().schedule().equals(definition.schedule())
                     ? existing.nextFireAt()
                     : nextFireCalculator.nextFireAfter(definition.schedule(), clock.instant()).orElse(null);
-            return new StoredJob(definition, false, paused, runningExecutionCount, nextFireAt);
+            return new StoredJob(definition, false, paused, nextFireAt);
         });
         return definition;
     }
@@ -110,7 +109,7 @@ public final class InMemoryJobStore implements JobStore {
         Objects.requireNonNull(nextFireAt, "nextFireAt");
         jobs.computeIfPresent(key, (_, stored) -> stored.nextFireAt() != null
                 ? stored
-                : new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), stored.runningExecutionCount(), nextFireAt));
+                : new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), nextFireAt));
     }
 
     @Override
@@ -125,63 +124,30 @@ public final class InMemoryJobStore implements JobStore {
                     current.allowConcurrentExecutions(), current.maxConcurrentExecutions(), current.retries(),
                     current.timeout(), current.retryPolicy(), current.source());
             Instant nextFireAt = nextFireCalculator.nextFireAfter(schedule, clock.instant()).orElse(null);
-            return new StoredJob(redefined, stored.orphaned(), stored.paused(), stored.runningExecutionCount(), nextFireAt);
+            return new StoredJob(redefined, stored.orphaned(), stored.paused(), nextFireAt);
         }) != null;
     }
 
     @Override
     public void markOrphaned(JobKey key) {
         jobs.computeIfPresent(key, (_, stored) ->
-                new StoredJob(stored.definition(), true, stored.paused(), stored.runningExecutionCount(), stored.nextFireAt()));
+                new StoredJob(stored.definition(), true, stored.paused(), stored.nextFireAt()));
     }
 
     @Override
     public void pause(JobKey key) {
         jobs.computeIfPresent(key, (_, stored) ->
-                new StoredJob(stored.definition(), stored.orphaned(), true, stored.runningExecutionCount(), stored.nextFireAt()));
+                new StoredJob(stored.definition(), stored.orphaned(), true, stored.nextFireAt()));
     }
 
     @Override
     public void resume(JobKey key) {
         jobs.computeIfPresent(key, (_, stored) ->
-                new StoredJob(stored.definition(), stored.orphaned(), false, stored.runningExecutionCount(), stored.nextFireAt()));
+                new StoredJob(stored.definition(), stored.orphaned(), false, stored.nextFireAt()));
     }
 
     @Override
     public void remove(JobKey key) {
         jobs.remove(key);
-    }
-
-    @Override
-    public boolean tryIncrementRunningExecutions(JobKey key) {
-        Objects.requireNonNull(key, "key");
-        boolean[] acquired = {false};
-        jobs.computeIfPresent(key, (_, stored) -> {
-            if (stored.runningExecutionCount() >= stored.definition().maxConcurrentExecutions()) {
-                return stored;
-            }
-            acquired[0] = true;
-            return new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), stored.runningExecutionCount() + 1, stored.nextFireAt());
-        });
-        return acquired[0];
-    }
-
-    @Override
-    public void decrementRunningExecutions(JobKey key) {
-        Objects.requireNonNull(key, "key");
-        jobs.computeIfPresent(key, (_, stored) -> stored.runningExecutionCount() <= 0
-                ? stored
-                : new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), stored.runningExecutionCount() - 1, stored.nextFireAt()));
-    }
-
-    /** Mesmo piso em zero do bloco JDBC (ADR-0047). */
-    @Override
-    public void decrementRunningExecutions(JobKey key, int permits) {
-        Objects.requireNonNull(key, "key");
-        if (permits < 0) {
-            throw new IllegalArgumentException("permits must be >= 0, got " + permits);
-        }
-        jobs.computeIfPresent(key, (_, stored) -> new StoredJob(stored.definition(), stored.orphaned(), stored.paused(),
-                Math.max(stored.runningExecutionCount() - permits, 0), stored.nextFireAt()));
     }
 }

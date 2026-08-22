@@ -3,15 +3,17 @@
  * (ADR-0023) — modelo na forma do {@code LimitHandler}/{@code
  * LockingStrategy} do Hibernate (interfaces pequenas, uma preocupação
  * cada), sem trazer o Hibernate como dependência. {@link
- * io.mohs.store.jdbc.dialect.JdbcDialect} isola a única consulta sensível a
- * dialeto de {@code io.mohs.store.jdbc} ({@code SELECT} de candidatos ao
- * claim: posição do {@code LIMIT}/{@code TOP}, {@code SKIP LOCKED} vs.
- * hint de tabela) — cada banco suportado (H2, PostgreSQL, MySQL, SQL
- * Server) tem sua própria implementação, mesmo onde o SQL é
- * idêntico hoje, para não acoplar bancos independentes a uma
- * coincidência de sintaxe atual. Escolha explícita de qual {@link
- * io.mohs.store.jdbc.dialect.JdbcDialect} usar, nunca auto-detecção — quem
- * monta {@link io.mohs.store.jdbc.JdbcClaimer} decide.
+ * io.mohs.store.jdbc.dialect.JdbcDialect} isola as consultas sensíveis a
+ * dialeto de {@code io.mohs.store.jdbc} (o claim de {@code mohs_ready}:
+ * posição do {@code LIMIT}/{@code TOP}, {@code SKIP LOCKED} vs. hint de
+ * tabela, o statement único do Postgres; e a travessia temporal
+ * {@code TIMESTAMPTZ}/{@code LocalDateTime} das tabelas do split) — cada
+ * banco suportado (H2, PostgreSQL, MySQL, SQL Server) tem sua própria
+ * implementação, mesmo onde o SQL é idêntico hoje, para não acoplar
+ * bancos independentes a uma coincidência de sintaxe atual. Escolha
+ * explícita de qual {@link io.mohs.store.jdbc.dialect.JdbcDialect} usar,
+ * nunca auto-detecção — quem monta {@link io.mohs.store.jdbc.JdbcWorkQueue}
+ * decide.
  */
 @NullMarked
 package io.mohs.store.jdbc.dialect;

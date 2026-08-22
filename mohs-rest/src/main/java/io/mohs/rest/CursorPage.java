@@ -33,7 +33,7 @@ public record CursorPage<T>(List<T> items, @Nullable String nextCursor) {
 
     /**
      * Monta a página a partir de um resultado buscado com {@code size + 1}
-     * itens (convenção de {@code ExecutionStore#findPage}) — o item extra
+     * itens (convenção de {@code HistoryStore#findPage}) — o item extra
      * denuncia se há próxima página sem round-trip a mais, e é descartado
      * do corpo devolvido.
      *

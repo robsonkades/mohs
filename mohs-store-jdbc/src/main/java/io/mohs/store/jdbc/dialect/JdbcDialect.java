@@ -4,7 +4,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
@@ -24,13 +23,13 @@ import io.mohs.store.jdbc.JdbcTimestamps;
  * usá-las isoladamente significaria adotar boa parte do framework mesmo
  * assim.
  *
- * <p>Cada implementação é dona do template SQL inteiro de {@code
- * io.mohs.store.jdbc.JdbcClaimer#claim}, não de fragmentos concatenáveis — o
- * {@code TOP} do SQL Server muda de <b>posição</b> na query (logo após
- * {@code SELECT}, não no fim como {@code LIMIT}), então uma composição
- * de fragmentos genéricos não fecha limpo. Mesmo padrão que o próprio
- * Quartz usa ({@code StdJDBCDelegate}/{@code MSSQLDelegate}: cada
- * Delegate tem o SQL completo de cada operação) e como Hibernate
+ * <p>Cada implementação é dona do template SQL inteiro do claim
+ * ({@link #claimReady}/{@link #selectReadyCandidates}), não de fragmentos
+ * concatenáveis — o {@code TOP} do SQL Server muda de <b>posição</b> na
+ * query (logo após {@code SELECT}, não no fim como {@code LIMIT}), então
+ * uma composição de fragmentos genéricos não fecha limpo. Mesmo padrão
+ * que o próprio Quartz usa ({@code StdJDBCDelegate}/{@code MSSQLDelegate}:
+ * cada Delegate tem o SQL completo de cada operação) e como Hibernate
  * realmente implementa {@code LimitHandler} por baixo (recebe o SQL e
  * devolve o SQL reescrito, não um fragmento).
  *
@@ -50,91 +49,12 @@ public interface JdbcDialect {
     String migrationLocation();
 
     /**
-     * Template ANSI compartilhado por H2/Postgres/MySQL — os três nasceram
-     * byte a byte idênticos e nunca divergiram; a constante elimina os 3
-     * clones sem tirar de nenhum dialeto a liberdade de divergir depois
-     * (basta parar de usá-la). SQL Server não a usa: {@code TOP} muda de
-     * posição e o lock é hint de tabela (ver Javadoc da interface).
-     * {@code e.priority} já é {@code Priority.value()} (menor reivindica
-     * primeiro) — {@code NOT NULL DEFAULT 20} no schema, ordena direto,
-     * sem {@code CASE}. {@code j.retired = FALSE}: job aposentado
-     * ({@code Mohs.remove}) nunca volta a ser candidato.
-     */
-    String ANSI_SKIP_LOCKED_CANDIDATES = """
-            SELECT e.id AS id, e.job_key AS job_key,
-                   j.allow_concurrent_executions AS allow_concurrent_executions,
-                   j.window_name AS window_name,
-                   j.rate_limit AS rate_limit
-            FROM mohs_executions e
-            JOIN mohs_job_definitions j ON j.job_key = e.job_key
-            WHERE e.state IN ('ENQUEUED', 'RETRY_WAITING')
-              AND e.scheduled_at <= :now
-              AND j.retired = FALSE
-              AND (j.allow_concurrent_executions = TRUE OR j.running_execution_count < j.max_concurrent_executions)
-            ORDER BY e.priority ASC, e.scheduled_at ASC
-            LIMIT :batchSize
-            FOR UPDATE OF e SKIP LOCKED
-            """;
-
-    List<Candidate> selectCandidates(NamedParameterJdbcTemplate jdbcTemplate, Instant now, int batchSize);
-
-    /**
-     * CAS final pra {@code RUNNING} — a garantia real da ADR-0018 contra
-     * double-claim, independente do lock de {@link #selectCandidates}. Os
-     * dois estados claimáveis são o mesmo par do template de candidatos
-     * (ADR-0033). {@code scheduled_at <= :now} reverificado aqui porque o
-     * retry o tornou mutável: entre o SELECT e este CAS, outro nó pode
-     * reivindicar o candidato, falhar rápido e reagendá-lo pro futuro —
-     * sem a guarda, o backoff seria furado (ADR-0018: toda condição de
-     * elegibilidade que muda entre SELECT e CAS pertence ao CAS).
-     * {@code UPDATE} simples, sem sintaxe divergente — compartilhado pelos
-     * 4 dialetos via {@link #transitionToRunning}.
-     */
-    String ANSI_TRANSITION_TO_RUNNING = """
-            UPDATE mohs_executions
-            SET state = 'RUNNING', lease_expires_at = :leaseExpiresAt, node_id = :nodeId, fired_at = :now
-            WHERE id = :id AND state IN ('ENQUEUED', 'RETRY_WAITING') AND scheduled_at <= :now
-            """;
-
-    /**
-     * Terceira divergência real de dialeto (DBTUNE-16): executa o CAS de
-     * {@link #ANSI_TRANSITION_TO_RUNNING} pra cada id e devolve os que
-     * venceram — subconjunto de {@code ids}, <b>ordem não garantida</b>
-     * ({@code io.mohs.store.jdbc.JdbcClaimer} reordena pela ordem dos
-     * candidatos). {@code ids} nunca pode ser vazio: a expansão de
-     * {@code IN (:ids)} do override do Postgres não aceita coleção vazia
-     * — o chamador guarda, e é quem deve continuar guardando. Default:
-     * um {@code UPDATE} por id, atômico por
-     * construção em qualquer banco — o comportamento que todos os dialetos
-     * tinham antes. Postgres sobrescreve com um único
-     * {@code UPDATE ... RETURNING}: mesmas guardas por linha, N round
-     * trips viram 1.
-     */
-    default List<String> transitionToRunning(NamedParameterJdbcTemplate jdbcTemplate, List<String> ids, String nodeId,
-            Instant now, Instant leaseExpiresAt) {
-        List<String> claimed = new ArrayList<>(ids.size());
-        for (String id : ids) {
-            int updated = jdbcTemplate.update(ANSI_TRANSITION_TO_RUNNING, new MapSqlParameterSource()
-                    .addValue("leaseExpiresAt", JdbcTimestamps.toUtcLocalDateTime(leaseExpiresAt))
-                    .addValue("nodeId", nodeId)
-                    .addValue("now", JdbcTimestamps.toUtcLocalDateTime(now))
-                    .addValue("id", id));
-            if (updated == 1) {
-                claimed.add(id);
-            }
-        }
-        return claimed;
-    }
-
-    /**
-     * Segunda divergência real de dialeto (a primeira é {@link #selectCandidates}):
-     * {@code io.mohs.store.jdbc.JdbcExecutionStore#findPage} precisa do mesmo
-     * teto de linhas em todo dialeto, sem lock nenhum — query simples
-     * demais pra justificar 4 templates completos como {@code
-     * selectCandidates}. {@code :limit} é o mesmo parâmetro nomeado nos
-     * dois métodos; só a posição do texto na query muda. Default cobre
-     * H2/Postgres/MySQL ({@code LIMIT} no fim); SQL Server sobrescreve os
-     * dois juntos.
+     * Teto de linhas portátil ({@code io.mohs.store.jdbc.JdbcHistoryStore#findPage},
+     * {@code JdbcLeaseStore#findOrphaned}): {@code :limit} é o mesmo
+     * parâmetro nomeado nos dois métodos; só a posição do texto na query
+     * muda. Default cobre H2/Postgres/MySQL ({@code LIMIT} no fim);
+     * SQL Server sobrescreve os dois juntos ({@code TOP} logo após
+     * {@code SELECT}).
      */
     default String topClause() {
         return "";
@@ -146,7 +66,7 @@ public interface JdbcDialect {
 
     /**
      * Hint de tabela pras contagens de monitoramento do {@code GET
-     * /overview} ({@code JdbcExecutionStore#countActiveByState}/{@code
+     * /overview} ({@code JdbcHistoryStore#countActiveByState}/{@code
      * countTerminalOutcomesSince}) — o contrato do endpoint é não adquirir
      * lock nenhum: monitoramento jamais disputa com o caminho quente do
      * claim/conclusão. Default vazio: em H2/Postgres/MySQL um {@code
@@ -171,8 +91,9 @@ public interface JdbcDialect {
      * a travessia {@code LocalDateTime} UTC de sempre; Postgres sobrescreve
      * com {@code OffsetDateTime} — {@code LocalDateTime} numa coluna
      * tz-aware seria interpretado pelo fuso da SESSÃO, a classe de bug que
-     * a ADR-0049 matou. As tabelas da era da tabela única continuam usando
-     * {@link JdbcTimestamps} direto até o S5.4 as levar.
+     * a ADR-0049 matou. As tabelas de control plane ({@code
+     * mohs_job_definitions}/{@code mohs_nodes}/{@code mohs_batches}) seguem
+     * {@link JdbcTimestamps} direto — reshape delas é fase própria.
      */
     default Object splitTimestamp(Instant instant) {
         return JdbcTimestamps.toUtcLocalDateTime(instant);

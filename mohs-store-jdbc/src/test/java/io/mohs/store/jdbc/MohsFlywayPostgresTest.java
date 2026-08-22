@@ -34,19 +34,19 @@ class MohsFlywayPostgresTest {
         assertThat(jdbc.queryForObject(
                 "SELECT count(*) FROM \"" + MohsFlyway.HISTORY_TABLE + "\" WHERE \"success\"", Integer.class))
                 .isGreaterThanOrEqualTo(1);
-        // as tabelas pré-existentes seguem lá e utilizáveis
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM mohs_executions", Integer.class)).isNotNull();
+        // as tabelas pré-existentes seguem lá e utilizáveis (e a V4 dropou a era da tabela única)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM mohs_execution", Integer.class)).isNotNull();
+        assertThat(jdbc.queryForList("SELECT 1 FROM information_schema.tables WHERE table_name = 'mohs_executions'")).isEmpty();
     }
 
     /**
      * O guardião das duas cópias da verdade NO dialeto onde elas mais
-     * divergem: o predicado parcial de {@code idx_mohs_executions_owner}
-     * (V2, DBTUNE-22) só existe em Postgres/SQL Server, que o guardião H2
-     * de {@code MohsFlywayTest} não sabe expressar. {@code pg_indexes.indexdef}
-     * carrega o predicado — um typo no {@code schema-postgresql.sql} ou uma
-     * V-script cujas guardas comem a diferença falham AQUI, não viram no-op
-     * silencioso. SQL Server fica coberto por procuração (mesma forma de
-     * filtro) — registrado, não prometido.
+     * divergem: particionamento de {@code mohs_execution}/{@code mohs_attempt},
+     * {@code TIMESTAMPTZ} e storage options (V3/ADR-A) só existem em
+     * Postgres — o guardião H2 de {@code MohsFlywayTest} não sabe
+     * expressá-los. {@code pg_indexes.indexdef} carrega a forma completa —
+     * um typo no {@code schema-postgresql.sql} ou uma V-script cujas
+     * guardas comem a diferença falham AQUI, não viram no-op silencioso.
      */
     @Test
     void flywayChainMatchesTheSchemaFileStructurally() {

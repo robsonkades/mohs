@@ -97,43 +97,14 @@ public interface JobStore {
     /**
      * Aposentadoria explícita ({@code Mohs#remove}) — só pra definições
      * {@code PROGRAMMATIC} (quem valida o {@code source} é o chamador,
-     * {@code MohsImpl}). Soft-retire, nunca delete: cancela as execuções
-     * {@code ENQUEUED}, marca a definição como {@code retired} — ela some
-     * de {@link #find}/{@link #findAll} e da claim query, mas a linha (e
-     * todo o histórico de execuções) permanece. Um {@link #upsert} do
-     * mesmo {@code job_key} ressuscita a definição.
+     * {@code MohsImpl}). Soft-retire, nunca delete: drena a fila
+     * ({@code mohs_ready}) cancelando o que estava enfileirado, marca a
+     * definição como {@code retired} — ela some de
+     * {@link #find}/{@link #findAll}, mas a linha (e todo o histórico de
+     * execuções) permanece. Um {@link #upsert} do mesmo {@code job_key}
+     * ressuscita a definição. A vaga de concorrência não é assunto desta
+     * porta desde a ADR-D: o cap deriva de {@code mohs_lease} — deletar a
+     * lease É liberar a vaga.
      */
     void remove(JobKey key);
-
-    /**
-     * Reserva uma vaga de execução concorrente se {@code
-     * runningExecutionCount < maxConcurrentExecutions} — incremento atômico
-     * guardado, sem {@code SELECT} prévio (ADR-0018/0020). Chamado pelo
-     * claim, candidato a candidato, dentro da mesma transação.
-     *
-     * @return {@code true} se reservou a vaga; {@code false} se o job já
-     *         está no teto (candidato fica de fora deste batch de claim).
-     */
-    boolean tryIncrementRunningExecutions(JobKey key);
-
-    /**
-     * Devolve uma vaga reservada por engano — usado dentro da própria
-     * transação de claim quando um candidato reserva a vaga mas não chega a
-     * ser efetivamente reivindicado. Guardado contra contagem negativa. Não
-     * é o decremento de conclusão de execução (etapa de dispatch, ainda não
-     * implementada).
-     */
-    void decrementRunningExecutions(JobKey key);
-
-    /**
-     * {@link #decrementRunningExecutions(JobKey)} em bloco — devolve
-     * {@code permits} vagas do mesmo job numa escrita só, com o mesmo piso
-     * em zero (a sequência de N decrementos guardados e o bloco com piso
-     * produzem o mesmo estado final). ADR-0047: o flush do
-     * {@code CompletionBatcher} devolvia as vagas UMA POR EXECUÇÃO, serial
-     * na thread do flusher — ~256 round trips por flush, medido como o
-     * gargalo novo assim que o commit deixou de ser (bancada da Phase 3 na
-     * BASELINE).
-     */
-    void decrementRunningExecutions(JobKey key, int permits);
 }

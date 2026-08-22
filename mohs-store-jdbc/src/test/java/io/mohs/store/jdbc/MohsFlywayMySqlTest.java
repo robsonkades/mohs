@@ -36,6 +36,6 @@ class MohsFlywayMySqlTest {
         assertThat(jdbc.queryForObject(
                 "SELECT count(*) FROM " + MohsFlyway.HISTORY_TABLE + " WHERE success = 1", Integer.class))
                 .isGreaterThanOrEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM mohs_executions", Integer.class)).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM mohs_execution", Integer.class)).isNotNull();
     }
 }

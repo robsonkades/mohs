@@ -4,11 +4,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 
 /**
- * Uma linha reivindicada da fila da Phase 5 ({@code mohs_ready} →
- * {@code mohs_lease}, §5.4 do redesign) — identidade e o attempt que a
- * entrada vira, nunca payload (o dispatcher segue com UMA leitura em lote
- * na história). Par de {@link Candidate}, que é a forma da era da tabela
- * única e morre com ela no S5.4 (PLAN.md).
+ * Uma linha reivindicada da fila ({@code mohs_ready} → {@code mohs_lease},
+ * §5.4 do redesign) — identidade e o attempt que a entrada vira, nunca
+ * payload (o dispatcher segue com UMA leitura em lote na história).
  */
 public record ClaimedReady(String executionId, String jobKey, int attempt, int priority) {
 
