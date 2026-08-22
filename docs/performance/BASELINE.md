@@ -946,6 +946,78 @@ del 1,00 cada.
   (o ganho de vazão é da ADR-C; o split é o pré-requisito do sharding do
   E3 e da retenção por partição).
 
+## S6/S8 — chaos: kill −9 e pausa de banco (Phase 0 do redesign) — 2026-08-22
+
+Cenários §20.2 do `ARCHITECTURE_REDESIGN_PLAN.md` contra o motor ATUAL —
+fecham a validação da Phase 0 (S1 já coberto pelas seções de tuning/write
+amplification). `mohs-benchmark/scripts/chaos-recovery.ps1`: app demo no
+ponto de operação da rodada 5, Postgres `postgres:latest` (Docker), seed
+de 50k por SQL, gatilho a 40% drenado, duas rodadas por cenário,
+`lease-ttl` no default (30s), `every-job` com `retries=10`.
+
+### S6 — kill −9 do nó no meio do drain: **PASSA**
+
+| Rodada | Em voo no kill | Re-executadas (attempts>1) | Violações* | Terminais | kill→drain | restart→drain |
+|---|---:|---:|---:|---|---:|---:|
+| 1 | 392 | 392 | 0 | 50.000 SUCCEEDED | 31,2 s | 26,1 s |
+| 2 | 918 | 918 | 0 | 50.000 SUCCEEDED | 31,9 s | 26,4 s |
+
+*multi-attempt que NÃO estava RUNNING no kill (critério: 0).
+
+100% executado; duplicatas exatamente = em voo no kill (cada uma com o
+`Attempt` FAILED sintético do reaper + a re-execução, ADR-0033); zero
+exceções no log do node2. **O piso da recuperação é o lease TTL**: a onda
+de reclaim começa aos +30,0/30,1 s do kill e dura ~1 s — os ENQUEUED
+restantes drenam imediatamente no restart; só os em-voo esperam a lease.
+É o número que o E6 vai comparar com o node-lease da ADR-B (detecção por
+heartbeat de nó, `expires_at` ~5-15 s).
+
+### S8 — pausa do banco por 30 s no meio do drain: **recuperação passa; dois achados**
+
+| Rodada | FAILED terminais | Re-executadas | 1ª conclusão pós-unpause | Conclusões em 10 s | Linhas de exceção |
+|---|---:|---:|---:|---:|---:|
+| 1 | 18 | 598 | +12 ms | 29.196 | 3.066 |
+| 2 | 3 | 486 | +6 ms | 28.972 | 2.446 |
+
+- **Recuperação: passa com folga.** App sobrevive, primeira conclusão
+  6-12 ms após o unpause (as conexões congeladas simplesmente continuam —
+  `docker pause` é SIGSTOP, os sockets não caem), drain a plena taxa nos
+  10 s seguintes. Critério "< 10 s" atendido por 3 ordens de grandeza.
+- **ACHADO 1 — "sem perda" falha no espírito: 18/3 execuções queimadas
+  terminalmente por falha transiente.** `Engine.failUnreadablePayload`
+  trata QUALQUER falha na leitura do payload como terminal por natureza
+  (`failBeforeDispatch` → FAILED, `exhausted=false` — decisão testada,
+  `EngineTest` RESP-3). Certa para payload ilegível (deserialização,
+  classe ausente); errada para `Failed to obtain JDBC Connection` durante
+  o soluço — infra transiente virou FAILED no attempt 1 com `retries=10`
+  intactos. Viola o espírito do contrato at-least-once. Reportado, não
+  corrigido (mudança de comportamento); a classificação
+  transiente × permanente é exatamente o que o redesign §4.3/§6 promete.
+- **ACHADO 2 — self-reap race: 598/486 re-execuções.** Pausa (30 s) ==
+  lease TTL (30 s): as leases dos em-voo expiram DURANTE a pausa e, ao
+  acordar, o próprio nó reclama as execuções que ele mesmo está
+  concluindo — duplicatas dentro do contrato (at-least-once), mas
+  evitáveis; pausa < TTL não exibiria o fenômeno. O guard anti-ABA do CAS
+  (ADR-0033) segurou a consistência: nenhuma conclusão dupla, só
+  re-execução.
+- **Tempestade de exceções: bounded, mas presente.** ~80-100 linhas/s
+  durante a pausa, dominadas por `SQLTransientConnectionException`/
+  `createTimeoutException` do Hikari (617/490) e
+  `CannotCreateTransactionException` (536/460) — o tick continua tentando
+  a cada 50 ms contra um pool que não conecta. Sem backoff no poll loop
+  (o §5.5 do redesign introduz adaptive poll; ADR-J propõe o circuit
+  breaker).
+
+### Limitações declaradas
+
+- Node único; a "recuperação" do S6 usa um segundo processo idêntico no
+  mesmo host — não mede rede nem failover entre máquinas.
+- O gatilho a 40% e a coincidência pausa == lease TTL são escolhas do
+  bench; outras fases do drain / durações de pausa mudam os números de
+  duplicatas, não os vereditos.
+- Handler trivial: duplicata aqui custa um log; o custo real de
+  re-execução é do handler do usuário.
+
 ## Como reproduzir
 
 Os harnesses moram em `mohs-benchmark` desde 2026-08-21 (Phase 0 do
@@ -963,5 +1035,8 @@ redesign — antes viviam nos test sources de `mohs-jdbc`):
 Write amplification fim a fim (commits/execução, tuple versions, WAL):
 `mohs-benchmark/scripts/write-amplification.ps1`, com o app de demo no
 ar (seção "Write amplification por execução").
+
+Chaos S6/S8 (o script sobe e mata o app sozinho; porta 8080 livre):
+`mohs-benchmark/scripts/chaos-recovery.ps1 -Scenario S6` (ou `S8`).
 
 Requer Docker local (Testcontainers sobe Postgres/MySQL/SQL Server).

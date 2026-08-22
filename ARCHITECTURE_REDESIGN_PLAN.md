@@ -2483,6 +2483,15 @@ phase depends on a later phase to be correct.
   execution and WAL bytes/execution for today's design. **These three numbers do not
   exist yet and every later phase is judged against them.**
 - **Rollback.** n/a.
+- **Result (2026-08-22, BASELINE "S6/S8 — chaos"):** Phase 0 closed. S6 passes
+  (100% executed, duplicates exactly = in-flight at kill, recovery floored by the
+  30 s lease TTL — the number E6 compares ADR-B against). S8: recovery in single-
+  digit milliseconds, but two findings — a transient JDBC failure while loading
+  the payload terminally FAILs the execution on attempt 1 with the retry budget
+  untouched (`Engine.failUnreadablePayload` treats every read failure as
+  terminal-by-nature; the §4.3/§6 transient-vs-permanent classification is the
+  redesign's answer), and a pause equal to the lease TTL triggers a self-reap
+  race (~500-600 in-contract duplicates; ADR-B's node lease removes it).
 
 ### Phase 1 — Experiments E1–E3 *(1–2 sprints, no production code)*
 
