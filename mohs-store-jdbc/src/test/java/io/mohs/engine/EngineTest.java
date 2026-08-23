@@ -219,7 +219,15 @@ class EngineTest {
         return assembleEngine(tracingQueue, leaseStore, historyStore, tracingNodeStore, listeners, defaultRunnerRegistry(), settings);
     }
 
-    /** Janelas completas da trilha: claims agrupados por tick, descartando a janela ainda aberta no fim. */
+    /**
+     * Janelas completas da trilha: claims agrupados por tick, descartando a
+     * janela ainda aberta no fim. Desde o lap da Phase 6 (§5.4) cada
+     * statement sonda UM shard e o fixture semeia tudo no shard 0 — as
+     * sondas vazias ({@code claim:0}) são só o lap circulando shards
+     * possuídos-mas-vazios; a estrutura que o ADR-0040 afirma (quantos
+     * lotes por tick, encadeamento, parada antecipada) é a dos claims que
+     * acharam trabalho, então o zero sai da janela.
+     */
     private static List<List<Integer>> claimsPerTick(List<String> trace) {
         List<String> snapshot;
         synchronized (trace) {
@@ -232,13 +240,34 @@ class EngineTest {
                 current = new ArrayList<>();
                 ticks.add(current);
             } else if (current != null) {
-                current.add(Integer.parseInt(entry.substring("claim:".length())));
+                int claimed = Integer.parseInt(entry.substring("claim:".length()));
+                if (claimed > 0) {
+                    current.add(claimed);
+                }
             }
         }
         if (!ticks.isEmpty()) {
             ticks.removeLast();
         }
         return ticks;
+    }
+
+    /** Sondas BRUTAS (vazias inclusive) do tick — pina a economia de SELECTs do ADR-0040, que o filtro de zeros acima esconderia. */
+    private static long rawClaimStatementsInTick(List<String> trace, int tickIndex) {
+        List<String> snapshot;
+        synchronized (trace) {
+            snapshot = List.copyOf(trace);
+        }
+        int tick = -1;
+        long statements = 0;
+        for (String entry : snapshot) {
+            if (entry.equals("tick")) {
+                tick++;
+            } else if (tick == tickIndex) {
+                statements++;
+            }
+        }
+        return statements;
     }
 
     private void seedEnqueuedExecution(String id, String jobKey, Object payload) {
@@ -261,9 +290,13 @@ class EngineTest {
 
     /** A unidade de enqueue do §7.5-1 sem o upsert — pra teste que registra a definição por conta própria. */
     private void recordAndOffer(String id, String jobKey, Object payload, Instant scheduledAt) {
-        historyStore.record(List.of(new HistoryStore.NewExecution(ExecutionId.of(id), JobKey.of(jobKey), 0, 20,
+        recordAndOffer(id, jobKey, payload, scheduledAt, 0);
+    }
+
+    private void recordAndOffer(String id, String jobKey, Object payload, Instant scheduledAt, int shard) {
+        historyStore.record(List.of(new HistoryStore.NewExecution(ExecutionId.of(id), JobKey.of(jobKey), shard, 20,
                 scheduledAt, NOW, "test", null, null, payload)));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, 20, 1, scheduledAt)));
+        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), shard, 20, 1, scheduledAt)));
     }
 
     /** Estado do read model derivado (§4.3): advisory + lease + fila — o que a API pública vê. */
@@ -858,6 +891,10 @@ class EngineTest {
             List<List<Integer>> ticks = claimsPerTick(trace);
 
             assertThat(ticks.get(0)).containsExactly(2, 1); // 3º round não acontece apesar de claimRounds=3
+            // economia bruta: lap 1 para na 1ª sonda (orçamento cheio), lap 2 dá a
+            // volta (64) e não enche → SEM lap 3 — um lap extra de sondas vazias
+            // estouraria este teto
+            assertThat(rawClaimStatementsInTick(trace, 0)).isLessThanOrEqualTo(1 + Shards.SHARD_COUNT);
 
             releaseHandlers.countDown();
             assertThat(allSucceeded.await(5, TimeUnit.SECONDS)).isTrue();
@@ -866,6 +903,73 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(terminalCount(ExecutionState.SUCCEEDED)).isEqualTo(3);
+    }
+
+    /**
+     * §8.3/S6.1: com um par RUNNING vivo, a partição derivada dos node ids
+     * ordenados dá a cada node metade dos shards — este node NÃO reivindica
+     * dos shards do par, mesmo com a execução devida e folga de sobra.
+     * "zzz-peer" ordena depois do node_id UUID deste engine, então este
+     * node é o índice 0 e possui os shards PARES.
+     */
+    @Test
+    void shardOwnershipLeavesThePeersShardsUnclaimed() throws Exception {
+        nodeStore.heartbeat("zzz-peer", EngineState.RUNNING, 1, NOW, NOW.plusSeconds(3600));
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
+        recordAndOffer("exec-mine", "welcome-email", "hello", NOW.minusSeconds(1), 0);
+        recordAndOffer("exec-peers", "welcome-email", "hello", NOW.minusSeconds(1), 1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+        });
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(1));
+        Engine engine = newEngine(counting, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(succeeded.await(5, TimeUnit.SECONDS)).isTrue();
+            // mais dois ticks completos DEPOIS do sucesso: a chance que o node
+            // teria de reivindicar o shard alheio, se fosse reivindicar
+            CountDownLatch twoMoreTicks = new CountDownLatch(2);
+            counting.resetLatch(twoMoreTicks);
+            assertThat(twoMoreTicks.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(stateOf("exec-mine")).isEqualTo(ExecutionState.SUCCEEDED);
+            assertThat(stateOf("exec-peers")).isEqualTo(ExecutionState.ENQUEUED);
+            assertThat(readyCount()).isEqualTo(1);
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+    }
+
+    /** §11.2: par não-RUNNING (DRAINING/PAUSED) não reivindica — mantê-lo na atribuição deixaria 1/n da fila parada; excluídos os dois, os shards deles voltam pra cá e a execução roda. */
+    @Test
+    void aNonRunningPeerIsExcludedFromShardAssignment() throws Exception {
+        nodeStore.heartbeat("zzz-peer", EngineState.DRAINING, 1, NOW, NOW.plusSeconds(3600));
+        nodeStore.heartbeat("zzz-peer2", EngineState.PAUSED, 1, NOW, NOW.plusSeconds(3600));
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
+        recordAndOffer("exec-even", "welcome-email", "hello", NOW.minusSeconds(1), 0);
+        recordAndOffer("exec-odd", "welcome-email", "hello", NOW.minusSeconds(1), 1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+        });
+        CountDownLatch bothSucceeded = new CountDownLatch(2);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                bothSucceeded.countDown();
+            }
+        };
+        Engine engine = newEngine(nodeStore, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(bothSucceeded.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(terminalCount(ExecutionState.SUCCEEDED)).isEqualTo(2);
     }
 
     /**

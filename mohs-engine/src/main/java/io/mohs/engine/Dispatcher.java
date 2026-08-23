@@ -312,8 +312,8 @@ public final class Dispatcher {
         completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
                 attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, error.getClass().getName(), errorMessage(error),
                 null, grant.executionCreatedAt(),
-                new WorkQueue.ReadyEntry(execution.id(), execution.jobKey(), 0, execution.priority().value(),
-                        attemptNumber + 1, retryAt),
+                new WorkQueue.ReadyEntry(execution.id(), execution.jobKey(), Shards.of(execution.id()),
+                        execution.priority().value(), attemptNumber + 1, retryAt),
                 execution.batchId(), null),
                 () -> {
                     events.publish(new AttemptFailed(execution.id(), execution.jobKey(), attemptNumber, error));

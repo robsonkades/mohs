@@ -1,209 +1,126 @@
-# PLAN — Phase 5 do redesign: the table split (ADR-A)
+# PLAN — Phase 6 do redesign: sharding + adaptive poll + NOTIFY (ADR-F/G)
 
-Estado: **em execução** · Base: `ARCHITECTURE_REDESIGN_PLAN.md` §4.3, §5.3–5.8,
-§6.2–6.4, §7.2–7.6, §16.3, §18.3, §21 (Phase 5) · Pré-requisitos verdes:
-Phases 0–4 commitadas (1756933), E1/E2 decididos (BASELINE).
+Estado: **proposto, aguardando veto das decisões abaixo** · Base:
+`ARCHITECTURE_REDESIGN_PLAN.md` §5.4–5.6, §8.3–8.5, §11, §21 (Phase 6),
+ADR-F, ADR-G · Pré-requisitos verdes: Phase 5 completa (97d781a→a6d9956),
+E3 decidido (claim single-shard round-robin 2,21×/2,91×; 64 shards
+escalam 345k→487k — BASELINE §E2/E3).
 
-## Decisões de execução (desvios registrados, sujeitos a veto)
+A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
 
-1. **Sem dual-write/shadow-read.** O plano mitigava risco de migração VIVA;
-   pré-GA não há usuário nem dado a preservar (§21.1 — o "drop and recreate"
-   já foi usado na Phase 2; daqui é expand→flip→contract DENTRO da release).
-   O risco de corretude é coberto pelo gate: suíte inteira + E5/E6 re-rodados
-   + S1/S5 antes do commit final da fase. Registrar na ADR-A.
-2. **Escopo do split = hot path.** Entram: `mohs_ready`, `mohs_lease`,
-   `mohs_idempotency`, história particionada (`mohs_execution`/`mohs_attempt`
-   novas). NÃO entram nesta fase (ficam onde estão, com trigger registrado):
-   `mohs_job` JSONB (o control plane atual `mohs_job_definitions` é frio e
-   funciona — reshape junto com tenant/circuitBreaker, §16.3-4, fase própria),
-   `mohs_trigger`/shard ownership (Phase 6 — `shard` nasce na `mohs_ready`
-   com valor 0), `mohs_node` extras (`shards`/`capacity`/`in_flight` — Phase 6/§11.1).
-3. **Partições só no Tier 1 (Postgres).** H2 (Tier 3) e MySQL/SQL Server
-   (Tier 2) ganham equivalentes funcionais SEM partição; a retenção deles
-   continua no mecanismo ADR-0032 até o trigger da
-   `BATCH-ARCHITECTURE-REVIEW`/Phase 8. É o argumento central da ADR-0050.
-4. **Fence vira `(node_id, epoch)`** na `mohs_lease` (§6.3) — o que a
-   ADR-0051 antecipou; o fence `(node_id, fired_at)` da Phase 4 morre junto
-   com a tabela que o carregava. Epoch é o de `mohs_nodes` (Phase 4).
-5. **API pública (§16.3, pré-aprovada no plano commitado):**
-   `RETRY_SCHEDULED` → `RETRY_WAITING` (não-claimável) e
-   `Execution.leaseExpiresAt()` → `Execution.owner()`. Os breaks de `Batch`
-   são da Phase 8, não desta.
-6. **Timestamps:** novas tabelas PG usam `TIMESTAMPTZ` (o que a ADR-0049
-   adiou para cá) com travessia `OffsetDateTime` UTC (JDBC 4.2); demais
-   dialetos seguem `LocalDateTime` UTC como hoje.
-7. **Ids continuam `VARCHAR`** (não o `UUID` nativo do §7.2): `ExecutionId`
-   é string na API pública e o vocabulário de teste inteiro usa ids não-UUID
-   (`exec-1`); o ganho do tipo nativo (16 vs ~37 bytes/id na história) fica
-   registrado como otimização de dialeto com trigger de storage medido.
-   `payload` continua `TEXT` (JSONB é upgrade de queryabilidade — "when
-   someone needs it", §7.3 — não pré-requisito do split).
+## Decisões de execução (desvios e escolhas, sujeitos a veto)
 
-## Passos (um por commit; suíte verde ao fim de cada um)
+1. **Shard derivado do id, sem coluna nova em `mohs_lease`.** O plano §8.3
+   define `shard = hash(execution_id) % 64`; como o shard é FUNÇÃO do id,
+   requeue/retry/reaper o RE-DERIVAM (função compartilhada única) em vez
+   de transportá-lo pela lease — resolve a pendência "shard=0 hardcoded"
+   sem migração. `SHARD_COUNT = 64` fixo, não configurável (§8.3). Hash:
+   o do próprio UUIDv7 string (`hashCode` normalizado) — determinístico
+   entre JVMs é obrigatório, então NÃO é `String.hashCode` e sim um hash
+   estável próprio (FNV-1a ou similar) fixado por teste de contrato.
+2. **Handler-aware claiming e starvation floor (§5.6/§11.1) NÃO entram.**
+   O cross-shard fallback é requisito de correção DE handler-aware
+   claiming — que esta fase não introduz. Sem o filtro por handler, o
+   dono do shard reivindica e falha como hoje (retry queimado no
+   rolling-update heterogêneo — comportamento atual, nenhum strand novo).
+   Ficam registrados como pendência com gatilho: primeiro rolling update
+   real com handler removido, ou primeira reclamação de starvation por
+   prioridade.
+3. **`mohs_nodes` extras (`capacity`/`in_flight`/`version`/`shards`
+   persistidos) NÃO entram.** A atribuição de shards é DERIVADA (ids
+   vivos ordenados, §8.3) — não precisa persistir; os campos de dashboard
+   são feature de `GET /nodes`, fase própria. `DRAINING`/`STOPPED` já
+   existem e passam a excluir o nó da atribuição.
+4. **Config do poll:** `mohs.engine.poll-interval` passa a ser o PISO do
+   adaptativo (semântica preservada: é o intervalo sob carga) e nasce
+   `mohs.engine.max-poll-interval` (default 2s) como teto do backoff
+   (dobra a cada rodada vazia, reseta em trabalho). `max <= poll`
+   desliga o adaptativo (comportamento atual). **Default do
+   `poll-interval` muda de 5s → 25ms** (ADR-G). O trade HONESTO: idle
+   sobe de 0,2 para 0,5 queries/s por nó (o backoff estaciona no teto de
+   2s, não nos 5s de hoje) — desprezível em absoluto — em troca de um
+   piso de latência de dispatch 200× melhor sob carga; quem se importar
+   com o idle pina `poll-interval`/`max-poll-interval`. Mudança de
+   default visível, por isso está aqui.
+5. **O loop de tick vira platform thread própria** (§12.1: "claim loop —
+   one platform thread per node"), substituindo o ThreadPoolTaskScheduler
+   de intervalo fixo: espera em `Condition.await(nextDelay)` (adaptativo)
+   e acordável por sinal (hand-off local, NOTIFY). Tempo de espera por
+   relógio MONOTÔNICO (invariante CLAUDE.md); o `Clock` injetado segue
+   dono de todo "quando".
+6. **NOTIFY é Tier-1 (Postgres) e best-effort** (§5.5): `NOTIFY
+   mohs_ready, '<shard>'` no commit do offer; LISTEN em conexão dedicada
+   (fora do Hikari) com reconexão; perder notificação é inofensivo — o
+   poll é o backstop de correção. Tier 2/3 ficam só com adaptativo.
+7. **Gate S2 na bancada local, com honestidade declarada:** 6×S1 literal
+   (≥72k/s agregado) não cabe num único host. Medimos o que a bancada
+   permite — agregado de 2–4 processos-nó vs 1 nó (escala relativa),
+   idle query rate com N nós, p50 de dispatch com NOTIFY — e declaramos
+   o resto como shape validado pelo E3 (micro, 64 shards, 8 claimers).
+   Ritual de bancada antes das rodadas de registro (pendência da
+   Phase 5): reboot do Docker + rounds de warmup descartados.
 
-- [x] **S5.1 — Expand: schema novo ao lado do velho.** *(2026-08-22; db-tuner:
-      INCLUDE do índice de claim removido — FOR UPDATE força heap access, o
-      INCLUDE era só +43% WAL/2,7× índice; `idx_mohs_attempt_exec` no PG —
-      detail view 19ms→0,035ms; MySQL payload/error MEDIUMTEXT. Requisitos
-      herdados pro S5.2: gestor cria semanais NO BOOT antes do flip +
-      rotina de move-out da DEFAULT; `created_at` DEVE ser derivado do
-      UUIDv7 no enqueue — a poda do UPDATE terminal é por IGUALDADE; o SQL
-      do §7.6 do plano tem bug: `x.created_at` fora do unnest.)* Migração V3 nos 4
-      dialetos + `schema-*.sql`: `mohs_ready` (+ `ix_ready_claim`),
-      `mohs_lease` (+ `ix_lease_node`, `ix_lease_job`), `mohs_idempotency`,
-      `mohs_execution`/`mohs_attempt` (particionadas por RANGE no PG com
-      bootstrap de partições; tabelas planas nos demais). Storage options
-      (fillfactor 70, autovacuum agressivo) só no PG. Nenhum código muda.
-- [x] **S5.2 — As portas + stores novos, sem chamador.** *(2026-08-22.
-      Pipeline: refactorer ✅; db-tuner ✅ zero mudanças, planos reais
-      confirmando claim CTE 1,1ms/50k sem Sort, fence grátis no PK, prune
-      por igualdade nos dois modos de plano — 2 gatilhos registrados:
-      `findPayloads` >12 partições populadas; requeue em lote quando o
-      reaper der in-flight ≥500 — e 1 nota: cabeça da fila dominada por
-      job inadmissível custa 53ms/5k buffers no pior caso, mitigação é
-      admissão/backoff, não índice; reviewer ⚠️→fixes aplicados: contrato
-      do retry no complete, enqueue-fora-de-transação declarado não
-      suportado, REQUIRES_NEW no claim/complete, ordem do claim garantida
-      TAMBÉM no statement único do PG, probe da DEFAULT sob o contrato
-      WARN-never-throw, outcome tipado, guardas dos replace _FILTERED,
-      testes de SKIP LOCKED/READPAST concorrente determinísticos.)* `WorkQueue`,
-      `LeaseStore`, `HistoryStore` em `io.mohs.engine` (a quarta porta,
-      `ControlStore`, fica pro S5.3/S5.4: consolidar `NodeStore` +
-      `TriggerFirer` é cosmético até o firer mirar `mohs_ready`);
-      implementações em `io.mohs.store.jdbc` (claim §5.4 single-statement no
-      PG; forma portátil SELECT FOR UPDATE SKIP LOCKED + DELETE nos demais),
-      enqueue §7.5-1, completion em lote §7.6 (lease delete fenced RETURNING
-      + attempt insert + update advisory), reaper §4.3 (delete leases do nó
-      morto + reinsert ready com attempt+1), gestão de partição (criação
-      antecipada). Testes de store completos. Engine ainda no caminho velho.
-- [x] **S5.3 — Flip do engine.** *(2026-08-22. Pipeline: refactorer ✅ (4
-      aplicadas: admitFor/Admitted no Engine, batchTerminalUpdate no
-      LeaseStore, imports, Javadoc obsoleto do starter); db-tuner ✅ 1
-      mudança medida (`idx_mohs_execution_job` → `(job_key, execution_id
-      DESC)`: findPage seletivo 0,61→0,24ms, cursor vira Index Cond; 3
-      gatilhos registrados: findPage jobKey+terminal raro 8,7ms@100k,
-      findCancelRequested ≫10k in-flight, findOrphaned ≫10k leases);
-      reviewer ❌→✅ em 1 ciclo — 3 críticos corrigidos com teste cada:
-      guard `correlation_id IS NULL` de volta no rearm (ADR-0043),
-      `reconcileOwnStrayLeases` no tick (lease presa em nó VIVO não tinha
-      caminho de recuperação — o sucessor da expiração por execução),
-      `PROPAGATION_NESTED` no enqueue (savepoint: dedup de idempotência não
-      condena mais a transação do host); 🟡: watchdog/pré-dispatch concluem
-      síncronos fora do batcher, teto de 1000 no filtro de inadmissíveis,
-      partition create-ahead segue só-boot (pendência com gatilho abaixo).
-      E6 re-rodado no build final: S6 16,8s/fence 0 violações, SUSPEND 0
-      duplo-SUCCEEDED/244 reclaims/epoch bump, S8 0 re-execuções/drain
-      imediato — critério de duplicatas do E5 coberto pelo S6 no flush do
-      ponto de operação. NOTA: V3 editada in place (priority na lease +
-      swap de índice) — banco local que aplicou a V3 antiga precisa de
-      flyway repair/reset.)* Poll loop/dispatch/completion/reaper/firer/
-      cancel sobre as portas novas; `RETRY_WAITING` na API; `Execution.owner()`;
-      caps derivados de `mohs_lease` (ADR-D) e fim do contador
-      `running_execution_count`; facade/REST/dashboard leem o modelo novo
-      (estado advisory + join de lease onde precisa verdade). Testes de
-      engine/REST reformulados. E5/E6 re-rodados.
-- [x] **S5.4 — Contract.** *(2026-08-22. Caíram: as 2 tabelas velhas +
-      `running_execution_count` (V4 guardada por dialeto pro caminho de
-      adoção — MySQL PREPARE, SQL Server COL_LENGTH + default constraint
-      sem nome), portas `Claimer`/`Reaper`/`ExecutionStore` + Jdbc* +
-      `Candidate` + SQL legado dos dialetos + 6 testes + 12 harnesses do
-      modelo velho (resultados preservados em BASELINE/git); contador de
-      mutex fora do `JobStore`/`StoredJob` (ADR-D); `remove()` drena
-      `mohs_ready` (dreno-primeiro: o row lock do DELETE arbitra contra
-      claim concorrente — review); round-trips/Flyway/guardião estrutural
-      re-apontados; gêmeo Postgres do teste NESTED (25P02). BÔNUS de
-      causa-raiz: E2E do starter falhava ~50% desde o flip — snapshot de
-      definições precede o claim e um job define+schedule no mesmo tick
-      morria como "removido"; heal `storedJobFor` (consulta fresca no miss,
-      MEMOIZADA no snapshot pro cap não ficar cego nas rodadas 2+) aplicado
-      em dispatch/admissão/reaper + guard de janela no `admitFor` (segunda
-      linha de defesa, cobre também o modo degradado do filtro); 8/8 verdes
-      após o fix. Pipeline: refactorer ✅ (extração `storedJobFor`);
-      db-tuner ✅ zero mudanças com planos reais (COUNT vs EXISTS medido
-      igual; índice de state rejeitado por proteger HOT; 2 gatilhos acima);
-      reviewer ❌→✅ em 1 ciclo (memoização do cap + dreno-primeiro no
-      remove + 2 testes de caracterização).)* Caem: `mohs_executions`/`mohs_attempts` (tabelas e
-      código), portas velhas (`ExecutionStore`/`Claimer`/`Reaper`… → as 4),
-      `TerminalStateWriteScanTest` re-apontado, ArchUnit atualizado,
-      migração V4 de drop.
-- [x] **S5.5 — Validação e registro.** *(2026-08-22. Os três gates
-      MEDIDOS e atendidos (BASELINE "Phase 5"): S1 = 12,2–14,5k/s em 5
-      rodadas quentes de 2 sessões (ponto de operação novo poll=20ms +
-      claim-rounds=2 — a 50ms o teto é o tick serial, 5,8k; dispersão
-      entre sessões de até ~45% DECLARADA, com A/B binário provando que é
-      do host, não do código); tuple versions = 2,000 exato em todas as
-      sessões; S5 = par A/B limpo mesmo binário: ~0 de história ≈ 2M
-      (flat). Achado e fix no caminho: o reconcile de leases órfãs
-      requeueava em massa conclusões em trânsito no batcher a 12k+/s (199k
-      WARNs, 23 deadlocks requeue×flush, 10,7k fences perdidos num round
-      frio) — fix em 3 camadas: grace por claimed_at max(2s, 4×poll) +
-      guard por ESTADO no batcher (completionInTransit, cobre job mais
-      longo que o grace) + ordem canônica de locks no requeue (mata o
-      AB-BA dos deadlocks pela raiz); zero fantasmas/deadlocks depois.
-      WARN do fence-perdeu rebaixado a DEBUG (rotina, não achado).
-      write-amplification.ps1 portado pro split (stats somados sobre
-      partições, seed §7.5-1). ADRs: 0052 (split/ADR-A), 0053 (cap
-      derivado/ADR-D); ADR-C JÁ ERA a ADR-0047 (Phase 3) — emenda
-      registrando a re-hospedagem no LeaseStore, uma decisão = um
-      documento (desvio do "A/C/D escritas" registrado aqui). §21 do
-      plano com o resultado. Observação registrada: 410 drops de Started
-      por rodada com event-concurrency=256 (best-effort; nenhum
-      BatchCompleted dropado).)* S1 ≥ 12k/s, tuple versions = 2 na
-      história, S5 (claim independe do tamanho da história); BASELINE
-      "Phase 5"; ADR-A/C/D escritas; plano §21 com o resultado.
+## Passos (um por commit; suíte verde e pipeline de DoD ao fim de cada um)
 
-## Fase completa
+- [x] **S6.1 — Shard na escrita + claim em lap.** Função de shard
+      compartilhada (`io.mohs.engine`, testada por contrato de
+      estabilidade); enqueue/firer/retry/requeue/rearm gravam
+      `hash(id)%64` (hoje 0); ownership derivada no tick (ids vivos
+      ordenados; `DRAINING`/`STOPPED` fora); claim vira LAP round-robin —
+      um shard próprio por statement, admission UMA vez por lap (§5.7),
+      volta vazia encerra; `Admission`/requeue por lap. Backlog existente
+      com shard=0 continua claimável (0 pertence a alguém em qualquer n).
+      Testes: ownership (1 nó = todos; n nós = partição; membership
+      change = sobreposição benigna), lap, distribuição do hash.
+- [ ] **S6.2 — Loop adaptativo + hand-off local.** Platform thread única
+      no lugar do scheduler; backoff poll→max (dobra em lap vazio, reset
+      em trabalho); `max-poll-interval` + validação de boot; hand-off
+      pós-commit do enqueue local (tier 1 §5.5: `visible_at <= now`
+      agendado NESTA JVM acorda o loop sem esperar poll). Heartbeat segue
+      1×/tick — com backoff, tick esparso em idle: heartbeat precisa de
+      cadência PRÓPRIA ≤ node-lease-ttl/3 (senão nó idle é declarado
+      morto!) — este é o risco nº 1 da fase, teste dedicado.
+- [ ] **S6.3 — NOTIFY Tier-1.** `NOTIFY` no offer (mesma transação, PG);
+      listener em conexão dedicada com reconexão e shard filter; acorda o
+      loop (mesmo sinal do hand-off). Testcontainers PG: latência de
+      dispatch cross-"nó" < poll com backoff no teto; queda da conexão de
+      LISTEN degrada pro poll sem erro fatal.
+- [ ] **S6.4 — Validação e registro.** Bancada ritual (decisão 7):
+      idle query rate 1 nó e 4 nós (gate: < 10/s com o backoff no teto);
+      p50 dispatch NOTIFY (< 5ms Tier-1); agregado 2–4 nós vs 1 (escala
+      relativa; S1 de referência re-medido na mesma sessão); E6 re-rodado
+      (S6/SUSPEND — a atribuição de shards muda o reaper? não — reaper é
+      por liveness, mas o requeue re-derivado precisa do chaos verde);
+      BASELINE "Phase 6"; ADR-0054 (F) e ADR-0055 (G); §21 com resultado.
 
-Phase 5 entregue: S5.1 (97d781a) → S5.2 (d6f0aa3) → S5.3 (ac20c28) →
-S5.4 (3a3bdd4) → S5.5. Gate da fase integralmente verde (abaixo).
-Próxima fase do plano: Phase 6 (sharding + adaptive poll + NOTIFY).
+## Pendências registradas (com gatilho) — herdadas e novas
 
-## Pendências registradas (com gatilho)
+- **Handler-aware claiming + starvation floor/probe (§5.6/§11.1)** — fase
+  própria. **Gatilho:** rolling update real com handler removido
+  (retry queimado deixa de ser aceitável), ou starvation de prioridade
+  observada (head de shard preso atrás de HIGH contínuo).
+- **Partições semanais: create-ahead só no boot.** **Gatilho:** primeiro
+  deploy com uptime esperado > 1 semana.
+- **`cancelQueued` que fecha o lote não publica `BatchCompleted`** —
+  dívida ADR-0043. **Gatilho:** registro formal na BATCH-ARCHITECTURE-REVIEW.
+- **`MohsImpl.enqueueMembers` grava membro a membro.** **Gatilho:**
+  medição com o harness de write amplification num lote ≥ 1k.
+- **Churn de janela fechada no modo degradado do filtro** (>1000
+  inadmissíveis). **Gatilho:** `mohs.claim.requeued{reason="window-closed"}`
+  crescendo sustentado.
+- **`hasLiveSchedulerOccurrence` escala com a história retida.**
+  **Gatilho:** cura do upsert acima de dezenas de ms na retenção real.
+- **`drainedBatchMembers`/aposentadoria em base grande.** **Gatilho:**
+  `Mohs.remove` de job com milhões de execuções de lote passando de ~1s.
+- **Cancel contra stray lease se perde no requeue** (best-effort,
+  ADR-0034). **Gatilho:** primeira reclamação real de operador.
+- **Bancada de bench não-controlada** (dispersão ~45% entre sessões).
+  Mitigada nesta fase pelo ritual da decisão 7; bancada dedicada segue
+  pendente. **Gatilho:** gate de vazão que o ritual não estabilizar.
 
-- **Partições semanais: create-ahead só no boot.** O `PostgresPartitionManager`
-  roda no bean do starter; uptime > ~2 semanas sem restart derrama história
-  nova na DEFAULT (WARN no boot seguinte + move-out manual). Fechar = carona
-  no tick guardada por virada de semana, o que exige atravessar o gestor como
-  porta do engine. **Gatilho:** primeiro deploy com uptime esperado > 1 semana.
-- **`cancelQueued` que fecha o lote não publica `BatchCompleted`** (o
-  callback one-shot não dispara quando o cancel do último membro pendente
-  zera o `pending` fora do caminho de conclusão). Comportamento idêntico ao
-  da era pré-split — dívida da ADR-0043, candidata a registro formal na
-  `BATCH-ARCHITECTURE-REVIEW.md`.
-- **`MohsImpl.enqueueMembers` grava membro a membro** (N×2 statements na
-  mesma transação onde 2 bastariam — `record`/`offer` já aceitam lote).
-  **Gatilho:** medição com o harness de write amplification num lote ≥ 1k.
-- **Churn de janela fechada no modo degradado do filtro** (S5.4): acima de
-  `MAX_INADMISSIBLE_FILTER` (1000) o claim roda sem filtro e entradas de
-  jobs com janela fechada são reivindicadas e devolvidas (`admitFor`,
-  reason `window-closed`) a cada rodada até a janela abrir. Correção
-  preserva-se pelo guard; o custo é churn. **Gatilho:** crescimento
-  sustentado de `mohs.claim.requeued{reason="window-closed"}`.
-- **`hasLiveSchedulerOccurrence` escala com a história retida** (db-tuner
-  S5.4: 6,5ms com job de 40k linhas em 100k; sem índice de `state` DE
-  PROPÓSITO — indexar `state` quebraria HOT update no UPDATE terminal, a
-  conquista de −70% da Phase 4). **Gatilho:** cura do upsert acima de
-  dezenas de ms na retenção real; alternativa preferida é derivar "vivo"
-  de `mohs_ready`+`mohs_lease` (mudança semântica — exige aprovação).
-- **`drainedBatchMembers`/aposentadoria em base grande** (db-tuner S5.4):
-  custo O(história de lotes) no join; a 3,9ms hoje. **Gatilho:**
-  `Mohs.remove` de job com milhões de execuções de lote passando de ~1s —
-  saída portável registrada no relatório do tuning.
-- **Requeue reconstrói a entrada com `shard = 0` hardcoded** (a lease não
-  carrega shard). Correto com shard único; **gatilho: Phase 6** — ou a
-  lease ganha a coluna, ou o requeue devolve pro shard errado.
-- **Cancel contra stray lease se perde no requeue** (`Requeue` não
-  transporta `cancel_requested`): o job re-roda apesar da ordem. Aceito
-  como cancel cooperativo best-effort (ADR-0034); registrado como gap
-  conhecido, não decisão nova. **Gatilho:** primeira reclamação real de
-  operador.
-- **Bancada de bench não-controlada** (S5.5): dispersão entre sessões de
-  até ~45% no host compartilhado (Docker/WSL) — A/B binário provou que
-  não é código. **Gatilho:** próxima fase com gate de vazão (Phase 6, S2)
-  — considerar bancada dedicada/reboot ritual antes das rodadas de
-  registro.
+## Gate da fase (do plano, com a leitura da decisão 7)
 
-## Gate da fase (do plano)
-
-S1 ≥ 12 k/s · tuple versions/execução = 2 · S5: história não afeta latência
-de claim · suíte + E5/E6 verdes.
+Idle query rate < 10/s por cluster ocioso · p50 dispatch < 5ms (Tier-1,
+NOTIFY) · escala relativa multi-processo positiva e próxima de linear no
+que a bancada permitir (shape 6× fica lastreado no E3) · suíte + E6
+verdes.

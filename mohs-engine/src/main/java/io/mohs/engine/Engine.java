@@ -21,6 +21,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 import io.github.robsonkades.uuidv7.UUIDv7;
 import org.jspecify.annotations.Nullable;
@@ -143,6 +144,15 @@ public final class Engine implements MohsLifecycle {
     private final ConcurrentHashMap<ExecutionId, InFlightAttempt> inFlightAttempts = new ConcurrentHashMap<>();
     /** Candidatas do passe de reconciliação ({@link #reconcileOwnStrayLeases}) — só a thread do tick toca (JCIP 3.3). */
     private final Set<ExecutionId> strayLeaseCandidates = new HashSet<>();
+    /**
+     * Cursor de rotação do lap de claim (§5.4) — avança a cada shard
+     * sondado e PERSISTE entre ticks, então o primeiro shard de cada lap
+     * gira em vez de sempre recomeçar no mesmo: sem ele, um tick que esgota
+     * o orçamento no shard 0 deixaria os últimos da lista famintos. Só a
+     * thread do tick toca (JCIP 3.3); overflow é benigno via
+     * {@code Math.floorMod}.
+     */
+    private int shardCursor;
     private final TaskScheduler tickScheduler;
     private final RunnerRegistry runnerRegistry;
 
@@ -384,11 +394,15 @@ public final class Engine implements MohsLifecycle {
                 return;
             }
             Map<JobKey, StoredJob> definitions = loadDefinitions();
-            reapOrphanedLeases(definitions, now);
+            // UMA leitura de mohs_nodes por tick serve o reaper (vivos) e a
+            // atribuição de shards (elegíveis) — depois do heartbeat, então a
+            // própria linha recém-renovada está na foto
+            List<StoredNode> nodes = nodeStore.findAll();
+            reapOrphanedLeases(definitions, aliveNodeIds(nodes, now), now);
             reconcileOwnStrayLeases(now);
             purgeStaleNodeRows();
             fireDueTriggers();
-            claimAndDispatch(definitions);
+            claimAndDispatch(definitions, Shards.ownedBy(nodeId, shardEligibleNodeIds(nodes, now)));
         } catch (RuntimeException e) {
             log.error("engine tick failed — will retry next tick", e);
         }
@@ -484,8 +498,8 @@ public final class Engine implements MohsLifecycle {
      * qualquer falha (ADR-0033) e o fence garante que uma encarnação nova
      * saudável nunca é morta (§6.3).
      */
-    private void reapOrphanedLeases(Map<JobKey, StoredJob> definitions, Instant now) {
-        List<LeaseStore.Lease> orphans = leaseStore.findOrphaned(aliveNodeIds(now), RECLAIM_LIMIT);
+    private void reapOrphanedLeases(Map<JobKey, StoredJob> definitions, List<String> aliveNodeIds, Instant now) {
+        List<LeaseStore.Lease> orphans = leaseStore.findOrphaned(aliveNodeIds, RECLAIM_LIMIT);
         if (orphans.isEmpty()) {
             return;
         }
@@ -556,7 +570,7 @@ public final class Engine implements MohsLifecycle {
             absentNow.add(lease.executionId());
             if (strayLeaseCandidates.contains(lease.executionId())) {
                 strays.add(new WorkQueue.Requeue(lease.executionId(), nodeId, lease.epoch(),
-                        new WorkQueue.ReadyEntry(lease.executionId(), lease.jobKey(), 0,
+                        new WorkQueue.ReadyEntry(lease.executionId(), lease.jobKey(), Shards.of(lease.executionId()),
                                 lease.priority(), lease.attemptNumber(), now)));
             }
         }
@@ -594,20 +608,43 @@ public final class Engine implements MohsLifecycle {
     }
 
     /** Vivos deste instante — inclui SEMPRE este node (a promessa dele acabou de ser renovada neste mesmo tick, antes do reaper: a ordem que mata o self-reap do S8). */
-    private List<String> aliveNodeIds(Instant now) {
-        Instant legacyCutoff = now.minus(settings.leaseTtl());
-        List<String> alive = new ArrayList<>();
-        for (StoredNode node : nodeStore.findAll()) {
-            Instant expiresAt = node.expiresAt();
-            boolean isAlive = expiresAt != null ? expiresAt.isAfter(now) : node.lastHeartbeatAt().isAfter(legacyCutoff);
-            if (isAlive) {
-                alive.add(node.nodeId());
+    private List<String> aliveNodeIds(List<StoredNode> nodes, Instant now) {
+        return nodeIdsMatching(nodes, node -> isAlive(node, now));
+    }
+
+    private boolean isAlive(StoredNode node, Instant now) {
+        Instant expiresAt = node.expiresAt();
+        // linha de jar antigo sem expires_at: staleness de lease-ttl (tolerância de versão mista, ADR-0051)
+        return expiresAt != null ? expiresAt.isAfter(now) : node.lastHeartbeatAt().isAfter(now.minus(settings.leaseTtl()));
+    }
+
+    /**
+     * Quem participa da atribuição de shards (§8.3/§11.2): vivo E
+     * {@code RUNNING} — {@code PAUSED}/{@code DRAINING}/{@code STOPPED}
+     * não reivindicam, então dar-lhes shards deixaria 1/n da fila parada
+     * enquanto os pares têm folga (o plano só nomeia DRAINING; PAUSED sai
+     * pela mesma razão — decisão registrada no PLAN.md da fase). Este node
+     * sempre entra quando chega ao claim: o heartbeat do próprio tick
+     * acabou de gravar RUNNING. Se a lista sair vazia ou sem este node,
+     * {@link Shards#ownedBy} degrada pra "possui todos" — sobreposição é o
+     * comportamento pré-shard, fila parada não é opção.
+     */
+    private List<String> shardEligibleNodeIds(List<StoredNode> nodes, Instant now) {
+        return nodeIdsMatching(nodes, node -> node.state() == EngineState.RUNNING && isAlive(node, now));
+    }
+
+    /** Os ids que passam no predicado, SEMPRE incluindo este node — o invariante comum de reaper e atribuição de shards (ver os chamadores). */
+    private List<String> nodeIdsMatching(List<StoredNode> nodes, Predicate<StoredNode> included) {
+        List<String> ids = new ArrayList<>();
+        for (StoredNode node : nodes) {
+            if (included.test(node)) {
+                ids.add(node.nodeId());
             }
         }
-        if (!alive.contains(nodeId)) {
-            alive.add(nodeId);
+        if (!ids.contains(nodeId)) {
+            ids.add(nodeId);
         }
-        return alive;
+        return ids;
     }
 
     /** Um desfecho de reclaim decidido — o resultado cercado + o que publicar/medir se o fence vencer. */
@@ -641,7 +678,7 @@ public final class Engine implements MohsLifecycle {
                     orphan.attemptNumber(), orphan.claimedAt(), now, ExecutionState.FAILED,
                     IllegalStateException.class.getName(), NODE_DEAD_ERROR,
                     null, createdAt,
-                    new WorkQueue.ReadyEntry(id, jobKey, 0, orphan.priority(), orphan.attemptNumber() + 1, retryAt),
+                    new WorkQueue.ReadyEntry(id, jobKey, Shards.of(id), orphan.priority(), orphan.attemptNumber() + 1, retryAt),
                     batchId, null),
                     ExecutionState.RETRY_WAITING, false, retryAt);
         }
@@ -709,18 +746,20 @@ public final class Engine implements MohsLifecycle {
      * rate limit sem saldo), e a sobra de admissão pós-claim volta pra
      * fila SEM consumir orçamento ({@link #admit}).
      */
-    private void claimAndDispatch(Map<JobKey, StoredJob> definitions) {
-        long roundsBudgetNanos = settings.nodeLeaseTtl().toNanos() / 4;
+    private void claimAndDispatch(Map<JobKey, StoredJob> definitions, List<Integer> ownedShards) {
+        long lapsBudgetNanos = settings.nodeLeaseTtl().toNanos() / 4;
         long startNanos = System.nanoTime();
-        for (int round = 0; round < settings.claimRounds(); round++) {
-            if (round > 0 && (state.get() != EngineState.RUNNING || System.nanoTime() - startNanos >= roundsBudgetNanos)) {
+        for (int lap = 0; lap < settings.claimRounds(); lap++) {
+            if (lap > 0 && (state.get() != EngineState.RUNNING || System.nanoTime() - startNanos >= lapsBudgetNanos)) {
                 return;
             }
-            int claimLimit = Math.min(settings.batchSize(), settings.dispatchConcurrency() - inFlight.size());
-            if (claimLimit <= 0) {
+            int lapBudget = Math.min(settings.batchSize(), settings.dispatchConcurrency() - inFlight.size());
+            if (lapBudget <= 0) {
                 return;
             }
             Instant now = clock.instant();
+            // admissão UMA vez por lap, nunca por statement (§5.7): o bound de
+            // sobre-admissão continua "nós × 1 lap", mesmo sentido de erro
             Admission admission = Admission.compute(definitions, windowRegistry, rateLimitStore, leaseStore, now);
             // o filtro no SQL é otimização de churn, não correção — o admit() pós-claim
             // é a autoridade. Acima do teto de parâmetros de IN (SQL Server quebra
@@ -729,17 +768,40 @@ public final class Engine implements MohsLifecycle {
             Collection<JobKey> inadmissibleFilter = admission.inadmissible().size() > MAX_INADMISSIBLE_FILTER
                     ? List.of()
                     : admission.inadmissible();
-            long claimStartNanos = System.nanoTime();
-            List<WorkQueue.ClaimedWork> claimed =
-                    workQueue.claim(0, nodeId, nodeEpoch, claimLimit, inadmissibleFilter, now);
-            metrics.claimRound(System.nanoTime() - claimStartNanos, claimed.size());
-            if (!claimed.isEmpty()) {
+            // o LAP (§5.4/E2): um shard PRÓPRIO por statement, round-robin com
+            // cursor persistente entre ticks — multi-shard no predicado mataria
+            // a ordenação do índice (lição do E2); volta completa vazia encerra
+            int remaining = lapBudget;
+            for (int probe = 0; probe < ownedShards.size() && remaining > 0; probe++) {
+                // o mesmo guard da fronteira de lap, POR SONDA: um lap são até 64
+                // statements, e um orçamento de tempo só protege na granularidade
+                // em que é checado — banco degradado a 300ms/claim estouraria o
+                // lease do NÓ no meio do tick (review S6.1); a primeira sonda do
+                // tick sempre roda
+                if ((lap > 0 || probe > 0)
+                        && (state.get() != EngineState.RUNNING || System.nanoTime() - startNanos >= lapsBudgetNanos)) {
+                    return;
+                }
+                int shard = ownedShards.get(Math.floorMod(shardCursor++, ownedShards.size()));
+                long claimStartNanos = System.nanoTime();
+                List<WorkQueue.ClaimedWork> claimed =
+                        workQueue.claim(shard, nodeId, nodeEpoch, remaining, inadmissibleFilter, now);
+                metrics.claimRound(System.nanoTime() - claimStartNanos, claimed.size());
+                if (claimed.isEmpty()) {
+                    continue;
+                }
+                // o reivindicado desconta MESMO quando o admit devolve losers:
+                // deliberado — simplicidade > utilização (o churn de admissão é
+                // raro por construção e autolimitado a um lap)
+                remaining -= claimed.size();
                 List<WorkQueue.ClaimedWork> admitted = admit(claimed, definitions, admission, now);
                 if (!admitted.isEmpty() && !dispatchClaimedBatch(admitted, definitions, now)) {
                     return;
                 }
             }
-            if (claimed.size() < claimLimit) {
+            if (remaining > 0) {
+                // lap não encheu o orçamento — fila drenada o bastante; um lap a
+                // mais seria uma volta de SELECTs em filas já vazias (ADR-0040)
                 return;
             }
         }
@@ -777,9 +839,10 @@ public final class Engine implements MohsLifecycle {
                     ? Admitted.all(ofJob.size())
                     : admitFor(stored.definition(), ofJob.size(), admission, now);
             admitted.addAll(ofJob.subList(0, share.count()));
+            admission.consume(jobKey, share.count());
             for (WorkQueue.ClaimedWork loser : ofJob.subList(share.count(), ofJob.size())) {
                 losers.add(new WorkQueue.Requeue(loser.executionId(), nodeId, nodeEpoch,
-                        new WorkQueue.ReadyEntry(loser.executionId(), jobKey, 0,
+                        new WorkQueue.ReadyEntry(loser.executionId(), jobKey, Shards.of(loser.executionId()),
                                 loser.priority(), loser.attemptNumber(), now)));
             }
             if (!share.reason().isEmpty()) {
@@ -836,11 +899,44 @@ public final class Engine implements MohsLifecycle {
         return new Admitted(allowed, reason);
     }
 
-    /** Os guards por job da rodada (§5.4): quem está fora desta rodada e as contagens de posse que decidem folga de cap. */
-    private record Admission(Set<JobKey> inadmissible, Map<JobKey, Integer> leaseCounts) {
+    /**
+     * Os guards por job do lap (§5.4): quem está fora deste lap e as
+     * contagens de posse que decidem folga de cap. Classe, não record: o
+     * lap MUTA as contagens ({@link #consume}) e record comunica valor
+     * imutável (Effective Java 17 — a convenção do projeto reserva record
+     * pra value object). Confinado à thread do tick (JCIP 3.3).
+     */
+    private static final class Admission {
+
+        private final Set<JobKey> inadmissible;
+        private final Map<JobKey, Integer> leaseCounts;
+
+        private Admission(Set<JobKey> inadmissible, Map<JobKey, Integer> leaseCounts) {
+            this.inadmissible = inadmissible;
+            this.leaseCounts = leaseCounts;
+        }
+
+        Set<JobKey> inadmissible() {
+            return inadmissible;
+        }
 
         int leaseCount(JobKey jobKey) {
             return leaseCounts.getOrDefault(jobKey, 0);
+        }
+
+        /**
+         * Desconta do headroom o que este lap acabou de admitir — o
+         * snapshot é UM por lap (§5.7), mas o lap tem N statements: sem o
+         * desconto, cada sonda re-concederia o mesmo headroom e um cap de 1
+         * admitiria 1 por shard (o perdedor devolvido com
+         * {@code visible_at = now} num shard à frente do cursor seria
+         * re-admitido na MESMA volta). Com ele, o bound de sobre-admissão
+         * segue "nós × 1 lap", o que o plano prometeu.
+         */
+        void consume(JobKey jobKey, int count) {
+            if (count > 0) {
+                leaseCounts.merge(jobKey, count, Integer::sum);
+            }
         }
 
         static Admission compute(Map<JobKey, StoredJob> definitions, ExecutionWindowRegistry windowRegistry,
@@ -861,7 +957,8 @@ public final class Engine implements MohsLifecycle {
                     inadmissible.add(definition.key());
                 }
             }
-            Map<JobKey, Integer> leaseCounts = capped.isEmpty() ? Map.of() : leaseStore.countByJob(capped);
+            // cópia mutável: o lap desconta o que admite ({@link #consume})
+            Map<JobKey, Integer> leaseCounts = new HashMap<>(capped.isEmpty() ? Map.of() : leaseStore.countByJob(capped));
             for (JobKey jobKey : capped) {
                 StoredJob stored = definitions.get(jobKey);
                 if (stored != null

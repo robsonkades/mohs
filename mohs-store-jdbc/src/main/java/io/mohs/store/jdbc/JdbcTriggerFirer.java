@@ -16,6 +16,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.HistoryStore;
+import io.mohs.engine.Shards;
 import io.mohs.engine.TriggerFirer;
 import io.mohs.engine.WorkQueue;
 
@@ -82,13 +83,13 @@ public final class JdbcTriggerFirer implements TriggerFirer {
             // apontaria uma partição que a retenção pode já ter dropado);
             // visible_at = scheduledAt: a ocorrência entra na fila já devida
             historyStore.record(occurrences.stream()
-                    .map(occurrence -> new HistoryStore.NewExecution(occurrence.id(), occurrence.jobKey(), 0,
-                            occurrence.priority().value(), occurrence.scheduledAt(), now, occurrence.actor(),
-                            occurrence.batchId(), occurrence.idempotencyKey(), payload))
+                    .map(occurrence -> new HistoryStore.NewExecution(occurrence.id(), occurrence.jobKey(),
+                            Shards.of(occurrence.id()), occurrence.priority().value(), occurrence.scheduledAt(), now,
+                            occurrence.actor(), occurrence.batchId(), occurrence.idempotencyKey(), payload))
                     .toList());
             workQueue.offer(occurrences.stream()
-                    .map(occurrence -> new WorkQueue.ReadyEntry(occurrence.id(), occurrence.jobKey(), 0,
-                            occurrence.priority().value(), 1, occurrence.scheduledAt()))
+                    .map(occurrence -> new WorkQueue.ReadyEntry(occurrence.id(), occurrence.jobKey(),
+                            Shards.of(occurrence.id()), occurrence.priority().value(), 1, occurrence.scheduledAt()))
                     .toList());
             return true;
         }));

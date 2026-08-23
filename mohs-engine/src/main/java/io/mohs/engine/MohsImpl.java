@@ -152,9 +152,10 @@ public final class MohsImpl implements Mohs {
         Instant scheduledAt = clock.instant();
         for (Member member : members) {
             ExecutionId id = ExecutionId.of(UUIDv7.randomUUIDString());
-            historyStore.record(List.of(new HistoryStore.NewExecution(id, member.key(), 0, Priority.NORMAL.value(),
+            int shard = Shards.of(id);
+            historyStore.record(List.of(new HistoryStore.NewExecution(id, member.key(), shard, Priority.NORMAL.value(),
                     scheduledAt, scheduledAt, DEFAULT_ACTOR, batchId, null, member.payload())));
-            workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, member.key(), 0, Priority.NORMAL.value(), 1, scheduledAt)));
+            workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, member.key(), shard, Priority.NORMAL.value(), 1, scheduledAt)));
         }
     }
 

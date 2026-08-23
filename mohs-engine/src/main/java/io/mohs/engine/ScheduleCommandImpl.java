@@ -104,9 +104,10 @@ final class ScheduleCommandImpl implements ScheduleCommand {
         Instant createdAt = clock.instant();
         try {
             storeTransactions.inTransaction(() -> {
-                historyStore.record(List.of(new HistoryStore.NewExecution(id, jobKey, 0, priority.value(),
+                int shard = Shards.of(id);
+                historyStore.record(List.of(new HistoryStore.NewExecution(id, jobKey, shard, priority.value(),
                         when, createdAt, actor, null, idempotencyKey, payload)));
-                workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, jobKey, 0, priority.value(), 1, when)));
+                workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, jobKey, shard, priority.value(), 1, when)));
             });
             return new Enqueued(id, jobKey, when, actor);
         } catch (DuplicateKeyException e) {
