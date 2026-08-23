@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.stream.IntStream;
 
 import javax.sql.DataSource;
 
@@ -13,6 +14,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
+import io.mohs.engine.Shards;
 import io.mohs.engine.WorkQueue;
 import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
 
@@ -43,6 +45,32 @@ class JdbcWorkQueuePostgresTest {
 
     private WorkQueue.ReadyEntry entry(String id, String jobKey, int priority, int attempt, Instant visibleAt) {
         return new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, priority, attempt, visibleAt);
+    }
+
+    /**
+     * S6.5: a sonda do gate ocioso ({@code hasVisibleWork}) atravessa o
+     * driver com a LISTA de shards do nó — 64 parâmetros num nó único. O
+     * binding de coleção é do driver, não do dialeto, então cada um paga o
+     * seu teste; o resto do cenário prova o predicado: shard alheio não
+     * conta, entrada ainda invisível não conta.
+     */
+    @Test
+    void hasVisibleWorkSeesOnlyVisibleEntriesInTheOwnedShards() {
+        List<Integer> owned = IntStream.range(0, Shards.SHARD_COUNT).filter(shard -> shard % 2 == 0).boxed().toList();
+        assertThat(queue.hasVisibleWork(owned, NOW)).isFalse();
+
+        queue.offer(List.of(shardedEntry("exec-alheio", 7, NOW.minusSeconds(1))));
+        assertThat(queue.hasVisibleWork(owned, NOW)).as("shard de outro nó").isFalse();
+
+        queue.offer(List.of(shardedEntry("exec-futuro", 8, NOW.plusSeconds(60))));
+        assertThat(queue.hasVisibleWork(owned, NOW)).as("ainda não visível").isFalse();
+
+        queue.offer(List.of(shardedEntry("exec-devido", 8, NOW.minusSeconds(1))));
+        assertThat(queue.hasVisibleWork(owned, NOW)).isTrue();
+    }
+
+    private WorkQueue.ReadyEntry shardedEntry(String id, int shard, Instant visibleAt) {
+        return new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of("job-a"), shard, 20, 1, visibleAt);
     }
 
     @Test

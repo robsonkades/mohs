@@ -49,8 +49,10 @@ import io.mohs.rest.node.NodeResponse;
  * LEITURAS custam o mesmo que UM {@code GET /overview} + as listas por
  * intervalo, independente de quantos dashboards estão conectados — e
  * zero sem assinante (o tick sai antes de tocar o banco). As leituras
- * herdam o contrato sem lock das contagens
- * ({@code JdbcDialect#lockFreeCountHint}).
+ * herdam o que as contagens fizerem — que desde a Phase 5 já não é o
+ * contrato sem lock: elas foram reescritas sobre as tabelas do split e
+ * deixaram de usar {@code JdbcDialect#lockFreeReadHint}, então em SQL
+ * Server sem RCSI voltaram a tomar shared locks (pendência no PLAN.md).
  *
  * <p>Os ENVIOS são por assinante, em virtual thread (I/O de rede
  * bloqueante — regra da casa), com <em>conflation</em>: se o frame

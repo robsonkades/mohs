@@ -32,6 +32,24 @@ import io.mohs.store.jdbc.dialect.JdbcDialect;
  */
 public final class JdbcWorkQueue implements WorkQueue {
 
+    /**
+     * {@code EXISTS} em vez de {@code LIMIT 1}/{@code TOP 1}: curto-circuita
+     * igual e é a mesma forma nos quatro dialetos — não vale um método de
+     * {@link JdbcDialect} por uma pergunta de sim ou não. O {@code %s} é o
+     * hint de leitura sem lock: vazio sob MVCC, {@code WITH (NOLOCK)} no
+     * SQL Server, onde um {@code SELECT} simples tomaria shared locks na
+     * tabela mais quente do sistema — e quem bloquearia é a thread do tick,
+     * que carrega o heartbeat. As anomalias do hint são exatamente o erro
+     * que o contrato da sonda já declara aceitável (linha perdida = um
+     * poll; linha suja = um lap).
+     */
+    private static final String VISIBLE_WORK_EXISTS = """
+            SELECT CASE WHEN EXISTS (
+                SELECT 1 FROM mohs_ready %sWHERE shard IN (:shards) AND visible_at <= :now
+            ) THEN 1 ELSE 0 END
+            """;
+
+    private final String visibleWorkExists;
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate claimTransaction;
     private final JdbcDialect dialect;
@@ -54,6 +72,7 @@ public final class JdbcWorkQueue implements WorkQueue {
         // READ COMMITTED explícito, nunca o default do banco (MySQL = RR).
         this.claimTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.dialect = Objects.requireNonNull(dialect, "dialect");
+        this.visibleWorkExists = VISIBLE_WORK_EXISTS.formatted(dialect.lockFreeReadHint());
     }
 
     @Override
@@ -71,6 +90,18 @@ public final class JdbcWorkQueue implements WorkQueue {
         return claimed.stream()
                 .map(row -> new ClaimedWork(ExecutionId.of(row.executionId()), JobKey.of(row.jobKey()), row.attempt(), row.priority()))
                 .toList();
+    }
+
+    @Override
+    public boolean hasVisibleWork(Collection<Integer> shards, Instant now) {
+        Objects.requireNonNull(now, "now");
+        if (shards.isEmpty()) {
+            return false;
+        }
+        Integer found = jdbcTemplate.queryForObject(visibleWorkExists, new MapSqlParameterSource()
+                .addValue("shards", shards)
+                .addValue("now", dialect.splitTimestamp(now)), Integer.class);
+        return found != null && found == 1;
     }
 
     @Override

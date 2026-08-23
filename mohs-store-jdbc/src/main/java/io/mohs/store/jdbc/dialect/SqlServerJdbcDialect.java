@@ -88,7 +88,7 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
      * decisão do operador, não da biblioteca.
      */
     @Override
-    public String lockFreeCountHint() {
+    public String lockFreeReadHint() {
         return "WITH (NOLOCK) ";
     }
 }

@@ -178,6 +178,13 @@ class EngineTest {
             }
 
             @Override
+            public boolean hasVisibleWork(Collection<Integer> shards, Instant now) {
+                boolean found = workQueue.hasVisibleWork(shards, now);
+                trace.add("probe:" + found);
+                return found;
+            }
+
+            @Override
             public void offer(List<ReadyEntry> entries) {
                 workQueue.offer(entries);
             }
@@ -237,7 +244,7 @@ class EngineTest {
             if (entry.equals("tick")) {
                 current = new ArrayList<>();
                 ticks.add(current);
-            } else if (current != null) {
+            } else if (current != null && entry.startsWith("claim:")) {
                 int claimed = Integer.parseInt(entry.substring("claim:".length()));
                 if (claimed > 0) {
                     current.add(claimed);
@@ -252,6 +259,15 @@ class EngineTest {
 
     /** Sondas BRUTAS (vazias inclusive) do tick — pina a economia de SELECTs do ADR-0040, que o filtro de zeros acima esconderia. */
     private static long rawClaimStatementsInTick(List<String> trace, int tickIndex) {
+        return entriesInTick(trace, tickIndex, "claim:");
+    }
+
+    /** Sondas de existência do gate ocioso (S6.5) — a alternativa de UM statement ao lap inteiro. */
+    private static long emptyGateProbesInTick(List<String> trace, int tickIndex) {
+        return entriesInTick(trace, tickIndex, "probe:");
+    }
+
+    private static long entriesInTick(List<String> trace, int tickIndex, String prefix) {
         List<String> snapshot;
         synchronized (trace) {
             snapshot = List.copyOf(trace);
@@ -261,7 +277,7 @@ class EngineTest {
         for (String entry : snapshot) {
             if (entry.equals("tick")) {
                 tick++;
-            } else if (tick == tickIndex) {
+            } else if (tick == tickIndex && entry.startsWith(prefix)) {
                 statements++;
             }
         }
@@ -901,6 +917,85 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(terminalCount(ExecutionState.SUCCEEDED)).isEqualTo(3);
+    }
+
+    /**
+     * S6.5 (BASELINE "Phase 6 — S6.4"): o lap de 64 sondas era 96% do
+     * custo de consulta de um nó OCIOSO. Enquanto a rodada anterior voltou
+     * vazia, o tick pergunta UMA vez se existe trabalho visível nos shards
+     * próprios — contenção é fenômeno de carga, e não há o que espalhar
+     * quando a resposta é "nada". O primeiro tick ainda não sabe disso e
+     * dá o lap inteiro.
+     */
+    @Test
+    void anIdleTickProbesOnceInsteadOfLappingEveryShard() throws Exception {
+        List<String> trace = Collections.synchronizedList(new ArrayList<>());
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
+        Engine engine = newEngineWithTickTrace(trace, counting, List.of(),
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+
+        engine.start();
+        try {
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+
+        assertThat(rawClaimStatementsInTick(trace, 0)).isEqualTo(Shards.SHARD_COUNT);
+        assertThat(emptyGateProbesInTick(trace, 0)).isZero();
+        assertThat(rawClaimStatementsInTick(trace, 1)).isZero();
+        assertThat(emptyGateProbesInTick(trace, 1)).isEqualTo(1);
+    }
+
+    /**
+     * O gate ocioso é uma economia, nunca um filtro de correção: a sonda
+     * que acha trabalho devolve o MESMO tick ao lap — o enqueue não paga
+     * um poll a mais por ter chegado num engine estacionado.
+     */
+    @Test
+    void workOfferedWhileIdleRunsWithoutAnExtraTick() throws Exception {
+        CountDownLatch succeeded = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        List<String> trace = Collections.synchronizedList(new ArrayList<>());
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
+        Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+
+        engine.start();
+        try {
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+            seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+            assertThat(succeeded.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(terminalCount(ExecutionState.SUCCEEDED)).isEqualTo(1);
+        // o latch sozinho passaria mesmo com um tick de atraso (o poll deste
+        // fixture é 20ms): quem prova a garantia é o lap estar no MESMO tick
+        assertThat(rawClaimStatementsInTick(trace, tickThatProbedTrue(trace)))
+                .as("a sonda que achou trabalho devolve o mesmo tick ao lap").isPositive();
+    }
+
+    /** O índice do tick em que o gate ocioso sondou e ACHOU trabalho — o tick que precisa conter o lap. */
+    private static int tickThatProbedTrue(List<String> trace) {
+        List<String> snapshot;
+        synchronized (trace) {
+            snapshot = List.copyOf(trace);
+        }
+        int tick = -1;
+        for (String entry : snapshot) {
+            if (entry.equals("tick")) {
+                tick++;
+            } else if (entry.equals("probe:true")) {
+                return tick;
+            }
+        }
+        throw new AssertionError("the idle gate never probed true — trace: " + snapshot);
     }
 
     /**

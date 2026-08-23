@@ -65,20 +65,32 @@ public interface JdbcDialect {
     }
 
     /**
-     * Hint de tabela pras contagens de monitoramento do {@code GET
-     * /overview} ({@code JdbcHistoryStore#countActiveByState}/{@code
-     * countTerminalOutcomesSince}) — o contrato do endpoint é não adquirir
-     * lock nenhum: monitoramento jamais disputa com o caminho quente do
-     * claim/conclusão. Default vazio: em H2/Postgres/MySQL um {@code
-     * SELECT} MVCC já não toma lock de linha (leitura consistente).
-     * SQL Server sobrescreve — sob {@code READ COMMITTED} default (sem
-     * RCSI) todo {@code SELECT} toma shared locks que bloqueiam e são
-     * bloqueados pelos {@code UPDATE}s do motor. Só pra contagem — as
-     * anomalias aceitas (linha em transição, dupla contagem/perda sob page
-     * split, erro 601 como falha transitória) estão no Javadoc do override
-     * do SQL Server; nunca usar em leitura que hidrata entidade.
+     * Hint de tabela pras leituras que não podem tomar lock: o princípio é
+     * que monitoramento e sondagem jamais disputem com o caminho quente do
+     * claim/conclusão. Default vazio — em H2/Postgres/MySQL um {@code
+     * SELECT} MVCC já não toma lock de linha (leitura consistente). SQL
+     * Server sobrescreve: sob {@code READ COMMITTED} default (sem RCSI)
+     * todo {@code SELECT} toma shared locks que bloqueiam e são bloqueados
+     * pelos {@code UPDATE}s do motor. As anomalias aceitas (linha em
+     * transição, dupla contagem/perda sob page split, erro 601 como falha
+     * transitória) estão no Javadoc do override do SQL Server; nunca usar
+     * em leitura que hidrata entidade.
+     *
+     * <p>Hoje o ÚNICO chamador é a sonda do gate ocioso
+     * ({@code JdbcWorkQueue#hasVisibleWork}, S6.5) — daí "Read" e não
+     * "Count" no nome. Ela é ainda mais tolerante que uma contagem: perder
+     * linha sob page split só vira falso negativo se o scan perder TODAS
+     * as visíveis, e o desfecho é um poll; o erro 601 cai no fallback
+     * fail-open do {@code Engine}, que devolve o tick ao lap.
+     *
+     * <p>As contagens do {@code GET /overview} ({@code
+     * JdbcHistoryStore#countActiveByState}/{@code
+     * countTerminalOutcomesSince}) foram reescritas sobre as tabelas do
+     * split na Phase 5 e NÃO usam mais o hint — em SQL Server sem RCSI
+     * elas voltaram a tomar shared locks nas três tabelas quentes.
+     * Pendência com gatilho no PLAN.md; não é regressão deste método.
      */
-    default String lockFreeCountHint() {
+    default String lockFreeReadHint() {
         return "";
     }
 

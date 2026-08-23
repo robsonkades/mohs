@@ -85,6 +85,28 @@ public interface WorkQueue {
     List<ClaimedWork> claim(int shard, String nodeId, long epoch, int limit, Collection<JobKey> inadmissible, Instant now);
 
     /**
+     * Existe alguma entrada visível em algum destes shards? Leitura que não
+     * reivindica nada e não abre transação — é por isso que ela custa UM
+     * round trip e o claim custa três: o {@code BEGIN} da transação e o
+     * {@code SHOW TRANSACTION ISOLATION LEVEL} que a isolação explícita
+     * arrasta (nota de custo colateral da ADR-0055). É o gate ocioso do
+     * S6.5: enquanto a
+     * rodada anterior voltou vazia, o tick paga isto em vez do lap de
+     * {@link Shards#SHARD_COUNT} statements, que media 96% do custo de
+     * consulta de um nó parado (BASELINE "Phase 6 — S6.4"). A lição do E2
+     * vale para o CLAIM, não para esta pergunta: o predicado multi-shard
+     * mata a ordenação do índice, e aqui não se ordena nada — a resposta é
+     * "existe" ou "não existe".
+     *
+     * <p>Best-effort numa direção só: {@code true} é sempre seguro (custa
+     * um lap), {@code false} é uma AFIRMAÇÃO — só pode sair de uma leitura
+     * fresca do estado real, jamais de cache ou flag em memória. Na
+     * dúvida, {@code true}: um {@code false} persistentemente errado não
+     * custa um poll, para a fila deste node.
+     */
+    boolean hasVisibleWork(Collection<Integer> shards, Instant now);
+
+    /**
      * Insere entradas na fila. NÃO abre transação própria: o chamador DEVE
      * compor {@code HistoryStore.record} + {@code offer} numa única
      * transação (§7.5-1; ADR-0003 §4 — junta-se à do host quando existe, e

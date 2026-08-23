@@ -161,6 +161,16 @@ public final class Engine implements MohsLifecycle {
      * {@code Math.floorMod}.
      */
     private int shardCursor;
+    /**
+     * A última volta COMPLETA pelos shards próprios voltou vazia? É o que
+     * arma o gate ocioso do S6.5 (ver {@link #claimAndDispatch}); "completa"
+     * é a distinção que o {@link LapOutcome} existe pra fazer — zero
+     * reivindicado por saturação de dispatch ou orçamento estourado não é
+     * fila vazia. Só a thread do tick toca (JCIP 3.3). Nasce {@code false}:
+     * o primeiro tick de um engine que acabou de subir não tem direito a
+     * supor fila vazia.
+     */
+    private boolean queueLooksEmpty;
     private final RunnerRegistry runnerRegistry;
 
     /**
@@ -864,32 +874,84 @@ public final class Engine implements MohsLifecycle {
     // ─── aquisição → dispatch (§5.4) ────────────────────────────────────────
 
     /**
-     * A etapa "aquisição → dispatch" do tick. ADR-0039: cada claim é
-     * limitado pela folga de dispatch — node saturado não reivindica; o
-     * excedente fica na fila, reivindicável por qualquer node com folga.
-     * ADR-0040: sob backlog, um tick encadeia até {@code claimRounds}
-     * claims, com dois guards entre rounds: drain/pause interrompe o
-     * encadeamento, e um orçamento monotônico de {@code nodeLeaseTtl/4}
-     * limita a duração total — o heartbeat roda UMA vez por tick, antes
-     * daqui, e rounds que se aproximassem do TTL deixariam a lease do NÓ
-     * vencer no meio do tick (lease é detecção de falha — DDIA).
+     * A etapa "aquisição → dispatch" do tick, com o gate ocioso do S6.5 na
+     * frente: enquanto a rodada anterior voltou vazia, uma sonda de
+     * existência responde pelo lap inteiro — 1 statement no lugar de
+     * {@link Shards#SHARD_COUNT}, que media 96% do custo de consulta de um
+     * nó parado (BASELINE "Phase 6 — S6.4"). Quando a sonda acha trabalho,
+     * o lap roda NESTE mesmo tick: economia, nunca latência.
+     */
+    private int claimAndDispatch(Map<JobKey, StoredJob> definitions, List<Integer> ownedShards) {
+        if (queueLooksEmpty && !probeSaysThereIsWork(ownedShards)) {
+            return 0;
+        }
+        LapOutcome outcome = claimLaps(definitions, ownedShards);
+        // dispatch saturado e orçamento estourado devolvem zero SEM a fila estar
+        // vazia: armar neles faria o gate pagar uma sonda por tick no caminho
+        // quente, que é o oposto do que ele existe pra fazer
+        queueLooksEmpty = outcome.claimed() == 0 && outcome.sweptEveryOwnedShard();
+        return outcome.claimed();
+    }
+
+    /**
+     * A sonda do gate, à prova de si mesma: ela é economia, nunca
+     * autoridade — sonda que falha devolve o tick ao lap. Sem isto, uma
+     * falha PERSISTENTE dela deixaria este node vivo, heartbeatando e dono
+     * de 1/n dos shards, sem nunca reivindicar nada — ninguém o reaparia,
+     * porque ele não está morto.
+     */
+    private boolean probeSaysThereIsWork(List<Integer> ownedShards) {
+        try {
+            return workQueue.hasVisibleWork(ownedShards, clock.instant());
+        } catch (RuntimeException e) {
+            log.warn("idle-gate probe failed — falling back to the full claim lap this tick", e);
+            return true;
+        }
+    }
+
+    /**
+     * O resultado de uma rodada de claim: quanto veio e se a volta pelos
+     * shards próprios foi COMPLETA. Só uma volta completa e vazia é prova
+     * de fila vazia — as saídas antecipadas (folga de dispatch esgotada,
+     * orçamento de tempo, saída de {@code RUNNING}) devolvem zero por
+     * outros motivos.
+     *
+     * <p>A saída por esgotar {@code claimRounds} devolve {@code false} por
+     * conservadorismo, e é inobservável: chegar lá exige todo lap ter
+     * enchido o orçamento, o que garante {@code claimed > 0}. Não
+     * "uniformize" pra {@code true} — o valor não muda nada e a regra
+     * "só arma com prova" para de ser legível.
+     */
+    private record LapOutcome(int claimed, boolean sweptEveryOwnedShard) {
+    }
+
+    /**
+     * Os laps de claim propriamente ditos. ADR-0039: cada claim é limitado
+     * pela folga de dispatch — node saturado não reivindica; o excedente
+     * fica na fila, reivindicável por qualquer node com folga. ADR-0040:
+     * sob backlog, um tick encadeia até {@code claimRounds} claims, com
+     * dois guards entre rounds: drain/pause interrompe o encadeamento, e
+     * um orçamento monotônico de {@code nodeLeaseTtl/4} limita a duração
+     * total — o heartbeat roda UMA vez por tick, antes daqui, e rounds que
+     * se aproximassem do TTL deixariam a lease do NÓ vencer no meio do
+     * tick (lease é detecção de falha — DDIA).
      *
      * <p>§5.4: a lista de inadmissíveis é recomputada por round (janela
      * fechada, cap sem folga — derivado de {@code mohs_lease}, §5.7 —,
      * rate limit sem saldo), e a sobra de admissão pós-claim volta pra
      * fila SEM consumir orçamento ({@link #admit}).
      */
-    private int claimAndDispatch(Map<JobKey, StoredJob> definitions, List<Integer> ownedShards) {
+    private LapOutcome claimLaps(Map<JobKey, StoredJob> definitions, List<Integer> ownedShards) {
         long lapsBudgetNanos = settings.nodeLeaseTtl().toNanos() / 4;
         long startNanos = System.nanoTime();
         int totalClaimed = 0;
         for (int lap = 0; lap < settings.claimRounds(); lap++) {
             if (lap > 0 && mustStopClaiming(startNanos, lapsBudgetNanos)) {
-                return totalClaimed;
+                return new LapOutcome(totalClaimed, false);
             }
             int lapBudget = Math.min(settings.batchSize(), settings.dispatchConcurrency() - inFlight.size());
             if (lapBudget <= 0) {
-                return totalClaimed;
+                return new LapOutcome(totalClaimed, false);
             }
             Instant now = clock.instant();
             // admissão UMA vez por lap, nunca por statement (§5.7): o bound de
@@ -913,7 +975,7 @@ public final class Engine implements MohsLifecycle {
                 // lease do NÓ no meio do tick (review S6.1); a primeira sonda do
                 // tick sempre roda
                 if ((lap > 0 || probe > 0) && mustStopClaiming(startNanos, lapsBudgetNanos)) {
-                    return totalClaimed;
+                    return new LapOutcome(totalClaimed, false);
                 }
                 int shard = ownedShards.get(Math.floorMod(shardCursor++, ownedShards.size()));
                 long claimStartNanos = System.nanoTime();
@@ -930,16 +992,18 @@ public final class Engine implements MohsLifecycle {
                 totalClaimed += claimed.size();
                 List<WorkQueue.ClaimedWork> admitted = admit(claimed, definitions, admission, now);
                 if (!admitted.isEmpty() && !dispatchClaimedBatch(admitted, definitions, now)) {
-                    return totalClaimed;
+                    return new LapOutcome(totalClaimed, false);
                 }
             }
             if (remaining > 0) {
                 // lap não encheu o orçamento — fila drenada o bastante; um lap a
-                // mais seria uma volta de SELECTs em filas já vazias (ADR-0040)
-                return totalClaimed;
+                // mais seria uma volta de SELECTs em filas já vazias (ADR-0040).
+                // Chegar aqui exige o loop interno ter esgotado os shards
+                // próprios: a volta foi COMPLETA, e zero aqui É fila vazia
+                return new LapOutcome(totalClaimed, true);
             }
         }
-        return totalClaimed;
+        return new LapOutcome(totalClaimed, false);
     }
 
     /**
