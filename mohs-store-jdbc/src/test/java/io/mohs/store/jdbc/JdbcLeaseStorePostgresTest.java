@@ -45,7 +45,7 @@ class JdbcLeaseStorePostgresTest {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
         store = new JdbcLeaseStore(dataSource, new PostgresJdbcDialect(), batchStore);
-        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect(), batchStore, clock);
+        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect(), batchStore);
         jobStore = new JdbcJobStore(dataSource, clock);
     }
 

@@ -65,14 +65,6 @@ class ShardsTest {
                 .isEqualTo(Shards.ownedBy("node-b", List.of("node-a", "node-b", "node-c")));
     }
 
-    /** Mesmo tratamento dos literais de hash: a máscara é contrato do filtro do LISTEN — bit 0 e bit 63 pinados provam as duas pontas do long. */
-    @Test
-    void maskOfSetsExactlyTheOwnedBits() {
-        assertThat(Shards.maskOf(List.of())).isZero();
-        assertThat(Shards.maskOf(List.of(0, 63))).isEqualTo(1L | Long.MIN_VALUE);
-        assertThat(Shards.maskOf(Shards.ownedBy("only-node", List.of("only-node")))).isEqualTo(-1L);
-    }
-
     @Test
     void singleNodeOwnsEveryShard() {
         assertThat(Shards.ownedBy("node-a", List.of("node-a"))).hasSize(Shards.SHARD_COUNT);

@@ -32,10 +32,10 @@ public interface WorkQueue {
      * em retry/requeue) — o claim o copia pra
      * {@code mohs_lease.attempt_number} e nada mais conta attempts no
      * caminho quente (§5.3). {@code shard} vem de {@link Shards#of} desde
-     * a Phase 6 (ADR-F) e alimenta bitmasks de 64 bits (conflação do
-     * NOTIFY, {@code Shards.maskOf}) — fora de [0, 64) o shift daria wrap
-     * (JLS 15.19: shard 70 setaria o bit 6) e sinalizaria o shard errado
-     * em silêncio, daí a validação aqui, onde o dado entra no tipo.
+     * a Phase 6 (ADR-F); a faixa é validada AQUI, onde o dado entra no
+     * tipo (Effective Java 49): uma linha gravada fora de [0, 64) nunca
+     * seria reivindicada — o lap só sonda shards que a partição derivada
+     * distribui, e a entrada apodreceria na fila em silêncio.
      */
     record ReadyEntry(ExecutionId executionId, JobKey jobKey, int shard, int priority, int attempt, Instant visibleAt) {
         public ReadyEntry {
@@ -47,7 +47,7 @@ public interface WorkQueue {
             }
             if (shard < 0 || shard >= Shards.SHARD_COUNT) {
                 throw new IllegalArgumentException("shard must be in [0, " + Shards.SHARD_COUNT
-                        + ") — it feeds 64-bit shard masks and the shift would wrap");
+                        + ") — no node's derived partition would ever probe it and the entry would rot unclaimed");
             }
         }
     }

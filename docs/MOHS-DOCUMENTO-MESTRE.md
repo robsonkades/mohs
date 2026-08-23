@@ -158,8 +158,9 @@ graceful shutdown (resolvido em design, seção 5.4); rate limiter de janela
 fixa permite burst de ~2× na virada (evolução: token bucket/sliding
 window); priority sem aging (risco de starvation de BACKGROUND);
 observabilidade (Micrometer/OTel); test kit; latência de trigger com piso
-no intervalo de poll (aposta: wakeup event-driven — LISTEN/NOTIFY com
-fallback de polling adaptativo). Versionamento de payload: **decidido** —
+no intervalo de poll (resolvido na Phase 6: polling ADAPTATIVO
+25ms–2s + hand-off local; a aposta LISTEN/NOTIFY foi implementada,
+medida e retirada — serializava o commit do enqueue, ADR-0054). Versionamento de payload: **decidido** —
 compatibilidade é obrigação do handler, não do motor (ver Pendências).
 
 **As 3 apostas do líder:** 1) liveness completo (lease + heartbeat + reaper

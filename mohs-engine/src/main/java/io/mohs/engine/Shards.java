@@ -77,15 +77,6 @@ public final class Shards {
         return owned;
     }
 
-    /** A mesma posse como bitmask — {@code SHARD_COUNT == 64} cabe exato num {@code long}, e um long {@code volatile} é o que o filtro do LISTEN lê de fora da thread do tick (JLS 17.7). */
-    public static long maskOf(List<Integer> ownedShards) {
-        long mask = 0L;
-        for (int shard : ownedShards) {
-            mask |= 1L << shard;
-        }
-        return mask;
-    }
-
     private static List<Integer> everyShard() {
         return IntStream.range(0, SHARD_COUNT).boxed().toList();
     }

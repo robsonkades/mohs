@@ -689,6 +689,11 @@ the hot path: E2 (§20.3) measures the claim *including* it.
 
 ### 5.5 Wake-up — decision: adaptive backoff + `NOTIFY`, poll as the backstop
 
+> **Revised in execution:** tier 2 (`LISTEN/NOTIFY`) was implemented,
+> measured and withdrawn — a notifying transaction cannot group-commit
+> and it serialized the enqueue path (ADR-0054, with the numbers).
+> Tiers 1 and 3 stand as written.
+
 Three-tier wake-up:
 
 1. **Immediate local hand-off.** An execution scheduled by this JVM with

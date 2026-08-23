@@ -71,14 +71,10 @@
             <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- compile OPTIONAL, não test: PostgresNotifyListener compila contra PGConnection/
-             PGNotification (LISTEN, tier 2 do wake-up). Mesmo padrão <optional> das deps web
-             do starter (actuator pattern): quem roda Postgres já declara o driver; os demais
-             não herdam nada. -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <optional>true</optional>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.microsoft.sqlserver</groupId>

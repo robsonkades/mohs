@@ -101,7 +101,7 @@ class EngineTest {
         jobStore = new JdbcJobStore(dataSource, clock);
         JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
         historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
-        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore, clock);
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
         leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
         rateLimitStore = new JdbcRateLimitStore(dataSource, clock);
         nodeStore = new JdbcNodeStore(dataSource);
@@ -1424,22 +1424,6 @@ class EngineTest {
         Instant expiresAt = nodes.get(0).expiresAt();
         assertThat(expiresAt).isNotNull();
         return expiresAt;
-    }
-
-    /**
-     * O bounds check de {@code ownsShard} é ESTRUTURAL, não defensivo: sem
-     * ele, {@code 1L << 70} faz wrap pra {@code 1L << 6} (JLS 15.19 — shift
-     * mod 64) e um payload malformado "70" no canal acordaria o dono do
-     * shard 6 em silêncio. Antes do primeiro tick a máscara é -1: possui
-     * todos (degenerado seguro, o mesmo de {@code Shards.ownedBy}).
-     */
-    @Test
-    void ownsShardBoundsAndInitialMask() {
-        Engine engine = newEngine(nodeStore, List.of());
-        assertThat(engine.ownsShard(-1)).isFalse();
-        assertThat(engine.ownsShard(64)).isFalse();
-        assertThat(engine.ownsShard(0)).isTrue();
-        assertThat(engine.ownsShard(63)).isTrue();
     }
 
     /** ADR-G: o teto do backoff abaixo do piso inverteria a rampa — rejeitado na construção, nomeando as duas propriedades. */

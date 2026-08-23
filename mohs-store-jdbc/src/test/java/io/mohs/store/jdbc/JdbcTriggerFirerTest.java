@@ -57,7 +57,7 @@ class JdbcTriggerFirerTest {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         jobStore = new JdbcJobStore(dataSource, clock);
         JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
-        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), new JdbcBatchStore(dataSource, clock), clock);
+        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), new JdbcBatchStore(dataSource, clock));
         firer = new JdbcTriggerFirer(dataSource, historyStore, workQueue);
         rawJdbc = new JdbcTemplate(dataSource);
     }

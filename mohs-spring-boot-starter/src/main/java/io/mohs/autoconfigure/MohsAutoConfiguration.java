@@ -12,9 +12,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.context.SmartLifecycle;
@@ -61,7 +59,6 @@ import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcNodeStore;
 import io.mohs.store.jdbc.JdbcRateLimitStore;
 import io.mohs.store.jdbc.JdbcStoreTransactions;
-import io.mohs.store.jdbc.PostgresNotifyListener;
 import io.mohs.store.jdbc.JdbcTriggerFirer;
 import io.mohs.store.jdbc.JdbcWorkQueue;
 import io.mohs.store.jdbc.MohsFlyway;
@@ -222,31 +219,8 @@ public class MohsAutoConfiguration {
     }
 
     @Bean
-    public WorkQueue mohsWorkQueue(DataSource dataSource, JdbcDialect mohsJdbcDialect, BatchStore mohsBatchStore,
-            @Qualifier("mohsClock") Clock mohsClock, MohsFlyway mohsFlyway) {
-        return new JdbcWorkQueue(dataSource, mohsJdbcDialect, mohsBatchStore, mohsClock);
-    }
-
-    /**
-     * Tier 2 do wake-up (§5.5, ADR-G) — só Postgres, e só com
-     * {@code spring.datasource.url} EXPLÍCITA: a conexão do LISTEN é
-     * dedicada, fora do pool, e precisa da url crua — a condição testa
-     * exatamente o que o bean consome ({@code getUrl}, nunca
-     * {@code determineUrl}: o fallback pra embedded derivaria uma url de
-     * H2 fantasma, e a ausência viraria erro de BOOT num componente cuja
-     * própria doc diz que NOTIFY nunca é requisito de correção — review
-     * S6.3). App com {@code DataSource} próprio e sem a property fica sem
-     * tier 2 e o poll adaptativo cobre; o relatório de conditions do Boot
-     * conta o porquê.
-     */
-    @Bean(initMethod = "start", destroyMethod = "close")
-    @ConditionalOnProperty(name = "mohs.jdbc.dialect", havingValue = "postgresql")
-    @ConditionalOnProperty(name = "spring.datasource.url")
-    @ConditionalOnBean(DataSourceProperties.class)
-    public PostgresNotifyListener mohsNotifyListener(DataSourceProperties dataSourceProperties, Engine mohsEngine) {
-        return new PostgresNotifyListener(dataSourceProperties.getUrl(),
-                dataSourceProperties.getUsername(), dataSourceProperties.getPassword(),
-                mohsEngine::ownsShard, mohsEngine::signalWorkScheduled);
+    public WorkQueue mohsWorkQueue(DataSource dataSource, JdbcDialect mohsJdbcDialect, BatchStore mohsBatchStore, MohsFlyway mohsFlyway) {
+        return new JdbcWorkQueue(dataSource, mohsJdbcDialect, mohsBatchStore);
     }
 
     @Bean

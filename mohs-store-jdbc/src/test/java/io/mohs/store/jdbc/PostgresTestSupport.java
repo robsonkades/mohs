@@ -43,19 +43,6 @@ final class PostgresTestSupport {
         return dataSource;
     }
 
-    /** Conexão CRUA pro listener de NOTIFY — a conexão de LISTEN é dedicada, fora de qualquer pool/DataSource (S6.3). */
-    static String jdbcUrl() {
-        return CONTAINER.getJdbcUrl();
-    }
-
-    static String username() {
-        return CONTAINER.getUsername();
-    }
-
-    static String password() {
-        return CONTAINER.getPassword();
-    }
-
     /** Limpa todas as tabelas — o schema já foi aplicado uma vez quando o container subiu. */
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();

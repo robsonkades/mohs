@@ -182,16 +182,4 @@ public interface JdbcDialect {
         jdbcTemplate.batchUpdate(LEASE_INSERT, leases);
         return picked;
     }
-
-    /**
-     * Tier 2 do wake-up (§5.5, ADR-G): sinaliza os shards que acabaram de
-     * ganhar entrada DEVIDA — na MESMA transação do INSERT (o chamador,
-     * {@code JdbcWorkQueue.offer}, participa da transação do enqueue; o
-     * sinal só sai no commit dela). Best-effort por contrato: default
-     * vazio — só o Tier-1 (Postgres, {@code pg_notify}) implementa;
-     * perder o sinal é inofensivo, o poll adaptativo é o backstop de
-     * correção.
-     */
-    default void notifyReady(NamedParameterJdbcTemplate jdbcTemplate, Collection<Integer> shards) {
-    }
 }

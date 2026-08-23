@@ -58,7 +58,7 @@ class ScheduleCommandPostgresTest {
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
         JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
         JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new PostgresJdbcDialect());
-        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect(), batchStore, clock);
+        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect(), batchStore);
         JdbcLeaseStore leaseStore = new JdbcLeaseStore(dataSource, new PostgresJdbcDialect(), batchStore);
         mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
                 new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock,

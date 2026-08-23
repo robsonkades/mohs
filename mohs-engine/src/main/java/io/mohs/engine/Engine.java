@@ -53,9 +53,15 @@ import io.mohs.core.schedule.IntervalSpec;
  * {@link MohsLifecycle} diretamente: "exposta via {@code mohs.lifecycle()}"
  * (ADR-0007) já é a mesma máquina de estados que o poll loop precisa.
  *
- * <p>Poll de intervalo fixo, não wakeup event-driven (LISTEN/NOTIFY) —
- * adaptive poll + NOTIFY são a Phase 6 (§5.5); intervalo fixo é a linha de
- * base correta agora. {@code nodeId} é um UUID gerado por instância.
+ * <p>Poll ADAPTATIVO com hand-off local (Phase 6, §5.5/ADR-G): o loop
+ * dorme entre o piso e o teto conforme acha trabalho, e um enqueue DESTA
+ * JVM já devido o acorda ({@link #signalWorkScheduled}). Wakeup
+ * event-driven cross-nó (LISTEN/NOTIFY) foi implementado, MEDIDO e
+ * retirado — a transação notificante não participa de group commit e
+ * serializou o ingest (ADR-0054, com os números); o poll adaptativo é o
+ * único backstop cross-nó, latência limitada por
+ * {@code max-poll-interval}. {@code nodeId} é um UUID gerado por
+ * instância.
  *
  * <p><b>Guards de admissão (§5.4):</b> os predicados que a era da tabela
  * única pagava POR CANDIDATO no SQL do claim (janela, rate limit, cap de
@@ -155,15 +161,6 @@ public final class Engine implements MohsLifecycle {
      * {@code Math.floorMod}.
      */
     private int shardCursor;
-    /**
-     * A posse corrente como bitmask ({@link Shards#maskOf}) — escrita pela
-     * thread do tick, lida pelo filtro do LISTEN ({@link #ownsShard}) em
-     * outra thread: {@code volatile} é publicação segura de um long (JCIP
-     * 3.1; JLS 17.7). Nasce {@code -1} (possui TUDO) de propósito: antes do
-     * primeiro tick a degeneração segura é a mesma de {@link Shards#ownedBy}
-     * — wake a mais é um lap; wake a menos é trabalho esperando o poll.
-     */
-    private volatile long ownedShardsMask = -1L;
     private final RunnerRegistry runnerRegistry;
 
     /**
@@ -474,11 +471,6 @@ public final class Engine implements MohsLifecycle {
         }
     }
 
-    /** O filtro do LISTEN (tier 2, §5.5): um NOTIFY de shard alheio não acorda este loop. Seguro de qualquer thread. */
-    public boolean ownsShard(int shard) {
-        return shard >= 0 && shard < Shards.SHARD_COUNT && (ownedShardsMask & (1L << shard)) != 0;
-    }
-
     /** Acorda o loop agora — de stop/resume e do tier 1 do wake-up (§5.5). Seguro de qualquer thread. */
     void wake() {
         wakeLock.lock();
@@ -539,9 +531,7 @@ public final class Engine implements MohsLifecycle {
             reconcileOwnStrayLeases(now);
             purgeStaleNodeRows();
             boolean fired = fireDueTriggers();
-            List<Integer> ownedShards = Shards.ownedBy(nodeId, shardEligibleNodeIds(nodes, now));
-            ownedShardsMask = Shards.maskOf(ownedShards);
-            int claimed = claimAndDispatch(definitions, ownedShards);
+            int claimed = claimAndDispatch(definitions, Shards.ownedBy(nodeId, shardEligibleNodeIds(nodes, now)));
             return fired || claimed > 0;
         } catch (RuntimeException e) {
             log.error("engine tick failed — will retry next tick", e);

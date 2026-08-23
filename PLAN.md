@@ -1,6 +1,6 @@
-# PLAN — Phase 6 do redesign: sharding + adaptive poll + NOTIFY (ADR-F/G)
+# PLAN — Phase 6 do redesign: sharding + adaptive poll (ADR-F/G; tier NOTIFY retirado — ADR-0054)
 
-Estado: **proposto, aguardando veto das decisões abaixo** · Base:
+Estado: **em execução (S6.1–S6.3 concluídos)** · Base:
 `ARCHITECTURE_REDESIGN_PLAN.md` §5.4–5.6, §8.3–8.5, §11, §21 (Phase 6),
 ADR-F, ADR-G · Pré-requisitos verdes: Phase 5 completa (97d781a→a6d9956),
 E3 decidido (claim single-shard round-robin 2,21×/2,91×; 64 shards
@@ -45,20 +45,20 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
 5. **O loop de tick vira platform thread própria** (§12.1: "claim loop —
    one platform thread per node"), substituindo o ThreadPoolTaskScheduler
    de intervalo fixo: espera em `Condition.await(nextDelay)` (adaptativo)
-   e acordável por sinal (hand-off local, NOTIFY). Tempo de espera por
+   e acordável por sinal (hand-off local). Tempo de espera por
    relógio MONOTÔNICO (invariante CLAUDE.md); o `Clock` injetado segue
    dono de todo "quando".
-6. **NOTIFY é Tier-1 (Postgres) e best-effort** (§5.5): `NOTIFY
-   mohs_ready, '<shard>'` no commit do offer; LISTEN em conexão dedicada
-   (fora do Hikari) com reconexão; perder notificação é inofensivo — o
-   poll é o backstop de correção. Tier 2/3 ficam só com adaptativo.
+6. **NOTIFY Tier-1 — decisão original, RETIRADA na execução
+   (ADR-0054).** A forma decidida aqui foi implementada e medida no
+   S6.3: funcionava, mas o `pg_notify` serializa o commit do enqueue.
+   Ver o passo S6.3 abaixo e a pendência com gatilho de retorno.
 7. **Gate S2 na bancada local, com honestidade declarada:** 6×S1 literal
    (≥72k/s agregado) não cabe num único host. Medimos o que a bancada
    permite — agregado de 2–4 processos-nó vs 1 nó (escala relativa),
-   idle query rate com N nós, p50 de dispatch com NOTIFY — e declaramos
-   o resto como shape validado pelo E3 (micro, 64 shards, 8 claimers).
-   Ritual de bancada antes das rodadas de registro (pendência da
-   Phase 5): reboot do Docker + rounds de warmup descartados.
+   idle query rate com N nós — e declaramos o resto como shape validado
+   pelo E3 (micro, 64 shards, 8 claimers). Ritual de bancada antes das
+   rodadas de registro (pendência da Phase 5): reboot do Docker + rounds
+   de warmup descartados.
 
 ## Passos (um por commit; suíte verde e pipeline de DoD ao fim de cada um)
 
@@ -86,47 +86,38 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
       a dona define a política; re-armar viraria busy-spin); o custo da
       manutenção por tick no piso de 25ms é medido no S6.4 (gate da
       fase), não reivindicado aqui.
-- [x] **S6.3 — NOTIFY Tier-1.** `NOTIFY` no offer (mesma transação, PG);
-      listener em conexão dedicada com reconexão e shard filter; acorda o
-      loop (mesmo sinal do hand-off). Testcontainers PG: latência de
-      dispatch cross-"nó" < poll com backoff no teto; queda da conexão de
-      LISTEN degrada pro poll sem erro fatal.
-      Executado; driver PG virou compile `<optional>` no mohs-store-jdbc
-      (o listener compila contra PGConnection — padrão actuator).
-      **ACHADO MEDIDO E RESOLVIDO (P1)**: `pg_notify` na transação
-      serializa commits notificantes (lock global do notify queue
-      atravessa o flush — mata group commit); fim a fim o ingest REST
-      caiu de ~680 pra ~345 req/s (latência 7,7ms → 1,3s) — a regressão
-      percebida em uso. **P1 aplicada como conflação GLOBAL por emissor**
-      (janela de 50ms; todo offer acumula shards devidos numa bitmask e
-      só o vencedor da janela emite, carregando o acumulado): REST de
-      volta a 14,8–15,9s / 9–18ms, drain inalterado. A forma por-shard
-      da proposta original ficou no meio do caminho (52% dos commits
-      ainda notificantes num burst uniforme) e foi substituída. Números
-      completos: BASELINE "Phase 6 — S6.1–S6.3 A/B". P2 (emissor
-      pós-commit) segue como alternativa registrada se alguma medição
-      futura exigir.
+- [x] **S6.3 — NOTIFY Tier-1: implementado, medido e RETIRADO
+      (ADR-0054).** O tier funcionava (E2E cross-conexão < 1s com poll de
+      2s), mas `pg_notify` na transação serializa commits notificantes
+      (lock global do notify queue atravessa o flush — mata group commit)
+      e derrubou o ingest REST de ~680 pra ~345 req/s (latência 7,7ms →
+      1,3s) — a regressão foi PERCEBIDA em uso antes de medida. A
+      mitigação P1 (conflação global por emissor, janela 50ms) devolveu o
+      baseline, mas a retirada venceu no saldo: o valor residual do
+      NOTIFY (dispatch cross-nó < max-poll num cluster multi-nó OCIOSO) é
+      cenário que ninguém tem, e o custo permanente era superfície
+      operacional PG-only (conexão dedicada, half-open, lock
+      instância-wide compartilhado com outras aplicações, janela ×
+      tamanho de cluster). Ficam tier 1 (hand-off local) + tier 3 (poll
+      adaptativo). Números completos: BASELINE "Phase 6 — S6.1–S6.3 A/B";
+      código com a lição da P1 vive no git (2fe9f08/e41ce96).
 - [ ] **S6.4 — Validação e registro.** Bancada ritual (decisão 7):
       idle query rate 1 nó e 4 nós (gate: < 10/s com o backoff no teto);
-      p50 dispatch NOTIFY (< 5ms Tier-1); agregado 2–4 nós vs 1 (escala
-      relativa; S1 de referência re-medido na mesma sessão); E6 re-rodado
-      (S6/SUSPEND — a atribuição de shards muda o reaper? não — reaper é
-      por liveness, mas o requeue re-derivado precisa do chaos verde);
-      BASELINE "Phase 6"; ADR-0054 (F) e ADR-0055 (G); §21 com resultado.
+      agregado 2–4 nós vs 1 (escala relativa; S1 de referência re-medido
+      na mesma sessão); E6 re-rodado (S6/SUSPEND — a atribuição de shards
+      muda o reaper? não — reaper é por liveness, mas o requeue
+      re-derivado precisa do chaos verde); BASELINE "Phase 6";
+      ADR-0055 (F, sharding) e ADR-0056 (G, adaptive poll — sem o tier
+      NOTIFY, retirado pela ADR-0054); §21 com resultado.
 
 ## Pendências registradas (com gatilho) — herdadas e novas
 
-- **Janela de conflação do NOTIFY em cluster grande.** O teto de ~500
-  commits notificantes/s é do CLUSTER (lock global do notify queue); o
-  cap da P1 (~20/s) é POR NÓ emissor. **Gatilho:** ~20+ nós emissores
-  (20/s × M se aproximando do teto) — aí a janela vira função do tamanho
-  do cluster ou o NOTIFY migra pra emissor único eleito. Sem este
-  registro, a regressão pareceria "o Postgres ficou lento".
-- **LISTEN half-open: probe ativo (`SELECT 1` periódico) na conexão
-  dedicada.** O `tcpKeepAlive` já ligado detecta em minutos; o probe
-  detectaria em segundos. **Gatilho:** primeira ocorrência real de tier-2
-  mudo com log "active" (NAT/firewall/failover), ou p50 de dispatch do
-  S6.4 degradando sem queda de conexão logada.
+- **Wakeup cross-nó (NOTIFY retirado — ADR-0054).** **Gatilho de
+  retorno:** requisito real de latência de dispatch cross-nó menor que
+  `max-poll-interval` num cluster OCIOSO (usuário/SLA nomeado, não
+  hipótese). Ponto de partida: a forma P1-conflacionada em
+  2fe9f08/e41ce96, com as pendências dela (half-open probe, janela ×
+  tamanho do cluster) reabertas junto.
 - **Handler-aware claiming + starvation floor/probe (§5.6/§11.1)** — fase
   própria. **Gatilho:** rolling update real com handler removido
   (retry queimado deixa de ser aceitável), ou starvation de prioridade

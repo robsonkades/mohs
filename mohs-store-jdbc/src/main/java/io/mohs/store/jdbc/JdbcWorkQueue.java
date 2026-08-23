@@ -1,13 +1,10 @@
 package io.mohs.store.jdbc;
 
-import java.time.Clock;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicLong;
 
 import javax.sql.DataSource;
 
@@ -20,7 +17,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.BatchStore;
-import io.mohs.engine.Shards;
 import io.mohs.engine.WorkQueue;
 import io.mohs.store.jdbc.dialect.ClaimedReady;
 import io.mohs.store.jdbc.dialect.JdbcDialect;
@@ -36,33 +32,14 @@ import io.mohs.store.jdbc.dialect.JdbcDialect;
  */
 public final class JdbcWorkQueue implements WorkQueue {
 
-    /**
-     * Janela de conflação do NOTIFY (P1): no máximo UM commit notificante
-     * por janela POR EMISSOR (~20/s), muito abaixo do teto de serialização
-     * medido (~500 notificantes/s nesta máquina — transação notificante
-     * não participa de group commit). A primeira versão da P1 (janela por
-     * shard) ainda deixava ~52% dos commits notificantes num burst
-     * uniforme (4/s × 64 shards) e o wall do ingest ficou 1,55× o
-     * baseline — a janela global é o que devolve o group commit de
-     * verdade. Constante, não knob (CLAUDE.md): só vira configuração se
-     * uma medição mandar.
-     */
-    private static final long NOTIFY_CONFLATION_WINDOW_NANOS = 50_000_000L;
-
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate claimTransaction;
     private final JdbcDialect dialect;
     private final BatchStore batchStore;
-    private final Clock clock;
-    /** Shards devidos ainda NÃO sinalizados (bitmask, {@link Shards#maskOf}-compatível) — quem vencer a próxima janela carrega tudo que acumulou aqui. */
-    private final AtomicLong pendingNotifyShards = new AtomicLong();
-    /** Último NOTIFY em tempo MONOTÔNICO ({@code System.nanoTime} — janela é duração, invariante CLAUDE.md); semeado com "janela já vencida" porque a origem do nanoTime é arbitrária (zero literal suprimiria o primeiro sinal em JVM cujo nanoTime corre negativo). */
-    private final AtomicLong lastNotifyNanos = new AtomicLong(System.nanoTime() - NOTIFY_CONFLATION_WINDOW_NANOS);
 
-    public JdbcWorkQueue(DataSource dataSource, JdbcDialect dialect, BatchStore batchStore, Clock clock) {
+    public JdbcWorkQueue(DataSource dataSource, JdbcDialect dialect, BatchStore batchStore) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
-        this.clock = Objects.requireNonNull(clock, "clock");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.claimTransaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         // §7.5: claim é transação PRÓPRIA, sempre — REQUIRES_NEW torna isso
@@ -104,77 +81,6 @@ public final class JdbcWorkQueue implements WorkQueue {
         jdbcTemplate.batchUpdate(JdbcSupport.READY_INSERT, entries.stream()
                 .map(entry -> JdbcSupport.readyEntryParams(entry, dialect))
                 .toArray(MapSqlParameterSource[]::new));
-        notifyShardsWithDueEntries(entries);
-    }
-
-    /**
-     * Tier 2 do wake-up (§5.5): sinaliza os shards com entrada já DEVIDA —
-     * no-op fora do Postgres; entra na transação do chamador, então o
-     * sinal só existe se o INSERT existir. Futuro fica de fora: acordar
-     * um nó pra uma linha invisível seria um lap perdido (retries nunca
-     * passam por aqui — renascem na conclusão cercada do LeaseStore).
-     *
-     * <p>CONFLAÇÃO global por emissor (P1 do S6.3, medida): transação
-     * notificante não participa de group commit — o Postgres segura um
-     * lock GLOBAL do notify queue até o fim do flush do commit
-     * ({@code PreCommit_Notify}), e notificar todo enqueue serializou o
-     * ingest REST fim a fim de ~680 pra ~345 req/s (latência 7,7ms →
-     * 1,3s; A/B de binários na mesma sessão, BASELINE Phase 6). Todo
-     * offer ACUMULA seus shards devidos em {@link #pendingNotifyShards};
-     * só quem vence a janela ({@link #NOTIFY_CONFLATION_WINDOW_NANOS})
-     * emite — e emite TUDO que acumulou, no mesmo statement. O dono de um
-     * shard suprimido ou já está no piso do poll (o wake anterior o
-     * acordou e o backoff zera a cada tick com trabalho) ou recebe o
-     * sinal na próxima janela; a cauda de um burst sem tráfego seguinte
-     * fica pro poll — o mesmo best-effort já contratado (rollback do
-     * vencedor idem: os bits já saíram da máscara e o poll cobre; e o
-     * carry pode SAIR ANTES de o INSERT concorrente que o gerou commitar
-     * — wake adiantado, lap vazio, a linha fica pro poll; validado ao
-     * vivo no review da P1).
-     */
-    private void notifyShardsWithDueEntries(List<ReadyEntry> entries) {
-        long dueMask = dueShardMask(entries);
-        if (dueMask == 0L) {
-            return;
-        }
-        pendingNotifyShards.getAndAccumulate(dueMask, (pending, add) -> pending | add);
-        if (!winsNotifyWindow()) {
-            return; // janela fechada, ou outro enqueue concorrente venceu — os bits ficam pra ele/próxima
-        }
-        long toNotify = pendingNotifyShards.getAndSet(0L);
-        if (toNotify != 0L) {
-            dialect.notifyReady(jdbcTemplate, shardsOf(toNotify));
-        }
-    }
-
-    /** Bitmask ({@link Shards#maskOf}-compatível) dos shards com entrada já devida — entrada futura fica de fora por design (ver {@link #notifyShardsWithDueEntries}). */
-    private long dueShardMask(List<ReadyEntry> entries) {
-        Instant now = clock.instant();
-        long dueMask = 0L;
-        for (ReadyEntry entry : entries) {
-            if (!entry.visibleAt().isAfter(now)) {
-                dueMask |= 1L << entry.shard();
-            }
-        }
-        return dueMask;
-    }
-
-    /** Disputa a janela global de conflação: só UM emissor vence por {@link #NOTIFY_CONFLATION_WINDOW_NANOS} — perder o CAS significa que outro enqueue concorrente acabou de vencer e carrega os bits pendentes. */
-    private boolean winsNotifyWindow() {
-        long nowNanos = System.nanoTime();
-        long last = lastNotifyNanos.get();
-        return nowNanos - last >= NOTIFY_CONFLATION_WINDOW_NANOS
-                && lastNotifyNanos.compareAndSet(last, nowNanos);
-    }
-
-    private static List<Integer> shardsOf(long mask) {
-        List<Integer> shards = new ArrayList<>(Long.bitCount(mask));
-        for (int shard = 0; shard < Shards.SHARD_COUNT; shard++) {
-            if ((mask & (1L << shard)) != 0) {
-                shards.add(shard);
-            }
-        }
-        return shards;
     }
 
     @Override
