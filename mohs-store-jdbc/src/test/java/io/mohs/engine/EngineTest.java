@@ -12,6 +12,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -21,6 +22,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.awaitility.Awaitility;
 import org.h2.jdbcx.JdbcDataSource;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
@@ -1617,6 +1619,104 @@ class EngineTest {
             engine.stop(Duration.ZERO);
         }
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+    }
+
+    /**
+     * A janela entre {@code runAsync} e {@code inFlight.add} de
+     * {@code submitDispatch}: nela a execução tem lease no banco e está
+     * ausente do conjunto que o drain observa, então achar {@code inFlight}
+     * vazio prova que o dispatch ainda não foi REGISTRADO, não que ele
+     * acabou. Se o {@code stop} devolvesse ali, o heartbeat final gravaria
+     * a lease do nó já vencida (ADR-0051) com o handler rodando, e o
+     * reaper de um par reclamaria trabalho vivo — o resultado bom é
+     * descartado pelo fence e, sem orçamento de retry, vira FAILED
+     * terminal.
+     *
+     * <p>Quem torna a janela determinística é
+     * {@link #registryTrappingTheTickAfterSubmit} — sem ele a corrida é de
+     * microssegundos e não se reproduz. Sem a segunda espera do
+     * {@code stop}, o {@code stopCall} abaixo completa de imediato e a
+     * asserção de timeout falha.
+     */
+    @Test
+    void stopWaitsForADispatchSubmittedButNotYetRegistered() throws Exception {
+        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        CountDownLatch handlerStarted = new CountDownLatch(1);
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        CountDownLatch releaseSubmit = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            handlerStarted.countDown();
+            releaseHandler.await(10, TimeUnit.SECONDS);
+        });
+        Engine engine = newEngine(nodeStore, List.of(), registryTrappingTheTickAfterSubmit(releaseSubmit));
+
+        engine.start();
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            CompletableFuture<Void> stopCall = CompletableFuture.runAsync(() -> engine.stop(Duration.ofSeconds(10)));
+            // esperar STOPPED é o que dá determinismo ao cenário: o estado só
+            // muda depois da espera do drain, e ela só passa por um `inFlight`
+            // VAZIO — é exatamente esse vazio enganoso que o teste precisa
+            // produzir. Liberar o submit antes disto deixaria o drain ver a
+            // future e esperar sozinho: o teste passaria mesmo sem a segunda
+            // espera.
+            // o teto tem de ficar ABAIXO de nodeLeaseTtl/4 (7,5s com o
+            // LEASE_TTL de 30s do fixture), que é o orçamento do join do
+            // loop: estourá-lo faria a espera pós-join ler `inFlight` ainda
+            // vazio e o stop voltar — vermelho por ambiente, não por defeito
+            Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> engine.state() == EngineState.STOPPED);
+            releaseSubmit.countDown(); // só agora o tick registra a future e o loop encerra
+
+            assertThatThrownBy(() -> stopCall.get(1, TimeUnit.SECONDS))
+                    .as("stop returned while the handler was still running — the final heartbeat would hand live work to a peer's reaper")
+                    .isInstanceOf(TimeoutException.class);
+
+            releaseHandler.countDown();
+            stopCall.get(10, TimeUnit.SECONDS);
+        } finally {
+            // solta as duas pontas: sem isto, uma asserção que falhe antes
+            // deixaria a thread do tick presa no submit e o handler pendurado
+            releaseSubmit.countDown();
+            releaseHandler.countDown();
+        }
+        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+    }
+
+    /**
+     * Registry cujo executor prende a thread do tick DENTRO do
+     * {@code execute}, depois de já ter submetido a tarefa ao executor
+     * real: é assim que o tick congela na janela entre o {@code runAsync} e
+     * o {@code inFlight.add} do {@code submitDispatch}. Entra pela seam
+     * package-private {@code RunnerRegistry(List, Function)} — a única
+     * forma de trocar o executor de um runner sem mexer no engine.
+     *
+     * <p>Desligamento no-op, como o executor de eventos de
+     * {@code assembleEngine}: ninguém fecha o registry no teste (o
+     * {@code Engine} não é dono dele) e o executor real é de virtual
+     * threads, sem pool pra vazar entre testes.
+     */
+    private static RunnerRegistry registryTrappingTheTickAfterSubmit(CountDownLatch releaseSubmit) {
+        AsyncTaskExecutor realExecutor = MohsExecutors.ioBoundExecutor("mohs-runner-gated", BATCH_SIZE);
+        AsyncTaskExecutor trappingExecutor = task -> {
+            realExecutor.execute(task);
+            try {
+                // a thread do tick para AQUI: já submeteu, ainda não registrou.
+                // Expirar é FALHA, não via de escape: um trap que se solta
+                // sozinho registraria a future e faria o teste passar sem a
+                // segunda espera — verde pelo motivo errado. A exceção sai
+                // pela guarda de "runner executor rejected" do submitDispatch,
+                // a future nunca é registrada, e o teste fica vermelho.
+                if (!releaseSubmit.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("submit trap expired — the test never released it");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        return new RunnerRegistry(
+                List.of(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(BATCH_SIZE).build()),
+                runner -> new RunnerRegistry.LiveRunner(runner, new RunnerRegistry.CountingExecutor(trappingExecutor), () -> { }));
     }
 
     @Test
