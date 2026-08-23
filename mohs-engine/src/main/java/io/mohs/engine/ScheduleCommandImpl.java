@@ -39,13 +39,15 @@ final class ScheduleCommandImpl implements ScheduleCommand {
     private final Clock clock;
     private final JobKey jobKey;
     private final Object payload;
+    private final Runnable localWakeSignal;
 
     private Priority priority = Priority.NORMAL;
     private String actor = MohsImpl.DEFAULT_ACTOR;
     private @Nullable String idempotencyKey;
 
     ScheduleCommandImpl(JobStore jobStore, HistoryStore historyStore, WorkQueue workQueue,
-            StoreTransactions storeTransactions, Clock clock, JobKey jobKey, Object payload) {
+            StoreTransactions storeTransactions, Clock clock, JobKey jobKey, Object payload,
+            Runnable localWakeSignal) {
         this.jobStore = jobStore;
         this.historyStore = historyStore;
         this.workQueue = workQueue;
@@ -53,6 +55,7 @@ final class ScheduleCommandImpl implements ScheduleCommand {
         this.clock = clock;
         this.jobKey = jobKey;
         this.payload = payload;
+        this.localWakeSignal = localWakeSignal;
     }
 
     @Override
@@ -109,6 +112,11 @@ final class ScheduleCommandImpl implements ScheduleCommand {
                         when, createdAt, actor, null, idempotencyKey, payload)));
                 workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, jobKey, shard, priority.value(), 1, when)));
             });
+            // já devido → tier 1 (§5.5) acorda o loop local; futuro fica pro
+            // poll — acordar agora seria um lap que ainda não o vê
+            if (!when.isAfter(clock.instant())) {
+                localWakeSignal.run();
+            }
             return new Enqueued(id, jobKey, when, actor);
         } catch (DuplicateKeyException e) {
             if (idempotencyKey == null) {

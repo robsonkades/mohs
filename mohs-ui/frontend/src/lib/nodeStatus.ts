@@ -7,8 +7,9 @@ export interface NodeFreshness {
 
 /**
  * Heartbeat freshness, inferred client-side — not an authoritative health check, and the
- * thresholds come from Mohs' own defaults rather than round numbers: `mohs.engine.poll-interval`
- * is 5s (the node writes its heartbeat on the tick) and `lease-ttl` is 30s. Past the lease, the
+ * thresholds come from Mohs' own defaults rather than round numbers: the node writes its
+ * heartbeat on the tick, and since the adaptive loop (Phase 6) an idle node still ticks at
+ * least every `node-lease-ttl/3` (5s by default); `lease-ttl` is 30s. Past the lease, the
  * reaper may already reclaim that node's executions — that is the boundary that matters
  * operationally, not "a while ago".
  *

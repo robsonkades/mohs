@@ -52,7 +52,8 @@ public record MohsProperties(
     }
 
     /**
-     * @param pollInterval intervalo entre ticks do poll loop do engine
+     * @param pollInterval PISO do intervalo entre ticks do loop do engine (ADR-G/§5.5 do redesign): o loop poll neste ritmo enquanto acha trabalho e dobra o intervalo a cada tick vazio até {@code max-poll-interval}; default 25ms — a latência de dispatch é ~poll/2 no pior caso sem wake-up, e o custo idle é controlado pelo backoff, não pelo piso
+     * @param maxPollInterval TETO do backoff adaptativo (ADR-G): intervalo máximo entre ticks de um engine sem trabalho; deve ser ≥ {@code poll-interval}; o sono real nunca passa de {@code node-lease-ttl/3} — o heartbeat tem cadência própria e um teto alto não pode fazer o nó idle ser declarado morto
      * @param batchSize máximo de execuções reclamadas por claim
      * @param claimRounds ADR-0040: quantos claims um mesmo tick encadeia enquanto o lote voltar cheio e houver folga de dispatch — relaxa o acoplamento da vazão com o {@code poll-interval} sob backlog (medição na ADR); 1 (default) = formato clássico de um claim por tick
      * @param leaseTtl ADR-0012: alimenta {@code lease_expires_at} no claim; desde a ADR-0051 é também o corte de staleness para linha de node legado sem {@code expires_at}
@@ -64,7 +65,8 @@ public record MohsProperties(
      * @param completionFlushOnEveryResult ADR-0047: desliga o group commit da conclusão e volta ao commit síncrono por resultado — troca a janela de durabilidade (~5ms) pela latência por execução de antes; o único knob que a decisão adiciona
      */
     public record Engine(
-            @DefaultValue("5s") Duration pollInterval,
+            @DefaultValue("25ms") Duration pollInterval,
+            @DefaultValue("2s") Duration maxPollInterval,
             @DefaultValue("50") int batchSize,
             @DefaultValue("1") int claimRounds,
             @DefaultValue("30s") Duration leaseTtl,

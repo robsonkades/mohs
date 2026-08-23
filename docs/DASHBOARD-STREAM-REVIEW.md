@@ -57,13 +57,14 @@ que o custo do tick importa — o que vier primeiro.
 ## 3. `nodeStatus.ts` julga frescor com o relógio do browser
 
 **O que é.** O dashboard classifica um nó em Online/Stale/Lease expired com
-`Date.now() - lastHeartbeatAt` e um orçamento fixo de 15s, contra um
-`mohs.engine.poll-interval` de 5s (`mohs-ui/frontend/src/lib/nodeStatus.ts`).
+`Date.now() - lastHeartbeatAt` e um orçamento fixo de 15s, contra a cadência
+de heartbeat do nó — desde a Phase 6, `node-lease-ttl/3` (5s no default) em
+idle, mais rápida sob carga (`mohs-ui/frontend/src/lib/nodeStatus.ts`).
 Duas fragilidades, nenhuma introduzida hoje:
 
 - o relógio do cliente não é o do servidor, e a margem toda é de 8s;
-- um operador que suba `poll-interval` para 10s estoura o orçamento sozinho — o
-  próprio comentário do arquivo já admite isso.
+- um operador que suba `node-lease-ttl` para 30s estoura o orçamento sozinho —
+  o próprio comentário do arquivo já admite isso.
 
 **Por que importa mais do que parece.** `staleNodes` alimenta o painel "Needs
 attention" com "stopped sending heartbeats". Um falso positivo ali é alarme

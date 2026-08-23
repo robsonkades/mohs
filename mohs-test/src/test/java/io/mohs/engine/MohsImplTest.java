@@ -84,7 +84,7 @@ class MohsImplTest {
         rateLimitStore = mock(RateLimitStore.class);
         handlerRegistry = new HandlerRegistry();
         batchStore = mock(BatchStore.class);
-        mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, work -> work.run(), nodeStore, rateLimitStore, handlerRegistry, clock, mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())));
+        mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, work -> work.run(), nodeStore, rateLimitStore, handlerRegistry, clock, mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { });
     }
 
     private static JobDefinition onDemand(String key) {
@@ -227,7 +227,7 @@ class MohsImplTest {
     void cancelOfAPendingSchedulerOccurrenceRearmsTheAfterFinishChain() {
         JobStore jobStoreMock = mock(JobStore.class);
         MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, workQueue, historyStore, leaseStore, work -> work.run(), nodeStore, rateLimitStore, handlerRegistry,
-                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())));
+                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { });
         ExecutionId id = ExecutionId.of("exec-1");
         JobDefinition afterFinish = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
         when(jobStoreMock.find(JobKey.of("poll"))).thenReturn(Optional.of(new StoredJob(afterFinish, false, false, null)));
@@ -245,7 +245,7 @@ class MohsImplTest {
     void cancelOfAPendingManualExecutionDoesNotTouchTheChain() {
         JobStore jobStoreMock = mock(JobStore.class);
         MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, workQueue, historyStore, leaseStore, work -> work.run(), nodeStore, rateLimitStore, handlerRegistry,
-                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())));
+                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { });
         ExecutionId id = ExecutionId.of("exec-1");
         when(workQueue.cancelQueued(eq(id), any())).thenReturn(true);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(

@@ -33,7 +33,9 @@ public interface JobContext {
      * Cooperativo (ADR-0034) — vira {@code true} quando o timeout do job
      * dispara, o shutdown escala no estouro do grace de drain, ou um
      * {@code POST /executions/{id}/cancel} é observado pelo node dono
-     * (staleness ≤ 1 poll-interval, {@code mohs.engine.poll-interval}).
+     * (staleness ≤ um intervalo do loop — de
+     * {@code mohs.engine.poll-interval} a
+     * {@code mohs.engine.max-poll-interval}, conforme o backoff).
      * O handler decide quando e como parar: sair com exceção depois de
      * observar um cancel manual encerra a execução como {@code CANCELLED};
      * concluir normalmente registra {@code SUCCEEDED} — trabalho terminado

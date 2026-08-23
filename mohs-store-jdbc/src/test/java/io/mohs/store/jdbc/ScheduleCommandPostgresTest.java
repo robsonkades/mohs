@@ -63,7 +63,7 @@ class ScheduleCommandPostgresTest {
         mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
                 new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock,
                 mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks(),
-                new RunnerRegistry(List.of(MohsRunner.io("io").build())));
+                new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { });
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));
     }
 

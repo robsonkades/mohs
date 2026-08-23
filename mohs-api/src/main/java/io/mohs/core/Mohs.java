@@ -65,7 +65,9 @@ public interface Mohs {
      * Cancela uma execução (ADR-0034). Pendente ({@code ENQUEUED}/
      * {@code RETRY_WAITING}) vira {@code CANCELLED} na hora;
      * {@code RUNNING} recebe o pedido cooperativo — o node dono observa em
-     * até um poll-interval e o handler decide quando parar (via
+     * até um intervalo do seu loop (entre {@code mohs.engine.poll-interval}
+     * e {@code mohs.engine.max-poll-interval}, conforme o backoff) e o
+     * handler decide quando parar (via
      * {@link io.mohs.core.execution.JobContext#cancellationRequested()});
      * estado terminal não muda. Nunca é imediato nem garantido: uma
      * conclusão pode vencer a corrida, e nesse caso ela vale.

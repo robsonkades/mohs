@@ -31,7 +31,6 @@ import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import tools.jackson.databind.json.JsonMapper;
 
@@ -154,10 +153,9 @@ class EngineTest {
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         EngineMetrics metrics = new EngineMetrics(new SimpleMeterRegistry());
         Dispatcher dispatcher = new Dispatcher(leaseStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor, metrics);
-        ThreadPoolTaskScheduler tickScheduler = MohsExecutors.scheduler("mohs-engine-tick-test", 1);
         return new Engine(workQueueOverride, dispatcher, historyStoreOverride, leaseStoreOverride, jobStoreOverride, nodeStoreOverride,
                 new JdbcTriggerFirer(dataSource, historyStore, workQueue), windowRegistry,
-                rateLimitStore, clock, settings, tickScheduler, runnerRegistry, metrics);
+                rateLimitStore, clock, settings, runnerRegistry, metrics);
     }
 
     private static RunnerRegistry defaultRunnerRegistry() {
@@ -593,7 +591,7 @@ class EngineTest {
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = assembleEngine(blindOnce, workQueue, leaseStore, historyStore, counting, List.of(listener),
                 defaultRunnerRegistry(),
-                new EngineSettings(POLL_INTERVAL, 1, 10, 2, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, 1, 10, 2, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
 
         engine.start();
         try {
@@ -846,7 +844,7 @@ class EngineTest {
         List<String> trace = Collections.synchronizedList(new ArrayList<>());
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(4));
         Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
-                new EngineSettings(POLL_INTERVAL, 2, 6, 2, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, 2, 6, 2, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
 
         engine.start();
         try {
@@ -883,7 +881,7 @@ class EngineTest {
         List<String> trace = Collections.synchronizedList(new ArrayList<>());
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
-                new EngineSettings(POLL_INTERVAL, 2, 10, 3, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, 2, 10, 3, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
 
         engine.start();
         try {
@@ -903,6 +901,83 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(terminalCount(ExecutionState.SUCCEEDED)).isEqualTo(3);
+    }
+
+    /**
+     * Risco nº 1 da Phase 6 (S6.2): o backoff no teto NÃO pode espaçar o
+     * heartbeat além de {@code node-lease-ttl/3} — o heartbeat sai uma vez
+     * por tick, então o sono do loop é limitado pela cadência da promessa
+     * de liveness, senão um nó apenas OCIOSO seria declarado morto pelo
+     * reaper dos pares e teria trabalho futuro reivindicado em vão. Teto
+     * absurdo (1h) de propósito: sem o cap, o segundo heartbeat só viria
+     * em ~1h e o await estouraria.
+     */
+    @Test
+    void idleBackoffNeverStretchesTheHeartbeatPastAThirdOfTheNodeLease() throws Exception {
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(4));
+        Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
+                new EngineSettings(Duration.ofMillis(20), Duration.ofHours(1), BATCH_SIZE, 10, 1,
+                        LEASE_TTL, Duration.ofMillis(300), null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+
+        engine.start();
+        try {
+            // 4 heartbeats a ≤100ms (300ms/3) cabem com folga; a 1h de teto, jamais
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+    }
+
+    /** ADR-G/§5.5 tier 3: tick vazio dobra o intervalo até o teto — engine ocioso pola cada vez menos, e volta ao piso quando há trabalho (coberto pelos testes de claim, que rodam no piso). */
+    @Test
+    void emptyTicksBackOffTheLoopTowardsTheCeiling() throws Exception {
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
+        Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
+                new EngineSettings(Duration.ofMillis(20), Duration.ofSeconds(1), BATCH_SIZE, 10, 1,
+                        LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+
+        engine.start();
+        try {
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
+            // após 3 ticks vazios o intervalo já dobrou pra ≥160ms: 9 ticks a mais
+            // em 500ms são IMPOSSÍVEIS com backoff (cabem ≤4) — e triviais na
+            // cadência fixa de 20ms que uma regressão restauraria (25 caberiam)
+            CountDownLatch nineMore = new CountDownLatch(9);
+            counting.resetLatch(nineMore);
+            assertThat(nineMore.await(500, TimeUnit.MILLISECONDS)).isFalse();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+    }
+
+    /** Tier 1 do wake-up (§5.5): enqueue local já devido acorda o loop na hora — a latência de dispatch não espera o intervalo de poll. */
+    @Test
+    void aDueLocalEnqueueWakesTheLoopWithoutWaitingThePoll() throws Exception {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+        });
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(1));
+        // piso de 2s: sem o wake, o claim seguinte só viria 2s depois do
+        // primeiro tick vazio — o await de 1s abaixo é impossível sem tier 1
+        Engine engine = newEngine(counting, List.of(listener), defaultRunnerRegistry(),
+                new EngineSettings(Duration.ofSeconds(2), Duration.ofSeconds(2), BATCH_SIZE, 10, 1,
+                        LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+
+        engine.start();
+        try {
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue(); // primeiro tick (vazio) já passou
+            recordAndOffer("exec-1", "welcome-email", "hello", NOW.minusSeconds(1));
+            engine.signalWorkScheduled(); // fora de transação → wake imediato
+            assertThat(succeeded.await(1, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
     }
 
     /**
@@ -1349,6 +1424,16 @@ class EngineTest {
         Instant expiresAt = nodes.get(0).expiresAt();
         assertThat(expiresAt).isNotNull();
         return expiresAt;
+    }
+
+    /** ADR-G: o teto do backoff abaixo do piso inverteria a rampa — rejeitado na construção, nomeando as duas propriedades. */
+    @Test
+    void maxPollIntervalMustBeAtLeastThePollInterval() {
+        assertThatThrownBy(() -> new EngineSettings(Duration.ofSeconds(1), Duration.ofMillis(500), BATCH_SIZE, 10, 1,
+                LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("mohs.engine.max-poll-interval")
+                .hasMessageContaining("mohs.engine.poll-interval");
     }
 
     /** Bound menor/igual à lease do NÓ liberaria posse antes de o node sequer poder ser considerado morto (ADR-0051) — rejeitado na construção, nomeando as duas propriedades. */

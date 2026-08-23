@@ -72,7 +72,7 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
       com shard=0 continua claimável (0 pertence a alguém em qualquer n).
       Testes: ownership (1 nó = todos; n nós = partição; membership
       change = sobreposição benigna), lap, distribuição do hash.
-- [ ] **S6.2 — Loop adaptativo + hand-off local.** Platform thread única
+- [x] **S6.2 — Loop adaptativo + hand-off local.** Platform thread única
       no lugar do scheduler; backoff poll→max (dobra em lap vazio, reset
       em trabalho); `max-poll-interval` + validação de boot; hand-off
       pós-commit do enqueue local (tier 1 §5.5: `visible_at <= now`
@@ -80,6 +80,12 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
       1×/tick — com backoff, tick esparso em idle: heartbeat precisa de
       cadência PRÓPRIA ≤ node-lease-ttl/3 (senão nó idle é declarado
       morto!) — este é o risco nº 1 da fase, teste dedicado.
+      Executado: o cap de ttl/3 vale nas DUAS pontas (um piso maior que
+      ele é engolido com WARN no start — liveness vence configuração);
+      interrupt na thread do loop é engolido de propósito (JCIP 7.1.3 —
+      a dona define a política; re-armar viraria busy-spin); o custo da
+      manutenção por tick no piso de 25ms é medido no S6.4 (gate da
+      fase), não reivindicado aqui.
 - [ ] **S6.3 — NOTIFY Tier-1.** `NOTIFY` no offer (mesma transação, PG);
       listener em conexão dedicada com reconexão e shard filter; acorda o
       loop (mesmo sinal do hand-off). Testcontainers PG: latência de

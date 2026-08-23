@@ -79,9 +79,9 @@ import io.mohs.store.jdbc.dialect.SqlServerJdbcDialect;
  * <p>Escaneamento de {@code @MohsJob} ({@link MohsJobScanner}) e runners
  * nomeados ({@link RunnerRegistry}) são montados aqui.
  *
- * <p>Dois beans compartilham o tipo {@link ThreadPoolTaskScheduler} (tick
- * do {@link Engine} vs. resync do {@link DatabaseClock}), e o
- * {@link AsyncTaskExecutor} de eventos convive com executores da própria
+ * <p>O {@link ThreadPoolTaskScheduler} do resync do {@link DatabaseClock}
+ * (o loop do {@link Engine} é thread própria desde a Phase 6, não bean) e o
+ * {@link AsyncTaskExecutor} de eventos convivem com executores da própria
  * aplicação hospedeira (ex.: {@code applicationTaskExecutor}) —
  * {@link Qualifier} explícito em cada ponto de injeção em vez de confiar
  * no fallback de resolução por nome do Spring (CLAUDE.md: "não usar mágica
@@ -261,12 +261,6 @@ public class MohsAutoConfiguration {
         return MohsExecutors.ioBoundExecutor("mohs-events", properties.engine().eventConcurrency());
     }
 
-    @Bean(defaultCandidate = false)
-    @Qualifier("mohsTickScheduler")
-    public ThreadPoolTaskScheduler mohsTickScheduler() {
-        return MohsExecutors.scheduler("mohs-engine-tick", 1);
-    }
-
     /** Defaults built-in, overrides e conflito de fonte: {@link MohsRunners#assemble}. */
     @Bean(destroyMethod = "close")
     public RunnerRegistry mohsRunnerRegistry(MohsProperties properties, List<MohsRunner> mohsRunnerBeans) {
@@ -363,17 +357,17 @@ public class MohsAutoConfiguration {
             RateLimitStore mohsRateLimitStore,
             @Qualifier("mohsClock") Clock mohsClock,
             MohsProperties properties,
-            @Qualifier("mohsTickScheduler") ThreadPoolTaskScheduler mohsTickScheduler,
             RunnerRegistry mohsRunnerRegistry,
             EngineMetrics mohsEngineMetrics
     ) {
         MohsProperties.Engine engineProperties = properties.engine();
-        EngineSettings settings = new EngineSettings(engineProperties.pollInterval(), engineProperties.batchSize(),
-                engineProperties.dispatchConcurrency(), engineProperties.claimRounds(), engineProperties.leaseTtl(),
-                engineProperties.nodeLeaseTtl(), engineProperties.watchdogTimeout(), engineProperties.misfireThreshold());
+        EngineSettings settings = new EngineSettings(engineProperties.pollInterval(), engineProperties.maxPollInterval(),
+                engineProperties.batchSize(), engineProperties.dispatchConcurrency(), engineProperties.claimRounds(),
+                engineProperties.leaseTtl(), engineProperties.nodeLeaseTtl(), engineProperties.watchdogTimeout(),
+                engineProperties.misfireThreshold());
         return new Engine(mohsWorkQueue, mohsDispatcher, mohsHistoryStore, mohsLeaseStore, mohsJobStore, mohsNodeStore,
                 mohsTriggerFirer, mohsExecutionWindowRegistry, mohsRateLimitStore, mohsClock, settings,
-                mohsTickScheduler, mohsRunnerRegistry, mohsEngineMetrics);
+                mohsRunnerRegistry, mohsEngineMetrics);
     }
 
     /** {@link SmartLifecycle} — ver Javadoc de {@link MohsEngineLifecycle} sobre a adaptação e o WARN de lease × timeout. */
@@ -408,7 +402,8 @@ public class MohsAutoConfiguration {
             BatchCompletionCallbacks mohsBatchCompletionCallbacks, RunnerRegistry mohsRunnerRegistry) {
         return new MohsImpl(mohsJobStore, mohsWorkQueue, mohsHistoryStore, mohsLeaseStore, mohsStoreTransactions,
                 mohsNodeStore, mohsRateLimitStore, mohsHandlerRegistry,
-                mohsClock, mohsEngine, mohsBatchStore, mohsBatchCompletionCallbacks, mohsRunnerRegistry);
+                mohsClock, mohsEngine, mohsBatchStore, mohsBatchCompletionCallbacks, mohsRunnerRegistry,
+                mohsEngine::signalWorkScheduled);
     }
 
     /**

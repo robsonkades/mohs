@@ -1,5 +1,6 @@
 package io.mohs.engine;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
@@ -10,6 +11,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.sql.DataSource;
 
@@ -58,6 +60,7 @@ class ScheduleCommandImplTest {
 
     private DataSource dataSource;
     private Mohs mohs;
+    private final AtomicInteger wakes = new AtomicInteger();
 
     @BeforeEach
     void setUp() {
@@ -71,7 +74,7 @@ class ScheduleCommandImplTest {
         mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
                 new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock,
                 mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks(),
-                new RunnerRegistry(List.of(MohsRunner.io("io").build())));
+                new RunnerRegistry(List.of(MohsRunner.io("io").build())), wakes::incrementAndGet);
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));
     }
 
@@ -87,6 +90,16 @@ class ScheduleCommandImplTest {
     private int executionCount() {
         Integer count = new JdbcTemplate(dataSource).queryForObject("SELECT COUNT(*) FROM mohs_execution", Integer.class);
         return count == null ? 0 : count;
+    }
+
+    /** Tier 1 do wake-up (§5.5): terminal já devido dispara o sinal local; agendamento futuro não — acordar o loop pra uma linha ainda invisível seria um lap perdido. */
+    @Test
+    void aDueTerminalFiresTheLocalWakeSignalAndAFutureOneDoesNot() {
+        mohs.schedule("welcome-email", "hello").now();
+        assertThat(wakes.get()).isEqualTo(1);
+
+        mohs.schedule("welcome-email", "hello").after(Duration.ofHours(1));
+        assertThat(wakes.get()).isEqualTo(1);
     }
 
     @Test

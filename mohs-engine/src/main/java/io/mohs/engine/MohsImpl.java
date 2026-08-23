@@ -74,11 +74,13 @@ public final class MohsImpl implements Mohs {
     private final BatchStore batchStore;
     private final BatchCompletionCallbacks callbacks;
     private final RunnerRegistry runnerRegistry;
+    /** Tier 1 do wake-up (§5.5): acorda o loop do engine local pós-commit — {@code Engine#signalWorkScheduled}; best-effort por contrato (ADR-G). */
+    private final Runnable localWakeSignal;
 
     public MohsImpl(JobStore jobStore, WorkQueue workQueue, HistoryStore historyStore, LeaseStore leaseStore,
             StoreTransactions storeTransactions, NodeStore nodeStore, RateLimitStore rateLimitStore,
             HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle, BatchStore batchStore,
-            BatchCompletionCallbacks callbacks, RunnerRegistry runnerRegistry) {
+            BatchCompletionCallbacks callbacks, RunnerRegistry runnerRegistry, Runnable localWakeSignal) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.workQueue = Objects.requireNonNull(workQueue, "workQueue");
         this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
@@ -92,20 +94,23 @@ public final class MohsImpl implements Mohs {
         this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
         this.callbacks = Objects.requireNonNull(callbacks, "callbacks");
         this.runnerRegistry = Objects.requireNonNull(runnerRegistry, "runnerRegistry");
+        this.localWakeSignal = Objects.requireNonNull(localWakeSignal, "localWakeSignal");
     }
 
     @Override
     public <T> ScheduleCommand schedule(JobRef<T> ref, T payload) {
         Objects.requireNonNull(ref, "ref");
         Objects.requireNonNull(payload, "payload");
-        return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, ref.key(), payload);
+        return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, ref.key(), payload,
+                localWakeSignal);
     }
 
     @Override
     public ScheduleCommand schedule(String jobId, Object payload) {
         Objects.requireNonNull(jobId, "jobId");
         Objects.requireNonNull(payload, "payload");
-        return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, JobKey.of(jobId), payload);
+        return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, JobKey.of(jobId), payload,
+                localWakeSignal);
     }
 
     /**
@@ -134,6 +139,8 @@ public final class MohsImpl implements Mohs {
             batchStore.insert(batchId, members.size());
             enqueueMembers(members, batchId);
         });
+        // membros nascem devidos (scheduledAt = now) — tier 1 acorda o loop
+        localWakeSignal.run();
         return new BatchImpl(batchId, callbacks);
     }
 

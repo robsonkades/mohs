@@ -31,6 +31,17 @@ import org.jspecify.annotations.Nullable;
  * qualquer política; mais velha que ele responde ao {@code Misfire} do
  * job.
  *
+ * <p>{@code maxPollInterval} (ADR-G do redesign, §5.5) é o teto do
+ * backoff adaptativo: o intervalo entre ticks começa em
+ * {@code pollInterval} (o piso), dobra a cada tick que não achou trabalho
+ * e volta ao piso no primeiro que achou. {@code maxPollInterval ==
+ * pollInterval} desliga o backoff (cadência fixa — o formato pré-Phase-6,
+ * que os construtores de conveniência preservam para teste
+ * determinístico). O sono real de cada volta é ainda limitado por
+ * {@code nodeLeaseTtl/3}: o heartbeat tem cadência própria — um teto de
+ * backoff maior que a promessa de liveness NÃO pode fazer o nó idle ser
+ * declarado morto (risco nº 1 da Phase 6).
+ *
  * <p>{@code dispatchConcurrency} (ADR-0039) é o teto de execuções em voo do
  * node — o mesmo valor que dimensiona o runner {@code io} built-in
  * ({@code mohs.engine.dispatch-concurrency}); o claim de cada tick é
@@ -52,8 +63,9 @@ import org.jspecify.annotations.Nullable;
  * que estava em voo. O alongamento do tick também adia os sinais de
  * timeout/cancel (ADR-0034) — mais um motivo para rounds serem poucos.
  */
-public record EngineSettings(Duration pollInterval, int batchSize, int dispatchConcurrency, int claimRounds,
-        Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
+public record EngineSettings(Duration pollInterval, Duration maxPollInterval, int batchSize, int dispatchConcurrency,
+        int claimRounds, Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout,
+        Duration misfireThreshold) {
 
     /** Mesmo default de {@code mohs.engine.misfire-threshold} ({@code MohsProperties}) — precedente Quartz. */
     public static final Duration DEFAULT_MISFIRE_THRESHOLD = Duration.ofSeconds(60);
@@ -68,6 +80,7 @@ public record EngineSettings(Duration pollInterval, int batchSize, int dispatchC
 
     public EngineSettings {
         Objects.requireNonNull(pollInterval, "pollInterval");
+        Objects.requireNonNull(maxPollInterval, "maxPollInterval");
         Objects.requireNonNull(leaseTtl, "leaseTtl");
         Objects.requireNonNull(nodeLeaseTtl, "nodeLeaseTtl");
         Objects.requireNonNull(misfireThreshold, "misfireThreshold");
@@ -83,6 +96,11 @@ public record EngineSettings(Duration pollInterval, int batchSize, int dispatchC
         }
         if (!pollInterval.isPositive()) {
             throw new IllegalArgumentException("mohs.engine.poll-interval must be positive, got " + pollInterval);
+        }
+        if (maxPollInterval.compareTo(pollInterval) < 0) {
+            throw new IllegalArgumentException("mohs.engine.max-poll-interval (" + maxPollInterval
+                    + ") must be >= mohs.engine.poll-interval (" + pollInterval
+                    + ") — it is the ceiling the idle backoff climbs to (ADR-G), not a second floor");
         }
         if (!leaseTtl.isPositive()) {
             throw new IllegalArgumentException("mohs.engine.lease-ttl must be positive, got " + leaseTtl
@@ -106,7 +124,8 @@ public record EngineSettings(Duration pollInterval, int batchSize, int dispatchC
     /** Um claim por tick (pré-ADR-0040) e lease de nó = lease de execução — conveniência para quem só configura o teto de dispatch. */
     public EngineSettings(Duration pollInterval, int batchSize, int dispatchConcurrency, Duration leaseTtl,
             @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
-        this(pollInterval, batchSize, dispatchConcurrency, 1, leaseTtl, leaseTtl, watchdogTimeout, misfireThreshold);
+        this(pollInterval, pollInterval, batchSize, dispatchConcurrency, 1, leaseTtl, leaseTtl, watchdogTimeout,
+                misfireThreshold);
     }
 
     /** Threshold de misfire default (ADR-0035), claim sem teto de dispatch (pré-ADR-0039) e um claim por tick — conveniência de teste. */
