@@ -93,16 +93,19 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
       LISTEN degrada pro poll sem erro fatal.
       Executado; driver PG virou compile `<optional>` no mohs-store-jdbc
       (o listener compila contra PGConnection — padrão actuator).
-      **ACHADO MEDIDO (db-tuner, PG 18 local): `pg_notify` na transação
-      serializa commits notificantes** (AccessExclusiveLock global no
-      notify queue atravessa o flush do WAL — mata group commit): 7,6k →
-      ~510 tps no microbench de enqueue com 32 conexões. Propostas
-      aguardando aprovação: **P1** conflação por shard (só notifica um
-      shard se não notificado na última janela de poll-floor; mantém o
-      sinal em-transação, devolve group commit ao caso comum) ou **P2**
-      emissor pós-commit coalescido (revisão do §5.5, não tuning).
-      Decidir ANTES da bancada do S6.4, que senão mede o caminho
-      serializado.
+      **ACHADO MEDIDO E RESOLVIDO (P1)**: `pg_notify` na transação
+      serializa commits notificantes (lock global do notify queue
+      atravessa o flush — mata group commit); fim a fim o ingest REST
+      caiu de ~680 pra ~345 req/s (latência 7,7ms → 1,3s) — a regressão
+      percebida em uso. **P1 aplicada como conflação GLOBAL por emissor**
+      (janela de 50ms; todo offer acumula shards devidos numa bitmask e
+      só o vencedor da janela emite, carregando o acumulado): REST de
+      volta a 14,8–15,9s / 9–18ms, drain inalterado. A forma por-shard
+      da proposta original ficou no meio do caminho (52% dos commits
+      ainda notificantes num burst uniforme) e foi substituída. Números
+      completos: BASELINE "Phase 6 — S6.1–S6.3 A/B". P2 (emissor
+      pós-commit) segue como alternativa registrada se alguma medição
+      futura exigir.
 - [ ] **S6.4 — Validação e registro.** Bancada ritual (decisão 7):
       idle query rate 1 nó e 4 nós (gate: < 10/s com o backoff no teto);
       p50 dispatch NOTIFY (< 5ms Tier-1); agregado 2–4 nós vs 1 (escala
@@ -113,6 +116,12 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
 
 ## Pendências registradas (com gatilho) — herdadas e novas
 
+- **Janela de conflação do NOTIFY em cluster grande.** O teto de ~500
+  commits notificantes/s é do CLUSTER (lock global do notify queue); o
+  cap da P1 (~20/s) é POR NÓ emissor. **Gatilho:** ~20+ nós emissores
+  (20/s × M se aproximando do teto) — aí a janela vira função do tamanho
+  do cluster ou o NOTIFY migra pra emissor único eleito. Sem este
+  registro, a regressão pareceria "o Postgres ficou lento".
 - **LISTEN half-open: probe ativo (`SELECT 1` periódico) na conexão
   dedicada.** O `tcpKeepAlive` já ligado detecta em minutos; o probe
   detectaria em segundos. **Gatilho:** primeira ocorrência real de tier-2

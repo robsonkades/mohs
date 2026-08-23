@@ -31,7 +31,11 @@ public interface WorkQueue {
      * VAI virar quando reivindicada (1 no primeiro enqueue; anterior + 1
      * em retry/requeue) — o claim o copia pra
      * {@code mohs_lease.attempt_number} e nada mais conta attempts no
-     * caminho quente (§5.3). {@code shard} fica 0 até a Phase 6 (ADR-F).
+     * caminho quente (§5.3). {@code shard} vem de {@link Shards#of} desde
+     * a Phase 6 (ADR-F) e alimenta bitmasks de 64 bits (conflação do
+     * NOTIFY, {@code Shards.maskOf}) — fora de [0, 64) o shift daria wrap
+     * (JLS 15.19: shard 70 setaria o bit 6) e sinalizaria o shard errado
+     * em silêncio, daí a validação aqui, onde o dado entra no tipo.
      */
     record ReadyEntry(ExecutionId executionId, JobKey jobKey, int shard, int priority, int attempt, Instant visibleAt) {
         public ReadyEntry {
@@ -40,6 +44,10 @@ public interface WorkQueue {
             Objects.requireNonNull(visibleAt, "visibleAt");
             if (attempt < 1) {
                 throw new IllegalArgumentException("attempt must be >= 1 — it is the attempt this entry becomes, not a counter");
+            }
+            if (shard < 0 || shard >= Shards.SHARD_COUNT) {
+                throw new IllegalArgumentException("shard must be in [0, " + Shards.SHARD_COUNT
+                        + ") — it feeds 64-bit shard masks and the shift would wrap");
             }
         }
     }

@@ -1252,6 +1252,43 @@ por-execução no pior caso, ordens de magnitude melhor com poll curto).
   entre rodadas — os 2,000 exatos aparecem na média/soma, não em cada
   rodada isolada.
 
+## Phase 6 — S6.1–S6.3 A/B e a conflação do NOTIFY (P1) — 2026-08-22
+
+A/B de binários na MESMA sessão, alternados (metodologia do S5.5):
+HEAD pós-S6.3 (`2fe9f08`) vs Phase 5 (`a6d9956`), mesmo ponto de
+operação (`poll=20ms`, `batch=1000`, `claim-rounds=2`, `dispatch=1024`,
+eventos 256, Hikari 300), Postgres 18.4 em Docker. Seed do drain FIEL a
+cada binário: uniforme (`n % 64`) pro shardado, shard 0 pro pré-shard —
+cada um com a distribuição que os próprios escritores dele produzem
+(`write-amplification.ps1 -ShardMode`).
+
+| Métrica | Phase 5 | S6.3 (pg_notify por enqueue) | S6.3 + P1 (conflação global) |
+|---|---:|---:|---:|
+| Drain 50k (exec/s, rodadas quentes) | 12,0 · 12,8 · 12,5 k | 12,9 · 13,1 k | 11,1 · 12,2 k |
+| REST 10k wall (`load-test.ps1`, 1000 conexões) | 14,3 · 15,3 s | **29,0 · 29,2 s** | **15,9 · 15,1 · 14,8 s** |
+| Latência média do POST | 7,7 · 18,7 ms | **1.281 · 1.514 ms** | 9 · 10 · 17,9 ms |
+| commits/execução (drain) | 0,043–0,049 | 0,079–0,090 | 0,084–0,098 |
+
+Leituras:
+- **O drain (processamento) NÃO regrediu com o sharding** — o lap de
+  probes single-shard mantém 11–13k/s no nó único com seed uniforme; o
+  custo visível é commits/execução ~2× (uma transação por sonda em vez
+  de uma por round), sem efeito na vazão neste ponto de operação.
+- **O pg_notify por enqueue serializou o ingest** exatamente como o
+  microbench previu (~500 notificantes/s de teto): wall 2×, latência
+  ~170× — foi a regressão percebida em uso real. Causa: transação
+  notificante não participa de group commit (lock global do notify
+  queue seguro através do flush — `PreCommit_Notify`).
+- **P1 (conflação global por emissor, janela de 50ms)** devolveu wall e
+  latência ao baseline: ≤ ~20 commits notificantes/s por nó emissor,
+  cada um carregando a bitmask de shards acumulada; a primeira versão
+  (janela POR shard, 250ms) ficou no meio do caminho (wall 22s — ~52%
+  dos commits ainda notificantes num burst uniforme) e foi substituída.
+- Sinal conflacionado é entregue pelo próximo vencedor da janela; cauda
+  de burst sem tráfego seguinte fica pro poll adaptativo — o best-effort
+  contratado pela ADR-G, agora com o custo do caminho notificante
+  limitado por construção.
+
 ## Como reproduzir
 
 Os harnesses da era da tabela única (TableSplitExperiment, ClaimQueryLoad/

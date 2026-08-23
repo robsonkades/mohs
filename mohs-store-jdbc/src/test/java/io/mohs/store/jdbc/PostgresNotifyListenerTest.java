@@ -125,6 +125,31 @@ class PostgresNotifyListenerTest {
         assertThat(woke.await(700, TimeUnit.MILLISECONDS)).isFalse();
     }
 
+    /**
+     * P1 do S6.3 (conflação global por emissor): um shard cujo sinal caiu
+     * dentro da janela fica PENDENTE e é carregado pelo próximo offer que
+     * vencer a janela — conflação nunca vira perda enquanto houver
+     * tráfego (a cauda sem tráfego é do poll, best-effort contratado). O
+     * teste não pina QUAL offer emite (timing da janela de 50ms não é
+     * determinístico em teste): pina que o sinal do shard 9 CHEGA, direto
+     * ou carregado.
+     */
+    @Test
+    void aConflatedShardIsCarriedByTheNextWindowWinnerNotLost() throws Exception {
+        CountDownLatch shardNineSignalled = new CountDownLatch(1);
+        startedListener(shard -> shard == 9, shardNineSignalled::countDown);
+
+        workQueue.offer(List.of(entry("exec-conflate-1", 7, NOW.minusSeconds(1))));
+        workQueue.offer(List.of(entry("exec-conflate-2", 9, NOW.minusSeconds(1))));
+        // deixa a janela de 50ms vencer com folga: se o sinal do 9 caiu na
+        // janela do 7, o offer seguinte vence uma janela nova e carrega o
+        // pendente junto com o próprio 11
+        Thread.sleep(120);
+        workQueue.offer(List.of(entry("exec-conflate-3", 11, NOW.minusSeconds(1))));
+
+        assertThat(shardNineSignalled.await(5, TimeUnit.SECONDS)).isTrue();
+    }
+
     /** Best-effort de verdade: a conexão de LISTEN morta por fora reconecta sozinha (backoff) e volta a acordar — sem erro fatal no meio. */
     @Test
     void aKilledListenConnectionReconnectsAndKeepsWaking() throws Exception {

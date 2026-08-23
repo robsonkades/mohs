@@ -3,9 +3,11 @@ package io.mohs.store.jdbc;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import javax.sql.DataSource;
 
@@ -14,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
 import io.mohs.core.definition.JobDefinition;
@@ -21,8 +24,10 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.WorkQueue;
 import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.dialect.JdbcDialect;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assumptions.assumeThat;
 
 /**
  * {@link JdbcWorkQueue} sobre H2 — a forma portátil do claim (SELECT com
@@ -63,6 +68,47 @@ class JdbcWorkQueueTest {
         assertThat(rawJdbcTemplate.queryForObject(
                 "SELECT state FROM mohs_execution WHERE execution_id = 'exec-member'", String.class)).isEqualTo("FAILED");
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_ready", Integer.class)).isZero();
+    }
+
+    /**
+     * P1 do S6.3, o comportamento CENTRAL: no máximo um {@code notifyReady}
+     * por janela de conflação, carregando TODOS os shards acumulados — é o
+     * que devolve group commit ao enqueue (transação notificante não
+     * participa; BASELINE "Phase 6"). Sem este teste, um refactor que
+     * "simplificasse" a janela voltaria a notificar todo offer com a suíte
+     * verde e reapareceria como "o ingest ficou 2× mais lento".
+     * Determinístico por premissa declarada (JCIP cap. 12): só afirma
+     * supressão se os offers couberam DE FATO numa janela — um stall
+     * (GC/scheduler) entre eles invalida a premissa via assumeThat, não o
+     * teste.
+     */
+    @Test
+    void offersInsideTheConflationWindowProduceASingleNotifyCarryingEveryShard() {
+        List<List<Integer>> notified = new CopyOnWriteArrayList<>();
+        JdbcDialect recording = new JdbcDialect() {
+            @Override
+            public String migrationLocation() {
+                return new H2JdbcDialect().migrationLocation();
+            }
+
+            @Override
+            public void notifyReady(NamedParameterJdbcTemplate jdbcTemplate, Collection<Integer> shards) {
+                notified.add(List.copyOf(shards));
+            }
+        };
+        JdbcWorkQueue conflating = new JdbcWorkQueue(dataSource, recording,
+                new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC)), Clock.fixed(NOW, ZoneOffset.UTC));
+
+        long start = System.nanoTime();
+        conflating.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("exec-w1"), JobKey.of("job-a"), 7, 20, 1, NOW.minusSeconds(1))));
+        conflating.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("exec-w2"), JobKey.of("job-a"), 9, 20, 1, NOW.minusSeconds(1))));
+        long elapsedNanos = System.nanoTime() - start;
+
+        assumeThat(elapsedNanos).isLessThan(50_000_000L);
+        // o PRIMEIRO offer vence a janela e emite só o próprio shard; o
+        // segundo acumula {9} pro próximo vencedor — a supressão é o contrato
+        assertThat(notified).hasSize(1);
+        assertThat(notified.getFirst()).containsExactly(7);
     }
 
     private static DataSource freshH2DataSource() {

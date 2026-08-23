@@ -25,7 +25,13 @@ param(
     # the default 'every-job' is the trivial-handler shape of the Phase 0 numbers.
     [string]$JobKey = 'every-job',
     [string]$Container = 'postgres',
-    [string]$DbUser = 'postgres'
+    [string]$DbUser = 'postgres',
+    # Phase 6 (S6.1): os escritores reais espalham shard = hash(id) % 64 — o
+    # seed uniforme ('uniform', n % 64) é a forma fiel pro binário shardado;
+    # 'zero' preserva a forma pré-Phase-6 (tudo no shard 0) pra A/B com
+    # binário antigo, cujo claim só olha o shard 0.
+    [ValidateSet('uniform', 'zero')]
+    [string]$ShardMode = 'uniform'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,11 +102,12 @@ foreach ($round in 1..$Rounds) {
 
     # Phase 5: a unidade de enqueue do §7.5-1 — história advisory PENDING +
     # entrada na fila (mesma forma do chaos-recovery.ps1)
+    $shardExpr = if ($ShardMode -eq 'uniform') { '(n % 64)' } else { '0' }
     Invoke-Psql ("INSERT INTO mohs_execution (execution_id, job_key, shard, priority, state, scheduled_at, created_at, actor, payload, payload_type) " +
-        "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', 0, 20, 'PENDING', now(), now(), 'anonymous', '{}', " +
+        "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', $shardExpr, 20, 'PENDING', now(), now(), 'anonymous', '{}', " +
         "'java.util.Collections`$UnmodifiableMap' FROM generate_series(1,$SeedSize) n") | Out-Null
     Invoke-Psql ("INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at) " +
-        "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', 0, 20, 1, now() FROM generate_series(1,$SeedSize) n") | Out-Null
+        "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', $shardExpr, 20, 1, now() FROM generate_series(1,$SeedSize) n") | Out-Null
 
     $pending = "SELECT count(*) FROM mohs_execution WHERE execution_id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')"
     $deadline = (Get-Date).AddSeconds($DrainTimeoutSeconds)
