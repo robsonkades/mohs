@@ -90,7 +90,7 @@ class DispatcherTest {
         jobStore = new JdbcJobStore(dataSource, clock);
         JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
         historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
-        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore, clock);
         leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
         handlerRegistry = new HandlerRegistry();
         listener = new RecordingListener();

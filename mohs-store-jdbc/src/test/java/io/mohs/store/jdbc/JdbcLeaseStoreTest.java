@@ -44,7 +44,7 @@ class JdbcLeaseStoreTest {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
         store = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
-        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
+        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore, clock);
         jobStore = new JdbcJobStore(dataSource, clock);
     }
 

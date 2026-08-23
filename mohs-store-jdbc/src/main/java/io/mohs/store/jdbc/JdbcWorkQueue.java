@@ -1,5 +1,6 @@
 package io.mohs.store.jdbc;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.Comparator;
@@ -36,10 +37,12 @@ public final class JdbcWorkQueue implements WorkQueue {
     private final TransactionTemplate claimTransaction;
     private final JdbcDialect dialect;
     private final BatchStore batchStore;
+    private final Clock clock;
 
-    public JdbcWorkQueue(DataSource dataSource, JdbcDialect dialect, BatchStore batchStore) {
+    public JdbcWorkQueue(DataSource dataSource, JdbcDialect dialect, BatchStore batchStore, Clock clock) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
+        this.clock = Objects.requireNonNull(clock, "clock");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.claimTransaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         // §7.5: claim é transação PRÓPRIA, sempre — REQUIRES_NEW torna isso
@@ -81,6 +84,26 @@ public final class JdbcWorkQueue implements WorkQueue {
         jdbcTemplate.batchUpdate(JdbcSupport.READY_INSERT, entries.stream()
                 .map(entry -> JdbcSupport.readyEntryParams(entry, dialect))
                 .toArray(MapSqlParameterSource[]::new));
+        notifyShardsWithDueEntries(entries);
+    }
+
+    /**
+     * Tier 2 do wake-up (§5.5): sinaliza os shards com entrada já DEVIDA —
+     * no-op fora do Postgres; entra na transação do chamador, então o
+     * sinal só existe se o INSERT existir. Futuro fica de fora: acordar
+     * um nó pra uma linha invisível seria um lap perdido (retries nunca
+     * passam por aqui — renascem na conclusão cercada do LeaseStore).
+     */
+    private void notifyShardsWithDueEntries(List<ReadyEntry> entries) {
+        Instant now = clock.instant();
+        List<Integer> dueShards = entries.stream()
+                .filter(entry -> !entry.visibleAt().isAfter(now))
+                .map(ReadyEntry::shard)
+                .distinct()
+                .toList();
+        if (!dueShards.isEmpty()) {
+            dialect.notifyReady(jdbcTemplate, dueShards);
+        }
     }
 
     @Override

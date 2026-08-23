@@ -69,7 +69,7 @@ class ScheduleCommandImplTest {
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
         JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
         JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
-        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
+        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore, clock);
         JdbcLeaseStore leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
         mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
                 new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock,

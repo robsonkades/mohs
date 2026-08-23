@@ -86,11 +86,23 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
       a dona define a política; re-armar viraria busy-spin); o custo da
       manutenção por tick no piso de 25ms é medido no S6.4 (gate da
       fase), não reivindicado aqui.
-- [ ] **S6.3 — NOTIFY Tier-1.** `NOTIFY` no offer (mesma transação, PG);
+- [x] **S6.3 — NOTIFY Tier-1.** `NOTIFY` no offer (mesma transação, PG);
       listener em conexão dedicada com reconexão e shard filter; acorda o
       loop (mesmo sinal do hand-off). Testcontainers PG: latência de
       dispatch cross-"nó" < poll com backoff no teto; queda da conexão de
       LISTEN degrada pro poll sem erro fatal.
+      Executado; driver PG virou compile `<optional>` no mohs-store-jdbc
+      (o listener compila contra PGConnection — padrão actuator).
+      **ACHADO MEDIDO (db-tuner, PG 18 local): `pg_notify` na transação
+      serializa commits notificantes** (AccessExclusiveLock global no
+      notify queue atravessa o flush do WAL — mata group commit): 7,6k →
+      ~510 tps no microbench de enqueue com 32 conexões. Propostas
+      aguardando aprovação: **P1** conflação por shard (só notifica um
+      shard se não notificado na última janela de poll-floor; mantém o
+      sinal em-transação, devolve group commit ao caso comum) ou **P2**
+      emissor pós-commit coalescido (revisão do §5.5, não tuning).
+      Decidir ANTES da bancada do S6.4, que senão mede o caminho
+      serializado.
 - [ ] **S6.4 — Validação e registro.** Bancada ritual (decisão 7):
       idle query rate 1 nó e 4 nós (gate: < 10/s com o backoff no teto);
       p50 dispatch NOTIFY (< 5ms Tier-1); agregado 2–4 nós vs 1 (escala
@@ -101,6 +113,11 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
 
 ## Pendências registradas (com gatilho) — herdadas e novas
 
+- **LISTEN half-open: probe ativo (`SELECT 1` periódico) na conexão
+  dedicada.** O `tcpKeepAlive` já ligado detecta em minutos; o probe
+  detectaria em segundos. **Gatilho:** primeira ocorrência real de tier-2
+  mudo com log "active" (NAT/firewall/failover), ou p50 de dispatch do
+  S6.4 degradando sem queda de conexão logada.
 - **Handler-aware claiming + starvation floor/probe (§5.6/§11.1)** — fase
   própria. **Gatilho:** rolling update real com handler removido
   (retry queimado deixa de ser aceitável), ou starvation de prioridade

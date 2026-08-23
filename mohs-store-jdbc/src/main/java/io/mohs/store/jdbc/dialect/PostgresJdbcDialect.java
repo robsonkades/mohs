@@ -93,4 +93,21 @@ public final class PostgresJdbcDialect implements JdbcDialect {
         return jdbcTemplate.query(CLAIM_READY_FILTERED,
                 params.addValue("inadmissible", inadmissibleJobKeys), ClaimedReady::fromReadyRow);
     }
+
+    /**
+     * {@code pg_notify} em vez de {@code NOTIFY} literal: aceita bind de
+     * parâmetro (o comando NOTIFY não). O Postgres deduplica notificações
+     * idênticas da mesma transação e só entrega no COMMIT — perder por
+     * rollback é o comportamento certo (a entrada também não existe). UM
+     * statement pro conjunto inteiro via {@code unnest}: o offer do firer
+     * com lote grande toca até {@code SHARD_COUNT} shards distintos
+     * (shard = hash do id), e 64 round trips dentro da transação do CAS
+     * custavam ~2,3ms medidos contra 0,14ms desta forma (S6.3 db-tuner).
+     */
+    @Override
+    public void notifyReady(NamedParameterJdbcTemplate jdbcTemplate, Collection<Integer> shards) {
+        // query com callback vazio: pg_notify devolve void — não há valor a ler
+        jdbcTemplate.query("SELECT pg_notify('mohs_ready', s::text) FROM unnest(ARRAY[:shards]::int[]) s",
+                new MapSqlParameterSource("shards", shards), _ -> { });
+    }
 }

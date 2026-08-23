@@ -46,7 +46,7 @@ class JdbcWorkQueueTest {
     void setUp() {
         dataSource = freshH2DataSource();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC)));
+        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC)), Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     /** ADR-0043: membro de lote não rearma — o lote já contou esta falha; re-rodar contaria o desfecho DUAS vezes num lote possivelmente já fechado (mesmo guard do CAS da era anterior). */

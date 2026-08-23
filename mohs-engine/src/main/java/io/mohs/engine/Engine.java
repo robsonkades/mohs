@@ -155,6 +155,15 @@ public final class Engine implements MohsLifecycle {
      * {@code Math.floorMod}.
      */
     private int shardCursor;
+    /**
+     * A posse corrente como bitmask ({@link Shards#maskOf}) — escrita pela
+     * thread do tick, lida pelo filtro do LISTEN ({@link #ownsShard}) em
+     * outra thread: {@code volatile} é publicação segura de um long (JCIP
+     * 3.1; JLS 17.7). Nasce {@code -1} (possui TUDO) de propósito: antes do
+     * primeiro tick a degeneração segura é a mesma de {@link Shards#ownedBy}
+     * — wake a mais é um lap; wake a menos é trabalho esperando o poll.
+     */
+    private volatile long ownedShardsMask = -1L;
     private final RunnerRegistry runnerRegistry;
 
     /**
@@ -465,6 +474,11 @@ public final class Engine implements MohsLifecycle {
         }
     }
 
+    /** O filtro do LISTEN (tier 2, §5.5): um NOTIFY de shard alheio não acorda este loop. Seguro de qualquer thread. */
+    public boolean ownsShard(int shard) {
+        return shard >= 0 && shard < Shards.SHARD_COUNT && (ownedShardsMask & (1L << shard)) != 0;
+    }
+
     /** Acorda o loop agora — de stop/resume e do tier 1 do wake-up (§5.5). Seguro de qualquer thread. */
     void wake() {
         wakeLock.lock();
@@ -525,7 +539,9 @@ public final class Engine implements MohsLifecycle {
             reconcileOwnStrayLeases(now);
             purgeStaleNodeRows();
             boolean fired = fireDueTriggers();
-            int claimed = claimAndDispatch(definitions, Shards.ownedBy(nodeId, shardEligibleNodeIds(nodes, now)));
+            List<Integer> ownedShards = Shards.ownedBy(nodeId, shardEligibleNodeIds(nodes, now));
+            ownedShardsMask = Shards.maskOf(ownedShards);
+            int claimed = claimAndDispatch(definitions, ownedShards);
             return fired || claimed > 0;
         } catch (RuntimeException e) {
             log.error("engine tick failed — will retry next tick", e);

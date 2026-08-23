@@ -76,7 +76,7 @@ class CompletionBatcherTest {
         jobStore = new JdbcJobStore(dataSource, clock);
         JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
         leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
-        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore, clock);
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
     }
 
