@@ -1,6 +1,6 @@
 # PLAN — Phase 6 do redesign: sharding + adaptive poll (ADR-F/G; tier NOTIFY retirado — ADR-0054)
 
-Estado: **em execução (S6.1–S6.3 concluídos)** · Base:
+Estado: **Phase 6 encerrada (S6.1–S6.5)** · Base:
 `ARCHITECTURE_REDESIGN_PLAN.md` §5.4–5.6, §8.3–8.5, §11, §21 (Phase 6),
 ADR-F, ADR-G · Pré-requisitos verdes: Phase 5 completa (97d781a→a6d9956),
 E3 decidido (claim single-shard round-robin 2,21×/2,91×; 64 shards
@@ -101,14 +101,46 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
       tamanho de cluster). Ficam tier 1 (hand-off local) + tier 3 (poll
       adaptativo). Números completos: BASELINE "Phase 6 — S6.1–S6.3 A/B";
       código com a lição da P1 vive no git (2fe9f08/e41ce96).
-- [ ] **S6.4 — Validação e registro.** Bancada ritual (decisão 7):
-      idle query rate 1 nó e 4 nós (gate: < 10/s com o backoff no teto);
-      agregado 2–4 nós vs 1 (escala relativa; S1 de referência re-medido
-      na mesma sessão); E6 re-rodado (S6/SUSPEND — a atribuição de shards
-      muda o reaper? não — reaper é por liveness, mas o requeue
-      re-derivado precisa do chaos verde); BASELINE "Phase 6";
-      ADR-0055 (F, sharding) e ADR-0056 (G, adaptive poll — sem o tier
-      NOTIFY, retirado pela ADR-0054); §21 com resultado.
+- [x] **S6.4 — Validação e registro: dois gates de quatro NÃO passaram, e
+      isso está registrado** (BASELINE "Phase 6 — S6.4", ADR-0055/0056,
+      §21). Bancada nova: `mohs-benchmark/scripts/cluster-scale.ps1`
+      (`-Mode Idle|Latency|Drain`, sobe e derruba N nós sozinho).
+      - **Escala relativa (ADR-F): passa, sublinear.** 1/2/4 nós =
+        6,6k / 9,0k / 15,0k exec/s (1,00× / 1,37× / 2,29×), duas passadas
+        palindrômicas concordando em ~5%. O teto medido não é o claim:
+        CPU do host ≤ 44%, waits em `LWLock:WALWrite` + `IO:WalSync`. O
+        6× do S2 continua lastreado só no E3 — nenhum nó desta bancada
+        sai do mesmo host.
+      - **E6: passa inteiro** no binário shardado (S6 re-execuções = as
+        em voo no kill; SUSPEND 0 dupla-conclusão; S8 0 re-execução,
+        1ª conclusão 259ms após unpause). O shard re-derivado sobrevive
+        ao requeue — o risco da decisão 1.
+      - **Ocioso: NÃO passa.** 96 consultas/s com 1 nó, 109/s com 4,
+        contra gate de < 10/s. 96% é o lap: 64 statements por tick de
+        CLUSTER, invariante em N. **Resolvido no S6.5, abaixo.**
+      - **p50 dispatch < 5ms: NÃO passa** — 25ms com 1 nó, 461ms (p95
+        1,65s) com 4 nós ociosos. Era o número do tier NOTIFY, retirado
+        pela ADR-0054; o hand-off local só acorda o dono do shard (1/N).
+- [x] **S6.5 — O gate ocioso: uma sonda no lugar do lap.** Enquanto a
+      rodada de claim anterior voltou vazia, o tick pergunta UMA vez
+      (`EXISTS` sobre os shards próprios) em vez de dar o lap de 64
+      statements; achou trabalho, o lap roda no MESMO tick — economia,
+      nunca latência. Flag confinada à thread do tick (JCIP 3.3); a
+      sonda é `WorkQueue.hasVisibleWork`, leitura fora da transação de
+      claim (1 round trip, não 3) e com o hint sem lock do dialeto no
+      SQL Server, onde um SELECT simples tomaria shared locks na tabela
+      mais quente — e quem bloquearia é a thread que carrega o heartbeat. **Ocioso 96 → 4,0 consultas/s por nó** (24×); o termo do
+      claim virou 0,5/s por nó = 5/s em 10 nós, exatamente a conta da
+      ADR-G. Latência de dispatch e vazão de drain inalteradas em A/B
+      alternado com n=30 e células adjacentes (BASELINE "Phase 6 —
+      S6.5"). O gate só arma com uma volta COMPLETA e vazia: folga de
+      dispatch esgotada e orçamento de tempo estourado também devolvem
+      zero, e armar neles pagaria uma sonda por tick no caminho quente.
+      E6 re-rodado verde. A sonda tem teste nos
+      QUATRO dialetos: o binding de `IN (:shards)` com dezenas de
+      parâmetros é do driver, não do dialeto, e cada um paga o seu. A
+      isolação explícita por transação de claim (o `SHOW` de 1/3 dos
+      round trips) NÃO entrou junto — ver a pendência revisada abaixo.
 
 ## Pendências registradas (com gatilho) — herdadas e novas
 
@@ -118,6 +150,93 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
   hipótese). Ponto de partida: a forma P1-conflacionada em
   2fe9f08/e41ce96, com as pendências dela (half-open probe, janela ×
   tamanho do cluster) reabertas junto.
+- **As contagens do `/overview` perderam o hint sem lock na Phase 5.**
+  `JdbcHistoryStore#countActiveByState`/`countTerminalOutcomesSince`
+  foram reescritas sobre `mohs_ready`/`mohs_lease`/`mohs_attempt` e não
+  usam mais `JdbcDialect#lockFreeReadHint` — em SQL Server sem RCSI elas
+  voltaram a tomar shared locks nas três tabelas quentes, contra o
+  contrato declarado do endpoint ("monitoramento jamais disputa com o
+  claim"). Achado do review do S6.5; perdido na reescrita da Phase 5,
+  não introduzido aqui. O `GET /overview/stream` herda o mesmo.
+  **Gatilho:** primeiro deployment em SQL Server sem RCSI com dashboard
+  aberto e contenção observada, ou a fase que revisitar o `/overview`.
+- **A sonda ocioso vira Seq Scan no plano GENÉRICO do Postgres quando há
+  backlog não-visível.** Achado do db-tuner no S6.5, medido: o pgjdbc
+  server-prepara a partir da 5ª execução e o Postgres migra pro plano
+  genérico (`generic_plans=7, custom_plans=5` confirmado); sem histograma,
+  `visible_at <= $N` recebe `DEFAULT_INEQ_SEL = 1/3` e o Seq Scan
+  fast-start vence. Com 1M de entradas AINDA NÃO VISÍVEIS (retries em
+  backoff, `at`/`delay` no futuro) e 64 shards: **12.049 buffers / 27,5ms
+  por sonda**, contra **384 buffers / 0,4ms do lap inteiro** que ela
+  substituiu — 31× mais buffers no estado que a bancada do S6.5 não
+  mediu (ela mediu fila vazia, onde a sonda ganha 24×). Penhasco de plano
+  entre 16 e 24 shards no `IN`: **≥4 nós ficam no índice; 1 ou 2 nós caem
+  no Seq Scan** — o pior caso é o deployment mais simples. Nos defaults
+  isso é 27,5ms a cada 2s = 1,4% de uma thread; vira sério só com
+  `max-poll-interval == poll-interval` (54% do orçamento de cada tick com
+  500k de backlog). **Não é o índice**: `(shard, visible_at)` foi medido e
+  não muda o plano (o planner não escolhe Seq Scan por falta de índice, e
+  sim por estimar 1/3), então nenhuma migração entrou. A raiz é o BIND de
+  `:now`: com o instante como literal o plano volta a Index Only Scan
+  (321 buffers / 0,074ms), ao custo de 0,29ms de planejamento por chamada.
+  A variante com `ORDER BY shard, priority, visible_at LIMIT 1` — a
+  hipótese de ancorar o índice sem literal — foi MEDIDA e não funciona: o
+  Postgres descarta a ordenação dentro de `EXISTS`, e o plano sai
+  idêntico (6.025 buffers, 13,2ms contra 13,4ms). **Gatilho:** primeiro
+  deployment com `max-poll-interval == poll-interval` (onde são 54% do
+  orçamento de cada tick, não 1,4% de uma thread) — e nesse caso o
+  counter `mohs.claim.idle_probe` deixa de ser pendência e vira
+  pré-requisito, porque é ele que detecta. O gatilho por
+  `shared_blks_hit/calls` em `pg_stat_statements` fica como sinal
+  secundário: sem métrica no Micrometer, ninguém está olhando pra lá.
+- **Cluster com mais de 64 nós tem nós que nunca reivindicam.**
+  `Shards.ownedBy` devolve lista VAZIA para índice ≥ `SHARD_COUNT`: esses
+  nós heartbeatam, contam na atribuição (encolhendo a fatia dos demais) e
+  nunca claimam. Pré-existente do S6.1. Formas: `WARN` no boot, ou
+  `index % SHARD_COUNT` deliberado. **Gatilho:** primeiro cluster
+  planejado acima de 64 nós — hoje a bancada não passa de 4.
+- **A sonda do gate ocioso não aparece no Micrometer.** Nó com muitos
+  SELECTs de claim e zero dispatch (o modo degradado logo abaixo) só é
+  diagnosticável do lado do banco: `mohs.claim.latency`/
+  `mohs.claim.batch.size` somem quando o gate arma e nada nasce no lugar.
+  Forma: counter `mohs.claim.idle_probe{outcome=empty|work}` no padrão de
+  counters pré-registrados que o `EngineMetrics` já usa. **Gatilho:**
+  primeira investigação real de "o nó está vivo mas não processa".
+- **A sonda do gate ocioso não aplica o filtro de inadmissíveis.** Ela
+  pergunta "existe entrada visível nos meus shards?"; o lap reivindica
+  com o filtro. Modo degradado consequente: se as ÚNICAS entradas
+  visíveis forem de jobs inadmissíveis (rate limit sem saldo, janela
+  fechada, handler ausente), a sonda responde `true` todo tick, o lap
+  roda, reivindica 0 e o gate não desarma — custo = pré-S6.5 + 1
+  statement por tick. Não é regressão (é exatamente o comportamento
+  anterior) nem risco de correção. **Nota de 3 da manhã:** um nó com
+  muitos SELECTs de claim e zero dispatch é ISTO, não fila suja.
+  **Gatilho:** aparecer numa bancada, ou reclamação de custo ocioso num
+  cluster com rate limit saturado.
+- **O tick de manutenção são 7 statements, e agora ele É o custo ocioso.**
+  Depois do S6.5 o claim ocioso custa 1 sonda por tick; o que sobra são
+  heartbeat, `SELECT * FROM mohs_nodes`, duas varreduras de lease, duas
+  de definições e o purge de nós mortos — ~3,5 consultas/s por nó, o que
+  faz 10 nós ociosos extrapolarem para ~40/s contra o <10/s do gate
+  literal do §21. Anterior à Phase 6 e fora do escopo dela. Formas na
+  mesa: fundir as duas leituras de definições, e espaçar purge/reconcile
+  por N ticks em vez de todo tick. **Gatilho:** requisito real de custo
+  ocioso num cluster grande, ou banco cobrado por consulta.
+- **`SHOW TRANSACTION ISOLATION LEVEL` por transação de claim.** O
+  `setIsolationLevel(READ_COMMITTED)` explícito de `JdbcWorkQueue`
+  (DBTUNE-4, existe pelo MySQL RR) faz o Spring ler a isolação corrente e
+  o pgjdbc gastar um round trip — em Postgres e SQL Server, cujo default
+  já é READ COMMITTED, é 1/3 dos statements do claim confirmando o
+  óbvio. **Avaliado no S6.5 e NÃO feito**, de propósito: (a) com o lap
+  ocioso morto, o que restava era ~1 round trip por tick ocioso e ~1 por
+  sonda sob carga, contra um teto que é fsync de WAL — ganho não
+  mensurável hoje; (b) trocar por um flag de dialeto perde a garantia
+  atual, que vale contra a configuração do DataSource e não contra o
+  default do banco (um `spring.datasource.hikari.transaction-isolation`
+  diferente passaria a valer para o claim em silêncio). A forma que
+  preservaria a garantia é ler a isolação real do DataSource UMA vez e só
+  então decidir. **Gatilho:** medição que mostre o round trip pesando
+  sob carga.
 - **Handler-aware claiming + starvation floor/probe (§5.6/§11.1)** — fase
   própria. **Gatilho:** rolling update real com handler removido
   (retry queimado deixa de ser aceitável), ou starvation de prioridade
@@ -141,9 +260,24 @@ A Phase 5 encerrada vive no histórico do git (PLAN.md até a6d9956).
   Mitigada nesta fase pelo ritual da decisão 7; bancada dedicada segue
   pendente. **Gatilho:** gate de vazão que o ritual não estabilizar.
 
-## Gate da fase (do plano, com a leitura da decisão 7)
+## Gate da fase — veredito (S6.4 medido, S6.5 corrigido — 2026-08-23)
 
-Idle query rate < 10/s por cluster ocioso · p50 dispatch < 5ms (Tier-1,
-NOTIFY) · escala relativa multi-processo positiva e próxima de linear no
-que a bancada permitir (shape 6× fica lastreado no E3) · suíte + E6
-verdes.
+| Critério | Alvo | S6.4 | S6.5 | |
+|---|---|---|---|---|
+| Idle query rate | < 10/s num cluster de 10 nós | 96/s (1 nó) · 109/s (4) | **4,0/s por nó** · 16/s (4) · ~40/s extrapolado pra 10 | ⚠️ |
+| p50 dispatch (ocioso) | < 5ms (era do tier NOTIFY) | 25ms (1 nó) · 461ms (4) | inalterado | ❌ |
+| Escala relativa multi-processo | positiva, ~linear no que a bancada der | 1,37× (2 nós) · 2,29× (4); teto = fsync do WAL | inalterado | ✅ |
+| Suíte + E6 | verdes | passam | passam | ✅ |
+
+O ❌ que resta é consequência direta da ADR-0054: sem o tier NOTIFY, um
+enqueue num cluster OCIOSO só é imediato se quem o recebeu for o dono do
+shard (1/N) — os outros esperam o poll do dono, limitado por
+`max-poll-interval`. Sob tráfego o backoff fica no piso e o efeito some.
+O gatilho de retorno do NOTIFY está registrado acima.
+
+Sobre o ⚠️ do ocioso: o alvo do §21 é por CLUSTER de 10 nós, e reler
+como "por nó" depois de medir seria mover a trave — o mesmo S6.4 recusou
+fazer isso com o gate de latência. O que é fato: o termo que ESTA fase
+controla, o do claim, bateu na mosca (0,5/s por nó = os ~5/s em 10 nós da
+conta da ADR-G), e os ~35/s que faltam pro alvo são o tick de manutenção,
+anterior à fase e com pendência própria. Por nó o número está em 4,0/s.

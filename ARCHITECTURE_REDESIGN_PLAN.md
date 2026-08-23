@@ -2632,6 +2632,47 @@ phase depends on a later phase to be correct.
 - **Risk.** Low. `SHARD_COUNT=1` is a no-op; `NOTIFY` is best-effort by construction.
 - **Validation.** S2 ≥ 6× S1; idle query rate < 10/s at 10 nodes; p50 dispatch < 5 ms.
 - **Rollback.** Two properties.
+- **Result (2026-08-23, ADRs 0054/0055/0056; BASELINE "Phase 6 — S6.1–S6.3 A/B",
+  "Phase 6 — S6.4" and "Phase 6 — S6.5"):** delivered. Two of the four validation
+  criteria were missed on first measurement; one was improved 24× and its remaining
+  gap attributed (S6.5), the other is recorded rather than papered over.
+  - Sharding did what ADR-F promised: relative scale 1 → 2 → 4 node processes is
+    6.6k → 9.0k → 15.0k exec/s (1.00× / 1.37× / 2.29×), and the remaining ceiling is
+    *not* the claim — host CPU ≤ 44%, PostgreSQL waits are `LWLock:WALWrite` +
+    `IO:WalSync` throughout. The claim stopped being the bottleneck; WAL fsync on a
+    single instance is the new one. **S2 ≥ 6× S1 is not reachable on this bench**
+    (every node is a process on one host against one instance) and stays backed by
+    E3 alone.
+  - The adaptive poll delivered its own term: measured tick period 2.07 s with the
+    backoff at the ceiling, and dispatch p50 **25 ms** on a single idle node against
+    ~2.5 s under the old fixed 5 s poll.
+  - **`NOTIFY` was implemented, measured and withdrawn** (ADR-0054): `pg_notify`
+    inside the enqueue transaction does not participate in group commit and halved
+    REST ingest. Tiers 1 and 3 remain.
+  - **Idle query rate: 24× better after S6.5, still short of the literal gate.**
+    The target in §21 is per CLUSTER of ten nodes; rereading it as "per node" after
+    measuring would be moving the goalposts. The first measurement
+    was 96 queries/s at 1 node and 109/s at 4, against a < 10/s gate — 96% of it the
+    64-probe lap, because the idle claim cost 64 statements per *cluster* tick
+    regardless of node count (ADR-G's "~5/s at 10 nodes" counted one claim statement
+    per tick). S6.5 replaced the idle lap with a single `EXISTS` probe while the
+    previous round came back empty: **4.0 queries/s per node**, 16/s across four,
+    and the claim term itself is now 0.5/s per node — 5/s at ten nodes, exactly
+    ADR-G's figure. Dispatch latency and drain throughput are unchanged in an
+    alternating A/B (BASELINE "Phase 6 — S6.5"). What is left in the idle cost is the
+    seven-statement maintenance tick, which predates Phase 6 and is registered on its
+    own; it is what makes ten idle nodes extrapolate to ~40 queries/s rather than <10.
+    Per node the figure is 4.0/s.
+  - **Missed: p50 dispatch < 5 ms.** 461 ms p50 / 1.65 s p95 on a 4-node *idle*
+    cluster — the local hand-off only wakes the node that owns the shard (1/N), and
+    the rest wait for the owner's poll. That gate was the `NOTIFY` tier's number and
+    died with it; under traffic the backoff sits at the 25 ms floor and the effect
+    disappears.
+  - E6 re-ran green on the sharded binary (S6: re-executions exactly = in-flight at
+    kill; SUSPEND: 0 double-completions; S8: 0 re-runs, first completion 259 ms after
+    unpause) — the re-derived shard survives requeue, which was the risk of deriving
+    it instead of carrying it.
+    E6 ran green again on the S6.5 binary.
 
 ### Phase 7 — Rate-limit token leasing + circuit breaker *(1 sprint)*
 

@@ -1289,6 +1289,293 @@ Leituras:
   contratado pela ADR-G, agora com o custo do caminho notificante
   limitado por construção.
 
+## Phase 6 — S6.4: os gates da fase, medidos — 2026-08-23
+
+Bancada: Postgres 18.4 em Docker (Rancher recém-reiniciado, ritual da
+decisão 7 do PLAN.md), host de 24 threads/32 GB, todos os nós como
+processos JVM no MESMO host. Config **por nó** constante em toda a
+matriz (`poll=25ms`, `max-poll=2s`, `batch=1000`, `dispatch=1024`,
+eventos 256, Hikari **100** — 4×100 cabe no `max_connections=500` do
+container; o ponto de operação das fases anteriores usava 300 num nó só,
+então o número absoluto de 1 nó aqui é MENOR que o do S6.1–S6.3 de
+propósito: o que esta seção mede é a razão entre células, não o teto).
+Script: `mohs-benchmark/scripts/cluster-scale.ps1`.
+
+### Gate 1 — taxa de consulta com o cluster OCIOSO: **NÃO PASSA**
+
+Ocioso de verdade: todas as definições pausadas (o `every-job` PT1S do
+demo mediria outra coisa), 20 s de espera pro backoff estacionar no teto,
+janela de 60 s, contagem por `pg_stat_statements`.
+
+| Nós | Período do tick | Consultas/s (cluster) | Consultas/s (por nó) | Transações/s |
+|---:|---:|---:|---:|---:|
+| 1 | 2,07 s | **96,0** | 96,0 | 65,8 |
+| 4 | 2,01 s | **108,8** | 27,2 | 79,3 |
+
+Gate do plano (§21): < 10/s. Erra por ~10×. A atribuição diz exatamente
+onde, e não é ambígua:
+
+- **O lap de sondas é 96% do custo ocioso.** 1 nó: 1.856 sondas em 29
+  ticks = 64 por tick — o lap inteiro, como projetado. 4 nós: 1.909 em
+  120 ticks = 16 por tick por nó. Ou seja, o lap custa **64 statements
+  por tick de cluster, independentemente do número de nós** — o custo
+  ocioso do claim é constante em N, e é a manutenção (3,4 consultas/s por
+  nó) que cresce linearmente.
+- **Cada sonda são 3 round trips, não 1**: `BEGIN`, `SHOW TRANSACTION
+  ISOLATION LEVEL` e a CTE do claim (1.856 chamadas de cada, exatamente).
+  O `SHOW` é consequência do `setIsolationLevel(READ_COMMITTED)`
+  explícito em `JdbcWorkQueue` (DBTUNE-4, para o MySQL, que é RR por
+  default): quando a `TransactionDefinition` pede isolação explícita, o
+  Spring lê a isolação corrente da conexão e o pgjdbc responde com um
+  round trip — em Postgres, cujo default JÁ é READ COMMITTED, é um terço
+  do tráfego ocioso do claim gasto para confirmar o que já valia.
+- A ADR-G prometeu "cluster ocioso de 10 nós: 200 consultas/s → ~5". Essa
+  conta era **um statement de claim por tick**; o lap multiplicou o termo
+  do claim por 64. Nenhum outro termo da conta mudou nesta fase.
+
+### Gate 2 — latência de dispatch num cluster ocioso: **NÃO PASSA**
+
+Uma execução on-demand por vez pelo REST do nó 0, espaçadas 7 s (25 ms
+dobrando até 2 s leva ~5 s: menos que isso e a sonda mede o loop ainda
+acelerado pela sonda anterior). Latência = `scheduled_at → started_at`.
+
+| Nós | p50 | p95 | máx | n |
+|---:|---:|---:|---:|---:|
+| 1 | **25,3 ms** | 59,8 ms | 65,5 ms | 15 |
+| 4 | **461,3 ms** | 1.649 ms | 1.852 ms | 20 |
+
+Gate do plano: p50 < 5 ms. A atribuição por nó despachante, com 4 nós,
+mostra o mecanismo inteiro em duas linhas:
+
+| Nó | Despachou | p50 |
+|---|---:|---:|
+| o que recebeu o POST | 6 de 20 | **25,2 ms** |
+| os outros três | 14 de 20 | 504 · 612 · 844 ms |
+
+O hand-off local (tier 1) entrega os mesmos ~25 ms do nó único — mas só
+quando quem recebeu o enqueue é o dono do shard sorteado, o que é 1/N por
+construção. Os outros N−1/N esperam o poll do dono: uniforme em [0,
+`max-poll-interval`]. **É o preço da retirada do NOTIFY (ADR-0054),
+agora com número:** num cluster ocioso de 4 nós, 70% dos enqueues pagam
+meio segundo de p50 e até 1,85 s de cauda. Sob carga o efeito some (o
+backoff fica no piso de 25 ms), e é por isso que a retirada continua
+certa para quem tem tráfego — o custo é exatamente o cenário ocioso
+multi-nó que a ADR-0054 declarou não ter dono.
+
+### Gate 3 — escala relativa multi-processo: **PASSA, sublinear**
+
+Drains de 50k, shard uniforme, 4 rodadas por célula (a 1ª é warmup e sai
+do registro), `TRUNCATE` da história entre células e ordem palindrômica
+(1-2-4-4-2-1) pra que a deriva de sessão atinja as duas passadas
+igualmente. Mediana das 3 rodadas quentes:
+
+| Nós | Passada A | Passada B | Mediana | Escala |
+|---:|---:|---:|---:|---:|
+| 1 | 6.717 | 6.400 | **6,6k/s** | 1,00× |
+| 2 | 8.962 | 9.019 | **9,0k/s** | **1,37×** |
+| 4 | 14.898 | 15.176 | **15,0k/s** | **2,29×** |
+
+As duas passadas concordam dentro de ~5% por célula — a ordem
+palindrômica e a espera pelos backends fecharem (abaixo) foi o que
+estabilizou. Uma matriz anterior da mesma sessão, com a bancada ainda
+mais fria, deu 9,0k / 18,0k / 24,9k (2,00× / 2,76×): a razão é sempre
+positiva e crescente, o valor absoluto é o que a bancada não segura.
+Com seed de 200k, 4 nós fazem **22,8k/s**.
+
+Atribuição do teto, amostrada durante o drain de 4 nós: CPU do host ≤
+44% de 24 threads (não é o host), e os waits do Postgres são
+`LWLock:WALWrite` + `IO:WalSync` em toda a janela ativa — **o teto é o
+fsync do WAL de uma instância única**, a mesma parede das Phases 3 e 5.
+O sharding entregou o que a ADR-F prometeu (o claim deixou de ser o
+gargalo); o que impede a linearidade não está no engine.
+
+### Gate 4 — E6 (chaos) no binário shardado: **PASSA**
+
+Re-rodado inteiro sobre o sharding + loop adaptativo, `node-lease-ttl`
+15 s, seed de 50k, gatilho em 40% drenado
+(`chaos-recovery.ps1`):
+
+| Cenário | Resultado |
+|---|---|
+| **S6** (kill −9) | 50.000 terminais; re-execuções 827 = EXATAMENTE as RUNNING no kill; 0 fora disso; kill→fim 19,6 s (onda de reclaim 15,4 s após o kill — o piso do lease); 0 linhas de exceção |
+| **SUSPEND** | 50.000 terminais; 244 reclamadas enquanto congelado; **0 dupla-conclusão** (o fence de posse descartou todo zumbi); 1 WARN de bump de epoch no resume; resume→fim 14,6 s |
+| **S8** (pausa de 30 s do banco) | 50.000 terminais; **0 re-execuções**; 1ª conclusão 259 ms após o unpause; 24.109 conclusões nos 10 s seguintes; 0 exceções |
+
+O requeue com shard RE-DERIVADO (decisão 1 do PLAN.md) sobrevive ao
+chaos: nada apodreceu numa partição que ninguém sonda.
+
+### Achados de bancada (metodologia, não do produto)
+
+- **Matar o processo não fecha os backends do Postgres na hora.** Uma
+  célula de 4 nós deixa até 400 conexões morrendo; a célula seguinte
+  pedia as suas por cima do `max_connections=500` e saía degradada — uma
+  passada inteira da matriz (2 nós a 10k contra 18k) foi isso, não o
+  produto. O script agora espera os backends drenarem entre células.
+- **A história retida cobra o drain.** Sem `TRUNCATE` entre células, a
+  última célula da matriz mede uma base maior que a primeira e a
+  comparação vira ordem de execução.
+
+### Limitações declaradas
+
+- Todos os "nós" são processos no MESMO host, contra a MESMA instância
+  de Postgres: o experimento mede partição de trabalho e contenção de
+  banco, **não** rede, nem NUMA, nem falha de zona. A escala 6× do gate
+  S2 do plano continua lastreada só no E3 (micro, 64 shards, 8
+  claimers) — nenhuma bancada aqui a alcança.
+- Hikari 100 por nó (não os 300 do ponto de operação das fases
+  anteriores) para caber 4 nós no `max_connections`: o absoluto de 1 nó
+  aqui não é comparável ao das seções anteriores, só as razões entre
+  células desta.
+- Dispersão entre sessões continua real (~35% entre a primeira matriz e
+  a palindrômica, na mesma hora, com a mesma config). O ritual da
+  decisão 7 estabilizou a comparação DENTRO da sessão, não entre elas.
+- A latência de dispatch foi medida com n=15/20 — o suficiente pra p50 e
+  pra atribuição por nó, não pra uma cauda p99.
+
+
+## Phase 6 — S6.5: o gate ocioso, medido A/B — 2026-08-23
+
+Mesma bancada e mesma sessão do S6.4 (script `cluster-scale.ps1`), com
+A/B de binários ALTERNADO — o pré-S6.5 foi reconstruído e re-medido
+depois do pós, porque a sessão já tinha derivado ~20% e comparar contra
+os números da manhã seria comparar horários, não código.
+
+A mudança: enquanto a rodada de claim anterior voltou vazia, o tick
+pergunta UMA vez `SELECT CASE WHEN EXISTS (… shard IN (próprios) AND
+visible_at <= now)` em vez de dar o lap de 64 statements. Achou trabalho,
+o lap roda no MESMO tick.
+
+### O ocioso: 96 → 4,0 consultas/s por nó
+
+| Nós | Antes (S6.4) | Depois (S6.5) | |
+|---:|---:|---:|---|
+| 1 | 96,0/s | **4,02/s** | 24× menos |
+| 4 (cluster) | 108,8/s | **15,99/s** | 6,8× menos |
+| 4 (por nó) | 27,2/s | **4,00/s** | |
+
+A atribuição depois é oito statements por tick, todos a 0,50/s com o
+backoff no teto: o heartbeat, `SELECT * FROM mohs_nodes`, as duas
+varreduras de lease, as duas de definições, o purge de nós mortos — e
+**um** probe. O termo que a ADR-G projetava ("cluster ocioso de 10 nós:
+~5 consultas/s") era exatamente o do claim, e ele agora é 0,5/s por nó:
+5/s em 10 nós, na mosca.
+
+O que sobra é o tick de manutenção — 7 statements por tick por nó, ~3,5
+consultas/s, **anterior à Phase 6 e intocado por ela**. É o que faz um
+cluster de 10 nós ociosos extrapolar para ~40 consultas/s em vez dos <10
+do gate literal do §21. Registrado como pendência própria no PLAN.md; não
+é dívida do sharding nem do poll adaptativo.
+
+Custo do probe: 0,006–0,010 ms de média server-side (`pg_stat_statements`)
+— dentro do ruído de um round trip.
+
+### O plano da sonda (Postgres 18.4, `mohs_ready` com 200k entradas)
+
+O caso que importa não é a fila cheia — é a fila cheia **dos outros**:
+os 16 shards deste nó vazios, 150k entradas nos shards alheios. O
+`EXISTS` é um Index Only Scan sobre `idx_mohs_ready_claim`
+`(shard, priority, visible_at)`:
+
+| Estado | Plano | Tempo | Buffers |
+|---|---|---:|---:|
+| 200k na fila, shards próprios COM trabalho | Seq Scan curto-circuitado no 1º acerto | 0,025 ms | 2 |
+| 150k na fila, shards próprios VAZIOS, pós-`VACUUM` | Index Only Scan, `Heap Fetches: 0` | 0,031 ms | 11 |
+| idem, com 50k tuplas MORTAS nos shards próprios | Index Only Scan, `Heap Fetches: 50000` | 10,45 ms | 38.607 |
+
+A terceira linha é a propriedade da tabela sob churn, não da sonda: como
+`visible_at` não é prefixo do índice depois de `shard` (a prioridade está
+no meio), provar a AUSÊNCIA percorre as entradas de índice dos shards
+próprios — e antes do `VACUUM` cada uma custa uma visita à heap. É
+**one-shot**, não por tick: repetindo o `EXPLAIN` na mesma sessão, o
+`kill_prior_tuple` marca as entradas como `LP_DEAD` e a 2ª execução já
+cai para `Heap Fetches: 0`, 61 buffers, 0,118 ms — 42× menos, sem
+`VACUUM` nenhum.
+
+### O estado que estas três linhas NÃO cobrem, e onde a sonda perde
+
+Os três planos acima são **custom** (`EXPLAIN` ad-hoc com literais).
+Produção roda o plano **genérico**: o pgjdbc server-prepara a partir da
+5ª execução (`prepareThreshold=5`, sem override no repositório) e a sonda
+executa uma vez por tick — `pg_prepared_statements` confirma a migração
+(`generic_plans=7, custom_plans=5`). No genérico, `visible_at <= $N` não
+tem histograma, o planner aplica `DEFAULT_INEQ_SEL = 1/3` e o Seq Scan
+fast-start vence. Com backlog **não-visível** (retries em backoff,
+`at`/`delay` no futuro) e 64 shards:
+
+| Backlog não-visível | Plano | Buffers | Tempo |
+|---:|---|---:|---:|
+| 1.000 | Index Only Scan | 1 | 0,008 ms |
+| 10.000 | **Seq Scan** | 121 | 0,29 ms |
+| 200.000 | **Seq Scan** | 2.410 | 5,53 ms |
+| 1.000.000 | **Seq Scan** | 12.049 | 27,5 ms |
+
+**Neste estado o lap que a sonda substituiu é mais barato**: `shard = :shard`
+é igualdade única e o `ORDER BY priority, visible_at LIMIT` ancora o
+índice — 6 buffers por shard, **384 buffers e ~0,4 ms pelo lap inteiro de
+64**, contra 12.049 buffers e 27,5 ms da sonda. 31× mais buffers, ~70×
+mais CPU de banco. Há ainda um penhasco de plano entre 16 e 24 shards no
+`IN`: **≥4 nós ficam no índice; 1 ou 2 nós caem no Seq Scan** — o pior
+caso é o deployment mais simples.
+
+Não é falta de índice: `(shard, visible_at)` foi medido e o plano não
+muda (o planner não escolhe Seq Scan por falta de caminho, e sim por
+estimar 1/3 das linhas), então nenhuma migração entrou. Também não é a
+falta de `ORDER BY`: a variante `… AND visible_at <= $65 ORDER BY shard,
+priority, visible_at LIMIT 1`, que ancoraria o índice sem literal, foi
+medida e dá o **plano idêntico** — 6.025 buffers, 13,2 ms contra 13,4 ms
+do original, com 500k não-visíveis. O Postgres descarta a ordenação
+dentro de `EXISTS`, onde ela é semanticamente irrelevante. A raiz é o
+BIND de `:now` — com o instante como literal o plano volta a Index Only
+Scan (321 buffers, 0,074 ms), ao custo de 0,29 ms de planejamento por
+chamada.
+
+Ordem de grandeza do dano nos defaults: 27,5 ms a cada 2 s = **1,4% de
+uma thread** e ~6.000 buffer hits/s. Tolerável, e é por isso que a troca
+fica de pé. Vira sério com `max-poll-interval == poll-interval` (o
+formato pré-Phase-6, suportado): a 25 ms fixos com 500k de backlog são
+13,4 ms por tick — 54% do orçamento. Pendência com gatilho no PLAN.md.
+
+**O A/B abaixo mediu a fila VAZIA**, que é onde a sonda ganha 24×. O
+estado de backlog não-visível não foi medido fim a fim — só por plano.
+
+### O que NÃO mudou (o ponto do A/B)
+
+| Métrica | Pré-S6.5 | Pós-S6.5 |
+|---|---:|---:|
+| Latência de dispatch, 1 nó ocioso (p50, n=30) | 41,1 ms | 35,3 ms |
+| idem (p95) | 54,9 ms | 58,4 ms |
+| Drain 50k, 1 nó (rodadas quentes) | 12,2–12,7 k/s | 12,3–12,6 k/s |
+| Drain 50k, 4 nós (mesma janela de sessão) | 20,0 · 22,3 · 20,3 k/s | 19,3 · 24,3 · 20,7 · 21,3 k/s |
+
+A latência **não** regrediu: as duas medições estão dentro da dispersão
+da bancada, e a n=15 da manhã (p50 25,3 ms) mostrou que com 15 amostras a
+mediana desta distribuição é instável — por isso o A/B usou n=30 dos dois
+lados. A vazão não regrediu. A explicação que eu tinha escrito aqui — "por
+construção o probe não roda sob carga, porque todo tick de um drain
+reivindica" — é forte demais: `claimLaps` devolve zero também com a folga
+de dispatch esgotada ou o orçamento de tempo estourado, e nesses casos a
+flag armaria. O S6.5 fechou isso no código (só uma volta COMPLETA e vazia
+arma o gate), mas o registro honesto do A/B é o medido: **nesta bancada,
+com este workload, o probe não apareceu no caminho quente**.
+
+### E6 re-rodado no binário do S6.5: passa
+
+S6: 50.000 terminais, 286 re-execuções = exatamente as RUNNING no kill, 0
+fora disso. SUSPEND: 61 reclamadas enquanto congelado, **0
+dupla-conclusão**, 1 bump de epoch. S8: **0 re-execuções**, 1ª conclusão
+196 ms após o unpause, 27.002 conclusões nos 10 s seguintes. Zero linhas
+de exceção nos três.
+
+### Limitações declaradas
+
+- A sessão derivou ~20% entre a matriz da manhã (4 nós a ~25,6k) e a da
+  tarde (~20,5k nos DOIS binários). Todo par A/B aqui foi medido em
+  janelas adjacentes por isso; nenhum número desta seção deve ser
+  comparado com os absolutos da seção S6.4.
+- Uma célula da repetição de 4 nós colapsou para 1,6–8 k/s (parada de
+  ambiente, não do código) e foi descartada — a repetição seguinte, sem
+  nenhuma mudança, voltou a ~21k.
+
 ## Como reproduzir
 
 Os harnesses da era da tabela única (TableSplitExperiment, ClaimQueryLoad/
@@ -1306,6 +1593,21 @@ ar (boot manual: `java -cp "target/classes;$(cat target/cp.txt)"
 io.mohs.MohsApplication` + overrides de datasource/engine — ponto de
 operação da Phase 5 na seção acima); `-JobKey slow-job` para o workload
 renewal-heavy da Phase 4.
+
+Gates da Phase 6 — ocioso, latência de dispatch e escala relativa (o
+script sobe e derruba os N nós sozinho, portas 8080+; `pwsh`):
+
+```
+pwsh mohs-benchmark/scripts/cluster-scale.ps1 -Mode Idle    -Nodes 4
+pwsh mohs-benchmark/scripts/cluster-scale.ps1 -Mode Latency -Nodes 4 -Reset
+foreach ($n in 1,2,4,4,2,1) {
+  pwsh mohs-benchmark/scripts/cluster-scale.ps1 -Mode Drain -Nodes $n -Rounds 4 -Reset
+}
+```
+
+`-Reset` trunca fila e história entre células (sem ele a última mede uma
+base maior que a primeira); a ordem palindrômica é o que neutraliza a
+deriva de sessão.
 
 Chaos S6/S8/SUSPEND (portado pro split no S5.3; o script sobe e
 mata/congela o app sozinho; portas 8080/8081 livres; rodar com `pwsh`,
