@@ -21,12 +21,18 @@ export const API_BASE = "/api/mohs/v1";
 export const UI_BASE = "/mohs-ui";
 
 export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
+  /**
+   * A field and an assignment rather than a `readonly status` parameter property: parameter
+   * properties are the one piece of TypeScript that cannot be erased by stripping types, so they
+   * are rejected under `erasableSyntaxOnly` — the flag that keeps this source transpilable by
+   * anything that only deletes annotations (esbuild's fast path, Node's own type stripping).
+   */
+  readonly status: number;
+
+  constructor(status: number, message: string) {
     super(message);
     this.name = "ApiError";
+    this.status = status;
   }
 }
 

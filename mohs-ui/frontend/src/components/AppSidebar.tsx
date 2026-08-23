@@ -10,7 +10,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { IconActivity, IconClock, IconGauge, IconListChecks, IconServer, IconTicks } from "@/components/icons";
+import { IconActivity, IconClock, IconGauge, IconListChecks, IconServer, IconTicks } from "@/components/Icons";
 
 export const NAV_ITEMS = [
   { to: "/", label: "Overview", icon: IconGauge, subtitle: "Cluster health at a glance" },

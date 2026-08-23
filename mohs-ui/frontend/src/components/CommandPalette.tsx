@@ -3,7 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { fetchJobs } from "../lib/api";
 import { queryKeys } from "../lib/queryKeys";
-import { NAV_ITEMS } from "@/components/app-sidebar";
+import { NAV_ITEMS } from "@/components/AppSidebar";
 import {
   Command,
   CommandDialog,

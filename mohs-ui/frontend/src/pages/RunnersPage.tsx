@@ -3,10 +3,11 @@ import { fetchNodes, fetchRunners } from "../lib/api";
 import { queryKeys } from "../lib/queryKeys";
 import { EmptyState, ErrorState, Spinner } from "../components/Feedback";
 import { Panel } from "../components/Panel";
+import { PageStack, StatGrid } from "../components/Layout";
 import { StatCard } from "../components/StatCard";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { IconServer } from "../components/icons";
+import { UtilizationBar, utilizationTone } from "../components/UtilizationBar";
+import { IconServer } from "../components/Icons";
 import type { RunnerResponse } from "../types/api";
 
 /**
@@ -20,9 +21,6 @@ function loadPercent(runner: RunnerResponse): number {
   }
   return Math.min(100, Math.max(0, (runner.running / runner.max) * 100));
 }
-
-/** Past the ceiling the bar is pinned at 100%, so saturation has to be said in another channel — otherwise 8/8 and 503/8 draw the same picture, and the queue we chose to count becomes invisible. */
-const OVERLOADED = "bg-destructive/20 [&>[data-slot=progress-indicator]]:bg-destructive";
 
 function RunnerRow({ runner }: { runner: RunnerResponse }) {
   // Fila é conceito do modo CPU. No IO não há nada entre aceitar e executar — se running
@@ -44,7 +42,17 @@ function RunnerRow({ runner }: { runner: RunnerResponse }) {
           <span className="text-muted-foreground"> / {runner.max}</span>
         </span>
       </div>
-      <Progress value={loadPercent(runner)} className={queued > 0 ? OVERLOADED : undefined} />
+      {/*
+        Past the ceiling the bar is pinned at 100%, so saturation has to be said in another
+        channel — otherwise 8/8 and 503/8 draw the same picture and the queue we chose to count
+        becomes invisible. The tone is forced to critical when there IS a queue, rather than
+        letting the clamped percentage decide.
+      */}
+      <UtilizationBar
+        percent={loadPercent(runner)}
+        label={`${runner.name} occupancy`}
+        tone={queued > 0 ? "critical" : utilizationTone(loadPercent(runner))}
+      />
       {queued > 0 ? (
         <p className="text-xs font-medium text-destructive">
           {queued} waiting in the queue — this runner is accepting faster than it drains.
@@ -86,12 +94,12 @@ export function RunnersPage() {
   const totalCapacity = data.reduce((sum, runner) => sum + runner.max, 0);
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+    <PageStack>
+      <StatGrid columns={4}>
         <StatCard
           label="Runners"
           value={runners.isPending ? "…" : data.length}
-          icon={<IconServer className="h-4 w-4" />}
+          icon={<IconServer className="size-4" />}
           accent
         />
         <StatCard label="In flight" value={runners.isPending ? "…" : totalRunning} />
@@ -100,7 +108,7 @@ export function RunnersPage() {
           label="Nodes in cluster"
           value={nodes.isPending ? "…" : (nodes.data?.length ?? 0)}
         />
-      </div>
+      </StatGrid>
 
       <Panel title="Runners on this node">
         <p className="pb-3 text-xs text-muted-foreground">
@@ -124,6 +132,6 @@ export function RunnersPage() {
           </ul>
         )}
       </Panel>
-    </div>
+    </PageStack>
   );
 }

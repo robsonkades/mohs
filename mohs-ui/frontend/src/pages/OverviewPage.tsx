@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { fetchExecutions, fetchJobs, fetchNodes, fetchOverview } from "../lib/api";
@@ -6,8 +6,8 @@ import { queryKeys } from "../lib/queryKeys";
 import { STREAM_OVERVIEW_WINDOW } from "../lib/useLiveUpdates";
 import { StatCard } from "../components/StatCard";
 import { Panel } from "../components/Panel";
+import { PageStack, StatGrid } from "../components/Layout";
 import { BarBreakdown, type BreakdownRow } from "../components/BarBreakdown";
-import { ExecutionActivityChart } from "../components/ExecutionActivityChart";
 import { EmptyState, ErrorState, Spinner } from "../components/Feedback";
 import { EngineStateBadge, ExecutionStateBadge, JobPausedBadge, StatusBadge } from "../components/Badge";
 import { formatDuration, relativeTime, shortId } from "../lib/format";
@@ -20,8 +20,20 @@ import {
   IconGauge,
   IconListChecks,
   IconServer,
-} from "../components/icons";
+} from "../components/Icons";
 import { LIVE_STATES, type JobResponse } from "../types/api";
+
+/**
+ * Recharts is the single heaviest thing this dashboard ships, and it is used by exactly one panel
+ * on one route. Deferring it lets the overview paint its cards and lists immediately and stream
+ * the chart in behind them. The fallback is the SAME height as the chart, so the arrival swaps
+ * pixels in place instead of pushing the page down.
+ */
+const ExecutionActivityChart = lazy(() =>
+  import("../components/ExecutionActivityChart").then((module) => ({ default: module.ExecutionActivityChart })),
+);
+
+const CHART_HEIGHT = "h-[220px]";
 
 /**
  * The windows the selector offers. `PT1M` is first on purpose: it is the one the SSE stream pushes,
@@ -70,9 +82,25 @@ function ViewAllLink({ to, search, label }: { to: string; search?: Record<string
   return (
     <Link to={to} search={search} className="mono-label flex items-center gap-1 text-primary hover:text-primary/80">
       {label}
-      <IconArrowRight className="h-3 w-3" />
+      <IconArrowRight className="size-3" />
     </Link>
   );
+}
+
+/**
+ * What pausing this job actually stopped.
+ *
+ * <p>Pause suspends the TRIGGER and nothing else: `POST /jobs/{key}/schedule` is still accepted
+ * and still runs (REST-API-DESIGN, and `JobStore#findDueRecurring` — "pause bloqueia exatamente o
+ * trigger; on-demand continua valendo mesmo pausado"). For a recurring job that reads the way an
+ * operator expects. For an ON_DEMAND job there is no trigger to suspend, so the flag changes
+ * nothing at all — and this row used to claim "will not fire" for exactly that job, which is the
+ * opposite of what happens the next time anyone posts to it.
+ */
+function pausedConsequence(job: JobResponse): string {
+  return job.schedule.type === "ON_DEMAND"
+    ? "is paused, but it has no trigger to suspend — manual runs still execute"
+    : "is paused: it will not fire on its schedule, though manual runs still execute";
 }
 
 /**
@@ -80,10 +108,12 @@ function ViewAllLink({ to, search, label }: { to: string; search?: Record<string
  * job, and the definition list is bounded by nature (it is what the application declared at boot),
  * not by history. Sorting client-side is honest here; it would be wrong if the list were paged.
  */
-function upcoming(jobs: JobResponse[], limit: number): JobResponse[] {
+type ScheduledJob = JobResponse & { nextFireAt: string };
+
+function upcoming(jobs: JobResponse[], limit: number): ScheduledJob[] {
   return jobs
-    .filter((job) => job.nextFireAt !== null && !job.paused)
-    .sort((left, right) => left.nextFireAt!.localeCompare(right.nextFireAt!))
+    .filter((job): job is ScheduledJob => job.nextFireAt !== null && !job.paused)
+    .sort((left, right) => left.nextFireAt.localeCompare(right.nextFireAt))
     .slice(0, limit);
 }
 
@@ -124,40 +154,40 @@ export function OverviewPage() {
   const nextUp = upcoming(jobs.data ?? [], 6);
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
+    <PageStack>
+      <StatGrid columns={6}>
         <StatCard
           label="Jobs"
           value={statValue(jobs.isPending, !!jobs.error, jobs.data?.length ?? 0)}
-          icon={<IconListChecks className="h-4 w-4" />}
+          icon={<IconListChecks className="size-4" />}
           accent
         />
         <StatCard
           label="Paused"
           value={statValue(jobs.isPending, !!jobs.error, pausedJobs.length)}
-          icon={<IconGauge className="h-4 w-4" />}
+          icon={<IconGauge className="size-4" />}
         />
         <StatCard
           label="Live executions"
           value={statValue(overview.isPending, !!overview.error, liveTotal)}
-          icon={<IconActivity className="h-4 w-4" />}
+          icon={<IconActivity className="size-4" />}
         />
         <StatCard
           label="Running"
           value={statValue(overview.isPending, !!overview.error, counts?.RUNNING ?? 0)}
-          icon={<IconActivity className="h-4 w-4" />}
+          icon={<IconActivity className="size-4" />}
         />
         <StatCard
           label="Retry scheduled"
           value={statValue(overview.isPending, !!overview.error, counts?.RETRY_WAITING ?? 0)}
-          icon={<IconClock className="h-4 w-4" />}
+          icon={<IconClock className="size-4" />}
         />
         <StatCard
           label="Nodes online"
           value={statValue(nodes.isPending, !!nodes.error, `${onlineNodes}/${nodes.data?.length ?? 0}`)}
-          icon={<IconServer className="h-4 w-4" />}
+          icon={<IconServer className="size-4" />}
         />
-      </div>
+      </StatGrid>
 
       <Panel title="Needs attention">
         {!attentionLoaded && !failedRecent.error && <Spinner label="Checking" />}
@@ -166,7 +196,7 @@ export function OverviewPage() {
         )}
         {attentionEmpty && (
           <div className="flex items-center gap-2.5 py-6">
-            <span className="h-2 w-2 shrink-0 rounded-full bg-good" />
+            <span className="size-2 shrink-0 rounded-full bg-good" />
             <p className="text-sm font-medium">All clear — nothing needs attention right now.</p>
           </div>
         )}
@@ -192,7 +222,7 @@ export function OverviewPage() {
                 to="/jobs"
                 search={{ jobKey: job.jobKey }}
               >
-                {job.jobKey} is paused and will not fire
+                {job.jobKey} {pausedConsequence(job)}
               </AttentionRow>
             ))}
             {staleNodes.map((node) => {
@@ -212,7 +242,9 @@ export function OverviewPage() {
       </Panel>
 
       <Panel title="Live work">
-        <ExecutionActivityChart />
+        <Suspense fallback={<div className={CHART_HEIGHT} aria-hidden />}>
+          <ExecutionActivityChart />
+        </Suspense>
         <p className="pt-2 text-xs text-muted-foreground">
           Terminal states carry no all-time count by contract — history grows without bound, and this
           is a polling anchor. Recent terminal activity is the throughput panel.
@@ -299,14 +331,14 @@ export function OverviewPage() {
                   <span className="truncate text-xs text-muted-foreground">{job.name}</span>
                 </div>
                 <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
-                  {relativeTime(job.nextFireAt!)}
+                  {relativeTime(job.nextFireAt)}
                 </span>
               </li>
             ))}
           </ul>
         )}
       </Panel>
-    </div>
+    </PageStack>
   );
 }
 

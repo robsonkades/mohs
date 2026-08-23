@@ -4,12 +4,13 @@ import { fetchRateLimits, patchRateLimit } from "../lib/api";
 import { queryKeys } from "../lib/queryKeys";
 import { durationSeconds, formatDuration } from "../lib/format";
 import { EmptyState, ErrorState, Spinner } from "../components/Feedback";
-import { IconClock } from "../components/icons";
-import { Card } from "@/components/ui/card";
+import { IconClock } from "../components/Icons";
+import { PageStack } from "../components/Layout";
+import { Panel } from "../components/Panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
+import { UtilizationBar } from "../components/UtilizationBar";
 import type { RateLimitResponse } from "../types/api";
 
 /**
@@ -44,11 +45,14 @@ function RateLimitCard({ rateLimit }: { rateLimit: RateLimitResponse }) {
   const used = usedFraction(rateLimit);
 
   return (
-    <Card className="gap-3 p-4">
+    // A bordered tile, not a Card: these already live inside a Panel, and a card inside a card
+    // gives the eye two frames for one object. The tile sits on the page surface so the panel
+    // stays the outer container.
+    <div className="flex flex-col gap-3 rounded-lg border bg-page p-4">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5">
-          <span className="flex h-8 w-8 items-center justify-center rounded border border-primary/20 bg-primary/10 text-primary">
-            <IconClock className="h-4 w-4" />
+          <span className="flex size-8 items-center justify-center rounded border border-primary/20 bg-primary/10 text-primary">
+            <IconClock className="size-4" />
           </span>
           <span className="font-medium">{rateLimit.name}</span>
         </div>
@@ -65,7 +69,7 @@ function RateLimitCard({ rateLimit }: { rateLimit: RateLimitResponse }) {
       </div>
 
       <div className="space-y-1.5">
-        <Progress value={used} />
+        <UtilizationBar percent={used} label={rateLimit.name + " consumption"} />
         <div className="flex justify-between font-mono text-[11px] text-muted-foreground tabular-nums">
           <span>{rateLimit.available} available</span>
           <span>{Math.round(used)}% used</span>
@@ -112,31 +116,38 @@ function RateLimitCard({ rateLimit }: { rateLimit: RateLimitResponse }) {
 
       {patch.error && <p className="text-xs text-critical">{patch.error.message}</p>}
       {notice && <p className="text-xs text-warning">{notice}</p>}
-    </Card>
+    </div>
   );
 }
 
 export function RateLimitsPage() {
   const rateLimitsQuery = useQuery({ queryKey: queryKeys.rateLimits(), queryFn: fetchRateLimits });
-
-  if (rateLimitsQuery.isPending) return <Spinner label="Loading rate limits" />;
-  if (rateLimitsQuery.error) {
-    return <ErrorState message={rateLimitsQuery.error.message} onRetry={() => rateLimitsQuery.refetch()} />;
-  }
-  if (rateLimitsQuery.data.length === 0) {
-    return (
-      <EmptyState
-        title="No rate limits declared"
-        description="Declaring a rate limit is a boot-time act — jobs without one run with no throughput cap."
-      />
-    );
-  }
+  const rateLimits = rateLimitsQuery.data;
 
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-      {rateLimitsQuery.data.map((rateLimit) => (
-        <RateLimitCard key={rateLimit.name} rateLimit={rateLimit} />
-      ))}
-    </div>
+    <PageStack>
+      <Panel
+        title="Rate limits"
+        description="Cluster-wide throughput caps. A change here holds until the next boot."
+      >
+        {rateLimitsQuery.isPending && <Spinner label="Loading rate limits" />}
+        {rateLimitsQuery.error && (
+          <ErrorState message={rateLimitsQuery.error.message} onRetry={() => rateLimitsQuery.refetch()} />
+        )}
+        {rateLimits?.length === 0 && (
+          <EmptyState
+            title="No rate limits declared"
+            description="Declaring a rate limit is a boot-time act — jobs without one run with no throughput cap."
+          />
+        )}
+        {rateLimits !== undefined && rateLimits.length > 0 && (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {rateLimits.map((rateLimit) => (
+              <RateLimitCard key={rateLimit.name} rateLimit={rateLimit} />
+            ))}
+          </div>
+        )}
+      </Panel>
+    </PageStack>
   );
 }

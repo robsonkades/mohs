@@ -3,12 +3,13 @@ import { useRouterState } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import { RefreshControls } from "@/components/refresh-controls";
+import { RefreshControls } from "@/components/RefreshControls";
 import { CommandPalette } from "@/components/CommandPalette";
-import { IconSearch } from "@/components/icons";
-import { activeNavItem } from "@/components/app-sidebar";
+import { IconSearch } from "@/components/Icons";
+import { activeNavItem } from "@/components/AppSidebar";
+import type { StreamStatus } from "@/lib/useLiveUpdates";
 
-export function SiteHeader({ streaming }: { streaming: boolean }) {
+export function SiteHeader({ streamStatus }: { streamStatus: StreamStatus }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const currentItem = activeNavItem(pathname);
@@ -48,7 +49,7 @@ export function SiteHeader({ streaming }: { streaming: boolean }) {
         Search
         <kbd className="rounded-sm border bg-background px-1 font-mono text-[10px]">/</kbd>
       </Button>
-      <RefreshControls streaming={streaming} />
+      <RefreshControls streamStatus={streamStatus} />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </header>

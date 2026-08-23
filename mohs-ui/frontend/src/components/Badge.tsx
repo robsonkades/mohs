@@ -23,7 +23,7 @@ const TONE_CLASSES: Record<Tone, string> = {
 export function StatusBadge({ tone, label, live = false }: { tone: Tone; label: string; live?: boolean }) {
   return (
     <Badge variant="outline" className={cn("mono-label h-auto rounded px-2 py-0.5 font-mono", TONE_CLASSES[tone])}>
-      <span className={"h-1.5 w-1.5 shrink-0 rounded-full bg-current" + (live ? " live-dot" : "")} />
+      <span className={"size-1.5 shrink-0 rounded-full bg-current" + (live ? " live-dot" : "")} />
       {label}
     </Badge>
   );
@@ -58,7 +58,7 @@ export const EXECUTION_STATE_TONE: Record<ExecutionState, Tone> = {
 };
 
 /** RETRY_WAITING has an underscore; titleCase alone would render "Retry_scheduled". */
-const EXECUTION_STATE_LABEL: Record<ExecutionState, string> = {
+export const EXECUTION_STATE_LABEL: Record<ExecutionState, string> = {
   ENQUEUED: "Enqueued",
   RUNNING: "Running",
   RETRY_WAITING: "Retry scheduled",

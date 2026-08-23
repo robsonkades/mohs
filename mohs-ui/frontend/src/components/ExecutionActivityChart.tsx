@@ -62,7 +62,7 @@ export function ExecutionActivityChart() {
   if (samples.length < MIN_SAMPLES) {
     return (
       <div className="flex h-[220px] flex-col items-center justify-center gap-1.5 text-center">
-        <span className="h-2 w-2 animate-pulse rounded-full bg-info" />
+        <span className="size-2 animate-pulse rounded-full bg-info" />
         <p className="text-sm font-medium">Sampling…</p>
         <p className="max-w-sm text-xs text-muted-foreground">
           The series is built from what the stream pushes every 2s, so it starts when this page

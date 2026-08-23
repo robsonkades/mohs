@@ -11,6 +11,8 @@ const shortDateTimeFormatter = new Intl.DateTimeFormat("en", {
   hour12: false,
 });
 
+const rangeDayFormatter = new Intl.DateTimeFormat("en", { month: "short", day: "2-digit", year: "numeric" });
+
 const DIVISIONS: { amount: number; unit: Intl.RelativeTimeFormatUnit }[] = [
   { amount: 60, unit: "seconds" },
   { amount: 60, unit: "minutes" },
@@ -37,14 +39,32 @@ export function absoluteTime(iso: string): string {
   return dateTimeFormatter.format(new Date(iso));
 }
 
+/**
+ * "Aug 22, 2026" — the label a date-range trigger wears. Intl rather than a formatting library:
+ * date-fns is only in this tree transitively, under react-day-picker, and depending on a
+ * dependency's dependency is a break waiting for the next upgrade. The output is identical.
+ */
+export function rangeDay(date: Date): string {
+  return rangeDayFormatter.format(date);
+}
+
 /** "Aug 10, 09:44" — compact enough for a filter chip label. */
 export function shortDateTime(iso: string): string {
   return shortDateTimeFormatter.format(new Date(iso));
 }
 
-/** First 8 chars of a UUID, for compact display — pair with the full id as a title/tooltip. */
+/**
+ * Middle truncation, not a prefix.
+ *
+ * <p>Execution ids are UUIDv7: the leading hex IS the millisecond timestamp, so every row created
+ * in the same minute shares it. Showing `id.slice(0, 8)` printed the identical string down the
+ * whole identity column — `01a02f72` on every line of a live table — which is the one thing that
+ * column exists not to do. Keeping both ends distinguishes rows on screen and still lets an
+ * operator match either end of an id they copied from a log. The full value stays in the cell's
+ * `title` and one click away in the copy button.
+ */
 export function shortId(id: string): string {
-  return id.slice(0, 8);
+  return id.length <= 13 ? id : `${id.slice(0, 8)}…${id.slice(-4)}`;
 }
 
 export function titleCase(value: string): string {

@@ -19,6 +19,21 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
 
+    // `strict` alone lets `arr[i]` claim a value that may not be there; the flag below caught a
+    // real one, in the executions time filter (`"1".split(":")` destructured straight into
+    // `setHours`, producing NaN). `erasableSyntaxOnly` keeps the source strippable by tools that
+    // only delete annotations. The other two are free here — nothing violated them.
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "erasableSyntaxOnly": true,
+
+    // NOT enabled: `exactOptionalPropertyTypes`. It is the correct flag for a codebase written
+    // around it, but retrofitting it here buys almost nothing and costs casts at every library
+    // boundary — TanStack Router's search params, TanStack Table's options, Radix and
+    // react-day-picker props are all typed `?: T`, not `?: T | undefined`, and a cast to silence
+    // the compiler is strictly worse than the check it silences. Revisit if those types change.
+
     "paths": {
       "@/*": ["./src/*"]
     }

@@ -6,16 +6,19 @@ import { fetchJob, fetchJobs, pauseJob, rescheduleJob, resumeJob, scheduleJob } 
 import { queryKeys } from "../lib/queryKeys";
 import type { AcceptedExecutionResponse, JobResponse } from "../types/api";
 import { DataTable } from "../components/DataTable";
-import { FilterBar, TextInput } from "../components/Form";
+import { PageStack, Section } from "../components/Layout";
+import { Panel } from "../components/Panel";
+import { FilterBar } from "../components/Form";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { JobPausedBadge, TONE_COLOR_VAR } from "../components/Badge";
 import { EmptyState, ErrorState, Spinner } from "../components/Feedback";
 import { Drawer, Field } from "../components/Drawer";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CopyButton } from "../components/CopyButton";
 import { RescheduleForm } from "../components/RescheduleForm";
-import { IconArrowRight, IconPause, IconPlay, IconSearch, IconTicks } from "../components/icons";
+import { IconArrowRight, IconPause, IconPlay, IconSearch, IconTicks } from "../components/Icons";
 import { absoluteTime, formatDuration, relativeTime } from "../lib/format";
 import { scheduleLabel, scheduleTypeLabel } from "../lib/schedule";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
@@ -43,6 +46,17 @@ const ACTION_COPY: Record<JobAction, { title: string; description: string; confi
   },
 };
 
+/**
+ * Pause suspends the TRIGGER and nothing else. An ON_DEMAND job has no trigger, so pausing it
+ * changes nothing about how it runs — the operator deserves to read that BEFORE confirming, not
+ * discover it the next time a manual schedule goes straight through.
+ */
+function pauseCaveat(job: JobResponse | undefined): string {
+  return job?.schedule.type === "ON_DEMAND"
+    ? " This job is on demand: it has no trigger to suspend, so pausing it will not stop anything."
+    : "";
+}
+
 export interface JobsSearch {
   paused?: "true" | "false";
   search?: string;
@@ -56,6 +70,7 @@ const columnHelper = createColumnHelper<AppFeatures, JobResponse>();
 const columns = [
   columnHelper.accessor("jobKey", {
     header: "Job",
+    size: 240,
     enableHiding: false, // the identity column — hiding it would leave the table looking unrecoverable
     cell: (info) => (
       <div className="flex flex-col">
@@ -64,10 +79,15 @@ const columns = [
       </div>
     ),
   }),
-  columnHelper.accessor("paused", { header: "State", cell: (info) => <JobPausedBadge paused={info.getValue()} /> }),
+  columnHelper.accessor("paused", {
+    header: "State",
+    size: 110,
+    cell: (info) => <JobPausedBadge paused={info.getValue()} />,
+  }),
   columnHelper.display({
     id: "schedule",
     header: "Schedule",
+    size: 200,
     cell: (info) => (
       <div className="flex items-center gap-1.5">
         <span className="font-mono text-xs">{scheduleLabel(info.row.original.schedule)}</span>
@@ -79,15 +99,24 @@ const columns = [
   }),
   columnHelper.accessor("nextFireAt", {
     header: "Next fire",
-    cell: (info) =>
-      info.getValue() ? relativeTime(info.getValue()!) : <span className="text-muted-foreground">—</span>,
+    size: 140,
+    cell: (info) => {
+      const nextFireAt = info.getValue();
+      return nextFireAt === null ? (
+        <span className="text-muted-foreground">—</span>
+      ) : (
+        <span className="tabular-nums">{relativeTime(nextFireAt)}</span>
+      );
+    },
   }),
   columnHelper.accessor("runner", {
     header: "Runner",
+    size: 130,
     cell: (info) => info.getValue() ?? <span className="text-muted-foreground">—</span>,
   }),
   columnHelper.accessor("rateLimit", {
     header: "Rate limit",
+    size: 130,
     cell: (info) => info.getValue() ?? <span className="text-muted-foreground">—</span>,
   }),
 ];
@@ -178,11 +207,12 @@ export function JobsPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <FilterBar>
+    <PageStack>
+      <Section>
+        <FilterBar>
         <div className="relative">
-          <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <TextInput
+          <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
             placeholder="Search jobs…"
             className="w-56 pl-8"
             value={search.search ?? ""}
@@ -204,29 +234,42 @@ export function JobsPage() {
             <SelectItem value="true">Paused</SelectItem>
           </SelectContent>
         </Select>
-      </FilterBar>
+        </FilterBar>
 
-      {jobsQuery.isPending && <Spinner label="Loading jobs" />}
-      {jobsQuery.error && <ErrorState message={jobsQuery.error.message} onRetry={() => jobsQuery.refetch()} />}
-      {jobsQuery.data && rows.length === 0 && (
-        <EmptyState
-          title={jobsQuery.data.length === 0 ? "No jobs registered" : "No jobs match these filters"}
-          description={
-            jobsQuery.data.length === 0
-              ? "Jobs are declared by the host application at boot, with @MohsJob or the programmatic builder."
-              : "Try clearing a filter or widening your search."
-          }
-        />
-      )}
-      {rows.length > 0 && (
-        <DataTable
-          data={rows}
-          columns={columns}
-          getRowId={(row) => row.jobKey}
-          onRowClick={(row) => patchSearch({ jobKey: row.jobKey })}
-          rowAccent={(row) => TONE_COLOR_VAR[row.paused ? "warning" : "good"]}
-        />
-      )}
+        {jobsQuery.isPending && (
+          <Panel title="Jobs">
+            <Spinner label="Loading jobs" />
+          </Panel>
+        )}
+        {jobsQuery.error && (
+          <Panel title="Jobs">
+            <ErrorState message={jobsQuery.error.message} onRetry={() => jobsQuery.refetch()} />
+          </Panel>
+        )}
+        {jobsQuery.data && rows.length === 0 && (
+          <Panel title="Jobs">
+            <EmptyState
+              title={jobsQuery.data.length === 0 ? "No jobs registered" : "No jobs match these filters"}
+              description={
+                jobsQuery.data.length === 0
+                  ? "Jobs are declared by the host application at boot, with @MohsJob or the programmatic builder."
+                  : "Try clearing a filter or widening your search."
+              }
+            />
+          </Panel>
+        )}
+        {rows.length > 0 && (
+          <DataTable
+            title="Jobs"
+            description={rows.length + " of " + (jobsQuery.data?.length ?? 0) + " declared"}
+            data={rows}
+            columns={columns}
+            getRowId={(row) => row.jobKey}
+            onRowClick={(row) => patchSearch({ jobKey: row.jobKey })}
+            rowAccent={(row) => TONE_COLOR_VAR[row.paused ? "warning" : "good"]}
+          />
+        )}
+      </Section>
 
       <Drawer open={!!search.jobKey} title="Job details" onClose={closeDrawer}>
         {jobDetail.isPending && <Spinner />}
@@ -236,23 +279,23 @@ export function JobsPage() {
             <Button asChild>
               <Link to="/executions" search={{ jobKey: jobDetail.data.jobKey }}>
                 View executions for this job
-                <IconArrowRight className="h-4 w-4" />
+                <IconArrowRight className="size-4" />
               </Link>
             </Button>
 
             <div className="flex flex-wrap items-center gap-2">
               <Button variant="outline" onClick={() => startAction("schedule")}>
-                <IconTicks className="h-4 w-4" />
+                <IconTicks className="size-4" />
                 Run now
               </Button>
               {jobDetail.data.paused ? (
                 <Button variant="outline" onClick={() => startAction("resume")}>
-                  <IconPlay className="h-4 w-4" />
+                  <IconPlay className="size-4" />
                   Resume
                 </Button>
               ) : (
                 <Button variant="outline" onClick={() => startAction("pause")}>
-                  <IconPause className="h-4 w-4" />
+                  <IconPause className="size-4" />
                   Pause
                 </Button>
               )}
@@ -307,7 +350,12 @@ export function JobsPage() {
       <ConfirmDialog
         open={!!pendingAction}
         title={pendingAction ? ACTION_COPY[pendingAction].title : ""}
-        description={pendingAction ? ACTION_COPY[pendingAction].description : ""}
+        description={
+          pendingAction === null
+            ? ""
+            : ACTION_COPY[pendingAction].description +
+              (pendingAction === "pause" ? pauseCaveat(jobDetail.data) : "")
+        }
         confirmLabel={pendingAction ? ACTION_COPY[pendingAction].confirmLabel : ""}
         tone="default"
         pending={jobActionMutation.isPending}
@@ -315,6 +363,6 @@ export function JobsPage() {
         onConfirm={() => jobActionMutation.mutate(pendingAction!)}
         onCancel={() => setPendingAction(null)}
       />
-    </div>
+    </PageStack>
   );
 }

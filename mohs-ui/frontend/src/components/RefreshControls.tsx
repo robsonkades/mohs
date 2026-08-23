@@ -1,20 +1,30 @@
 import { useEffect, useState } from "react";
 import { useIsFetching, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { IconRefresh } from "@/components/icons";
+import { IconRefresh } from "@/components/Icons";
 import { useIsLoadingFresh } from "@/lib/useIsLoadingFresh";
+import type { StreamStatus } from "@/lib/useLiveUpdates";
+
+/** Exhaustive by construction: a new StreamStatus stops compiling here until it has a label. */
+const STATUS_LABEL: Record<StreamStatus, (ageSeconds: number) => string> = {
+  live: () => "live",
+  connecting: () => "connecting…",
+  offline: (age) => `updated ${age}s ago`,
+};
 
 /**
- * `streaming` says whether the SSE at /overview/stream is open. While it is, the label stops
+ * `streamStatus` is the SSE connection at /overview/stream. While it is `live` the label stops
  * announcing age: the server pushes every 2s, and "updated 14s ago" would misreport data that has
- * already arrived. The button stays, because not every query on screen lives on the stream — an
- * execution's detail view, for one.
+ * already arrived. `connecting` says so rather than claiming either extreme — a reconnect is not
+ * an outage, and pretending it is trains the operator to ignore the indicator. The button stays
+ * in every state, because not every query on screen lives on the stream — an execution's detail
+ * view, for one.
  *
  * The busy state covers first loads and the manual refresh only. Background refetches still move
  * `lastSettled` (the age label has to stay honest when the stream is down) but never flip the
  * label or spin the icon: at a 2s cadence that reads as the page reloading itself.
  */
-export function RefreshControls({ streaming }: { streaming: boolean }) {
+export function RefreshControls({ streamStatus }: { streamStatus: StreamStatus }) {
   const queryClient = useQueryClient();
   const anyFetching = useIsFetching() > 0;
   const loadingFresh = useIsLoadingFresh();
@@ -42,12 +52,17 @@ export function RefreshControls({ streaming }: { streaming: boolean }) {
 
   return (
     <div className="ml-auto flex shrink-0 items-center gap-2.5">
+      {/*
+        Fixed width, right-aligned: the label cycles through "live", "connecting…" and
+        "updated 12s ago", and letting it size itself would slide the refresh button sideways
+        every few seconds — a moving target next to the only button in the header.
+      */}
       <span
-        className="hidden items-center gap-1.5 font-mono text-[11px] tabular-nums text-muted-foreground sm:inline-flex"
+        className="hidden w-[9.5rem] items-center justify-end gap-1.5 font-mono text-[11px] tabular-nums text-muted-foreground sm:inline-flex"
         aria-live="off"
       >
-        {streaming && <span className="live-dot h-1.5 w-1.5 rounded-full bg-good" />}
-        {busy ? "updating…" : streaming ? "live" : `updated ${age}s ago`}
+        {streamStatus === "live" && <span className="live-dot size-1.5 rounded-full bg-good" />}
+        {busy ? "updating…" : STATUS_LABEL[streamStatus](age)}
       </span>
       <Button
         variant="outline"

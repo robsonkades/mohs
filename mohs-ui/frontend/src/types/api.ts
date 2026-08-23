@@ -2,14 +2,22 @@
 // Duration as an ISO-8601 duration string ("PT1M", "PT15M") — Spring Boot's default Jackson
 // JSR-310 config, and the shape mohs-rest's own contract tests assert.
 
-/** io.mohs.core.execution.ExecutionState — declaration order is lifecycle order, and exposed order is contract. */
-export type ExecutionState =
-  | "ENQUEUED"
-  | "RUNNING"
-  | "RETRY_WAITING"
-  | "SUCCEEDED"
-  | "FAILED"
-  | "CANCELLED";
+/**
+ * io.mohs.core.execution.ExecutionState — declaration order is lifecycle order, and exposed order
+ * is contract, so the ARRAY is the source and the union is derived from it. A screen that offers
+ * the states (the executions filter) iterates this instead of retyping the six literals, which is
+ * how one of them goes missing when the server grows a seventh.
+ */
+export const EXECUTION_STATES = [
+  "ENQUEUED",
+  "RUNNING",
+  "RETRY_WAITING",
+  "SUCCEEDED",
+  "FAILED",
+  "CANCELLED",
+] as const;
+
+export type ExecutionState = (typeof EXECUTION_STATES)[number];
 
 /** The three states /overview always carries: the live work. Terminal states have no all-time count. */
 export const LIVE_STATES = ["ENQUEUED", "RUNNING", "RETRY_WAITING"] as const satisfies readonly ExecutionState[];

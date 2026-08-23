@@ -19,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
@@ -189,6 +190,9 @@ public final class Engine implements MohsLifecycle {
     /** {@code volatile}: escrito por {@link #start} e lido por {@link #stop}, que podem vir de threads distintas ({@code MohsLifecycle} é API pública) — publicação segura, JCIP 3.1. */
     private volatile @Nullable Thread loopThread;
 
+    /** O WARN de escalada de grace é único por shutdown — o SINAL não é guardado por ele (ver {@link #escalateAfterDrainGrace}). */
+    private final AtomicBoolean drainEscalated = new AtomicBoolean();
+
     /**
      * A encarnação e o lease do NÓ (ADR-0051) — escritos só pela thread do
      * tick ({@link #renewNodeLease}). Epoch começa em 1 e só sobe quando o
@@ -295,17 +299,55 @@ public final class Engine implements MohsLifecycle {
         if (!state.compareAndSet(current, EngineState.DRAINING)) {
             throw new IllegalStateException("concurrent state change during drain(), was " + state.get());
         }
-        awaitInFlight(grace);
+        awaitInFlight(DrainDeadline.startingNow(grace));
     }
 
     /**
-     * {@link #drain} seguido de encerrar o loop.
-     * {@code runnerRegistry} continua vivo — não é desta classe pra
-     * desligar (ver Javadoc da classe). O join espera o tick em curso até
-     * {@code nodeLeaseTtl/4} (o próprio orçamento de lap do tick) antes do
-     * heartbeat final — encolhe a janela da corrida documentada em
-     * {@link #writeFinalStoppedHeartbeat} sem acoplar o shutdown a um tick
-     * pendurado.
+     * {@link #drain} seguido de encerrar o loop, nesta ordem: drain →
+     * {@code STOPPED} → join do loop → espera do in-flight → heartbeat
+     * final. {@code runnerRegistry} continua vivo — não é desta classe pra
+     * desligar (ver Javadoc da classe).
+     *
+     * <p>O join espera o tick em curso até {@code nodeLeaseTtl/4} (o
+     * próprio orçamento de lap do tick) — encolhe a janela da corrida
+     * documentada em {@link #writeFinalStoppedHeartbeat} sem acoplar o
+     * shutdown a um tick pendurado.
+     *
+     * <p>Esperar in-flight de novo depois do join não é redundância com o
+     * drain: a espera do drain observa {@code inFlight} com o loop ainda
+     * rodando, e um tick que já reivindicou um lote registra as futures
+     * DEPOIS do {@code runAsync} — achar o conjunto vazio ali prova que o
+     * trabalho ainda não foi registrado, não que ele acabou. Com o loop já
+     * parado nenhum submit novo entra e vazio é vazio (join estourado
+     * encolhe essa janela em vez de fechá-la). Sem a segunda espera o
+     * heartbeat final declararia a lease vencida (ADR-0051) com execuções
+     * rodando, e o reaper de um par as reclamaria: o resultado bem-sucedido
+     * é descartado pelo fence e vira re-entrega — ou perda terminal, quando
+     * não há orçamento de retry.
+     *
+     * <p>Os dois prazos de UM {@code stop} nascem no mesmo instante — este
+     * abre o seu {@link DrainDeadline} e o {@link #drain} abre o dele em
+     * seguida —, então o shutdown continua limitado ao {@code grace}
+     * pedido: o daqui é o mais antigo dos dois e é ele que a espera
+     * pós-loop cobra. Já {@code drain(g)} seguido de {@code stop(g)} são
+     * dois prazos SEPARADOS no tempo — a sequência pode custar até
+     * {@code 2×g} quando o drain escala e o handler ignora o interrupt.
+     *
+     * <p>Duas coisas que a espera pós-loop NÃO cobre, e que decidem o
+     * comportamento com os defaults:
+     * <ul>
+     *   <li><b>Ninguém renova a lease do nó durante ela</b> —
+     *       {@code renewNodeLease} só roda no tick, que já parou. A proteção
+     *       acaba no máximo {@code node-lease-ttl} depois do último tick —
+     *       menos, na prática, porque o resíduo já vinha correndo: com TTL
+     *       de 15s e {@code grace} de 30s, mais da metade da espera está
+     *       descoberta e um par pode reclamar o que ainda roda aqui.</li>
+     *   <li><b>A escada de sinalização fica suspensa</b> — sem tick não há
+     *       {@code signalJobTimeouts}, {@code pollCancelRequests} nem
+     *       Watchdog Bound (ADR-0034). Um job com {@code timeout} menor que
+     *       o {@code grace} deixa de ser interrompido no prazo dele:
+     *       durante esta janela quem decide é só o {@code grace}.</li>
+     * </ul>
      */
     @Override
     public void stop(Duration grace) {
@@ -314,22 +356,48 @@ public final class Engine implements MohsLifecycle {
         if (current == EngineState.STOPPED) {
             throw new IllegalStateException("already STOPPED");
         }
+        DrainDeadline deadline = DrainDeadline.startingNow(grace);
         if (current != EngineState.DRAINING) {
             drain(grace);
         }
         state.set(EngineState.STOPPED);
         wake();
-        Thread thread = loopThread;
-        if (thread != null) {
-            try {
-                // max(1,...): join(0) esperaria PARA SEMPRE — com TTL < 4ms a
-                // divisão arredondaria pra zero e acoplaria o shutdown ao tick
-                thread.join(Math.max(1, settings.nodeLeaseTtl().dividedBy(4).toMillis()));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        joinLoopThread();
+        awaitInFlight(deadline);
         writeFinalStoppedHeartbeat();
+    }
+
+    /**
+     * Espera o tick em curso terminar até {@code nodeLeaseTtl/4} — o
+     * próprio orçamento de lap do tick. Join completo é o que autoriza o
+     * {@link #stop} a ler {@code inFlight} vazio como trabalho terminado:
+     * sem loop, não há submit novo. Join estourado devolve o controle
+     * assim mesmo — shutdown não fica pendurado em tick travado.
+     */
+    private void joinLoopThread() {
+        Thread thread = loopThread;
+        // NEW: start() publica a thread ANTES de iniciá-la, e stop() pode ter
+        // vencido a largada (a corrida que o próprio start() trata). Nesse
+        // estado join(Duration) lança IllegalThreadStateException — e não há
+        // tick em curso pra esperar de qualquer forma: o runLoop testa
+        // STOPPED na entrada do while e não chega a ticar.
+        if (thread == null || thread.getState() == Thread.State.NEW) {
+            return;
+        }
+        Duration budget = settings.nodeLeaseTtl().dividedBy(4);
+        try {
+            // join(Duration) em vez de join(millis): não tem a armadilha do
+            // join(0) esperar para sempre (o que obrigava um max(1,...) com
+            // TTL < 4ms) e devolve SE o loop parou — e é justamente o falso
+            // que marca o modo degradado, onde a espera seguinte volta a
+            // poder perder um dispatch ainda não registrado
+            if (!thread.join(budget)) {
+                log.warn("engine loop did not stop within {} — the in-flight wait below can still miss a dispatch "
+                        + "the tick in progress had not registered yet; work may be re-delivered", budget);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**
@@ -377,29 +445,56 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Espera {@code inFlight} esvaziar em loop, não num snapshot só — um
+     * O prazo de uma espera por in-flight: o instante monotônico em que ela
+     * acaba e o {@code grace} que o operador pediu (só a mensagem de
+     * {@link Engine#escalateAfterDrainGrace} usa o segundo). É um objeto
+     * porque o {@link Engine#stop} espera duas vezes e as duas medem contra
+     * o MESMO prazo — esperar duas vezes não pode cobrar duas vezes o
+     * grace.
+     */
+    private record DrainDeadline(Duration requestedGrace, long deadlineNanos) {
+
+        /**
+         * {@code System.nanoTime}, não {@code clock.instant()}: duração se
+         * mede com tempo monotônico — o Clock injetado pode ser o
+         * DatabaseClock, cujo offset salta a cada resync e encurtaria ou
+         * esticaria o grace de shutdown.
+         */
+        static DrainDeadline startingNow(Duration grace) {
+            return new DrainDeadline(grace, System.nanoTime() + grace.toNanos());
+        }
+
+        long remainingMillis() {
+            return (deadlineNanos - System.nanoTime()) / 1_000_000;
+        }
+    }
+
+    /**
+     * Espera {@code inFlight} esvaziar em laço, não num snapshot só — um
      * tick que já tinha passado do claim no instante exato do CAS pra
      * {@code DRAINING} ainda vai submeter as execuções que acabou de
-     * reivindicar. Um segundo snapshot pega o que o primeiro perdeu; o
-     * loop para quando {@code inFlight} esvazia de verdade ou o
-     * {@code grace} acaba, o que vier primeiro.
+     * reivindicar, e a volta do laço pega o que o snapshot anterior perdeu.
+     * Para quando {@code inFlight} esvazia de verdade ou o prazo acaba, o
+     * que vier primeiro.
+     *
+     * <p>O laço só enxerga o que JÁ foi registrado: com o conjunto vazio no
+     * teste de entrada ele volta na hora, mesmo que um tick esteja
+     * exatamente entre o {@code runAsync} e o {@code inFlight.add} do
+     * {@link #submitDispatch}. Essa janela só fecha com o loop parado — é o
+     * que o {@link #stop} faz, esperando de novo depois do join.
      */
-    private void awaitInFlight(Duration grace) {
-        // System.nanoTime, não clock.instant(): duração se mede com tempo
-        // monotônico — o Clock injetado pode ser o DatabaseClock, cujo offset
-        // salta a cada resync e encurtaria/esticaria o grace de shutdown.
-        long deadlineNanos = System.nanoTime() + grace.toNanos();
+    private void awaitInFlight(DrainDeadline deadline) {
         while (!inFlight.isEmpty()) {
-            long remainingMillis = (deadlineNanos - System.nanoTime()) / 1_000_000;
+            long remainingMillis = deadline.remainingMillis();
             if (remainingMillis <= 0) {
-                escalateAfterDrainGrace(grace);
+                escalateAfterDrainGrace(deadline);
                 return;
             }
             CompletableFuture<?>[] snapshot = inFlight.toArray(CompletableFuture[]::new);
             try {
                 CompletableFuture.allOf(snapshot).get(remainingMillis, TimeUnit.MILLISECONDS);
             } catch (TimeoutException e) {
-                escalateAfterDrainGrace(grace);
+                escalateAfterDrainGrace(deadline);
                 return;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -420,15 +515,24 @@ public final class Engine implements MohsLifecycle {
      * a lease do nó expira e o reaper de outro node reclama (ADR-0051).
      * Durante o grace nada disso acontece: drain ≠ cancel (ADR-0007).
      */
-    private void escalateAfterDrainGrace(Duration grace) {
-        // as duas contagens de propósito: inFlight (futures) é quem segura o
-        // grace; o mapa é quem a escalada alcança — com a marca de posse
-        // liberada (zumbi fica no mapa), divergem só na janela de conclusão
-        // do whenComplete
-        log.warn("drain grace period ({}) elapsed with {} dispatch(es) still in flight ({} still signallable) — "
-                + "signalling cancellation and interrupting them; their attempts will fail with a node-shutdown cause "
-                + "and follow the retry policy (ADR-0034)",
-                grace, inFlight.size(), inFlightAttempts.size());
+    private void escalateAfterDrainGrace(DrainDeadline deadline) {
+        // o guard cerca só o LOG, nunca o laço: o sinal é first-wins por
+        // attempt (CancellationSignal), mas um dispatch registrado DEPOIS da
+        // primeira escalada — exatamente a janela runAsync/inFlight.add que a
+        // segunda espera existe pra cobrir — nunca teria sido sinalizado se o
+        // guard pulasse o laço junto
+        if (drainEscalated.compareAndSet(false, true)) {
+            // as duas contagens de propósito: inFlight (futures) é quem segura
+            // o grace; o mapa é quem a escalada alcança — com a marca de posse
+            // liberada (zumbi fica no mapa), divergem só na janela de conclusão
+            // do whenComplete
+            log.warn("drain grace period ({}) elapsed with {} dispatch(es) still in flight ({} still signallable) — "
+                    + "signalling cancellation and interrupting them; their attempts will fail with a node-shutdown cause "
+                    + "and follow the retry policy (ADR-0034)",
+                    deadline.requestedGrace(), inFlight.size(), inFlightAttempts.size());
+        } else {
+            log.debug("drain grace already escalated — re-signalling {} in-flight attempt(s)", inFlightAttempts.size());
+        }
         for (InFlightAttempt attempt : inFlightAttempts.values()) {
             attempt.signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
         }

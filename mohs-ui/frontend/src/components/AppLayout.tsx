@@ -1,13 +1,16 @@
 import type { ReactNode } from "react";
+import { useRouterState } from "@tanstack/react-router";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { AppSidebar } from "@/components/app-sidebar";
-import { SiteHeader } from "@/components/site-header";
+import { AppSidebar } from "@/components/AppSidebar";
+import { SiteHeader } from "@/components/SiteHeader";
 import { GlobalProgressBar } from "@/components/GlobalProgressBar";
 import { useLiveUpdates } from "../lib/useLiveUpdates";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 export function AppLayout({ children }: { children: ReactNode }) {
-  const { connected } = useLiveUpdates();
+  const { status } = useLiveUpdates();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   return (
     <TooltipProvider>
@@ -15,8 +18,10 @@ export function AppLayout({ children }: { children: ReactNode }) {
         <GlobalProgressBar />
         <AppSidebar />
         <SidebarInset>
-          <SiteHeader streaming={connected} />
-          <div className="mx-auto w-full max-w-[1600px] px-5 py-6 md:px-6">{children}</div>
+          <SiteHeader streamStatus={status} />
+          <div className="mx-auto w-full max-w-[1600px] px-5 py-6 md:px-6">
+            <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
+          </div>
         </SidebarInset>
       </SidebarProvider>
     </TooltipProvider>
