@@ -31,6 +31,23 @@ seguidas nesta área justamente por não haver número nenhum para ancorar.
 de bench e2e já existe; o que falta é a variante com assinante SSE conectado,
 comparando com/sem.
 
+**Medido em parte — 2026-08-23** (`OverviewLatencyScenario`, Postgres, banco
+OCIOSO, uma conexão): com 2M de linhas em `mohs_attempt` e backlog de 500k em
+`mohs_ready`, `countTerminalOutcomesSince` fica em **1,6 ms** (p99 de 30
+amostras) — ou seja, a contagem de throughput custa a JANELA e não o acervo,
+que é o que o §5.3 prometia, e a preocupação com "centenas de milhares de
+linhas na janela" acima está respondida pelo índice `(finished_at, outcome)`.
+Quem custa é `countActiveByState`, **13,2 ms**, e por outro motivo: o
+`COUNT(*)` sem `WHERE` em `mohs_ready` é proporcional ao BACKLOG (Parallel Seq
+Scan, 6.025 buffers, 2 workers). Combinado: 14,7 ms contra o alvo de 100 ms
+do §20.2.
+
+**O que isto NÃO responde, e por que o gatilho continua de pé:** banco ocioso,
+nenhum engine ticando, nenhum assinante SSE, uma conexão só. É o PISO da
+query, não o custo do endpoint no ponto de operação de 4k execuções/s com
+dashboard aberto — que continua sendo exatamente o número que falta, e o
+pré-requisito de qualquer proposta de otimização.
+
 ---
 
 ## 2. O frame `executions` transmite um payload que o cliente joga fora

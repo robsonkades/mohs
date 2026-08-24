@@ -56,8 +56,10 @@ class ShutdownLatencyScenario {
         };
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC())) {
-            cluster.defineJob("slow", _ -> {
-            });
+            // retries(0): o número medido é o CUSTO do stop, e uma reentrega
+            // por reclaim inflaria `invocations` sem que a janela de shutdown
+            // — a variável do experimento — tivesse mudado
+            cluster.defineJob("slow", spec -> spec.retries(0));
             for (int i = 0; i < 2; i++) {
                 cluster.addNode(settings(), List.of());
             }

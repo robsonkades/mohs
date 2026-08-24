@@ -62,9 +62,9 @@ public @interface OnDemandJob {
     @AliasFor(annotation = MohsJob.class, attribute = "maxConcurrentExecutions")
     int maxConcurrentExecutions() default 0;
 
-    /** Número máximo de tentativas de retry. */
+    /** Ver {@link MohsJob#retries()} — o default 1 é o que torna a entrega at-least-once sob falha de nó. */
     @AliasFor(annotation = MohsJob.class, attribute = "retries")
-    int retries() default 0;
+    int retries() default 1;
 
     /** Timeout da tentativa (duração ISO-8601, ex. {@code "PT5M"}). */
     @AliasFor(annotation = MohsJob.class, attribute = "timeout")

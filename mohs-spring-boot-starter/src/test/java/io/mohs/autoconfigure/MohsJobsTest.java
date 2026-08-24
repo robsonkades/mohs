@@ -317,6 +317,17 @@ class MohsJobsTest {
     }
 
     @Test
+    void anAnnotationWithoutRetriesIsBornWithRetryBudget() {
+        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("on-demand-job"), annotationOf("onDemandMethod"), AnnotatedFixtures.class);
+
+        assertThat(definition.retries())
+                .as("o caminho declarativo tem de nascer com o mesmo orçamento do builder: sem ele o reclaim de "
+                        + "uma posse perdida (nó morto, lease vencida) vira FAILED terminal e o contrato "
+                        + "at-least-once da ADR-0003 deixa de valer no default")
+                .isEqualTo(1);
+    }
+
+    @Test
     void rejectsMutuallyExclusiveTriggers() {
         assertThatThrownBy(() -> MohsJobs.toDefinition(JobKey.of("conflicting-job"), annotationOf("conflictingTriggersMethod"), AnnotatedFixtures.class))
                 .isInstanceOf(IllegalStateException.class)

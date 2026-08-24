@@ -72,8 +72,11 @@ mesma rodada, aplicados juntos):
   (ADR-0018).
 
 ## Consequences
-- Sob falha de nó, a garantia com `retries > 0` é **at-least-once**; com o default
-  `retries = 0` continua at-most-once — Javadoc do `Engine` atualizado com a nuance.
+- ~~Sob falha de nó, a garantia com `retries > 0` é **at-least-once**; com o default
+  `retries = 0` continua at-most-once~~ — **revisado em 2026-08-23 (ADR-0057): o
+  default passou a ser `retries = 1`, então at-least-once vale POR DEFAULT. A frase
+  original segue valendo para quem declarar `retries = 0` explicitamente.**
+  Javadoc do `Engine` atualizado com a nuance.
   Reclaim prematuro de handler vivo (lease curta demais, sem watchdog ainda) consome
   orçamento de retry — mais uma razão pro WARN de lease × timeout do boot.
 - `POST /executions/{id}/retry` (REST, stub) ganha o mecanismo por baixo quando for ligado.

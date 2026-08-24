@@ -288,9 +288,11 @@ public final class MohsImpl implements Mohs {
     public Optional<JobSnapshot> reschedule(JobKey jobKey, Schedule schedule) {
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(schedule, "schedule");
+
         if (!jobStore.reschedule(jobKey, schedule)) {
             return Optional.empty();
         }
+
         return findJob(jobKey);
     }
 
@@ -322,17 +324,21 @@ public final class MohsImpl implements Mohs {
     @Override
     public Optional<Execution> cancel(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
+
         boolean cancelledPending = workQueue.cancelQueued(executionId, clock.instant());
+
         if (!cancelledPending && !leaseStore.requestCancellation(executionId)) {
             cancelledPending = workQueue.cancelQueued(executionId, clock.instant());
             if (!cancelledPending) {
                 leaseStore.requestCancellation(executionId);
             }
         }
+
         Optional<Execution> result = historyStore.find(executionId, clock.instant());
         if (cancelledPending) {
             result.ifPresent(this::rearmAfterFinishChain);
         }
+
         return result;
     }
 
@@ -355,8 +361,8 @@ public final class MohsImpl implements Mohs {
             return;
         }
         jobStore.find(execution.jobKey()).ifPresent(stored -> {
-            if (stored.definition().schedule() instanceof IntervalSpec interval && interval.afterFinish()) {
-                jobStore.armNextFire(execution.jobKey(), clock.instant().plus(interval.interval()));
+            if (stored.definition().schedule() instanceof IntervalSpec(Duration interval, boolean afterFinish) && afterFinish) {
+                jobStore.armNextFire(execution.jobKey(), clock.instant().plus(interval));
             }
         });
     }
@@ -380,8 +386,7 @@ public final class MohsImpl implements Mohs {
     public Optional<Execution> retry(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
         if (workQueue.rearmForManualRetry(executionId, clock.instant())) {
-            log.info("execution {} manually rearmed for retry — rejoins the claim path bypassing the retries budget (ADR-0033)",
-                    executionId.value());
+            log.info("execution {} manually rearmed for retry — rejoins the claim path bypassing the retries budget (ADR-0033)", executionId.value());
             return historyStore.find(executionId, clock.instant());
         }
         Execution current = historyStore.find(executionId, clock.instant()).orElse(null);

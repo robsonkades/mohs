@@ -294,9 +294,16 @@ class EngineTest {
         seedEnqueuedExecution(id, jobKey, payload, scheduledAt, null);
     }
 
+    /**
+     * {@code retries(0)} declarado, não herdado: metade dos testes deste
+     * fixture mede o caminho TERMINAL (timeout, watchdog, shutdown, handler
+     * ausente), que só é alcançável sem orçamento de retry. Quem precisa do
+     * caminho com retentativa declara o seu, como
+     * {@link #aManuallyRearmedExecutionRunsOnceMoreAndFailsTerminally}.
+     */
     private void seedEnqueuedExecution(String id, String jobKey, Object payload, Instant scheduledAt, @Nullable String runner) {
         jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> {
-            PolicySpec policySpec = spec.onDemand();
+            PolicySpec policySpec = spec.onDemand().retries(0);
             if (runner != null) {
                 policySpec.runner(runner);
             }
@@ -1191,7 +1198,10 @@ class EngineTest {
      */
     @Test
     void jobTimeoutInterruptsTheHandlerAndTheOutcomeFollowsTheRetryBudget() throws Exception {
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().timeout(Duration.ofMillis(50))));
+        // retries(0) declarado: é o que faz o timeout ser o DESFECHO e não uma
+        // tentativa a mais — o teste mede o outcome sob orçamento esgotado
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class,
+                spec -> spec.onDemand().timeout(Duration.ofMillis(50)).retries(0)));
         recordAndOffer("exec-1", "welcome-email", "hello", NOW.minusSeconds(1));
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch never = new CountDownLatch(1);

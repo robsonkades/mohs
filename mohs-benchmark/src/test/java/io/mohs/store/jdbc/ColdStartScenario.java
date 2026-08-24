@@ -45,8 +45,11 @@ class ColdStartScenario {
         AtomicInteger invocations = new AtomicInteger();
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock)) {
-            cluster.defineJob("cold", _ -> {
-            });
+            // orçamento ZERO declarado: este cenário mede PERDA no arranque a
+            // frio, e herdar o default do produto (1) faria um reclaim ganhar
+            // segunda chance, terminar SUCCEEDED e a asserção `failed == 0`
+            // passar a tolerar exatamente o evento que ela existe pra pegar
+            cluster.defineJob("cold", spec -> spec.retries(0));
             for (int i = 0; i < NODES; i++) {
                 cluster.addNode(settings(), List.of());
             }

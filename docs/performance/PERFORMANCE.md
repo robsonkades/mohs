@@ -118,9 +118,9 @@ Ao adicionar instâncias, o que muda de verdade:
 
 5. **Failover é o reaper**: node que morre deixa seu in-flight expirar em
    `lease-ttl` e qualquer sobrevivente reclama com o orçamento de retry
-   (garantia at-least-once exige `retries > 0` no job — o default 0 é
-   at-most-once, ADR-0012/0033). `GET /nodes` (M3 pendente) é o
-   observatório disso.
+   (garantia at-least-once exige `retries > 0` no job — o default; com
+   `retries = 0` a garantia cai para at-most-once, ADR-0012/0033).
+   `GET /nodes` (M3 pendente) é o observatório disso.
 
 ## Como medir (sempre, antes e depois de qualquer mudança)
 

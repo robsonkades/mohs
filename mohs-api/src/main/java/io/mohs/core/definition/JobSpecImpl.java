@@ -29,7 +29,8 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     private boolean startPaused;
     private boolean allowConcurrentExecutions = true;
     private int maxConcurrentExecutions;
-    private int retries;
+    /** Mesmo default das anotações ({@link MohsJob#retries()}): a garantia de entrega não pode depender do estilo de declaração. */
+    private int retries = 1;
     private @Nullable Duration timeout;
     private @Nullable String retryPolicy;
 

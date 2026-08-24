@@ -199,19 +199,23 @@ class NodeChurnScenario {
     }
 
     /**
-     * A aresta afiada, afirmada no valor que ela TEM: o mesmo
-     * {@code stop(grace)}, com o default de {@code retries} do produto —
-     * ZERO ({@code JobSpecImpl.retries} nasce 0). Aqui o reclaim do órfão
-     * não tem para onde reagendar e vira {@code FAILED} terminal: o que
-     * seria reentrega vira perda. Não é um defeito diferente do teste
-     * acima — é o MESMO mecanismo, com a política que decide se ele custa
-     * uma re-execução ou uma execução perdida.
+     * O pior caso do {@code stop(grace)}: {@code retries = 0} — a opção de
+     * quem prefere at-most-once ao risco de reentrega — combinado com a
+     * saída de um nó que tem trabalho na mão. Sem orçamento, um reclaim do
+     * órfão não tem para onde reagendar e vira {@code FAILED} terminal:
+     * nesta configuração, o que seria reentrega é perda.
      *
-     * <p>Está aqui para que a escolha apareça: quem roda com
-     * {@code retries=0} paga isto em todo SIGTERM que pegue trabalho em voo.
+     * <p>A asserção é de TETO, não de piso, e isso é deliberado: depois que
+     * a segunda espera do {@code Engine.stop} fechou a janela entre o
+     * {@code runAsync} e o {@code inFlight.add}, o esperado é justamente
+     * ZERO — e foi o que passou a medir. O cenário deixou de ser
+     * "demonstração da perda" e virou o GUARDA dela: se a janela reabrir,
+     * é aqui que o dano aparece primeiro, e limitado ao que o nó segurava.
+     * Um piso ({@code failed > 0}) transformaria a correção do produto em
+     * teste vermelho.
      */
     @Test
-    void aGracefulStopWithNoRetryBudgetLosesTheWorkItWasHolding() {
+    void aGracefulStopWithNoRetryBudgetLosesAtMostWhatTheNodeHeld() {
         DataSource dataSource = PostgresTestSupport.freshSchema();
         Map<String, Integer> invocationsPerExecution = new ConcurrentHashMap<>();
         AtomicInteger invocations = new AtomicInteger();
@@ -226,8 +230,10 @@ class NodeChurnScenario {
         };
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC())) {
-            cluster.defineJob("churn", _ -> {
-            }); // sem retries: o default do produto
+            // orçamento zero DECLARADO: é a variável independente deste par —
+            // herdá-la do default do produto faria os dois testes medirem a
+            // mesma coisa no dia em que o default mudasse
+            cluster.defineJob("churn", spec -> spec.retries(0));
             for (int i = 0; i < 3; i++) {
                 cluster.addNode(settings(), List.of());
             }
@@ -247,6 +253,7 @@ class NodeChurnScenario {
 
             boolean settled = ScenarioCluster.awaitUntil(OBSERVATION, cluster::isDrained);
             int failed = cluster.countTerminal("FAILED");
+            int succeeded = cluster.countTerminal("SUCCEEDED");
 
             System.out.printf("""
 
@@ -254,12 +261,21 @@ class NodeChurnScenario {
                     queue settled        : %s
                     handler invocations  : %d
                     held by leaving node : %d
+                    terminal SUCCEEDED   : %d
                     terminal FAILED      : %d   <- work lost, bounded by what the node held
                     failure kinds        : %s
-                    """, SEED, settled ? "yes" : "NO", invocations.get(), heldByLeavingNode, failed,
+                    """, SEED, settled ? "yes" : "NO", invocations.get(), heldByLeavingNode, succeeded, failed,
                     cluster.failureKinds());
 
             assertThat(settled).as("the queue must drain even when the exit costs work").isTrue();
+            // conservação ANTES do teto: `isDrained` só olha fila e posse vazias,
+            // e o teto sozinho é satisfeito tanto por "nada se perdeu" quanto por
+            // "sumiram 8.000 sem nunca virar terminais". Sem esta linha o
+            // intervalo aceito é [0, 32] sobre um universo de tamanho desconhecido.
+            assertThat(succeeded + failed)
+                    .as("conservation: every seeded execution must reach a terminal state — one that leaves "
+                            + "mohs_ready without one is a loss the FAILED ceiling cannot see")
+                    .isEqualTo(SEED);
             assertThat(failed)
                     .as("KNOWN EDGE: with retries=0 a reclaimed orphan has nowhere to be rescheduled and becomes a "
                             + "terminal FAILED. The damage must stay bounded by what the leaving node held (%d) — "

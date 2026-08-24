@@ -148,9 +148,17 @@ final class ScenarioCluster implements AutoCloseable {
         jobStore.upsert(JobDefinition.of(jobKey, ScenarioCluster.class, spec -> policy.accept(spec.onDemand())));
     }
 
-    /** Um job RECORRENTE — o que faz a materialização de trigger (§5.2) entrar no cenário, e com ela a corrida entre nós pela mesma ocorrência. */
+    /**
+     * Um job RECORRENTE — o que faz a materialização de trigger (§5.2) entrar
+     * no cenário, e com ela a corrida entre nós pela mesma ocorrência.
+     * {@code retries(0)} declarado pela mesma disciplina dos demais: o
+     * orçamento não é variável deste experimento (o retry reencarna a MESMA
+     * linha de {@code mohs_execution}, então nem mudaria as contagens), e
+     * declarar impede que a próxima revisão de default mexa no que a bancada
+     * mede sem ninguém decidir.
+     */
     void defineRecurring(String jobKey, Duration every) {
-        jobStore.upsert(JobDefinition.of(jobKey, ScenarioCluster.class, spec -> spec.every(every)));
+        jobStore.upsert(JobDefinition.of(jobKey, ScenarioCluster.class, spec -> spec.every(every).retries(0)));
     }
 
     /**

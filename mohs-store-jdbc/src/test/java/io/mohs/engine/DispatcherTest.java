@@ -164,9 +164,16 @@ class DispatcherTest {
         return historyStore.find(ExecutionId.of(id), clock.instant()).orElseThrow().state();
     }
 
-    /** retries default 0 — primeira falha esgota o orçamento, o comportamento terminal de sempre. */
+    /**
+     * Job sem orçamento de retry, declarado: os testes que usam este helper
+     * medem o caminho TERMINAL — a primeira falha já é o desfecho. O par com
+     * orçamento monta a sua própria definição ({@code retries(2)} em
+     * {@link #failureWithRemainingBudgetSchedulesARetryWithBackoff}). Herdar
+     * o orçamento do default do produto faria estes testes mudarem de
+     * caminho a cada revisão de política.
+     */
     private static JobDefinition onDemand(String jobKey) {
-        return JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand());
+        return JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand().retries(0));
     }
 
     /** ADR-0033: falha com orçamento renasce na fila com backoff dentro do bound (1s pra 1ª falha) — RETRY_WAITING derivado — e publica AttemptFailed + RetryScheduled, nunca Failed. */

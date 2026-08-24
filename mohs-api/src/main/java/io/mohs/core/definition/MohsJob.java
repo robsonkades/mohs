@@ -97,8 +97,17 @@ public @interface MohsJob {
      */
     int maxConcurrentExecutions() default 0;
 
-    /** Número máximo de tentativas de retry. */
-    int retries() default 0;
+    /**
+     * Tentativas de retry ALÉM da primeira execução. O default é 1, não 0:
+     * o contrato de entrega (ADR-0003) só é at-least-once quando há
+     * orçamento — sem ele, o reclaim de uma execução cuja posse se perdeu
+     * (nó morto, lease vencida, janela de shutdown) não tem para onde
+     * reagendar e vira {@code FAILED} terminal, isto é, trabalho perdido em
+     * silêncio num evento que o produto promete sobreviver. Quem prefere
+     * no máximo uma invocação por execução (at-most-once) declara
+     * {@code retries = 0} de propósito, e aceita a perda sob falha de nó.
+     */
+    int retries() default 1;
 
     /** Timeout da tentativa (duração ISO-8601, ex. {@code "PT5M"}). */
     String timeout() default "";

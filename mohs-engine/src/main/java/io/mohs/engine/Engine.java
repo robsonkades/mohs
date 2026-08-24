@@ -79,7 +79,9 @@ import io.mohs.core.schedule.IntervalSpec;
  * leases de nós mortos ({@link LeaseStore#findOrphaned}) decidindo pelo
  * orçamento de retry, e TODA conclusão é cercada por
  * {@code (node_id, epoch)} (§6.3). Sob falha de nó a garantia é
- * <b>at-least-once</b> quando {@code retries > 0}.
+ * <b>at-least-once</b> quando {@code retries > 0} — o default de
+ * {@link JobDefinition#retries()}; com orçamento zero o órfão reclamado não
+ * tem para onde reagendar e a garantia cai para at-most-once.
  *
  * <p><b>Timeout e cancelamento (ADR-0034):</b> verificados de carona no
  * tick — flag + interrupt via {@link CancellationSignal}, desfecho passivo

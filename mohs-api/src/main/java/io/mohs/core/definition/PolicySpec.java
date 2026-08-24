@@ -52,6 +52,7 @@ public sealed interface PolicySpec permits JobSpecImpl {
      */
     PolicySpec maxConcurrentExecutions(int max);
 
+    /** Tentativas ALÉM da primeira. Default 1 — ver {@link MohsJob#retries()} pro porquê de não ser zero. */
     PolicySpec retries(int max);
 
     PolicySpec timeout(Duration timeout);

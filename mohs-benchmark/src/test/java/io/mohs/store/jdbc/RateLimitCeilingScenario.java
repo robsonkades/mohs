@@ -60,9 +60,11 @@ class RateLimitCeilingScenario {
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock)) {
             cluster.rateLimits().upsert(new RateLimit(LIMIT_NAME, MAX, WINDOW));
-            cluster.defineJob("limited", spec -> spec.rateLimit(LIMIT_NAME));
-            cluster.defineJob("unlimited", _ -> {
-            });
+            // retries(0) nos dois: o teto do bucket é cobrado por ENTREGA, e um
+            // retry por reclaim seria uma entrega a mais que não veio do seed —
+            // ruído numa asserção que conta exatamente entregas
+            cluster.defineJob("limited", spec -> spec.rateLimit(LIMIT_NAME).retries(0));
+            cluster.defineJob("unlimited", spec -> spec.retries(0));
 
             for (int i = 0; i < NODES; i++) {
                 cluster.addNode(settings(), List.of());

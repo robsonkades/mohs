@@ -65,7 +65,18 @@ class JobDefinitionTest {
 
         assertThat(definition.schedule()).isEqualTo(new OnDemandSpec());
         assertThat(definition.misfire()).isEqualTo(Misfire.IGNORE);
-        assertThat(definition.retries()).isZero();
+    }
+
+    @Test
+    void aDefinitionWithoutPolicyIsBornWithRetryBudget() {
+        JobDefinition definition = JobDefinition.of("import-file", Handler.class,
+                spec -> spec.onDemand().runner("io"));
+
+        assertThat(definition.retries())
+                .as("um job que não pede política nenhuma tem de nascer com orçamento: sem ele a posse perdida "
+                        + "(nó morto, lease vencida) não tem para onde reagendar e o contrato at-least-once da "
+                        + "ADR-0003 deixa de valer no default")
+                .isEqualTo(1);
     }
 
     @Test

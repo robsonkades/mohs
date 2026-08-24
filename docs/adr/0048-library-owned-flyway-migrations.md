@@ -69,12 +69,29 @@ DDL à mão no upgrade" passa despercebido por teste e por boot).
   delta real chega com as tabelas do §7.2 (a ADR-0049 decidiu que a
   Phase 2 NÃO altera tipo de coluna).
 - Boot concorrente multi-nó no primeiro deploy: coberto pelo lock de
-  migração do próprio Flyway, por especificação — não exercitado na
-  bancada (registrado; os cenários testados são fresh/adoção/re-execução
-  sequenciais nos 4 dialetos).
+  migração do próprio Flyway, por especificação — ~~não exercitado na
+  bancada~~ **exercitado e confirmado em 2026-08-23**
+  (`ConcurrentMigrationScenario`): 6 réplicas partindo de um
+  `CountDownLatch` contra um banco vazio, uma aplica a cadeia inteira e
+  as outras cinco esperam o lock e leem "up to date"; **4 versões, cada
+  uma aplicada exatamente uma vez, zero réplica falhando o boot**,
+  réplica mais lenta 5,2s. Medido só em Postgres (ver a ressalva de
+  cobertura por dialeto na ADR-0050).
 - Boot em banco vazio cria o schema sozinho (o demo perdeu o
   `spring.sql.init`); multi-nó concorrente é seguro pelo lock do próprio
   Flyway.
 - Adoção testada nos três cenários (banco novo, instalação existente
   pré-Flyway, re-execução) em H2 e Postgres (`MohsFlywayTest`/
   `MohsFlywayPostgresTest`).
+- **A cadeia V1→V4 é DESTRUTIVA para dados da era single-table, e isso
+  precisa estar na nota da primeira release.** A `V3__table_split` CRIA
+  `mohs_ready`/`mohs_lease`/`mohs_execution`/`mohs_attempt` e não copia
+  uma linha (zero `INSERT`/`SELECT` no script); a `V4__drop_legacy_tables`
+  faz `DROP TABLE mohs_executions` e `mohs_attempts`. Em banco vazio —
+  todo usuário novo — é inofensivo: a cadeia cria e dropa tabelas vazias.
+  Quem rodou versões de DESENVOLVIMENTO com dados perde histórico e fila
+  no primeiro boot da versão nova, em silêncio. Como o projeto nunca teve
+  release publicada, isso é aceitável e provavelmente deliberado; o que
+  não é aceitável é alguém descobrir sozinho. **Se algum dia for preciso
+  preservar**, o caminho é uma `V3.5` de backfill entre as duas, antes do
+  drop.

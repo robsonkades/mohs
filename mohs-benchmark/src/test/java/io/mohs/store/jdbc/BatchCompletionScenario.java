@@ -37,9 +37,9 @@ import io.mohs.engine.EngineSettings;
  * {@code retries(1)} — não é detalhe de bancada, é o que torna a asserção
  * do contador FALSIFICÁVEL: cada membro que falha é invocado DUAS vezes e
  * tem de contar UMA, e é isso que separa "contou a falha terminal" de
- * "contou cada tentativa", que fecharia o lote cedo. Com o default do
- * produto ({@code retries = 0}) os dois comportamentos produziriam o mesmo
- * número e a asserção não provaria nada.
+ * "contou cada tentativa", que fecharia o lote cedo. Sem orçamento
+ * ({@code retries = 0}) os dois comportamentos produziriam o mesmo número
+ * e a asserção não provaria nada.
  *
  * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
  * -Dtest=BatchCompletionScenario}.
@@ -49,11 +49,10 @@ class BatchCompletionScenario {
     private static final int MEMBERS = 20_000;
     /**
      * Um retry além da primeira tentativa: é o que torna FALSIFICÁVEL a
-     * asserção sobre o contador. Com o default do produto (retries=0) cada
-     * membro é invocado UMA vez, e aí "conta a falha terminal" e "conta cada
-     * attempt" produzem o mesmo número — um contador por-attempt passaria
-     * verde. Com um retry, o membro que falha é invocado DUAS vezes e tem
-     * de contar UMA.
+     * asserção sobre o contador. Sem orçamento (retries=0) cada membro é
+     * invocado UMA vez, e aí "conta a falha terminal" e "conta cada attempt"
+     * produzem o mesmo número — um contador por-attempt passaria verde. Com
+     * um retry, o membro que falha é invocado DUAS vezes e tem de contar UMA.
      */
     private static final int RETRIES = 1;
     private static final int NODES = 3;

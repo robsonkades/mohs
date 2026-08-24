@@ -39,3 +39,17 @@ que o projeto promete otimizar, e o que um usuário pode assumir.
   SQL Server 2019+) estão perto da borda (PG 14 EOL em nov/2026), e uma
   versão futura do Flyway via BOM pode passar a recusar. Mitigação já
   existente: `mohs.jdbc.migrate=false` (schema gerenciado por fora).
+- Ressalva registrada (bancada de validação de release, 2026-08-23): o
+  "testados na suíte inteira" do Tier 2 se apoia nos testes de store e de
+  schema por dialeto (Testcontainers) mais o CAS guardado da ADR-0018 —
+  **não** nos cenários de SISTEMA. Os nove `*Scenario` de
+  `mohs-benchmark` (rate limit sob cluster, fechamento de lote, churn de
+  nó, arranque a frio, migração concorrente, trigger recorrente,
+  shutdown) montam N engines reais contra um Postgres e rodam **só em
+  Tier 1**: nenhum deles jamais executou em SQL Server ou MySQL. O que
+  isso significa em concreto: claim concorrente, reclaim de posse e
+  fechamento de lote sob contenção real estão medidos apenas no dialeto
+  de referência. **Gatilho para fechar a lacuna:** primeiro usuário de
+  produção anunciado em Tier 2, ou primeira reclamação de corretude
+  nesses bancos. O trabalho é generalizar o `ScenarioCluster`, hoje
+  amarrado a `PostgresJdbcDialect` + `PostgresTestSupport`.

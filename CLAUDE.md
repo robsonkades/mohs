@@ -122,7 +122,11 @@ For any task that changes code:
 - `docs/DASHBOARD-STREAM-REVIEW.md` — what stayed open in `/overview/stream`,
   each with its trigger (companion to ADR-0046, which decided *not* to change
   it). Read it before proposing any stream optimization: two were already
-  implemented and reverted, and nobody has measured the endpoint yet.
+  implemented and reverted. Partially measured on 2026-08-23
+  (`OverviewLatencyScenario`): on an IDLE database the throughput count costs
+  the window, not the history (1.6 ms at 2M rows) — what costs is the backlog
+  scan (13.2 ms at 500k). The number that still does not exist, and that the
+  trigger asks for, is the endpoint under load with an SSE subscriber attached.
 - `docs/CLAIM-GRANULARITY.md` — open exploration: should the claim stay global,
   or split per runner? Not a decision; carries the number that would settle it.
 - `PLAN.md` — current refactor steps; one step per commit/PR.
