@@ -62,7 +62,6 @@ import io.mohs.store.jdbc.JdbcStoreTransactions;
 import io.mohs.store.jdbc.JdbcTriggerFirer;
 import io.mohs.store.jdbc.JdbcWorkQueue;
 import io.mohs.store.jdbc.MohsFlyway;
-import io.mohs.store.jdbc.PostgresPartitionManager;
 import io.mohs.store.jdbc.dialect.H2JdbcDialect;
 import io.mohs.store.jdbc.dialect.JdbcDialect;
 import io.mohs.store.jdbc.dialect.MySqlJdbcDialect;
@@ -232,22 +231,6 @@ public class MohsAutoConfiguration {
     @Bean
     public StoreTransactions mohsStoreTransactions(DataSource dataSource, MohsFlyway mohsFlyway) {
         return new JdbcStoreTransactions(dataSource);
-    }
-
-    /**
-     * Tier 1 apenas: as partições semanais da história são criadas AQUI, no
-     * boot — antes de qualquer enqueue (o gestor depende do Flyway pelo
-     * grafo, e todo escritor depende dele) — e re-garantidas a cada boot; a
-     * DEFAULT das migrações é o backstop (PLAN.md S5.1). Sem bean nos
-     * demais dialetos: os equivalentes funcionais não particionam
-     * (ADR-0050).
-     */
-    @Bean
-    @ConditionalOnProperty(prefix = "mohs.jdbc", name = "dialect", havingValue = "postgresql")
-    public PostgresPartitionManager mohsPartitionManager(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, MohsFlyway mohsFlyway) {
-        PostgresPartitionManager manager = new PostgresPartitionManager(dataSource);
-        manager.ensureWeeklyPartitions(mohsClock.instant());
-        return manager;
     }
 
     @Bean

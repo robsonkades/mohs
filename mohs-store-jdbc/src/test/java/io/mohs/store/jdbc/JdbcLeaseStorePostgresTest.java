@@ -22,10 +22,11 @@ import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * A conclusão do §7.5-3 contra o Tier 1 REAL: partições semanais no lugar
- * da tabela plana, poda por igualdade de {@code created_at} (PLAN.md
- * S5.1) e a travessia TIMESTAMPTZ. A semântica compartilhada mora em
- * {@code JdbcLeaseStoreTest} (H2).
+ * A conclusão do §7.5-3 contra o Tier 1 REAL: a igualdade de
+ * {@code created_at} que casa a linha (ele lidera a PK) e a travessia
+ * TIMESTAMPTZ, que o H2 não sabe expressar. Até a ADR-0058 este teste
+ * também cobria as partições semanais; elas saíram, a igualdade ficou.
+ * A semântica compartilhada mora em {@code JdbcLeaseStoreTest} (H2).
  */
 class JdbcLeaseStorePostgresTest {
 
@@ -41,7 +42,6 @@ class JdbcLeaseStorePostgresTest {
     void setUp() {
         DataSource dataSource = PostgresTestSupport.freshSchema();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        new PostgresPartitionManager(dataSource).ensureWeeklyPartitions(NOW);
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
         store = new JdbcLeaseStore(dataSource, new PostgresJdbcDialect(), batchStore);
@@ -50,7 +50,7 @@ class JdbcLeaseStorePostgresTest {
     }
 
     @Test
-    void terminalUpdateLandsOnThePartitionedHistoryThroughTheCreatedAtEqualityPrune() {
+    void terminalUpdateFindsTheRowThroughTheCreatedAtEquality() {
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
                 VALUES ('exec-1', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
@@ -64,7 +64,7 @@ class JdbcLeaseStorePostgresTest {
                 ExecutionState.SUCCEEDED, CREATED_AT, null)), jobStore);
 
         assertThat(verdicts.get(ExecutionId.of("exec-1")).owned()).isTrue();
-        // a poda por IGUALDADE achou a linha na partição — created_at com precisão de micros atravessou verbatim
+        // a igualdade achou a linha — created_at com precisão de micros atravessou verbatim
         assertThat(rawJdbcTemplate.queryForObject(
                 "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("SUCCEEDED");
         assertThat(rawJdbcTemplate.queryForObject(

@@ -17,8 +17,9 @@ import io.mohs.core.job.JobKey;
 /**
  * A HISTÓRIA ({@code mohs_execution}/{@code mohs_attempt}/
  * {@code mohs_idempotency}) — porta da Phase 5 (ADR-A, §7.2/§18.3 do
- * redesign). Append + UM update terminal por execução; no Tier 1 as
- * tabelas são particionadas por tempo e retenção é DROP de partição. O
+ * redesign). Append + UM update terminal por execução; as tabelas são
+ * planas em todos os dialetos desde a ADR-0058, e a retenção futura é
+ * DELETE em lote (o DROP de partição saiu junto com o particionamento). O
  * {@code state} daqui é read model ADVISORY (§6.2): em voo, a verdade é
  * a lease — leituras que precisam de verdade juntam {@link LeaseStore},
  * leituras que precisam de velocidade (dashboard) usam a coluna e aceitam
@@ -33,10 +34,13 @@ public interface HistoryStore {
 
     /**
      * Uma execução aceita, pronta pro registro de nascimento.
-     * {@code createdAt} é o instante do enqueue e a CHAVE DE PARTIÇÃO —
-     * viaja em memória até a conclusão (PLAN.md S5.1: a poda do UPDATE
-     * terminal é por igualdade). {@code correlationId} carrega o batch
-     * (ADR-0043) até a Phase 8 generalizar.
+     * {@code createdAt} é o instante do enqueue e lidera a PK de
+     * {@code mohs_execution} — viaja em memória até a conclusão, que casa
+     * a linha por igualdade nas duas colunas. Era a chave de partição até
+     * a ADR-0058; o contrato "createdAt viaja" sobreviveu à remoção porque
+     * a PK continua com ele à frente (pendência com gatilho lá).
+     * {@code correlationId} carrega o batch (ADR-0043) até a Phase 8
+     * generalizar.
      */
     record NewExecution(ExecutionId executionId, JobKey jobKey, int shard, int priority, Instant scheduledAt,
             Instant createdAt, String actor, @Nullable String correlationId, @Nullable String idempotencyKey,
@@ -81,7 +85,7 @@ public interface HistoryStore {
      */
     PayloadBatch findPayloads(List<ExecutionId> ids);
 
-    /** Payload hidratado + o cabeçalho da execução ({@code createdAt} poda a partição do UPDATE terminal; o resto alimenta dispatch/eventos/conclusão). */
+    /** Payload hidratado + o cabeçalho da execução ({@code createdAt} lidera a PK e casa a linha do UPDATE terminal; o resto alimenta dispatch/eventos/conclusão). */
     record PayloadRow(ExecutionHead head, Object payload) {
         public PayloadRow {
             Objects.requireNonNull(head, "head");

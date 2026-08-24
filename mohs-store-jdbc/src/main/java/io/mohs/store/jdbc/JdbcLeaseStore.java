@@ -39,7 +39,7 @@ import io.mohs.store.jdbc.dialect.JdbcDialect;
  * {@code (node_id, epoch)} — deletar a lease É liberar a vaga (não existe
  * mais contador a decrementar, ADR-0025 morre por construção) —,
  * {@code INSERT} dos attempts confirmados, {@code UPDATE} terminal
- * advisory da história (podado por partição via igualdade de
+ * advisory da história (casado por igualdade de
  * {@code created_at}) e, pros resultados não-terminais, o renascimento na
  * fila na MESMA transação (ver Javadoc de
  * {@link LeaseStore.CompletionResult#retry}).
@@ -76,7 +76,16 @@ public final class JdbcLeaseStore implements LeaseStore {
             WHERE execution_id = :executionId AND created_at = :createdAt
             """;
 
-    /** O caminho frio do reaper, que não carregou {@code created_at}: o índice de {@code execution_id} sonda as partições — aceitável fora do hot path (medição do S5.2). */
+    /**
+     * O caminho frio do reaper, que não carregou {@code created_at}. Desde a
+     * ADR-0058 os dois planos são IDÊNTICOS (medido: ambos usam
+     * {@code idx_mohs_execution_id}, 4 buffers, 0,047 ms — sem partição não há
+     * o que podar, e o planner rebaixa {@code created_at} a {@code Filter}
+     * mesmo quando ele está no predicado). A distinção pruned/unpruned virou
+     * vocabulário morto; as duas constantes só não colapsaram porque
+     * {@code execution_id} sozinho não é único PELO SCHEMA — colapsar muda
+     * garantia, não plano. Ver a pendência da PK na ADR-0058.
+     */
     // batch-counted: countIntoBatch, na mesma transação do complete
     private static final String TERMINAL_UPDATE_UNPRUNED = """
             UPDATE mohs_execution SET state = :state, finished_at = :finishedAt

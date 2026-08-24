@@ -69,7 +69,7 @@ public final class Dispatcher {
      * fence de toda conclusão; {@code attemptNumber} veio da entrada de
      * fila (§5.3 — nada conta attempts no hot path); {@code claimedAt}
      * ancora o attempt sintético do watchdog; {@code executionCreatedAt}
-     * poda a partição do UPDATE terminal ({@code null} = sem poda, o
+     * casa a linha do UPDATE terminal ({@code null} = casa só por id, o
      * caminho degradado de linha ilegível).
      */
     public record Grant(String nodeId, long epoch, int attemptNumber, Instant claimedAt,

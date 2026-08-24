@@ -150,7 +150,7 @@ public final class JdbcWorkQueue implements WorkQueue {
             if (jdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = :executionId", idParam) == 0) {
                 return false;
             }
-            // terminal advisory sem poda de partição — caminho frio, por id
+            // terminal advisory casado só por id — caminho frio
             // (mesmo racional do TERMINAL_UPDATE_UNPRUNED do LeaseStore)
             // batch-counted: incrementFailed logo abaixo, nesta transação
             jdbcTemplate.update("""

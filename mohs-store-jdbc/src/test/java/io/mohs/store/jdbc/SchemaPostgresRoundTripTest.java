@@ -72,7 +72,6 @@ class SchemaPostgresRoundTripTest {
         new JdbcJobStore(dataSource, clock).upsert(
                 JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
         JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new PostgresJdbcDialect());
-        new PostgresPartitionManager(dataSource).ensureWeeklyPartitions(clock.instant());
         Instant when = Instant.parse("2026-08-13T00:00:00Z");
 
         store.record(List.of(new HistoryStore.NewExecution(ExecutionId.of("019abc-1"), JobKey.of("welcome-email"),
@@ -93,7 +92,6 @@ class SchemaPostgresRoundTripTest {
         new JdbcJobStore(dataSource, clock).upsert(
                 JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
         JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new PostgresJdbcDialect());
-        new PostgresPartitionManager(dataSource).ensureWeeklyPartitions(clock.instant());
 
         store.record(List.of(newExecutionWithKey("idem-1", "req-1")));
         assertThatThrownBy(() -> store.record(List.of(newExecutionWithKey("idem-2", "req-1"))))

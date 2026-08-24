@@ -107,8 +107,11 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     idempotency_key VARCHAR(255),
     payload         TEXT         NOT NULL,
     payload_type    VARCHAR(500) NOT NULL,
+    -- created_at à frente é herança do particionamento (o Postgres exigia a
+    -- chave de partição na PK) e sobrevive à ADR-0058 por não valer o risco
+    -- de mexer no caminho quente sem medida; ver a pendência com gatilho lá
     PRIMARY KEY (created_at, execution_id)
-) PARTITION BY RANGE (created_at);
+);
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_id   ON mohs_execution (execution_id);
 -- (job_key, execution_id): serve o ORDER BY/cursor do findPage — ver o V3 do Postgres
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_job  ON mohs_execution (job_key, execution_id DESC);
@@ -125,7 +128,7 @@ CREATE TABLE IF NOT EXISTS mohs_attempt (
     error_type   VARCHAR(500),
     error        TEXT,
     PRIMARY KEY (finished_at, execution_id, number)
-) PARTITION BY RANGE (finished_at);
+);
 CREATE INDEX IF NOT EXISTS idx_mohs_attempt_throughput ON mohs_attempt (finished_at, outcome);
 CREATE INDEX IF NOT EXISTS idx_mohs_attempt_exec ON mohs_attempt (execution_id);
 
@@ -137,5 +140,3 @@ CREATE TABLE IF NOT EXISTS mohs_idempotency (
     PRIMARY KEY (job_key, idempotency_key)
 );
 
-CREATE TABLE IF NOT EXISTS mohs_execution_default PARTITION OF mohs_execution DEFAULT;
-CREATE TABLE IF NOT EXISTS mohs_attempt_default PARTITION OF mohs_attempt DEFAULT;

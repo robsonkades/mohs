@@ -106,12 +106,31 @@ CREATE TABLE IF NOT EXISTS mohs_idempotency (
     PRIMARY KEY (job_key, idempotency_key)
 );
 
--- Só o esqueleto estático aqui: partições SEMANAIS são criadas adiante
--- pelo gestor de partições do engine (S5.2) — nomes dependem da data, e
--- SQL procedural (DO $$) não sobrevive aos DOIS caminhos de instalação
--- (o ResourceDatabasePopulator do schema-file quebra statements por ';'
--- sem entender dollar-quoting). A DEFAULT é o backstop de operabilidade:
--- um create-ahead perdido NUNCA derruba o enqueue; linha na default é
--- WARN do gestor, não outage.
-CREATE TABLE IF NOT EXISTS mohs_execution_default PARTITION OF mohs_execution DEFAULT;
-CREATE TABLE IF NOT EXISTS mohs_attempt_default PARTITION OF mohs_attempt DEFAULT;
+-- HISTÓRICO: quando esta migração foi escrita, as partições SEMANAIS eram
+-- criadas adiante por um gestor no engine e a DEFAULT era o backstop de
+-- operabilidade. A ADR-0058 removeu o particionamento inteiro — gestor,
+-- PARTITION BY e DEFAULT —, e a V5 converte estas duas tabelas em normais
+-- logo em seguida. O que sobra aqui é a forma histórica, preservada porque
+-- migração aplicada não se reescreve por estética.
+-- Guardadas por "o pai é particionado?" desde a ADR-0058: quem já tinha o
+-- schema aplicado por fora (mohs.jdbc.migrate=false) e liga o Flyway depois
+-- chega aqui com as tabelas JÁ normais, e um CREATE ... PARTITION OF sobre
+-- pai não-particionado é erro duro, não no-op — o IF NOT EXISTS não cobre
+-- esse caso porque a queixa é sobre o pai. Em banco novo nada muda: o V3
+-- acabou de criá-las particionadas e o V5 as converte em seguida.
+-- `to_regclass` e não `relname`: a guarda TEM de resolver pelo MESMO
+-- search_path que o DDL logo abaixo usa. Com `relname` sem namespace, um
+-- schema vizinho que ainda tenha a tabela particionada faz a guarda dizer
+-- "sim" para a tabela NORMAL do search_path — e o CREATE ... PARTITION OF
+-- falha com exatamente o erro que a guarda existe para evitar (reproduzido
+-- em PG 18). `to_regclass` devolve NULL para tabela inexistente, então
+-- "banco vazio" também é no-op, sem precisar de segunda guarda.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_partitioned_table WHERE partrelid = to_regclass('mohs_execution')) THEN
+        CREATE TABLE IF NOT EXISTS mohs_execution_default PARTITION OF mohs_execution DEFAULT;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_partitioned_table WHERE partrelid = to_regclass('mohs_attempt')) THEN
+        CREATE TABLE IF NOT EXISTS mohs_attempt_default PARTITION OF mohs_attempt DEFAULT;
+    END IF;
+END $$;

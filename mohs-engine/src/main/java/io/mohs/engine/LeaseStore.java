@@ -54,7 +54,7 @@ public interface LeaseStore {
      * fila e não-terminal — órfã invisível pra sempre). O chamador NUNCA
      * chama {@link WorkQueue#offer} pra um retry: duplicaria a PK de
      * {@code mohs_ready}.
-     * {@code executionCreatedAt} poda a partição do UPDATE advisory —
+     * {@code executionCreatedAt} casa a linha do UPDATE advisory (ele lidera a PK) —
      * carregado em memória desde a leitura de payload (PLAN.md S5.1: a
      * poda é por IGUALDADE; derivar do id só funciona pra UUIDv7 real);
      * {@code null} = atualizar sem poda (caminho frio do reaper, que não
@@ -120,7 +120,7 @@ public interface LeaseStore {
      * leases cercado por {@code (node_id, epoch)} — a contagem diz
      * exatamente quais este chamador ainda possuía —, {@code INSERT} dos
      * attempts confirmados, {@code UPDATE} terminal advisory da história
-     * (podado por partição via {@code executionCreatedAt}), contagem de
+     * (casado por {@code executionCreatedAt}, que lidera a PK), contagem de
      * lote (ADR-0043) e rearme fixed-delay (ADR-0035) — tudo ou nada.
      * Resultado com {@code owned = false} foi de encarnação perdida e é
      * descartado — detectado, nunca silenciosamente perdido (§7.6).

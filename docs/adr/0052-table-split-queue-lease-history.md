@@ -2,6 +2,12 @@
 
 Data: 2026-08-22 · Status: aceita · Fase: Phase 5 do redesign ("the table split", ADR-A do plano; commits 97d781a → 3a3bdd4)
 
+> **Nota (2026-08-23):** o item 3 da Decisão foi revisado pela **ADR-0058** —
+> `mohs_execution`/`mohs_attempt` NÃO são mais particionadas por semana no
+> Postgres (são planas em todos os dialetos), e a retenção futura deixou de
+> ser DROP de partição. O resto da decisão — o split em quatro tabelas por
+> perfil de escrita, o `state` advisory, o fence — segue em vigor.
+
 ## Contexto
 
 `mohs_executions` era uma tabela só com três perfis de escrita em guerra:

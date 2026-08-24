@@ -2,6 +2,12 @@
 
 Data: 2026-08-22 · Status: aceita · Fase: Phase 2 do redesign (declara o ADR-H do plano, §7.9)
 
+> **Nota (2026-08-23):** a **ADR-0058** removeu o particionamento declarativo,
+> que aparecia aqui como uma das capacidades Tier 1 — as tabelas de história
+> são planas em TODOS os dialetos agora, e a linha "podem não ter retenção por
+> partição" do Tier 2 deixou de ser uma diferença. O tiering em si (Postgres
+> como referência de performance, H2 fora de produção) segue em vigor.
+
 ## Contexto
 
 Os 4 dialetos eram pares (ADR-0022/0023) — e a paridade cobrava: o SQL

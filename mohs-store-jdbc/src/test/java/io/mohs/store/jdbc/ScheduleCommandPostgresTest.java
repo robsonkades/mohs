@@ -54,7 +54,6 @@ class ScheduleCommandPostgresTest {
     void setUp() {
         dataSource = PostgresTestSupport.freshSchema();
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
-        new PostgresPartitionManager(dataSource).ensureWeeklyPartitions(NOW);
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
         JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
         JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new PostgresJdbcDialect());

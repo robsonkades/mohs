@@ -78,9 +78,13 @@ public final class JdbcTriggerFirer implements TriggerFirer {
             if (advanced == 0) {
                 return false;
             }
-            // createdAt = now (o instante do disparo, a chave de partição —
-            // scheduledAt pode estar no passado num FIRE_ALL de misfire e
-            // apontaria uma partição que a retenção pode já ter dropado);
+            // createdAt = now, não scheduledAt: é o instante em que a linha
+            // NASCE, e num FIRE_ALL de misfire o scheduledAt está no passado —
+            // a história registraria um nascimento que não aconteceu ali.
+            // Ele lidera a PK de mohs_execution e viaja em memória até a
+            // conclusão, que casa a linha por igualdade. (Até a ADR-0058 a
+            // razão era outra: ele era a chave de partição, e um scheduledAt
+            // antigo apontaria partição que a retenção já podia ter dropado.)
             // visible_at = scheduledAt: a ocorrência entra na fila já devida
             historyStore.record(occurrences.stream()
                     .map(occurrence -> new HistoryStore.NewExecution(occurrence.id(), occurrence.jobKey(),

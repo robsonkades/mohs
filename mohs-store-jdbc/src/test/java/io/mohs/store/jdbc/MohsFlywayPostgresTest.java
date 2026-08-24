@@ -5,6 +5,8 @@ import java.util.List;
 
 import javax.sql.DataSource;
 
+import org.flywaydb.core.Flyway;
+import org.flywaydb.core.api.MigrationVersion;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -22,6 +24,62 @@ import static org.assertj.core.api.Assertions.assertThat;
  * cima sem tocar nada.
  */
 class MohsFlywayPostgresTest {
+
+    /**
+     * A V5 é a ÚNICA migração do projeto que MOVE LINHAS, e o caminho de
+     * cópia dela só era exercitado com tabelas vazias: os outros testes ou
+     * partem do schema já plano (onde a V5 é no-op) ou não passam por
+     * Flyway. O guardião estrutural não cobre esta classe de defeito —
+     * um par trocado entre colunas do MESMO tipo ({@code job_key}/
+     * {@code actor}, {@code correlation_id}/{@code idempotency_key},
+     * {@code error_type}/{@code error}) deixa a estrutura idêntica e
+     * embaralha o banco do cliente em silêncio. Daí a concatenação
+     * ordenada: ela pega a troca que a comparação de schema não vê.
+     *
+     * <p>É também o único ponto onde o laço de {@code RENAME CONSTRAINT} e
+     * o ramo "estava particionada" rodam sobre dados.
+     */
+    @Test
+    void v5CarriesEveryHistoryColumnAcrossTheDepartitioning() {
+        DataSource dataSource = PostgresTestSupport.freshEmptyDatabase("mohs_v5_copy");
+        Flyway.configure()
+                .dataSource(dataSource)
+                .table(MohsFlyway.HISTORY_TABLE)
+                .locations(new PostgresJdbcDialect().migrationLocation())
+                .baselineOnMigrate(true)
+                .baselineVersion("0")
+                .target(MigrationVersion.fromVersion("3")) // para NA era particionada
+                .load()
+                .migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        jdbc.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, shard, priority, state, scheduled_at, created_at,
+                                            finished_at, actor, correlation_id, idempotency_key, payload, payload_type)
+                VALUES ('exec-1', 'job-a', 7, 5, 'SUCCEEDED', now(), now(), now(), 'alice', 'corr-1', 'idem-1', '{}', 'java.lang.Object')
+                """);
+        jdbc.update("""
+                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome, error_type, error)
+                VALUES ('exec-1', 3, 'node-a', now(), now(), 'FAILED', 'java.io.IOException', 'boom')
+                """);
+
+        new MohsFlyway(dataSource, new PostgresJdbcDialect()).migrate();
+
+        assertThat(jdbc.queryForObject("""
+                SELECT job_key || '|' || actor || '|' || correlation_id || '|' || idempotency_key
+                       || '|' || shard || '|' || priority
+                  FROM mohs_execution WHERE execution_id = 'exec-1'
+                """, String.class))
+                .as("cada coluna tem de chegar na SUA coluna — troca entre colunas do mesmo tipo é invisível ao guardião estrutural")
+                .isEqualTo("job-a|alice|corr-1|idem-1|7|5");
+        assertThat(jdbc.queryForObject("""
+                SELECT node_id || '|' || number || '|' || outcome || '|' || error_type || '|' || error
+                  FROM mohs_attempt WHERE execution_id = 'exec-1'
+                """, String.class)).isEqualTo("node-a|3|FAILED|java.io.IOException|boom");
+        assertThat(jdbc.queryForList(
+                "SELECT 1 FROM pg_partitioned_table WHERE partrelid = 'mohs_execution'::regclass"))
+                .as("a conversão tem de ter acontecido de fato — senão o teste acima passaria sem a V5 fazer nada")
+                .isEmpty();
+    }
 
     @Test
     void adoptsThePreFlywaySchemaOnPostgres() {
@@ -41,8 +99,9 @@ class MohsFlywayPostgresTest {
 
     /**
      * O guardião das duas cópias da verdade NO dialeto onde elas mais
-     * divergem: particionamento de {@code mohs_execution}/{@code mohs_attempt},
-     * {@code TIMESTAMPTZ} e storage options (V3/ADR-A) só existem em
+     * divergem: {@code TIMESTAMPTZ}, storage options (V3/ADR-A) e a
+     * DES-partição da ADR-0058 (a V5 recria as duas tabelas de história) só
+     * existem em
      * Postgres — o guardião H2 de {@code MohsFlywayTest} não sabe
      * expressá-los. {@code pg_indexes.indexdef} carrega a forma completa —
      * um typo no {@code schema-postgresql.sql} ou uma V-script cujas

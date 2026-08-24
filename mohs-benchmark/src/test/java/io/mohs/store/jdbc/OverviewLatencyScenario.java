@@ -43,12 +43,12 @@ import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
  * janela é evidência de que o custo não acompanha o acervo; o número
  * absoluto, não.
  *
- * <p>O que esta bancada NÃO exercita: partition pruning. As partições
- * semanais nascem do {@link PostgresPartitionManager}, que não roda aqui —
- * o schema entrega só a DEFAULT, e é nela que os 2M de história caem. O
- * pruning é a segunda linha de defesa da tabela; quem quiser medi-la
- * precisa criar as partições antes de semear e manter o seed dentro das
- * semanas cobertas.
+ * <p>Nota histórica: até a ADR-0058, {@code mohs_attempt} era particionada
+ * por semana no Postgres; hoje é tabela normal, como nos outros dialetos.
+ * Esta bancada nunca exercitou o pruning — os 2M de história caíam todos na
+ * partição DEFAULT —, e foi justamente esse número, 1,6 ms com o índice
+ * {@code (finished_at, outcome)} resolvendo sozinho, que ajudou a mostrar
+ * que o particionamento não estava comprando o que custava.
  *
  * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
  * -Dtest=OverviewLatencyScenario}.
