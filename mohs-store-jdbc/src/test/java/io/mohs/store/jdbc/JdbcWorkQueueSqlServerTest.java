@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Clock;
@@ -20,7 +35,7 @@ import io.mohs.store.jdbc.dialect.SqlServerJdbcDialect;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** A varredura T-SQL do claim (§5.4 — {@code TOP} + {@code UPDLOCK, ROWLOCK, READPAST}) contra SQL Server real (Tier 2). */
+/** The claim's T-SQL sweep ({@code TOP} plus {@code UPDLOCK, ROWLOCK, READPAST}) against a real SQL Server (Tier 2). */
 class JdbcWorkQueueSqlServerTest {
 
     private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");
@@ -41,11 +56,10 @@ class JdbcWorkQueueSqlServerTest {
     }
 
     /**
-     * S6.5: a sonda do gate ocioso ({@code hasVisibleWork}) atravessa o
-     * driver com a LISTA de shards do nó — 64 parâmetros num nó único. O
-     * binding de coleção é do driver, não do dialeto, então cada um paga o
-     * seu teste; o resto do cenário prova o predicado: shard alheio não
-     * conta, entrada ainda invisível não conta.
+     * The idle gate's probe ({@code hasVisibleWork}) crosses the driver with the node's LIST of shards —
+     * 64 parameters on a single node. Collection binding belongs to the driver, not the dialect, so each
+     * one pays for its own test; the rest of the scenario proves the predicate: another node's shard does
+     * not count, and an entry that is still invisible does not count.
      */
     @Test
     void hasVisibleWorkSeesOnlyVisibleEntriesInTheOwnedShards() {
@@ -53,10 +67,10 @@ class JdbcWorkQueueSqlServerTest {
         assertThat(queue.hasVisibleWork(owned, NOW)).isFalse();
 
         queue.offer(List.of(shardedEntry("exec-alheio", 7, NOW.minusSeconds(1))));
-        assertThat(queue.hasVisibleWork(owned, NOW)).as("shard de outro nó").isFalse();
+        assertThat(queue.hasVisibleWork(owned, NOW)).as("another node's shard").isFalse();
 
         queue.offer(List.of(shardedEntry("exec-futuro", 8, NOW.plusSeconds(60))));
-        assertThat(queue.hasVisibleWork(owned, NOW)).as("ainda não visível").isFalse();
+        assertThat(queue.hasVisibleWork(owned, NOW)).as("not visible yet").isFalse();
 
         queue.offer(List.of(shardedEntry("exec-devido", 8, NOW.minusSeconds(1))));
         assertThat(queue.hasVisibleWork(owned, NOW)).isTrue();
@@ -84,11 +98,10 @@ class JdbcWorkQueueSqlServerTest {
     }
 
     /**
-     * A parte mais sutil da emulação T-SQL: {@code READPAST} é quem faz o
-     * claim PULAR a linha lockada por outro nó em vez de bloquear —
-     * perdê-lo no hint passaria verde no resto da suíte e viraria
-     * lock-wait no claim multi-nó (review S5.2; JCIP cap. 12, interleaving
-     * controlado).
+     * The subtlest part of the T-SQL emulation: {@code READPAST} is what makes the claim SKIP a row
+     * locked by another node instead of blocking — losing it from the hint would pass green through the
+     * rest of the suite and become a lock wait in a multi-node claim (JCIP ch. 12, controlled
+     * interleaving).
      */
     @Test
     void claimSkipsRowsLockedByAConcurrentClaimant() throws Exception {

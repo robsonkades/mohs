@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.ratelimit;
 
 import java.time.Duration;
@@ -32,11 +47,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * Ver Javadoc de {@link io.mohs.rest.job.JobsControllerContractTest} sobre
- * o {@code @TestConfiguration}/{@code mohs.enabled=false} — mesmo motivo
- * aqui: {@link io.mohs.rest.RestSliceConfiguration} não escaneia {@code io.mohs.rest} no
- * component-scan. {@link RestExceptionHandler} entra também: os testes de
- * 404 e 422 dependem dele.
+ * See {@link io.mohs.rest.job.JobsControllerContractTest}'s Javadoc about the
+ * {@code @TestConfiguration}/{@code mohs.enabled=false} pair — the same reason applies here:
+ * {@link io.mohs.rest.RestSliceConfiguration} does not component-scan {@code io.mohs.rest}.
+ * {@link RestExceptionHandler} comes along too: the 404 and 422 tests depend on it.
  */
 @WebMvcTest(properties = "mohs.enabled=false")
 class RateLimitsControllerContractTest {
@@ -92,7 +106,7 @@ class RateLimitsControllerContractTest {
                 .andExpect(jsonPath("$.notice").value(RuntimePatchResponse.BOOT_REVERSION_NOTICE));
     }
 
-    /** Declarar limite é ato de boot (ADR-0042): PATCH em nome inexistente é 404 que ensina onde declarar, nunca criação implícita. */
+    /** Declaring a limit is an act of boot: a PATCH on a nonexistent name is a 404 that teaches where to declare it, never implicit creation. */
     @Test
     void patchOnAnUnknownRateLimitIs404() throws Exception {
         when(mohs.adjustRateLimit(eq("ghost"), eq(10), any())).thenReturn(Optional.empty());
@@ -105,7 +119,7 @@ class RateLimitsControllerContractTest {
                 .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("mohs.rate-limits.ghost.max")));
     }
 
-    /** Actor é inegociável em mutação (ADR-0010) — o header declarado chega ao resolver antes da escrita. */
+    /** An actor is non-negotiable on a mutation — the declared header reaches the resolver before the write. */
     @Test
     void patchResolvesTheActorBeforeMutating() throws Exception {
         when(mohs.adjustRateLimit(eq("smtp"), eq(10), any()))
@@ -121,13 +135,12 @@ class RateLimitsControllerContractTest {
     }
 
     /**
-     * REST-3 (docs/codereview.md): a validação de {@link RateLimitPatchRequest}
-     * roda no compact constructor, disparada durante a desserialização do
-     * Jackson — sem {@code io.mohs.rest.error.RestExceptionHandler#handleHttpMessageNotReadable}
-     * interceptando, o Spring substituiria a mensagem original por "Failed
-     * to read request" e devolveria 400 genérico. Prova que a mensagem real
-     * chega ao cliente, com o status 422 que o design REST promete pra
-     * payload inválido.
+     * {@link RateLimitPatchRequest}'s validation runs in the compact constructor, fired during
+     * Jackson's deserialisation — without
+     * {@code io.mohs.rest.error.RestExceptionHandler#handleHttpMessageNotReadable} intercepting,
+     * Spring would replace the original message with "Failed to read request" and return a generic
+     * 400. This proves the real message reaches the client, with the 422 the REST design promises for
+     * an invalid payload.
      */
     @Test
     void patchWithInvalidBodySurfacesTheValidationMessageAs422() throws Exception {

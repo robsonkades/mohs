@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Instant;
@@ -68,7 +83,7 @@ class JdbcHistoryStoreTest {
                 .isEqualTo(WelcomeEmail.class.getName());
     }
 
-    /** Idempotent Receiver (EIP, §7.2): o conflito de PK em mohs_idempotency É o check — propaga antes de qualquer linha de história nascer. */
+    /** Idempotent Receiver (EIP): the primary-key conflict in mohs_idempotency IS the check — it propagates before any history row is born. */
     @Test
     void recordWithADuplicateIdempotencyKeyFailsBeforeWritingHistory() {
         store.record(List.of(execution("exec-1", "job-a", "key-1")));
@@ -81,7 +96,7 @@ class JdbcHistoryStoreTest {
                 .contains(ExecutionId.of("exec-1"));
     }
 
-    /** A mesma chave em JOBS diferentes não colide — o escopo da dedup é (job, chave), como no índice único da era anterior (DBTUNE-8). */
+    /** The same key on different JOBS does not collide — the deduplication's scope is (job, key), as in the earlier era's unique index. */
     @Test
     void idempotencyKeysAreScopedPerJob() {
         store.record(List.of(execution("exec-1", "job-a", "key-1")));
@@ -95,7 +110,7 @@ class JdbcHistoryStoreTest {
         assertThat(store.findByIdempotencyKey(JobKey.of("job-a"), "never-used")).isEmpty();
     }
 
-    /** ADR-0047 preservada na porta nova: linha ilegível entra em unreadable COM a causa; as vizinhas hidratam normalmente. */
+    /** Preserved on the new port: an unreadable row enters unreadable WITH its cause; its neighbours hydrate normally. */
     @Test
     void findPayloadsIsolatesUnreadableRows() {
         store.record(List.of(execution("exec-ok", "job-a", null)));
@@ -134,7 +149,7 @@ class JdbcHistoryStoreTest {
                 second -> assertThat(second.outcome()).isEqualTo(ExecutionState.SUCCEEDED));
     }
 
-    /** A poda é pela janela de idempotência, não pela retenção da história (§7.2) — corte estrito. */
+    /** The pruning follows the idempotency window, not history's retention — a strict cutoff. */
     @Test
     void pruneIdempotencyRemovesOnlyStrictlyOlderKeys() {
         store.record(List.of(execution("exec-1", "job-a", "old-key")));

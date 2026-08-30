@@ -1,0 +1,25 @@
+name: Feature request
+description: Something Mohs does not do yet
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and where Mohs stops you. Not the solution yet.
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do today instead
+      description: >
+        If there is a workaround it usually decides how urgent this is — and sometimes it turns
+        out to be the right answer.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: >
+        Optional. Say so if it touches the public API, the database schema or observable
+        behaviour: those three carry a cost a pull request cannot absorb on its own.

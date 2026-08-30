@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Instant;
@@ -8,6 +23,7 @@ import java.util.Objects;
 
 import javax.sql.DataSource;
 
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -22,26 +38,26 @@ import io.mohs.store.jdbc.dialect.ClaimedReady;
 import io.mohs.store.jdbc.dialect.JdbcDialect;
 
 /**
- * {@link WorkQueue} sobre {@code mohs_ready}/{@code mohs_lease} (Phase 5,
- * ADR-A). O claim é a transação do §6.2 — fila e posse mudam juntas ou
- * nada muda; a forma do SQL é do {@link JdbcDialect} (statement único no
- * Postgres, três statements portáteis nos demais). {@link #offer} NÃO
- * abre transação de propósito (§7.5-1): o enqueue participa da transação
- * do chamador — é o "joins your transaction" da ADR-0003 §4, agora com
- * execução + fila + idempotência na mesma unidade.
+ * {@link WorkQueue} over {@code mohs_ready}/{@code mohs_lease}. The claim is the transaction in which
+ * queue and ownership change together or not at all; the SQL's shape belongs to {@link JdbcDialect}
+ * (a single statement on Postgres, three portable statements elsewhere).
+ *
+ * <p>{@link #offer} deliberately does NOT open a transaction: the enqueue takes part in the caller's —
+ * it is the async contract's "joins your transaction", now with execution, queue and idempotency in the
+ * same unit.
  */
 public final class JdbcWorkQueue implements WorkQueue {
 
     /**
-     * {@code EXISTS} em vez de {@code LIMIT 1}/{@code TOP 1}: curto-circuita
-     * igual e é a mesma forma nos quatro dialetos — não vale um método de
-     * {@link JdbcDialect} por uma pergunta de sim ou não. O {@code %s} é o
-     * hint de leitura sem lock: vazio sob MVCC, {@code WITH (NOLOCK)} no
-     * SQL Server, onde um {@code SELECT} simples tomaria shared locks na
-     * tabela mais quente do sistema — e quem bloquearia é a thread do tick,
-     * que carrega o heartbeat. As anomalias do hint são exatamente o erro
-     * que o contrato da sonda já declara aceitável (linha perdida = um
-     * poll; linha suja = um lap).
+     * {@code EXISTS} rather than {@code LIMIT 1}/{@code TOP 1}: it short-circuits the same way and is
+     * the same shape in all four dialects — not worth a {@link JdbcDialect} method for a yes-or-no
+     * question.
+     *
+     * <p>The {@code %s} is the lock-free read hint: empty under MVCC, {@code WITH (NOLOCK)} on SQL
+     * Server, where a plain {@code SELECT} would take shared locks on the system's hottest table — and
+     * what would block is the tick's thread, which carries the heartbeat. The hint's anomalies are
+     * exactly the error the probe's contract already declares acceptable (a missed row costs one poll; a
+     * dirty row costs one lap).
      */
     private static final String VISIBLE_WORK_EXISTS = """
             SELECT CASE WHEN EXISTS (
@@ -49,8 +65,34 @@ public final class JdbcWorkQueue implements WorkQueue {
             ) THEN 1 ELSE 0 END
             """;
 
+    /**
+     * No shard predicate: the backlog is the queue's, not this node's. The lock-free hint is here for
+     * the same reason it is on the probe above — a metric must never take a shared lock on the hot
+     * path it is measuring — with one difference worth naming: a probe tolerates the hint's anomalies
+     * because a wrong answer costs a lap, while a COUNT under them is simply approximate. That is what
+     * a gauge is.
+     *
+     * <p>No index leads with {@code visible_at}, and none is added: a second index on the system's
+     * hottest table, paid by every enqueue, claim and requeue, is a bad trade for a number sampled once
+     * every ten seconds. The count therefore SCANS, and what it scans is {@code mohs_ready} — the
+     * queue, never history — which also means its cost grows with the very backlog it is reporting.
+     *
+     */
+    private static final String VISIBLE_WORK_COUNT = """
+            SELECT COUNT(*) FROM mohs_ready %sWHERE visible_at <= :now
+            """;
+
+    /**
+     * Shorter than the prune's, and for a stricter reason: the prune runs hourly and can afford to
+     * wait for a peer's locks, while this runs every ten seconds and takes no locks at all — if it has
+     * not answered in two seconds the queue is deep enough that the claim is the thing that matters.
+     */
+    private static final int COUNT_TIMEOUT_SECONDS = 2;
+
     private final String visibleWorkExists;
+    private final String visibleWorkCount;
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final NamedParameterJdbcTemplate countTemplate;
     private final TransactionTemplate claimTransaction;
     private final JdbcDialect dialect;
     private final BatchStore batchStore;
@@ -60,19 +102,23 @@ public final class JdbcWorkQueue implements WorkQueue {
         this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.claimTransaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        // §7.5: claim é transação PRÓPRIA, sempre — REQUIRES_NEW torna isso
-        // executável em vez de convencionado: com o REQUIRED default, uma
-        // transação externa (interceptor, teste) herdaria a isolação DELA e
-        // o READ COMMITTED abaixo seria ignorado em silêncio (MySQL = RR,
-        // a divergência que a DBTUNE-4 matou). O engine chama do próprio
-        // loop, sem transação externa — a suspensão nunca acontece em
-        // operação normal.
+        // A claim is ALWAYS its own transaction — REQUIRES_NEW makes that executable rather than merely
+        // conventional: with the default REQUIRED, an outer transaction (an interceptor, a test) would
+        // impose ITS isolation and the READ COMMITTED below would be silently ignored (MySQL defaults to
+        // REPEATABLE READ, the divergence this killed). The engine calls from its own loop, with no outer
+        // transaction — the suspension never happens in normal operation.
         this.claimTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
-        // mesmo raciocínio da DBTUNE-4: SKIP LOCKED + inserts assumem
-        // READ COMMITTED explícito, nunca o default do banco (MySQL = RR).
+        // The same reasoning: SKIP LOCKED plus the inserts assume an explicit READ COMMITTED, never the
+        // database's default (MySQL defaults to REPEATABLE READ).
         this.claimTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.dialect = Objects.requireNonNull(dialect, "dialect");
         this.visibleWorkExists = VISIBLE_WORK_EXISTS.formatted(dialect.lockFreeReadHint());
+        this.visibleWorkCount = VISIBLE_WORK_COUNT.formatted(dialect.lockFreeReadHint());
+        // A template of its own: the timeout must not reach the claim or the requeue, which are the
+        // work rather than the measurement of it
+        JdbcTemplate countOperations = new JdbcTemplate(dataSource);
+        countOperations.setQueryTimeout(COUNT_TIMEOUT_SECONDS);
+        this.countTemplate = new NamedParameterJdbcTemplate(countOperations);
     }
 
     @Override
@@ -84,7 +130,7 @@ public final class JdbcWorkQueue implements WorkQueue {
             return List.of();
         }
         List<String> inadmissibleKeys = inadmissible.stream().map(JobKey::value).toList();
-        // requireNonNull documenta o invariante pro @NullMarked (JAVA-8) — o callback nunca devolve null
+        // requireNonNull documents the invariant for @NullMarked — the callback never returns null
         List<ClaimedReady> claimed = Objects.requireNonNull(claimTransaction.execute(
                 _ -> dialect.claimReady(jdbcTemplate, shard, nodeId, epoch, limit, inadmissibleKeys, now)));
         return claimed.stream()
@@ -104,6 +150,27 @@ public final class JdbcWorkQueue implements WorkQueue {
         return found != null && found == 1;
     }
 
+    /**
+     * Bounded in time ({@code COUNT_TIMEOUT_SECONDS}, two seconds), because it runs on the engine's
+     * loop thread ahead of the firing and the claim, and its cost grows with the backlog it reports.
+     * The tick's sleep is already capped at {@code node-lease-ttl/3}: a count that outlives that
+     * budget costs the node its heartbeat, and a node that misses its heartbeat has its work
+     * reclaimed by a peer — the deep-queue case turning into the lost-work case.
+     *
+     * <p>A stale gauge is strictly better than a node that stopped claiming, and on timeout the
+     * engine keeps the previous sample. Before the FIRST successful sample there is none, so a count
+     * that fails from boot reports an empty queue rather than an old one — which is what makes
+     * {@code mohs.tick.failed{step=queue-depth-sample}} the number to read first when the depth looks
+     * implausibly calm.
+     */
+    @Override
+    public long countVisible(Instant now) {
+        Objects.requireNonNull(now, "now");
+        Long depth = countTemplate.queryForObject(visibleWorkCount,
+                new MapSqlParameterSource("now", dialect.splitTimestamp(now)), Long.class);
+        return depth == null ? 0L : depth;
+    }
+
     @Override
     public void offer(List<ReadyEntry> entries) {
         if (entries.isEmpty()) {
@@ -119,13 +186,13 @@ public final class JdbcWorkQueue implements WorkQueue {
         if (orders.isEmpty()) {
             return 0;
         }
-        // mesma ordem canônica dos DELETEs do complete (JCIP cap. 10 em row
-        // locks): requeue e conclusão travam conjuntos sobrepostos — em ordens
-        // opostas seria o AB-BA que o bench do S5.5 mediu (23 deadlocks)
+        // The same canonical order as complete's DELETEs (JCIP ch. 10 on row locks): requeue and
+        // completion lock overlapping sets — in opposite orders it would be the AB-BA deadlock the bench
+        // measured (23 deadlocks)
         List<Requeue> ordered = orders.stream()
                 .sorted(Comparator.comparing(order -> order.executionId().value()))
                 .toList();
-        // requireNonNull: mesmo invariante de claim()
+        // requireNonNull: the same invariant as claim()
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
             int requeued = 0;
             for (Requeue order : ordered) {
@@ -144,22 +211,22 @@ public final class JdbcWorkQueue implements WorkQueue {
     public boolean cancelQueued(ExecutionId id, Instant now) {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(now, "now");
-        // requireNonNull: mesmo invariante de claim()
+        // requireNonNull: the same invariant as claim()
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
             MapSqlParameterSource idParam = new MapSqlParameterSource("executionId", id.value());
             if (jdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = :executionId", idParam) == 0) {
                 return false;
             }
-            // terminal advisory casado só por id — caminho frio
-            // (mesmo racional do TERMINAL_UPDATE_UNPRUNED do LeaseStore)
-            // batch-counted: incrementFailed logo abaixo, nesta transação
+            // The advisory terminal, matched by id — the primary key, the same match
+            // LeaseStore's TERMINAL_UPDATE makes
+            // batch-counted: incrementFailed just below, in this transaction
             jdbcTemplate.update("""
                     UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :finishedAt
                     WHERE execution_id = :executionId
                     """, idParam.addValue("finishedAt", dialect.splitTimestamp(now)));
-            // ADR-0043: cancelar é terminal e um fim que não conta deixa o lote
-            // aberto pra sempre — conta como falha na MESMA transação do delete
-            // (sem o delete ter pego a entrada, não se chega aqui = conta uma vez)
+            // Cancelling is terminal, and an end that does not count leaves the batch open forever — it
+            // counts as a failure in the SAME transaction as the delete (without the delete having taken
+            // the entry, this point is not reached, so it counts exactly once)
             String batchId = jdbcTemplate.queryForObject(
                     "SELECT correlation_id FROM mohs_execution WHERE execution_id = :executionId", idParam, String.class);
             if (batchId != null) {
@@ -170,24 +237,21 @@ public final class JdbcWorkQueue implements WorkQueue {
     }
 
     /**
-     * O CAS e o renascimento na fila num único par guardado: o UPDATE só
-     * vence com o advisory {@code FAILED} e o job vivo (EXISTS estreita a
-     * janela contra um {@code remove} concorrente — mesma semântica do CAS
-     * da era anterior); o INSERT deriva attempt e prioridade da própria
-     * história ({@code attempts gravados + 1}; a prioridade original), sem
-     * o chamador carregar nada.
+     * The CAS and the queue rebirth in a single guarded pair: the UPDATE only wins with the advisory
+     * {@code FAILED} and the job alive (the EXISTS narrows the window against a concurrent
+     * {@code remove}); the INSERT derives the attempt and the priority from history itself (recorded
+     * attempts plus 1; the original priority), with the caller carrying nothing.
      */
     @Override
     public boolean rearmForManualRetry(ExecutionId id, Instant now) {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(now, "now");
-        // requireNonNull: mesmo invariante de claim()
+        // requireNonNull: the same invariant as claim()
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
             MapSqlParameterSource params = new MapSqlParameterSource("executionId", id.value());
-            // correlation_id IS NULL: membro de lote não rearma (ADR-0043) — o
-            // lote já contou esta falha; re-rodar contaria o desfecho DUAS vezes
-            // num lote possivelmente já fechado (pending negativo, segundo
-            // BatchCompleted). Mesmo guard do CAS da era anterior.
+            // correlation_id IS NULL: a batch member does not rearm — the batch already counted this
+            // failure; re-running would count the outcome TWICE in a batch that may already be closed (a
+            // negative pending, a second BatchCompleted).
             int rearmed = jdbcTemplate.update("""
                     UPDATE mohs_execution SET state = 'PENDING', finished_at = NULL
                     WHERE execution_id = :executionId AND state = 'FAILED'

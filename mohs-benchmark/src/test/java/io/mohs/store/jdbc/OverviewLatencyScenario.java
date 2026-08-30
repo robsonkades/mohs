@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -20,49 +35,43 @@ import io.mohs.core.execution.ExecutionState;
 import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
 
 /**
- * S5 do §20.2 — o custo do {@code GET /overview} quando o banco não é
- * mais pequeno. O endpoint é a âncora de polling do dashboard e o
- * contrato dele diz "barato por construção"; este cenário é quem cobra a
- * conta.
+ * The cost of {@code GET /overview} once the database is no longer small. The endpoint is the
+ * dashboard's polling anchor and its contract says "cheap by construction"; this scenario is what
+ * settles the bill.
  *
- * <p>As duas leituras que o endpoint faz têm perfis de custo OPOSTOS, e é
- * essa diferença que o cenário existe para expor:
+ * <p>The two reads the endpoint performs have OPPOSITE cost profiles, and exposing that difference
+ * is why the scenario exists:
  * <ul>
- *   <li>{@code countTerminalOutcomesSince} varre {@code mohs_attempt} pelo
- *       índice {@code (finished_at, outcome)} — deve custar a JANELA (60s,
- *       o default do {@code ?window=}), não o acervo. Se isso valer, a
- *       história pode crescer à vontade;</li>
- *   <li>{@code countActiveByState} faz {@code COUNT(*)} SEM {@code WHERE}
- *       em {@code mohs_ready} — custa o BACKLOG inteiro. É aqui que o
- *       endpoint dói, e não é a história que o machuca: é a fila.</li>
+ *   <li>{@code countTerminalOutcomesSince} scans {@code mohs_attempt} through the
+ *       {@code (finished_at, outcome)} index — it should cost the WINDOW (60s, the default for
+ *       {@code ?window=}), not the archive. If that holds, history may grow freely;</li>
+ *   <li>{@code countActiveByState} runs {@code COUNT(*)} with NO {@code WHERE} over
+ *       {@code mohs_ready} — it costs the whole BACKLOG. This is where the endpoint hurts, and it
+ *       is not history that hurts it: it is the queue.</li>
  * </ul>
  *
- * <p>Limite declarado: o alvo do plano é 10⁹ linhas de história, que não
- * cabe nesta bancada (seriam ~100 GB). Semeia-se o que a máquina permite
- * e reporta-se o PLANO junto do número — um Index Scan que toca só a
- * janela é evidência de que o custo não acompanha o acervo; o número
- * absoluto, não.
+ * <p>Declared limitation: the plan targets 10^9 history rows, which does not fit on this bench
+ * (roughly 100 GB). It seeds what the machine allows and reports the PLAN alongside the number —
+ * an index scan touching only the window is evidence that cost does not track the archive; the
+ * absolute figure is not.
  *
- * <p>Nota histórica: até a ADR-0058, {@code mohs_attempt} era particionada
- * por semana no Postgres; hoje é tabela normal, como nos outros dialetos.
- * Esta bancada nunca exercitou o pruning — os 2M de história caíam todos na
- * partição DEFAULT —, e foi justamente esse número, 1,6 ms com o índice
- * {@code (finished_at, outcome)} resolvendo sozinho, que ajudou a mostrar
- * que o particionamento não estava comprando o que custava.
+ * <p>Historical note: {@code mohs_attempt} used to be partitioned by week on Postgres and is now
+ * an ordinary table, as in the other dialects. This bench never exercised pruning — the 2M history
+ * rows all landed in the DEFAULT partition — and it was precisely that number, 1.6 ms with the
+ * {@code (finished_at, outcome)} index resolving it alone, which helped show that partitioning was
+ * not buying what it cost.
  *
- * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
- * -Dtest=OverviewLatencyScenario}.
+ * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=OverviewLatencyScenario}.
  */
 class OverviewLatencyScenario {
 
     private static final int HISTORY_ROWS = 2_000_000;
     private static final int BACKLOG_ROWS = 500_000;
     /**
-     * Trinta amostras não sustentam um p99 — {@code ceil(0.99 × 30) − 1}
-     * devolve o ÚLTIMO elemento, ou seja o pior de 30. O relatório chama de
-     * "worst" por isso: prometer p99 aqui seria vender uma estatística de
-     * cauda que a amostra não tem, e foi exatamente um outlier isolado de
-     * conexão que produziu o 37,7 ms da primeira rodada desta bancada.
+     * Thirty samples do not support a p99 — {@code ceil(0.99 x 30) - 1} returns the LAST element,
+     * i.e. the worst of 30. The report calls it "worst" for that reason: promising a p99 here would
+     * be selling a tail statistic the sample does not have, and it was exactly one isolated
+     * connection outlier that produced the 37.7 ms of this bench's first run.
      */
     private static final int SAMPLES = 30;
     private static final Duration WINDOW = Duration.ofSeconds(60);
@@ -73,11 +82,10 @@ class OverviewLatencyScenario {
         DataSource dataSource = PostgresTestSupport.freshSchema();
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         Clock clock = Clock.systemUTC();
-        // UMA conexão para as leituras medidas: o PGSimpleDataSource do
-        // PostgresTestSupport abre TCP + auth A CADA statement (~7ms medidos
-        // contra uma query cujo EXPLAIN diz 0,074ms — 99% do número seria
-        // handshake). O que este cenário existe pra cobrar é o custo da
-        // QUERY; produção paga a conexão uma vez por pool, não por poll.
+        // ONE connection for the measured reads: PostgresTestSupport's PGSimpleDataSource opens TCP
+        // + auth ON EVERY statement (~7ms measured against a query whose EXPLAIN says 0.074ms — 99%
+        // of the number would be handshake). What this scenario exists to bill is the QUERY's cost;
+        // production pays for the connection once per pool, not once per poll.
         DataSource measured = new SingleConnectionDataSource(dataSource.getConnection(), true);
         JdbcHistoryStore history =
                 new JdbcHistoryStore(measured, JsonMapper.builder().build(), new PostgresJdbcDialect());
@@ -114,7 +122,7 @@ class OverviewLatencyScenario {
                 .isLessThan(TARGET_P99);
     }
 
-    /** História em lotes por {@code generate_series}: semear 2M linha a linha pelo store levaria mais que a medição. */
+    /** History seeded in bulk via {@code generate_series}: 2M rows one at a time through the store would take longer than the measurement. */
     private static void seedHistory(JdbcTemplate jdbc) {
         jdbc.update("""
                 INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
@@ -135,10 +143,9 @@ class OverviewLatencyScenario {
     }
 
     /**
-     * O que o dashboard paga por batida: as duas leituras acontecem no
-     * mesmo request, então o teto olhado é a soma dos p99 — um limite
-     * conservador de propósito, que o p99 da soma real só alcança se as
-     * duas caudas coincidirem.
+     * What the dashboard pays per hit: both reads happen in the same request, so the ceiling
+     * examined is the sum of the two p99s — a deliberately conservative bound that the p99 of the
+     * real sum only reaches if both tails coincide.
      */
     private static long combinedP99(List<Long> active, List<Long> throughput) {
         return percentile(active, 0.99) + percentile(throughput, 0.99);
@@ -162,9 +169,8 @@ class OverviewLatencyScenario {
                 millis(percentile(throughput, 0.5)), millis(percentile(throughput, 0.99)),
                 millis(combinedP99(active, throughput)), TARGET_P99.toMillis());
 
-        // o plano é a evidência que sobrevive ao tamanho da bancada: um index
-        // scan que toca só a janela diz que o custo não acompanha o acervo; o
-        // milissegundo, não
+        // The plan is the evidence that survives the bench's size: an index scan touching only the
+        // window says cost does not track the archive; the millisecond figure does not
         explain(jdbc, "throughput query (the one that must ignore the history)", """
                 SELECT outcome, COUNT(*) FROM mohs_attempt
                  WHERE finished_at >= now() - interval '%d seconds' AND outcome IN ('SUCCEEDED','FAILED')

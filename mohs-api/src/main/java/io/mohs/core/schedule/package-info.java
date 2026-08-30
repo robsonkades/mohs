@@ -1,9 +1,24 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 /**
- * Agenda de disparo: {@link io.mohs.core.schedule.Schedule} selado
+ * The firing schedule: the sealed {@link io.mohs.core.schedule.Schedule}
  * ({@link io.mohs.core.schedule.CronSpec}, {@link io.mohs.core.schedule.IntervalSpec},
- * {@link io.mohs.core.schedule.OnDemandSpec}) e {@link io.mohs.core.schedule.Misfire}.
- * Dado puro — sem builder, sem políticas de job; ver
- * {@code io.mohs.core.definition} para o builder staged que monta os dois.
+ * {@link io.mohs.core.schedule.OnDemandSpec}) and {@link io.mohs.core.schedule.Misfire}. Pure data —
+ * no builder, no job policies; see {@code io.mohs.core.definition} for the staged builder that
+ * assembles both.
  */
 @NullMarked
 package io.mohs.core.schedule;

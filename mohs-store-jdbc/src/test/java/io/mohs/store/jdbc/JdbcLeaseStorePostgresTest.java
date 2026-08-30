@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Clock;
@@ -10,6 +25,7 @@ import javax.sql.DataSource;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import io.mohs.core.execution.ExecutionId;
@@ -20,13 +36,14 @@ import io.mohs.engine.WorkQueue;
 import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * A conclusão do §7.5-3 contra o Tier 1 REAL: a igualdade de
- * {@code created_at} que casa a linha (ele lidera a PK) e a travessia
- * TIMESTAMPTZ, que o H2 não sabe expressar. Até a ADR-0058 este teste
- * também cobria as partições semanais; elas saíram, a igualdade ficou.
- * A semântica compartilhada mora em {@code JdbcLeaseStoreTest} (H2).
+ * The completion transaction against the REAL Tier 1 database, and the TIMESTAMPTZ crossing that H2
+ * cannot express. It used to cover the weekly partitions, and then the {@code created_at} equality
+ * they left behind in the primary key; both are gone, and what replaces them is the guarantee that
+ * arrived with the natural key — {@code execution_id} is unique, so the terminal UPDATE matching by
+ * id can only ever touch one row. The shared semantics live in {@code JdbcLeaseStoreTest} (H2).
  */
 class JdbcLeaseStorePostgresTest {
 
@@ -50,7 +67,7 @@ class JdbcLeaseStorePostgresTest {
     }
 
     @Test
-    void terminalUpdateFindsTheRowThroughTheCreatedAtEquality() {
+    void terminalUpdateFindsTheRowByItsPrimaryKey() {
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
                 VALUES ('exec-1', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
@@ -61,10 +78,9 @@ class JdbcLeaseStorePostgresTest {
         Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(new LeaseStore.CompletionResult(
                 ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-pg", 1, 1,
                 NOW.minusSeconds(2), NOW, ExecutionState.SUCCEEDED, null, null,
-                ExecutionState.SUCCEEDED, CREATED_AT, null)), jobStore);
+                ExecutionState.SUCCEEDED, null)), jobStore);
 
         assertThat(verdicts.get(ExecutionId.of("exec-1")).owned()).isTrue();
-        // a igualdade achou a linha — created_at com precisão de micros atravessou verbatim
         assertThat(rawJdbcTemplate.queryForObject(
                 "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("SUCCEEDED");
         assertThat(rawJdbcTemplate.queryForObject(
@@ -84,10 +100,46 @@ class JdbcLeaseStorePostgresTest {
         Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(new LeaseStore.CompletionResult(
                 ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-pg", 1, 1,
                 NOW.minusSeconds(2), NOW, ExecutionState.SUCCEEDED, null, null,
-                ExecutionState.SUCCEEDED, CREATED_AT, null)), jobStore);
+                ExecutionState.SUCCEEDED, null)), jobStore);
 
         assertThat(verdicts.get(ExecutionId.of("exec-1"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
         assertThat(rawJdbcTemplate.queryForObject(
                 "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
+    }
+
+    /**
+     * The guarantee the normalised key BUYS, and the reason the terminal UPDATE may match by id
+     * alone. Under the old key — {@code (created_at, execution_id)} — this insert succeeded, and two
+     * rows shared an id: nothing in the code produced that, but nothing in the schema forbade it
+     * either, and it was the only reason the completion carried {@code created_at} all the way from
+     * the claim.
+     */
+    @Test
+    void theSchemaRefusesASecondRowWithTheSameExecutionId() {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                VALUES ('exec-1', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT), JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT));
+
+        assertThatThrownBy(() -> rawJdbcTemplate.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                VALUES ('exec-1', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, JdbcTimestamps.toUtcOffsetDateTime(NOW), JdbcTimestamps.toUtcOffsetDateTime(NOW)))
+                .isInstanceOf(DuplicateKeyException.class);
+    }
+
+    /** The same, one level down: an attempt is identified by its execution and its number, with no finished_at in the key. */
+    @Test
+    void theSchemaRefusesASecondAttemptWithTheSameNumber() {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
+                VALUES ('exec-1', 1, 'node-pg', ?, ?, 'SUCCEEDED')
+                """, JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT), JdbcTimestamps.toUtcOffsetDateTime(NOW));
+
+        assertThatThrownBy(() -> rawJdbcTemplate.update("""
+                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
+                VALUES ('exec-1', 1, 'node-pg', ?, ?, 'FAILED')
+                """, JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT), JdbcTimestamps.toUtcOffsetDateTime(NOW.plusSeconds(1))))
+                .isInstanceOf(DuplicateKeyException.class);
     }
 }

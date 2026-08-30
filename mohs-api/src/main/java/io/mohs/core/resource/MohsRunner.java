@@ -1,35 +1,43 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.resource;
 
 import java.time.Duration;
 import java.util.Objects;
 
 /**
- * Capacidade de execução node-local, referenciada por nome estilo
- * {@code @Async("...")} — mas o bean é este spec, nunca um
- * {@code java.util.concurrent.Executor}: o Mohs cria e é dono das threads,
- * requisito para cancelamento cooperativo, timeout por interrupt, métricas
- * por runner e a disciplina io→virtual/cpu→platform (Effective Java Item 64:
- * referencie pela interface/spec, não pela implementação concreta).
+ * A node-local execution capability, referenced by name in the style of {@code @Async("...")} — but
+ * the bean is this spec, never a {@code java.util.concurrent.Executor}: Mohs creates and owns the
+ * threads, which is a requirement for cooperative cancellation, timeout by interrupt, per-runner
+ * metrics and the io-to-virtual / cpu-to-platform discipline (Effective Java Item 64: refer to
+ * objects by their interface or spec, not by the concrete implementation).
  *
- * <p>Record único e flat, não selado por modo: {@link #maxConcurrent()}
- * só é válido para {@link RunnerMode#IO}; {@link #coreSize()},
- * {@link #maxSize()}, {@link #queueCapacity()} e {@link #keepAlive()} só
- * para {@link RunnerMode#CPU} — o campo do modo errado fica zerado e
- * ignorado. Ergonomia (impedir {@code .coreSize()} num runner IO) é
- * responsabilidade dos dois builders separados ({@link IoBuilder}/
- * {@link CpuBuilder}), não do tipo armazenado (ver
- * {@code docs/adr/0014-cpu-runner-pool-properties.md} para a alternativa
- * selada considerada e rejeitada).
+ * <p>A single flat record rather than one sealed per mode: {@link #maxConcurrent()} is valid only
+ * for {@link RunnerMode#IO}; {@link #coreSize()}, {@link #maxSize()}, {@link #queueCapacity()} and
+ * {@link #keepAlive()} only for {@link RunnerMode#CPU} — a field of the wrong mode stays zero and
+ * ignored. Ergonomics (preventing {@code .coreSize()} on an IO runner) is the job of the two
+ * separate builders ({@link IoBuilder}/{@link CpuBuilder}), not of the stored type.
  *
- * <p>As quatro properties de {@code CPU} espelham
- * {@code org.springframework.boot.task.TaskExecutionProperties.Pool} do
- * Spring Boot (core-size/max-size/queue-capacity/keep-alive) — mesma ideia
- * de {@code spring.task.execution.pool.*} — mas com defaults diferentes,
- * deliberadamente: o Spring default para pool/fila efetivamente ilimitados
- * porque não sabe se o trabalho é CPU ou I/O; aqui sabemos que é
- * CPU-bound, e "backpressure em toda borda... nunca espera infinita"
- * (CLAUDE.md) já é regra do projeto. Ver a ADR-0014 para o raciocínio
- * completo dos defaults.
+ * <p>The four {@code CPU} properties mirror Spring Boot's
+ * {@code org.springframework.boot.task.TaskExecutionProperties.Pool}
+ * (core-size/max-size/queue-capacity/keep-alive) — the same idea as
+ * {@code spring.task.execution.pool.*} — but with deliberately different defaults: Spring defaults
+ * to an effectively unbounded pool and queue because it cannot know whether the work is CPU- or
+ * I/O-bound; here we know it is CPU-bound, and "backpressure at every boundary, never an unbounded
+ * wait" is already a project rule.
  */
 public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int coreSize, int maxSize, int queueCapacity, Duration keepAlive) {
 
@@ -63,17 +71,17 @@ public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int co
         }
     }
 
-    /** Runner de I/O; default {@code maxConcurrent = 64} (§3 do documento mestre). */
+    /** An IO runner; it defaults to {@code maxConcurrent = 64}. */
     public static IoBuilder io(String name) {
         return new IoBuilder(name);
     }
 
-    /** Runner de CPU; defaults dimensionados para núcleos disponíveis (§3 do documento mestre). */
+    /** A CPU runner; its defaults are sized from the available processors. */
     public static CpuBuilder cpu(String name) {
         return new CpuBuilder(name);
     }
 
-    /** Builder do runner {@link RunnerMode#IO} — só o permit count do {@code Semaphore} que limita concorrência. */
+    /** Builder for a {@link RunnerMode#IO} runner — only the permit count of the {@code Semaphore} that bounds concurrency. */
     public static final class IoBuilder {
         private final String name;
         private int maxConcurrent = 64;
@@ -93,15 +101,14 @@ public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int co
     }
 
     /**
-     * Builder do runner {@link RunnerMode#CPU} — as quatro properties de
-     * pool estilo Spring. {@code maxSize} default igual a {@code coreSize}
-     * (pool fixo, sem elasticidade: mais threads que núcleos não ajuda
-     * trabalho CPU-bound); {@code queueCapacity} default 0 (direct
-     * handoff — cresce até {@code maxSize}, depois rejeita na hora, sem
-     * fila escondida); {@code keepAlive} só tem efeito quando
-     * {@code maxSize > coreSize} é configurado explicitamente (semântica
-     * padrão de {@code ThreadPoolExecutor}: keep-alive não se aplica a
-     * core threads por default).
+     * Builder for a {@link RunnerMode#CPU} runner — the four Spring-style pool properties.
+     *
+     * <p>{@code maxSize} defaults to {@code coreSize} (a fixed pool, no elasticity: more threads
+     * than cores does not help CPU-bound work); {@code queueCapacity} defaults to 0 (direct
+     * hand-off — it grows to {@code maxSize}, then rejects immediately, with no hidden queue); and
+     * {@code keepAlive} only takes effect when {@code maxSize > coreSize} is configured explicitly
+     * ({@code ThreadPoolExecutor}'s standard semantics: keep-alive does not apply to core threads
+     * by default).
      */
     public static final class CpuBuilder {
         private final String name;

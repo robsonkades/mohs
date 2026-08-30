@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Instant;
@@ -15,32 +30,26 @@ import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 
 /**
- * A HISTÓRIA ({@code mohs_execution}/{@code mohs_attempt}/
- * {@code mohs_idempotency}) — porta da Phase 5 (ADR-A, §7.2/§18.3 do
- * redesign). Append + UM update terminal por execução; as tabelas são
- * planas em todos os dialetos desde a ADR-0058, e a retenção futura é
- * DELETE em lote (o DROP de partição saiu junto com o particionamento). O
- * {@code state} daqui é read model ADVISORY (§6.2): em voo, a verdade é
- * a lease — leituras que precisam de verdade juntam {@link LeaseStore},
- * leituras que precisam de velocidade (dashboard) usam a coluna e aceitam
- * a staleness limitada de um flush.
+ * HISTORY ({@code mohs_execution}/{@code mohs_attempt}/{@code mohs_idempotency}).
  *
- * <p>O UPDATE terminal e o INSERT do attempt NÃO passam por aqui — são da
- * transação de conclusão de {@link LeaseStore#complete} (§7.5-3): as
- * portas seguem os CONCEITOS (fila, posse, história, controle), e a
- * conclusão é um conceito da posse que toca a história, não o contrário.
+ * <p>Append plus ONE terminal update per execution; the tables are flat in every dialect, and future
+ * retention is a batched DELETE. The {@code state} here is an ADVISORY read model: while work is in
+ * flight, the truth is the lease — reads that need truth join {@link LeaseStore}, reads that need
+ * speed (the dashboard) use the column and accept the bounded staleness of one flush.
+ *
+ * <p>The terminal UPDATE and the attempt INSERT do NOT go through here — they belong to
+ * {@link LeaseStore#complete}'s completion transaction: the ports follow the CONCEPTS (queue,
+ * ownership, history, control), and a completion is a concept of ownership that touches history,
+ * not the other way round.
  */
 public interface HistoryStore {
 
     /**
-     * Uma execução aceita, pronta pro registro de nascimento.
-     * {@code createdAt} é o instante do enqueue e lidera a PK de
-     * {@code mohs_execution} — viaja em memória até a conclusão, que casa
-     * a linha por igualdade nas duas colunas. Era a chave de partição até
-     * a ADR-0058; o contrato "createdAt viaja" sobreviveu à remoção porque
-     * a PK continua com ele à frente (pendência com gatilho lá).
-     * {@code correlationId} carrega o batch (ADR-0043) até a Phase 8
-     * generalizar.
+     * An accepted execution, ready for its birth record.
+     *
+     * <p>{@code createdAt} is the enqueue instant — a column of the row, no longer part of its
+     * identity: the primary key is {@code execution_id} on every dialect, so nothing about it needs
+     * to travel to the completion. {@code correlationId} carries the batch until it is generalised.
      */
     record NewExecution(ExecutionId executionId, JobKey jobKey, int shard, int priority, Instant scheduledAt,
             Instant createdAt, String actor, @Nullable String correlationId, @Nullable String idempotencyKey,
@@ -56,36 +65,34 @@ public interface HistoryStore {
     }
 
     /**
-     * Registro de nascimento (§7.5-1): {@code INSERT} na história com
-     * {@code state = 'PENDING'} e, quando há {@code idempotencyKey},
-     * {@code INSERT} em {@code mohs_idempotency} — cujo conflito de PK É o
-     * check de dedup (Idempotent Receiver, EIP): propaga como
-     * {@code DuplicateKeyException} pro chamador resolver a execução
-     * vencedora via {@link #findByIdempotencyKey}. NÃO abre transação
-     * própria: o chamador DEVE compor {@code record} + {@code
-     * WorkQueue.offer} numa única transação (§7.5-1) — ver o contrato de
-     * {@code WorkQueue#offer}; fora de transação, falha parcial deixa
-     * chave órfã ou execução inalcançável. Com N execuções e UMA chave
-     * duplicada, a unidade INTEIRA aborta — resolução por item é do
-     * chamador (re-tentar sem o duplicado), não daqui.
+     * The birth record: an {@code INSERT} into history with {@code state = 'PENDING'} and, when there
+     * is an {@code idempotencyKey}, an {@code INSERT} into {@code mohs_idempotency} — whose primary
+     * key conflict IS the deduplication check (Idempotent Receiver, EIP): it propagates as a
+     * {@code DuplicateKeyException} for the caller to resolve the winning execution through
+     * {@link #findByIdempotencyKey}.
+     *
+     * <p>It does NOT open a transaction of its own: the caller MUST compose {@code record} plus
+     * {@code WorkQueue.offer} into a single transaction — see {@code WorkQueue#offer}'s contract;
+     * outside a transaction, a partial failure leaves either an orphan key or an unreachable
+     * execution. With N executions and ONE duplicated key, the WHOLE unit aborts — per-item
+     * resolution is the caller's job (retrying without the duplicate), not this port's.
      */
     void record(List<NewExecution> executions);
 
-    /** Quem venceu a corrida de idempotência — o id gravado em {@code mohs_idempotency} para (job, chave); vazio quando a chave nunca foi usada (ou já foi podada). */
+    /** Who won the idempotency race — the id recorded in {@code mohs_idempotency} for (job, key); empty when the key was never used (or has been pruned). */
     Optional<ExecutionId> findByIdempotencyKey(JobKey jobKey, String idempotencyKey);
 
     /**
-     * A leitura em lote que segue cada rodada de claim (§5.4): payload +
-     * cabeçalho dos ids reivindicados (o dispatch precisa de
-     * {@code scheduledAt}/{@code actor}/{@code priority}/{@code batchId}
-     * pra eventos, rearme e conclusão — uma leitura só, nunca N). Infra e
-     * linha separadas como na ADR-0047: falha de deserialização de UMA
-     * linha não derruba o lote — a linha entra em {@code unreadable} e o
-     * resto despacha.
+     * The batched read that follows each claim round: the payload plus the header of the claimed ids
+     * (dispatch needs {@code scheduledAt}/{@code actor}/{@code priority}/{@code batchId} for events,
+     * rearming and completion — one read, never N).
+     *
+     * <p>Infrastructure and row failures are separated: a deserialisation failure of ONE row does not
+     * take down the batch — that row enters {@code unreadable} and the rest dispatches.
      */
     PayloadBatch findPayloads(List<ExecutionId> ids);
 
-    /** Payload hidratado + o cabeçalho da execução ({@code createdAt} lidera a PK e casa a linha do UPDATE terminal; o resto alimenta dispatch/eventos/conclusão). */
+    /** The hydrated payload plus the execution's header — what dispatch, the events and the completion need about the row. */
     record PayloadRow(ExecutionHead head, Object payload) {
         public PayloadRow {
             Objects.requireNonNull(head, "head");
@@ -93,7 +100,7 @@ public interface HistoryStore {
         }
     }
 
-    /** O cabeçalho de uma linha de história — tudo menos payload e attempts; {@code correlationId} carrega o lote (ADR-0043) até a Phase 8. */
+    /** One history row's header — everything but the payload and the attempts; {@code correlationId} carries the batch. */
     record ExecutionHead(ExecutionId executionId, JobKey jobKey, Instant scheduledAt, Instant createdAt, String actor,
             int priority, @Nullable String correlationId) {
         public ExecutionHead {
@@ -105,7 +112,7 @@ public interface HistoryStore {
         }
     }
 
-    /** A separação da ADR-0047: {@code unreadable} = linhas ilegíveis (falha PERMANENTE, com a causa pro attempt terminal), nunca infra — infra propaga como exceção da própria chamada. */
+    /** The separation: {@code unreadable} means unreadable rows (a PERMANENT failure, with the cause for the terminal attempt), never infrastructure — infrastructure propagates as an exception from the call itself. */
     record PayloadBatch(Map<ExecutionId, PayloadRow> rows, Map<ExecutionId, RuntimeException> unreadable) {
         public PayloadBatch {
             rows = Map.copyOf(rows);
@@ -113,53 +120,50 @@ public interface HistoryStore {
         }
     }
 
-    /** Só os cabeçalhos — o caminho frio do reaper (rearme/lote/poda dos candidatos terminais) sem pagar deserialização de payload. */
+    /** Headers only — the reaper's cold path (rearming, batching and pruning terminal candidates) without paying for payload deserialisation. */
     List<ExecutionHead> findHeads(List<ExecutionId> ids);
 
-    /** Attempts de uma execução, em ordem de número — o detail view (servido por {@code idx_mohs_attempt_exec} no PG). */
+    /** One execution's attempts, in number order — the detail view. The primary key {@code (execution_id, number)} serves both the predicate and the ordering, on every dialect. */
     List<Attempt> findAttempts(ExecutionId executionId);
 
-    // ─── read model (§6.2): estado advisory + verdade da fila/posse ─────────
-
     /**
-     * A execução como a API pública a vê — com attempts, e com o estado
-     * DERIVADO: a coluna {@code state} da história é advisory (PENDING até
-     * o terminal); em voo, a verdade é a fila e a posse. A derivação
-     * (§4.3): lease presente → {@code RUNNING} (com {@code owner} =
-     * node dono e {@code firedAt} = claim); entrada de fila com
-     * {@code attempt > 1} ainda invisível → {@code RETRY_WAITING}; entrada
-     * de fila caso contrário → {@code ENQUEUED}; coluna terminal → ela
-     * mesma. Linha PENDING sem fila nem posse é a janela de um flush de
-     * conclusão em curso — lê {@code ENQUEUED} (staleness limitada e
-     * documentada do modelo, §6.2). {@code now} decide {@code ENQUEUED} ×
-     * {@code RETRY_WAITING} (a regra de visibilidade) — do {@code Clock}
-     * injetado do chamador, como todo "quando" do projeto.
+     * The execution as the public API sees it — with attempts, and with a DERIVED state: history's
+     * {@code state} column is advisory (PENDING until terminal), while in flight the truth is the
+     * queue and the ownership.
+     *
+     * <p>The derivation: a lease present means {@code RUNNING} (with {@code owner} = the owning node
+     * and {@code firedAt} = the claim); a queue entry with {@code attempt > 1} still invisible means
+     * {@code RETRY_WAITING}; a queue entry otherwise means {@code ENQUEUED}; and a terminal column
+     * means itself. A PENDING row with neither queue nor ownership is the window of a completion
+     * flush in progress — it reads {@code ENQUEUED} (the model's bounded, documented staleness).
+     *
+     * <p>{@code now} decides {@code ENQUEUED} versus {@code RETRY_WAITING} (the visibility rule) — from
+     * the caller's injected {@code Clock}, like every "when" in the project.
      */
     Optional<Execution> find(ExecutionId id, Instant now);
 
     /**
-     * Página do dashboard — mesma derivação de {@link #find}, sem attempts
-     * (sumário por contrato, como na era pré-split); ordenada por id
-     * decrescente (UUIDv7 = mais recente primeiro), keyset por
-     * {@code id < cursor}. Filtro de {@code status} sobre o estado
-     * DERIVADO: terminal filtra na coluna; {@code RUNNING} filtra por
-     * posse; {@code ENQUEUED}/{@code RETRY_WAITING} filtram pela fila.
+     * The dashboard's page — the same derivation as {@link #find}, without attempts (a summary by
+     * contract); ordered by descending id (UUIDv7, so most recent first), with a keyset on
+     * {@code id < cursor}.
+     *
+     * <p>The {@code status} filter applies to the DERIVED state: a terminal one filters on the column;
+     * {@code RUNNING} filters by ownership; {@code ENQUEUED}/{@code RETRY_WAITING} filter by the queue.
      */
     List<Execution> findPage(@Nullable JobKey jobKey, @Nullable ExecutionState status, @Nullable Instant from,
             @Nullable Instant to, @Nullable ExecutionId cursor, int limit, Instant now);
 
     /**
-     * Contagem por estado do trabalho vivo pro {@code GET /overview} —
-     * custo proporcional ao trabalho vivo por construção na mesa nova:
-     * {@code RUNNING} = tamanho de {@code mohs_lease}; {@code ENQUEUED}/
-     * {@code RETRY_WAITING} = {@code mohs_ready} partida pela regra de
-     * visibilidade. Nenhuma leitura toca a história.
+     * The live work's count by state for {@code GET /overview} — a cost proportional to the live work
+     * by construction on the new layout: {@code RUNNING} is the size of {@code mohs_lease};
+     * {@code ENQUEUED}/{@code RETRY_WAITING} are {@code mohs_ready} split by the visibility rule. No
+     * read touches history.
      */
     Map<ExecutionState, Long> countActiveByState(Instant now);
 
-    /** Vazão da janela recente ({@code GET /overview}): attempts terminais com {@code finished_at >= since}, por outcome — o índice de throughput serve por construção. */
+    /** The recent window's throughput ({@code GET /overview}): terminal attempts with {@code finished_at >= since}, by outcome — the throughput index serves it by construction. */
     Map<ExecutionState, Long> countTerminalOutcomesSince(Instant since);
 
-    /** Poda de {@code mohs_idempotency} pela janela de idempotência (§7.2) — chamada pelo housekeeping, não pelo caminho quente. */
+    /** Pruning of {@code mohs_idempotency} by the idempotency window — called by housekeeping, never on the hot path. */
     int pruneIdempotencyBefore(Instant cutoff);
 }

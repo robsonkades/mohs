@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import javax.sql.DataSource;
@@ -9,14 +24,13 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Container Postgres compartilhado entre as classes de teste que validam
- * contra um banco real (ADR-0022) — singleton container: sobe uma vez por
- * JVM de teste, nunca é parado explicitamente (Ryuk do Testcontainers
- * cuida do cleanup no fim da JVM), evitando o custo de subir um container
- * novo por classe. Isolamento entre testes não vem de um banco novo por
- * teste (como {@code freshH2DataSource()} faz via URL única em memória) —
- * vem de {@code TRUNCATE ... CASCADE} antes de cada teste, no mesmo
- * schema compartilhado.
+ * A Postgres container shared between the test classes that validate against a real database — a
+ * singleton container: it starts once per test JVM and is never stopped explicitly (Testcontainers' Ryuk
+ * handles cleanup at the JVM's end), avoiding the cost of a new container per class.
+ *
+ * <p>Isolation between tests does not come from a new database per test (as {@code freshH2DataSource()}
+ * does through a unique in-memory URL) — it comes from {@code TRUNCATE ... CASCADE} before each test, in
+ * the same shared schema.
  */
 final class PostgresTestSupport {
 
@@ -25,10 +39,9 @@ final class PostgresTestSupport {
     static {
         CONTAINER.start();
         DataSource dataSource = dataSource();
-        // schema aplicado uma vez só, aqui — não em freshSchema(), que
-        // roda antes de cada teste contra o mesmo container: reaplicar
-        // schema-postgresql.sql é idempotente (CREATE TABLE IF NOT
-        // EXISTS), mas não precisa, é trabalho à toa repetido.
+        // The schema is applied once, here — not in freshSchema(), which runs before each test against the
+        // same container: reapplying schema-postgresql.sql is idempotent (CREATE TABLE IF NOT EXISTS), but
+        // it is unnecessary, repeated work.
         new ResourceDatabasePopulator(new ClassPathResource("schema-postgresql.sql")).execute(dataSource);
     }
 
@@ -43,7 +56,7 @@ final class PostgresTestSupport {
         return dataSource;
     }
 
-    /** Limpa todas as tabelas — o schema já foi aplicado uma vez quando o container subiu. */
+    /** Clears every table — the schema was applied once, when the container started. */
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();
         new JdbcTemplate(dataSource).execute(
@@ -52,10 +65,9 @@ final class PostgresTestSupport {
     }
 
     /**
-     * Um database NOVO e vazio no mesmo container — pro guardião estrutural
-     * (schema-file × cadeia Flyway), que precisa de dois schemas construídos
-     * do zero por caminhos diferentes, coisa que o database compartilhado
-     * (schema já aplicado no static) não oferece.
+     * A NEW, empty database in the same container — for the structural guardian (schema file versus the
+     * Flyway chain), which needs two schemas built from scratch by different paths, something the shared
+     * database (its schema applied in the static block) does not offer.
      */
     static DataSource freshEmptyDatabase(String name) {
         new JdbcTemplate(dataSource()).execute("DROP DATABASE IF EXISTS " + name + "; CREATE DATABASE " + name);

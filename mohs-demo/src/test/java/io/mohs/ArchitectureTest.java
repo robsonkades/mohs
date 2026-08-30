@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs;
 
 import java.time.Instant;
@@ -31,11 +46,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ArchitectureTest {
 
     /**
-     * "API pública" = qualquer coisa em io.mohs.. que não seja um dos 5
-     * pacotes internos conhecidos. Lista os internos (estável, fixados em
-     * M0) em vez dos subpacotes públicos (cresce a cada milestone) — evita
-     * que um subpacote público novo escape da regra por esquecimento (ver
-     * docs/adr/0013-public-api-subpackaging.md).
+     * "Public API" means anything under io.mohs.. that is not one of the five known internal
+     * packages. The rule lists the INTERNAL packages, which are stable, rather than the public
+     * subpackages, which grow with every milestone — so a new public subpackage cannot slip out of
+     * the rule by being forgotten.
      */
     private static final DescribedPredicate<JavaClass> PUBLIC_API =
             JavaClass.Predicates.resideInAPackage("io.mohs..")
@@ -59,11 +73,10 @@ class ArchitectureTest {
             .should().dependOnClassesThat().resideInAPackage("io.mohs.test..");
 
     /**
-     * §18.2 do redesign (Phase 2): o engine nunca vê JDBC — as portas dele
-     * são vocabulário puro e é o módulo de store quem fala SQL. O reator já
-     * impede o inverso (mohs-jdbc depende de mohs-engine); esta regra
-     * impede o vazamento por tipo (um {@code ResultSet} numa assinatura de
-     * porta, por exemplo).
+     * The engine never sees JDBC: its ports are pure vocabulary, and it is the store module that
+     * speaks SQL. The reactor already prevents the inverse (the store module depends on the
+     * engine); this rule prevents the leak by TYPE — a {@code ResultSet} in a port signature, for
+     * instance.
      */
     @ArchTest
     static final ArchRule engine_is_free_of_jdbc =
@@ -71,10 +84,9 @@ class ArchitectureTest {
             .should().dependOnClassesThat().resideInAnyPackage("java.sql..", "javax.sql..");
 
     /**
-     * §18.2 do redesign (Phase 2): só o starter conhece auto-configuration
-     * — nenhum outro módulo pode crescer um {@code @AutoConfiguration}
-     * escondido. Exceção única e nominal: o bootstrap do app demo
-     * ({@code MohsApplication}), que é aplicação, não biblioteca.
+     * Only the starter knows about auto-configuration: no other module may quietly grow a hidden
+     * {@code @AutoConfiguration}. There is exactly one named exception, the demo application's
+     * bootstrap ({@code MohsApplication}), which is an application rather than a library.
      */
     @ArchTest
     static final ArchRule only_the_starter_speaks_boot_autoconfigure =
@@ -83,19 +95,18 @@ class ArchitectureTest {
             .should().dependOnClassesThat().resideInAPackage("org.springframework.boot.autoconfigure..");
 
     /**
-     * {@link DatabaseClock} é a única exceção: é o próprio relógio
-     * injetado, então ler o relógio de verdade ali é o propósito da
-     * classe, não uma violação — {@code sync()} amostra o offset
-     * banco×app pra que {@code instant()} nunca precise fazer I/O.
+     * {@link DatabaseClock} is the single exception: it IS the injected clock, so reading the real
+     * clock there is the class's purpose rather than a violation — {@code sync()} samples the
+     * database-to-application offset precisely so that {@code instant()} never has to do I/O.
      */
     private static final DescribedPredicate<JavaClass> IS_DATABASE_CLOCK =
             JavaClass.Predicates.equivalentTo(DatabaseClock.class);
 
     /**
-     * "Todo agora vem do Clock injetado, leitura direta proibida" (CLAUDE.md)
-     * — {@code System.nanoTime()} fica de fora de propósito, é a duração
-     * monotônica que o próprio CLAUDE.md pede pra medir intervalo, não
-     * "agora".
+     * Every "now" comes from the injected clock; reading it directly is forbidden.
+     *
+     * <p>{@code System.nanoTime()} is deliberately out of scope: it is monotonic time, which is
+     * what measuring an interval requires, and it is not a wall-clock "now".
      */
     @ArchTest
     static final ArchRule engine_never_reads_wall_clock_directly =
@@ -105,16 +116,17 @@ class ArchitectureTest {
             .orShould().callMethod(System.class, "currentTimeMillis");
 
     /**
-     * "Prefira ReentrantLock a synchronized/wait" (CLAUDE.md) — não é mais
-     * questão de pinning do carrier (JEP 491, JDK 24, eliminou o pinning por
-     * {@code synchronized}/{@code Object.wait()}), é sobre as capacidades que
-     * só o lock explícito dá (JCIP cap. 13: {@code tryLock} com timeout,
-     * aquisição interruptível, {@code Condition} múltiplas). Só pega o
-     * modificador {@code synchronized} de método; bloco {@code
-     * synchronized(lock) { ... }} não é modelado por ArchUnit (não há
-     * inspeção de bytecode ao nível de instrução na API pública) — mesma
-     * lacuna entre regra em prosa e regra executável que já existe para
-     * outras checagens deste arquivo, registrada aqui em vez de escondida.
+     * Prefer {@code ReentrantLock} over {@code synchronized}/{@code wait}.
+     *
+     * <p>This is no longer about carrier pinning — JEP 491 in JDK 24 removed pinning by
+     * {@code synchronized}/{@code Object.wait()} — but about the capabilities only an explicit lock
+     * offers (JCIP ch. 13: {@code tryLock} with a timeout, interruptible acquisition, multiple
+     * {@code Condition}s).
+     *
+     * <p>Only the {@code synchronized} METHOD modifier is caught; a {@code synchronized(lock) {…}}
+     * block is not modelled by ArchUnit, which has no instruction-level bytecode inspection in its
+     * public API. That is the same gap between a prose rule and an executable one that other checks
+     * in this file have, recorded here rather than hidden.
      */
     @ArchTest
     static final ArchRule no_synchronized_methods_in_concurrency_critical_code =
@@ -136,21 +148,22 @@ class ArchitectureTest {
             .should().dependOnClassesThat().belongToAnyOf(ThreadLocal.class, InheritableThreadLocal.class);
 
     /**
-     * "Todo PK gerado é UUIDv7, nunca sequencial nem v4" (CLAUDE.md,
-     * invariante) — o v4 do JDK é aleatório puro: espalha pelo índice
-     * inteiro os inserts que o v7 manteria localizados na cauda, e não é
-     * ordenável no tempo (o que mantém keyset possível — ADR-0040). A
-     * regra proíbe a GERAÇÃO, não o tipo:
-     * {@code io.github.robsonkades.uuidv7.UUIDv7} devolve
-     * {@code java.util.UUID} legitimamente e não dispara (o matching é
-     * pelo owner do alvo). {@code accessTargetWhere} em vez de
-     * {@code callMethod} de propósito: cobre também method reference
-     * ({@code UUID::randomUUID} é {@code JavaMethodReference}, não
-     * {@code JavaMethodCall} — escaparia do {@code callMethod}; review
-     * desta regra). A metade dos schemas (nenhum {@code IDENTITY}/
-     * {@code SERIAL}/{@code AUTO_INCREMENT}/{@code SEQUENCE}) fica em
-     * prosa no CLAUDE.md — ArchUnit não lê SQL, mesma lacuna registrada
-     * na regra de {@code synchronized} acima.
+     * Every generated primary key is UUIDv7 — never sequential, never v4.
+     *
+     * <p>The JDK's v4 is pure randomness: it scatters across the whole index the inserts that v7
+     * would keep localised at the tail, and it is not time-ordered, which is what keeps keyset
+     * pagination possible.
+     *
+     * <p>The rule forbids the GENERATION, not the type:
+     * {@code io.github.robsonkades.uuidv7.UUIDv7} legitimately returns a {@code java.util.UUID} and
+     * does not trip it, because matching is by the target's owner. {@code accessTargetWhere} rather
+     * than {@code callMethod} is deliberate: it also covers method references
+     * ({@code UUID::randomUUID} is a {@code JavaMethodReference}, not a {@code JavaMethodCall}, and
+     * would escape {@code callMethod}).
+     *
+     * <p>The other half of the invariant — no {@code IDENTITY}/{@code SERIAL}/
+     * {@code AUTO_INCREMENT}/{@code SEQUENCE} in any schema — stays in prose, because ArchUnit does
+     * not read SQL. Same gap recorded on the {@code synchronized} rule above.
      */
     @ArchTest
     static final ArchRule ids_are_generated_as_uuidv7_never_v4 =
@@ -160,10 +173,10 @@ class ArchitectureTest {
                 .as("no classes should call or reference java.util.UUID.randomUUID()");
 
     /**
-     * Todo pacote de produção precisa do próprio {@code package-info.java}
-     * com {@code @NullMarked} — não-nulo por padrão é a convenção do
-     * projeto (CLAUDE.md), e um pacote novo sem isso degrada o sinal de
-     * análise estática de JSpecify silenciosamente, sem erro de compilação.
+     * Every production package needs its own {@code package-info.java} carrying
+     * {@code @NullMarked}: non-null by default is the project's convention, and a new package
+     * without it silently degrades JSpecify's static-analysis signal with no compilation error to
+     * show for it.
      */
     @ArchTest
     static void all_production_packages_declare_null_marked(JavaClasses classes) {
@@ -177,22 +190,22 @@ class ArchitectureTest {
     }
 
     /**
-     * "O grafo de dependência resultante é acíclico por construção" — ADR-0013
-     * já declara essa propriedade para os subpacotes de {@code io.mohs.core}
-     * (job/schedule/definition/execution/event/resource); esta regra é o que
-     * a torna executável em vez de só prosa em {@code package-info.java}. Não
-     * prescreve a direção exata de cada aresta (isso muda pouco a pouco
-     * conforme o vocabulário cresce) — só proíbe que ela feche um ciclo, que
-     * é a garantia que a ADR de fato promete.
+     * The dependency graph among the {@code io.mohs.core} subpackages
+     * (job/schedule/definition/execution/event/resource) is acyclic by construction. That property
+     * is stated in each {@code package-info.java}; this rule is what makes it executable rather
+     * than merely written down.
+     *
+     * <p>It does not prescribe the exact direction of every edge — that shifts as the vocabulary
+     * grows — only that no edge may close a cycle, which is the guarantee actually promised.
      */
     @ArchTest
     static final ArchRule core_subpackages_are_free_of_cycles =
         SlicesRuleDefinition.slices().matching("io.mohs.core.(*)..").should().beFreeOfCycles();
 
     /**
-     * Mesmo raciocínio de {@link #core_subpackages_are_free_of_cycles}, para
-     * os subpacotes de recurso de {@code io.mohs.rest} (um por controller,
-     * ver {@code io.mohs.rest}'s {@code package-info.java}).
+     * Same reasoning as {@link #core_subpackages_are_free_of_cycles}, applied to the resource
+     * subpackages of {@code io.mohs.rest} (one per controller — see that package's
+     * {@code package-info.java}).
      */
     @ArchTest
     static final ArchRule rest_subpackages_are_free_of_cycles =

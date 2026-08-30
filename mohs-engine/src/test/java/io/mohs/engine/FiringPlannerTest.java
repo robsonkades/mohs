@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import org.junit.jupiter.api.Nested;
@@ -13,6 +28,7 @@ import io.mohs.core.schedule.Misfire;
 import io.mohs.core.schedule.OnDemandSpec;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class FiringPlannerTest {
@@ -29,7 +45,7 @@ class FiringPlannerTest {
 
         @Test
         void dueWithinThresholdFiresAllOccurrencesLateWithoutMisfire() {
-            // devidas há 25s: 3 ocorrências (25s, 15s, 5s atrás), todas dentro do threshold
+            // Due 25s ago: 3 occurrences (25s, 15s and 5s back), all within the threshold
             Instant nextFire = NOW.minusSeconds(25);
 
             FiringPlanner.Plan plan = planner.plan(everyTenSeconds, Misfire.IGNORE, nextFire, NOW);
@@ -42,8 +58,8 @@ class FiringPlannerTest {
 
         @Test
         void ignoreDropsMissedButKeepsTheSeriesAnchor() {
-            // devidas há 10min numa agenda de 1min: perdidas descartadas, mas as
-            // recentes e o próximo disparo continuam na série original (:00 do minuto)
+            // Due 10 minutes ago on a 1-minute schedule: the missed ones are discarded, but the recent
+            // ones and the next firing stay on the original series (:00 of the minute)
             IntervalSpec everyMinute = new IntervalSpec(Duration.ofMinutes(1), false);
             Instant nextFire = NOW.minus(Duration.ofMinutes(10));
 
@@ -57,12 +73,12 @@ class FiringPlannerTest {
         @Test
         void fireNowCompensatesTheMissedBatchWithASingleImmediateFire() {
             IntervalSpec everyMinute = new IntervalSpec(Duration.ofMinutes(1), false);
-            Instant nextFire = NOW.minus(Duration.ofMinutes(10)).minusSeconds(30); // série em :30
+            Instant nextFire = NOW.minus(Duration.ofMinutes(10)).minusSeconds(30); // the series sits at :30
 
             FiringPlanner.Plan plan = planner.plan(everyMinute, Misfire.FIRE_NOW, nextFire, NOW);
 
             assertThat(plan.misfired()).isTrue();
-            // a recente (30s atrás) dispara normalmente; [now] compensa as 10 perdidas
+            // The recent one (30s back) fires normally; [now] compensates for the 10 missed
             assertThat(plan.occurrences()).containsExactly(NOW.minusSeconds(30), NOW);
             assertThat(plan.nextFireAt()).isEqualTo(NOW.plusSeconds(30));
         }
@@ -83,8 +99,8 @@ class FiringPlannerTest {
 
         @Test
         void fireAllMissedCapsAtTheCycleCeilingAndStaysDue() {
-            // 2h de perdidas numa agenda de 1s: só 1.440 por ciclo; o next_fire_at
-            // avança até a primeira não materializada e continua devido (drena depois)
+            // 2 hours of missed occurrences on a 1-second schedule: only 1,440 per cycle; next_fire_at
+            // advances to the first unmaterialised one and stays due (it drains later)
             IntervalSpec everySecond = new IntervalSpec(Duration.ofSeconds(1), false);
             Instant nextFire = NOW.minus(Duration.ofHours(2));
 
@@ -96,17 +112,17 @@ class FiringPlannerTest {
             assertThat(plan.nextFireAt()).isBefore(NOW);
         }
 
-        /** "O cap vale para toda materialização" (ADR-0035): a compensação do FIRE_NOW reserva a própria vaga — nunca cap+1, e nunca é descartada. */
+        /** "The cap applies to every materialisation": FIRE_NOW's compensation reserves its own slot — never cap+1, and never discarded. */
         @Test
         void fireNowCompensationStaysWithinTheCycleCap() {
             IntervalSpec everyTenMillis = new IntervalSpec(Duration.ofMillis(10), false);
-            Instant nextFire = NOW.minus(Duration.ofMinutes(2)); // perdidas além do threshold + ~6000 recentes
+            Instant nextFire = NOW.minus(Duration.ofMinutes(2)); // missed beyond the threshold plus ~6000 recent ones
 
             FiringPlanner.Plan plan = planner.plan(everyTenMillis, Misfire.FIRE_NOW, nextFire, NOW);
 
             assertThat(plan.occurrences()).hasSize(FiringPlanner.MAX_OCCURRENCES_PER_CYCLE);
             assertThat(plan.occurrences().getLast()).isEqualTo(NOW);
-            assertThat(plan.nextFireAt()).isBefore(NOW); // capado — continua devido, drena no próximo tick
+            assertThat(plan.nextFireAt()).isBefore(NOW); // Capped — it stays due and drains on the next tick
         }
 
         @Test
@@ -127,8 +143,8 @@ class FiringPlannerTest {
 
         @Test
         void ignoreResumesAtTheNextRegularOccurrence() {
-            // disparo das 02:00 perdido há 10h: IGNORE não materializa nada e
-            // retoma nas 02:00 de amanhã
+            // The 02:00 firing missed 10 hours ago: IGNORE materialises nothing and resumes at tomorrow's
+            // 02:00
             Instant nextFire = Instant.parse("2026-08-15T02:00:00Z");
 
             FiringPlanner.Plan plan = planner.plan(dailyAtTwo, Misfire.IGNORE, nextFire, NOW);
@@ -151,7 +167,7 @@ class FiringPlannerTest {
         @Test
         void dueWithinThresholdFiresAtTheScheduledInstant() {
             CronSpec everyMinute = new CronSpec("0 * * * * *", ZoneId.of("UTC"));
-            Instant nextFire = NOW.minusSeconds(30); // 11:59:30 não é ocorrência real, mas é o valor armazenado
+            Instant nextFire = NOW.minusSeconds(30); // 11:59:30 is not a real occurrence, but it is the stored value
 
             FiringPlanner.Plan plan = planner.plan(everyMinute, Misfire.IGNORE, nextFire, NOW);
 
@@ -185,7 +201,7 @@ class FiringPlannerTest {
 
             assertThat(plan.misfired()).isFalse();
             assertThat(plan.occurrences()).containsExactly(nextFire);
-            assertThat(plan.nextFireAt()).isNull(); // a conclusão rearma (ADR-0035)
+            assertThat(plan.nextFireAt()).isNull(); // the completion rearms it
         }
 
         @Test
@@ -233,5 +249,27 @@ class FiringPlannerTest {
         assertThatThrownBy(() -> new FiringPlanner(new NextFireCalculator(), Duration.ZERO))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("misfireThreshold");
+    }
+    /**
+     * The "not due yet" guard's 1ms slack is the COLUMN's resolution, not clock tolerance: DATETIME2
+     * (100ns) and DATETIME(6) (microseconds) round the next_fire_at the calculation produced with
+     * nanoseconds, and the value read back may land marginally ahead of the raw now.
+     *
+     * <p>Without the slack, a non-event becomes a log.error per tick — and the guard throws from inside
+     * fireTrigger, so the job would stop firing with the node healthy.
+     */
+    @Test
+    void aTriggerRoundedForwardByTheColumnIsStillDue() {
+        assertThatNoException().isThrownBy(() -> planner.plan(new IntervalSpec(Duration.ofMinutes(5), false),
+                Misfire.FIRE_NOW, NOW.plusMillis(1), NOW));
+    }
+
+    /** The other side of the boundary: a genuinely future trigger is a violation of the caller's contract. */
+    @Test
+    void aTriggerThatIsGenuinelyInTheFutureIsRejected() {
+        assertThatThrownBy(() -> planner.plan(new IntervalSpec(Duration.ofMinutes(5), false),
+                Misfire.FIRE_NOW, NOW.plusMillis(2), NOW))   // 1ms passes, 2ms does not — THIS is the boundary
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not due yet");
     }
 }

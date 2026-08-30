@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.util.Comparator;
@@ -20,35 +35,32 @@ import io.mohs.core.RunnerSnapshot;
 import io.mohs.core.resource.MohsRunner;
 
 /**
- * Converte {@link MohsRunner} (spec puro, sem {@code Executor} nenhum —
- * ver Javadoc da classe) em executores vivos via {@link MohsExecutors}, e
- * é dona do ciclo de vida deles: constrói aqui, então fecha aqui
- * ({@link #close()}) — mesma disciplina de posse já documentada em
- * {@link MohsExecutors} ("quem constrói é dono do ciclo de vida").
+ * Converts a {@link MohsRunner} (a pure spec, with no {@code Executor} at all — see its class
+ * Javadoc) into live executors through {@link MohsExecutors}, and owns their lifecycle: it builds
+ * them here, so it closes them here ({@link #close()}) — the same ownership discipline already
+ * documented in {@link MohsExecutors} ("whoever builds owns the lifecycle").
  *
- * <p>Recebe a lista já resolvida — defaults, overrides de propriedade e
- * conflito entre fonte de config são decisão de quem monta a lista
- * (hoje, {@code io.mohs.autoconfigure}), não desta classe.
+ * <p>It receives the list already resolved — defaults, property overrides and conflicts between
+ * configuration sources are decisions for whoever assembles the list (today,
+ * {@code io.mohs.autoconfigure}), not for this class.
  */
 public final class RunnerRegistry implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(RunnerRegistry.class);
 
-    /** {@code JobDefinition.runner() == null} resolve pra este nome — o único runner que esta classe exige que exista. */
+    /** {@code JobDefinition.runner() == null} resolves to this name — the only runner this class insists must exist. */
     public static final String DEFAULT_RUNNER = "io";
 
     private final Map<String, LiveRunner> executors;
 
     /**
-     * Executor vivo pareado com a ação de desligamento que nasce junto
-     * dele em {@link #build} — {@link #close()} só executa
-     * {@code shutdown.run()}, sem re-derivar o tipo concreto por
-     * {@code instanceof}: um modo novo de runner muda um único lugar.
+     * A live executor paired with the shutdown action born alongside it in {@link #build} —
+     * {@link #close()} merely runs {@code shutdown.run()}, without re-deriving the concrete type
+     * through {@code instanceof}: a new runner mode changes exactly one place.
      *
-     * <p>O componente é o {@link CountingExecutor}, e não a interface
-     * {@link AsyncTaskExecutor} — a exceção à regra de referir pela interface
-     * (Effective Java, Item 64) é justamente a capacidade extra do decorator:
-     * a ocupação que {@link #snapshot()} lê.
+     * <p>The component is the {@link CountingExecutor} rather than the {@link AsyncTaskExecutor}
+     * interface — the exception to referring to objects by their interface (Effective Java, Item 64)
+     * is precisely the decorator's extra capability: the occupancy {@link #snapshot()} reads.
      */
     record LiveRunner(MohsRunner spec, CountingExecutor executor, Runnable shutdown) {
 
@@ -62,11 +74,10 @@ public final class RunnerRegistry implements AutoCloseable {
     }
 
     /**
-     * Seam de teste: os caminhos de falha no meio da construção não são
-     * atingíveis com os builders reais (o spec já chega válido) — a fábrica
-     * injetável existe só pra prová-los. A validação antecipada dos specs
-     * cobre duplicata e default ausente; a garantia de "nenhum pool órfão"
-     * pro resto é o try/catch em volta do loop de construção.
+     * A test seam: the failure paths midway through construction are unreachable with the real
+     * builders (the spec arrives already valid) — the injectable factory exists only to prove them.
+     * Validating the specs up front covers duplicates and a missing default; the "no orphan pool"
+     * guarantee for the rest is the try/catch around the construction loop.
      */
     RunnerRegistry(List<MohsRunner> runners, Function<MohsRunner, LiveRunner> factory) {
         Objects.requireNonNull(runners, "runners");
@@ -84,7 +95,7 @@ public final class RunnerRegistry implements AutoCloseable {
         try {
             specs.forEach((name, spec) -> built.put(name, factory.apply(spec)));
         } catch (RuntimeException buildFailure) {
-            // nenhum pool órfão: fecha o que já nasceu e relança a causa original intacta
+            // No orphan pool: close what has already been created and rethrow the original cause intact
             for (LiveRunner alreadyBuilt : built.values()) {
                 try {
                     alreadyBuilt.shutdown().run();
@@ -98,11 +109,9 @@ public final class RunnerRegistry implements AutoCloseable {
     }
 
     /**
-     * Protocolo de desligamento certo por tipo concreto —
-     * {@link SimpleAsyncTaskExecutor#close()} (IO) vs.
-     * {@link ThreadPoolTaskExecutor#destroy()} (CPU), a mesma assimetria
-     * já documentada em {@link MohsExecutors} — decidido aqui, no único
-     * lugar que conhece o tipo construído.
+     * The right shutdown protocol per concrete type — {@link SimpleAsyncTaskExecutor#close()} (IO)
+     * versus {@link ThreadPoolTaskExecutor#destroy()} (CPU), the same asymmetry already documented in
+     * {@link MohsExecutors} — decided here, in the one place that knows the type it built.
      */
     private static LiveRunner build(MohsRunner runner) {
         String namePrefix = "mohs-runner-" + runner.name();
@@ -119,25 +128,23 @@ public final class RunnerRegistry implements AutoCloseable {
     }
 
     /**
-     * Decorator (GoF) que conta a ocupação onde ela acontece, em vez de
-     * perguntá-la ao pool: {@code SimpleAsyncTaskExecutor} (modo IO) não
-     * expõe seu contador de ativos, e derivar de
-     * {@code ThreadPoolTaskExecutor#getActiveCount} só no modo CPU daria dois
-     * significados ao mesmo campo.
+     * A Decorator (GoF) counting occupancy where it happens, rather than asking the pool for it:
+     * {@code SimpleAsyncTaskExecutor} (IO mode) does not expose its active count, and deriving it from
+     * {@code ThreadPoolTaskExecutor#getActiveCount} only in CPU mode would give the same field two
+     * meanings.
      *
-     * <p>Incrementa ao ACEITAR, decrementa ao concluir — inclusive quando a
-     * task lança, senão um handler que estoura vazaria o contador para cima
-     * até o número virar ficção. Rejeição do executor (fila cheia no modo
-     * CPU) também devolve, no {@code catch}: o {@code execute} não aconteceu.
+     * <p>It increments on ACCEPTANCE and decrements on completion — including when the task throws,
+     * otherwise a handler that blows up would leak the counter upwards until the number became
+     * fiction. A rejection by the executor (a full queue in CPU mode) also gives the slot back, in the
+     * {@code catch}: the {@code execute} did not happen.
      *
-     * <p>Classe nomeada dona do próprio contador, e não uma lambda sobre um
-     * {@code AtomicInteger} de fora: o contador e o executor que o alimenta
-     * só significam alguma coisa juntos — soltos em dois campos, nada impede
-     * um par que não se conversa, e o número mentiria em silêncio.
+     * <p>A named class owning its own counter, rather than a lambda over an external
+     * {@code AtomicInteger}: the counter and the executor feeding it only mean anything together —
+     * loose in two fields, nothing stops a pair that does not talk to each other, and the number would
+     * lie in silence.
      *
-     * <p>Envolve uma vez, na construção, e não a cada {@link #resolve}: quem
-     * chama continua recebendo o mesmo executor de sempre e não precisa saber
-     * que existe contagem.
+     * <p>It wraps once, at construction, not on every {@link #resolve}: callers keep receiving the same
+     * executor as always and need not know counting exists.
      */
     static final class CountingExecutor implements AsyncTaskExecutor {
 
@@ -160,23 +167,22 @@ public final class RunnerRegistry implements AutoCloseable {
                     }
                 });
             } catch (RuntimeException notAccepted) {
-                // devolve a vaga só porque o execute NÃO aconteceu. Isto depende
-                // de o executor delegado nunca rodar a task na thread chamadora:
-                // hoje é verdade (AbortPolicy no CPU, rejectTasksWhenLimitReached
-                // no IO — ver MohsExecutors), e com CallerRunsPolicy uma task que
-                // lança decrementaria duas vezes, aqui e no finally acima.
+                // Gives the slot back only because the execute did NOT happen. This depends on the
+                // delegate executor never running the task on the calling thread: today that holds
+                // (AbortPolicy on CPU, rejectTasksWhenLimitReached on IO — see MohsExecutors), and
+                // with a CallerRunsPolicy a task that throws would decrement twice, here and in the
+                // finally above.
                 running.decrementAndGet();
                 throw notAccepted;
             }
         }
 
         /**
-         * Nunca negativo. Um contador que vaza para baixo só é alcançável por
-         * defeito daqui (decremento duplo), e o {@code RunnerSnapshot} recusa
-         * {@code running < 0} — o que transformaria o bug num 500 do
-         * {@code GET /runners}, derrubando junto os runners que estão sãos e
-         * enchendo o log a cada refresh do dashboard. Instrumento degrada e
-         * grita; nunca vira a causa da indisponibilidade que deveria explicar.
+         * Never negative. A counter leaking downwards is only reachable through a defect here (a
+         * double decrement), and {@code RunnerSnapshot} refuses {@code running < 0} — which would turn
+         * the bug into a 500 from {@code GET /runners}, taking the healthy runners down with it and
+         * filling the log on every dashboard refresh. An instrument degrades and shouts; it never
+         * becomes the cause of the unavailability it was meant to explain.
          */
         int running() {
             int current = running.get();
@@ -189,12 +195,11 @@ public final class RunnerRegistry implements AutoCloseable {
     }
 
     /**
-     * O que este node declarou e quanto cada runner carrega agora.
+     * What this node declared, and how much each runner is carrying now.
      *
-     * <p>Ordenado por nome porque {@code executors} é um {@code Map.copyOf}
-     * — sem ordem definida. Uma lista que muda de ordem entre duas leituras
-     * faria a tabela do dashboard dançar a cada atualização; alfabética é
-     * estável e não precisa de explicação.
+     * <p>Ordered by name because {@code executors} is a {@code Map.copyOf} — with no defined order. A
+     * list that changes order between two reads would make the dashboard's table dance on every
+     * refresh; alphabetical is stable and needs no explanation.
      */
     public List<RunnerSnapshot> snapshots() {
         return executors.values().stream()
@@ -203,7 +208,7 @@ public final class RunnerRegistry implements AutoCloseable {
                 .toList();
     }
 
-    /** O teto declarado muda de campo com o modo — {@code maxConcurrent} no IO, {@code maxSize} no CPU (ver {@code RunnerSnapshot}). */
+    /** The declared ceiling lives in a different field per mode — {@code maxConcurrent} on IO, {@code maxSize} on CPU (see {@code RunnerSnapshot}). */
     private static int maxOf(MohsRunner spec) {
         return switch (spec.mode()) {
             case IO -> spec.maxConcurrent();
@@ -212,11 +217,10 @@ public final class RunnerRegistry implements AutoCloseable {
     }
 
     /**
-     * {@code null} resolve pro runner {@link #DEFAULT_RUNNER} — mesmo
-     * contrato já documentado em {@code JobDefinition.runner()}: "null usa
-     * o runner default". Nome não encontrado lança — quem chama (hoje,
-     * {@link Engine#submitDispatch}) decide o que fazer (falhar só a
-     * execução, não o node inteiro).
+     * {@code null} resolves to the {@link #DEFAULT_RUNNER} — the same contract already documented on
+     * {@code JobDefinition.runner()}: "null uses the default runner". An unknown name throws, and the
+     * caller (today, {@link Engine#submitDispatch}) decides what to do (fail only the execution, not
+     * the whole node).
      */
     public AsyncTaskExecutor resolve(@Nullable String runnerName) {
         String name = runnerName == null ? DEFAULT_RUNNER : runnerName;
@@ -228,11 +232,10 @@ public final class RunnerRegistry implements AutoCloseable {
     }
 
     /**
-     * Divergência só de caixa ganha diagnóstico próprio: o binder do Spring
-     * canonicaliza chave de mapa não-bracketed pra minúsculas, então
-     * {@code mohs.runners.myUpload.*} registra o runner como {@code myupload}
-     * enquanto {@code JobDefinition.runner()} é case-sensitive — sem a dica,
-     * "no runner named 'myUpload'" não ensina o que corrigir.
+     * A divergence of case alone gets its own diagnostic: Spring's binder canonicalises a
+     * non-bracketed map key to lower case, so {@code mohs.runners.myUpload.*} registers the runner as
+     * {@code myupload} while {@code JobDefinition.runner()} is case-sensitive — without the hint,
+     * "no runner named 'myUpload'" teaches nothing about what to fix.
      */
     private String noSuchRunnerMessage(String name) {
         for (String registered : executors.keySet()) {
@@ -246,10 +249,9 @@ public final class RunnerRegistry implements AutoCloseable {
     }
 
     /**
-     * Best-effort: nenhum runner fica vivo porque o vizinho falhou ao
-     * morrer — o pool CPU usa platform threads não-daemon, que segurariam
-     * o shutdown da JVM. A primeira exceção é relançada no fim com as
-     * demais como suppressed.
+     * Best-effort: no runner stays alive because a neighbour failed to die — the CPU pool uses
+     * non-daemon platform threads, which would hold up the JVM's shutdown. The first exception is
+     * rethrown at the end with the others as suppressed.
      */
     @Override
     public void close() {

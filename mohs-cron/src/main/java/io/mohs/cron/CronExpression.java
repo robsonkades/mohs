@@ -17,10 +17,12 @@
  * (https://github.com/spring-projects/spring-framework), under the same license. Changes: moved
  * to this package; dropped the org.springframework.util.Assert/StringUtils dependency
  * (Assert/StringUtils in this package cover the same calls) — org.jspecify.annotations.Nullable
- * is back, now that this project depends on JSpecify directly; no other functional changes.
+ * is back, now that this project depends on JSpecify directly; ONE functional divergence: next() reanchors through LocalDateTime when the ZonedDateTime walk hits a fixed point in half-hour-offset zones (see reanchoredThroughWallClock).
  */
 package io.mohs.cron;
 
+import java.time.LocalDateTime;
+import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.Temporal;
 import java.util.Arrays;
@@ -235,7 +237,44 @@ public final class CronExpression {
      * if no such temporal can be found
      */
     public <T extends Temporal & Comparable<? super T>> @Nullable T next(T temporal) {
-        return nextOrSame(ChronoUnit.NANOS.addTo(temporal, 1));
+        T result = nextOrSame(ChronoUnit.NANOS.addTo(temporal, 1));
+        if (result != null && result.compareTo(temporal) <= 0 && temporal instanceof ZonedDateTime zoned) {
+            return reanchoredThroughWallClock(zoned, temporal);
+        }
+        return result;
+    }
+
+    /**
+     * Second functional divergence from upstream (see this file's header).
+     *
+     * <p>Field arithmetic over {@link ZonedDateTime} has a fixed point in HALF-hour offset zones:
+     * each {@code with()}/{@code truncatedTo()} in the {@code CronField}s re-resolves the offset,
+     * and in {@code Australia/Lord_Howe} and {@code Pacific/Chatham} the search lands back on the
+     * seed itself. Measured: {@code "0 0 1 * * *"} starting from
+     * {@code 2026-04-05T01:00+11:00[Australia/Lord_Howe]} returns exactly that instant, and it
+     * repeats at every transition from 2024 to 2030. Note that 01:00 there is NOT ambiguous — the
+     * overlap is 01:30-02:00 — so this is arithmetic, not DST semantics.
+     *
+     * <p>Downstream the effect is permanent rather than transient: the progress guard in
+     * {@code NextFireCalculator} throws, {@code FiringPlanner} propagates before assembling the
+     * plan, {@code next_fire_at} is never rewritten, and the next tick repeats with the SAME seed —
+     * so a daily job never fires again while the node stays healthy. A guard that turns silent
+     * corruption into a loud failure is right; a loud failure with no recovery path only trades one
+     * defect for another.
+     *
+     * <p>The {@link LocalDateTime} path has no such fixed point, because wall-clock arithmetic
+     * re-resolves nothing, so the walk is re-anchored there and the zone reattached afterwards. A
+     * naive retry would not do: a second pass converges on the same fixed point.
+     */
+    private <T extends Temporal & Comparable<? super T>> @Nullable T reanchoredThroughWallClock(
+            ZonedDateTime zoned, T seed) {
+        LocalDateTime local = nextOrSame(zoned.toLocalDateTime().plusNanos(1));
+        if (local == null) {
+            return null;
+        }
+        @SuppressWarnings("unchecked")
+        T reanchored = (T) local.atZone(zoned.getZone());
+        return reanchored.compareTo(seed) > 0 ? reanchored : null;
     }
 
 

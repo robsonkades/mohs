@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.batch;
 
 import java.util.Objects;
@@ -11,7 +26,7 @@ import io.mohs.core.Mohs;
 import io.mohs.rest.ApiPaths;
 import io.mohs.rest.error.BatchNotFoundException;
 
-/** {@code GET /batches/{id}} — contadores agregados e estado do lote. */
+/** {@code GET /batches/{id}} — a batch's aggregate counters and state. */
 @RestController
 @RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/batches")
 public class BatchesController {
@@ -23,16 +38,18 @@ public class BatchesController {
     }
 
     /**
-     * Seek na PK, custo plano no tamanho do lote — o contador mantido é o que
-     * paga esta rota barata (ADR-0043). {@code pending} e {@code state} são
-     * derivados dos três contadores por {@link BatchResponse#of}, e não
-     * guardados: uma coluna a mais poderia divergir das outras, e não há
-     * pergunta que ela responda mais rápido.
+     * A seek on the primary key, flat in the batch's size — the maintained counter is what pays for
+     * this route being cheap.
+     *
+     * <p>{@code pending} and {@code state} are derived from the three counters by
+     * {@link BatchResponse#of} rather than stored: one more column could drift from the others, and
+     * there is no question it would answer any faster.
      */
     @GetMapping("/{id}")
     public BatchResponse get(@PathVariable String id) {
         return mohs.findBatch(id)
-                .map(batch -> BatchResponse.of(batch.batchId(), batch.total(), batch.succeeded(), batch.failed()))
+                .map(batch -> BatchResponse.of(batch.batchId(), batch.name(), batch.total(), batch.succeeded(),
+                        batch.failed()))
                 .orElseThrow(() -> new BatchNotFoundException(id));
     }
 }

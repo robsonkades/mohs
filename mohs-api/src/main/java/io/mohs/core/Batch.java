@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core;
 
 import java.util.function.Consumer;
@@ -6,24 +21,24 @@ import io.mohs.core.event.BatchCompleted;
 import io.mohs.core.event.ExecutionListener;
 
 /**
- * Recibo de um lote — {@link #batchId()} já está disponível de forma
- * síncrona, mesma durabilidade da cláusula 2 do contrato assíncrono
- * ({@code docs/adr/0003-async-and-transactional-contract.md}).
- * {@link #onCompletion} registra uma continuação best-effort, no mesmo
- * espírito de {@link ExecutionListener} — reação garantida enfileira job
- * dentro da própria transação, não depende deste callback.
+ * A batch's receipt — {@link #batchId()} is already available synchronously, with the same
+ * durability the async contract promises for an enqueue.
+ *
+ * <p>{@link #onCompletion} registers a best-effort continuation, in the same spirit as
+ * {@link ExecutionListener}: a guaranteed reaction enqueues a job inside its own transaction rather
+ * than depending on this callback.
  */
 public interface Batch {
 
     String batchId();
 
     /**
-     * Registra um callback best-effort disparado no fim do lote (êxito ou
-     * falha) — não é a garantia de conclusão do batch, só uma notificação
-     * de conveniência. Cada chamada registra um listener independente, sem
-     * substituir os já registrados: {@code batch.onCompletion(a).onCompletion(b)}
-     * registra os dois, não só o último. O {@link Batch} retornado
-     * referencia o mesmo lote, nunca uma cópia.
+     * Registers a best-effort callback fired at the end of the batch, on success or failure — this
+     * is not the batch's completion guarantee, only a convenience notification.
+     *
+     * <p>Each call registers an independent listener without replacing those already registered:
+     * {@code batch.onCompletion(a).onCompletion(b)} registers both, not just the last. The
+     * {@link Batch} returned references the same batch, never a copy.
      */
     Batch onCompletion(Consumer<BatchCompleted> callback);
 }

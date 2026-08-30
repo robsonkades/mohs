@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.definition;
 
 import java.time.Duration;
@@ -14,10 +29,9 @@ import io.mohs.core.schedule.Schedule;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Única implementação de {@link JobSpec}/{@link PolicySpec} — acumulador
- * mutável por trás do builder staged, package-private porque nada fora de
- * {@link JobDefinition#of} precisa vê-la (Effective Java Item 15: minimize
- * acessibilidade).
+ * The single implementation of {@link JobSpec}/{@link PolicySpec} — the mutable accumulator behind
+ * the staged builder, package-private because nothing outside {@link JobDefinition#of} needs to see
+ * it (Effective Java Item 15: minimise accessibility).
  */
 final class JobSpecImpl implements JobSpec, PolicySpec {
 
@@ -29,7 +43,7 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     private boolean startPaused;
     private boolean allowConcurrentExecutions = true;
     private int maxConcurrentExecutions;
-    /** Mesmo default das anotações ({@link MohsJob#retries()}): a garantia de entrega não pode depender do estilo de declaração. */
+    /** The same default as the annotations ({@link MohsJob#retries()}): the delivery guarantee must not depend on the declaration style. */
     private int retries = 1;
     private @Nullable Duration timeout;
     private @Nullable String retryPolicy;
@@ -63,11 +77,9 @@ final class JobSpecImpl implements JobSpec, PolicySpec {
     }
 
     /**
-     * {@code cron}/{@code every}/{@code everyAfterFinish}/{@code onDemand}
-     * são mutuamente exclusivos só por construção no estilo encadeado
-     * ({@code PolicySpec} não expõe métodos de gatilho) — em statements
-     * separados, nada barrava uma segunda chamada sobrescrever a primeira
-     * em silêncio.
+     * {@code cron}/{@code every}/{@code everyAfterFinish}/{@code onDemand} are mutually exclusive by
+     * construction only in the chained style ({@code PolicySpec} exposes no trigger methods) — in
+     * separate statements, nothing stopped a second call from silently overwriting the first.
      */
     private void requireNoTriggerYet() {
         if (schedule != null) {

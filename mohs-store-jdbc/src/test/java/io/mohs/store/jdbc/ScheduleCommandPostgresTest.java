@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Instant;
@@ -32,13 +47,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 /**
- * O gêmeo Postgres do teste de savepoint de {@code ScheduleCommandImplTest}
- * (review S5.3): é AQUI que o bug do {@code REQUIRED} era pior — sem
- * savepoint, a violação de PK do dedup aborta a transação inteira
- * ({@code 25P02 current transaction is aborted}) e o caminho de
- * recuperação que lê o vencedor roda numa conexão morta. H2 prova a
- * metade cross-dialeto (rollback-only evitado); só o Postgres real prova
- * que a conexão continua sã DEPOIS do conflito.
+ * The Postgres twin of {@code ScheduleCommandImplTest}'s savepoint test: it is HERE that the
+ * {@code REQUIRED} bug was worst — without a savepoint, the deduplication's primary-key violation aborts
+ * the entire transaction ({@code 25P02 current transaction is aborted}) and the recovery path that reads
+ * the winner runs on a dead connection.
+ *
+ * <p>H2 proves the cross-dialect half (rollback-only avoided); only real Postgres proves the connection
+ * stays healthy AFTER the conflict.
  */
 class ScheduleCommandPostgresTest {
 
@@ -66,7 +81,7 @@ class ScheduleCommandPostgresTest {
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));
     }
 
-    /** A prova que só o dialeto do 25P02 dá: conflito de PK → savepoint desfeito → a MESMA conexão lê o vencedor e o host commita. */
+    /** The proof only the 25P02 dialect can give: a primary-key conflict, the savepoint undone, and the SAME connection reads the winner while the host commits. */
     @Test
     void duplicateIdempotencyKeyInsideAHostTransactionLeavesTheConnectionUsable() {
         TransactionTemplate host = new TransactionTemplate(new DataSourceTransactionManager(dataSource));

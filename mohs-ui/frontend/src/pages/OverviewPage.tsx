@@ -1,7 +1,7 @@
 import { lazy, Suspense, useState, type ReactNode } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { fetchExecutions, fetchJobs, fetchNodes, fetchOverview } from "../lib/api";
+import { fetchExecutions, fetchJobs, fetchNodes, fetchOverview, fetchRunners } from "../lib/api";
 import { queryKeys } from "../lib/queryKeys";
 import { STREAM_OVERVIEW_WINDOW } from "../lib/useLiveUpdates";
 import { StatCard } from "../components/StatCard";
@@ -10,7 +10,7 @@ import { PageStack, StatGrid } from "../components/Layout";
 import { BarBreakdown, type BreakdownRow } from "../components/BarBreakdown";
 import { EmptyState, ErrorState, Spinner } from "../components/Feedback";
 import { EngineStateBadge, ExecutionStateBadge, JobPausedBadge, StatusBadge } from "../components/Badge";
-import { formatDuration, relativeTime, shortId } from "../lib/format";
+import { formatDuration, rateFormatter, relativeTime, shortId } from "../lib/format";
 import { nodeFreshness, isNodeOnline } from "../lib/nodeStatus";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
@@ -21,7 +21,7 @@ import {
   IconListChecks,
   IconServer,
 } from "../components/Icons";
-import { LIVE_STATES, type JobResponse } from "../types/api";
+import type { JobResponse } from "../types/api";
 
 /**
  * Recharts is the single heaviest thing this dashboard ships, and it is used by exactly one panel
@@ -41,6 +41,9 @@ const CHART_HEIGHT = "h-[220px]";
  * two fall back to polling, which is the price of choosing a window.
  */
 const THROUGHPUT_WINDOWS = [STREAM_OVERVIEW_WINDOW, "PT15M", "PT1H"] as const;
+
+/** The default runner — `RunnerRegistry.DEFAULT_RUNNER`, the one the server refuses to boot without. */
+const DEFAULT_RUNNER = "io";
 
 /** "…" while loading, "—" if this one metric failed — a broken metric never blocks the rest of the page. */
 function statValue(isPending: boolean, isError: boolean, value: string | number) {
@@ -130,13 +133,15 @@ export function OverviewPage() {
   });
   const jobs = useQuery({ queryKey: queryKeys.jobs(), queryFn: fetchJobs });
   const nodes = useQuery({ queryKey: queryKeys.nodes(), queryFn: fetchNodes });
+  // Seeded by the stream's `runners` frame every 2s (ADR-0063); the fetch is the fallback for when
+  // SSE never comes up.
+  const runners = useQuery({ queryKey: queryKeys.runners(), queryFn: fetchRunners });
   const failedRecent = useQuery({
     queryKey: queryKeys.executions({ status: "FAILED" }),
     queryFn: () => fetchExecutions({ status: "FAILED" }, undefined, 5),
   });
 
   const counts = overview.data?.executionCountsByStatus;
-  const liveTotal = LIVE_STATES.reduce((sum, state) => sum + (counts?.[state] ?? 0), 0);
   const pausedJobs = (jobs.data ?? []).filter((job) => job.paused);
   const onlineNodes = (nodes.data ?? []).filter((node) => isNodeOnline(node.lastHeartbeatAt)).length;
   const staleNodes = (nodes.data ?? []).filter((node) => !isNodeOnline(node.lastHeartbeatAt));
@@ -144,6 +149,22 @@ export function OverviewPage() {
   const attentionLoaded = !!failedRecent.data && !!jobs.data && !!nodes.data;
   const attentionEmpty =
     attentionLoaded && failedRecent.data!.items.length === 0 && pausedJobs.length === 0 && staleNodes.length === 0;
+
+  // Node-local by contract (ADR-0063): `max` is this process's cap and `/runners` answers for
+  // whichever node served the request. overview.RUNNING is cluster-wide, so the two must not be
+  // divided into each other — the tile says "this node" instead of implying a cluster ratio.
+  //
+  // Matched by NAME, not by `mode === "IO"`: `/runners` is sorted by name, so an app that declares
+  // its own IO runner would silently tile that one instead; and the default runner is allowed to
+  // be CPU-mode (`mohs.runners.io.mode=cpu`), which would tile nothing. The name is the identity
+  // the server refuses to boot without (RunnerRegistry.DEFAULT_RUNNER).
+  const defaultRunner = (runners.data ?? []).find((runner) => runner.name === DEFAULT_RUNNER);
+  const concurrencyLabel = defaultRunner ? `${defaultRunner.running}/${defaultRunner.max}` : "no runner";
+  // One `?.`, on the pending query and nothing else: both writers of this cache key go through
+  // `isOverview` (the fetch and the stream's frame), so `recent` is there whenever `data` is. A
+  // second `?.` here would be dead code arguing that the guard cannot be trusted.
+  const rate = overview.data?.recent.ratePerSecond;
+  const rateLabel = rate === undefined ? "—" : rateFormatter.format(rate);
 
   const throughput = overview.data?.throughput;
   const throughputRows: BreakdownRow[] = [
@@ -168,14 +189,14 @@ export function OverviewPage() {
           icon={<IconGauge className="size-4" />}
         />
         <StatCard
-          label="Live executions"
-          value={statValue(overview.isPending, !!overview.error, liveTotal)}
+          label="Executions/s"
+          value={statValue(overview.isPending, !!overview.error, rateLabel)}
           icon={<IconActivity className="size-4" />}
         />
         <StatCard
-          label="Running"
-          value={statValue(overview.isPending, !!overview.error, counts?.RUNNING ?? 0)}
-          icon={<IconActivity className="size-4" />}
+          label={`Running · ${DEFAULT_RUNNER} @ this node`}
+          value={statValue(runners.isPending, !!runners.error, concurrencyLabel)}
+          icon={<IconGauge className="size-4" />}
         />
         <StatCard
           label="Retry scheduled"
@@ -241,13 +262,14 @@ export function OverviewPage() {
         )}
       </Panel>
 
-      <Panel title="Live work">
+      <Panel title="Activity">
         <Suspense fallback={<div className={CHART_HEIGHT} aria-hidden />}>
           <ExecutionActivityChart />
         </Suspense>
         <p className="pt-2 text-xs text-muted-foreground">
-          Terminal states carry no all-time count by contract — history grows without bound, and this
-          is a polling anchor. Recent terminal activity is the throughput panel.
+          Executions per second on the left, queue and concurrency on the right — two scales because
+          a backlog and a concurrency cap share none. The rate is what says the engine is working: a
+          fast job is queued and owned for milliseconds, so the gauges read zero even under load.
         </p>
       </Panel>
 

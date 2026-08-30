@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.job;
 
 import java.time.Duration;
@@ -10,12 +25,12 @@ import tools.jackson.databind.json.JsonMapper;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Round-trip do discriminador {@code type} através do {@link ScheduleView}
- * selado. Usa {@link JsonMapper} direto (Jackson 3, já transitivo via
- * {@code spring-boot-starter-webmvc}) em vez de {@code @JsonTest} — o
- * {@code spring-boot-starter-jackson-test} que fornece {@code @JsonTest}
- * não é dependência deste projeto, e não é o caso de adicionar uma só pra
- * isto.
+ * A round trip of the {@code type} discriminator through the sealed {@link ScheduleView}.
+ *
+ * <p>It uses {@link JsonMapper} directly (Jackson 3, already transitive through
+ * {@code spring-boot-starter-webmvc}) rather than {@code @JsonTest}: the
+ * {@code spring-boot-starter-jackson-test} that provides {@code @JsonTest} is not a dependency of
+ * this project, and this is not reason enough to add one.
  */
 class ScheduleViewJsonTest {
 

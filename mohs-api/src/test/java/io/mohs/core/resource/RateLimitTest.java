@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.resource;
 
 import java.time.Duration;
@@ -37,11 +52,10 @@ class RateLimitTest {
     }
 
     /**
-     * ADR-0042: o balde rende um token a cada {@code window / max}. Se essa
-     * divisão trunca para zero, o refill dividiria por {@code Duration.ZERO}
-     * e derrubaria a rodada de claim INTEIRA — inclusive os jobs sem limite
-     * nenhum. A spec recusa nascer nesse estado, então nem property, nem
-     * {@code @Bean}, nem PATCH conseguem produzi-lo.
+     * The bucket yields one token every {@code window / max}. If that division truncates to zero,
+     * the refill would divide by {@code Duration.ZERO} and bring down the ENTIRE claim round —
+     * including jobs with no limit at all. The spec refuses to be created in that state, so neither
+     * a property, nor a {@code @Bean}, nor a PATCH can produce it.
      */
     @Test
     void rejectsAWindowTooShortToIssueOneTokenPerInterval() {
@@ -50,7 +64,7 @@ class RateLimitTest {
                 .hasMessageContaining("too short for max");
     }
 
-    /** O limite exato — um token por nanossegundo — continua válido: a rejeição é do que não é representável, não do que é agressivo. */
+    /** The exact limit — one token per nanosecond — remains valid: the rejection is of what is not representable, not of what is aggressive. */
     @Test
     void acceptsAWindowThatIssuesExactlyOneTokenPerNanosecond() {
         assertThat(new RateLimit("smtp", 1_000_000, Duration.ofMillis(1)).max()).isEqualTo(1_000_000);

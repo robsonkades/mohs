@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.sql.ResultSet;
@@ -13,6 +28,8 @@ import java.util.Optional;
 import javax.sql.DataSource;
 
 import org.jspecify.annotations.Nullable;
+import org.springframework.util.ClassUtils;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
@@ -28,24 +45,36 @@ import io.mohs.engine.HistoryStore;
 import io.mohs.store.jdbc.dialect.JdbcDialect;
 
 /**
- * {@link HistoryStore} sobre {@code mohs_execution}/{@code mohs_attempt}/
- * {@code mohs_idempotency} (Phase 5, ADR-A). SEM {@code TransactionTemplate}
- * de propósito: {@link #record} participa da transação ativa do chamador
- * (ADR-0003 §4 — o enqueue junta-se à transação do host; §7.5-1: execução
- * + fila + idempotência são a mesma unidade de trabalho, composta por quem
- * chama, nunca aqui); as leituras são autocommit como as de qualquer
- * store. A escrita terminal NÃO mora aqui — é da transação de conclusão
- * ({@code JdbcLeaseStore.complete}, §7.5-3).
+ * {@link HistoryStore} over {@code mohs_execution}/{@code mohs_attempt}/{@code mohs_idempotency}.
+ *
+ * <p>Deliberately WITHOUT a {@code TransactionTemplate}: {@link #record} takes part in the caller's
+ * active transaction (the enqueue joins the host's; execution, queue and idempotency are the same unit
+ * of work, composed by the caller and never here); the reads are autocommit like any store's. The
+ * terminal write does NOT live here — it belongs to the completion transaction
+ * ({@code JdbcLeaseStore.complete}).
  */
 public final class JdbcHistoryStore implements HistoryStore {
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final NamedParameterJdbcTemplate pruneTemplate;
     private final JsonMapper objectMapper;
     private final JdbcDialect dialect;
+
+    /**
+     * Shorter than any sensible {@code node-lease-ttl}, so a prune waiting on another node's locks
+     * can never cost this node the lease it is supposed to be renewing. It is a ceiling on waiting,
+     * not a budget for working — see {@link #pruneIdempotencyBefore}.
+     */
+    private static final int PRUNE_TIMEOUT_SECONDS = 5;
 
     public JdbcHistoryStore(DataSource dataSource, JsonMapper objectMapper, JdbcDialect dialect) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
+        // A template of its own: the timeout must not reach the read model or the payload read, which
+        // run on the hot path and have no business being cancelled mid-flight
+        JdbcTemplate pruneOperations = new JdbcTemplate(dataSource);
+        pruneOperations.setQueryTimeout(PRUNE_TIMEOUT_SECONDS);
+        this.pruneTemplate = new NamedParameterJdbcTemplate(pruneOperations);
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.dialect = Objects.requireNonNull(dialect, "dialect");
     }
@@ -68,9 +97,8 @@ public final class JdbcHistoryStore implements HistoryStore {
         if (executions.isEmpty()) {
             return;
         }
-        // a idempotência entra ANTES da história: o conflito de PK É o check
-        // de dedup (Idempotent Receiver, EIP) e precisa abortar a unidade
-        // inteira antes de qualquer linha de história nascer
+        // Idempotency goes in BEFORE history: the primary-key conflict IS the deduplication check
+        // (Idempotent Receiver, EIP) and has to abort the whole unit before any history row is born
         MapSqlParameterSource[] keys = executions.stream()
                 .filter(e -> e.idempotencyKey() != null)
                 .map(this::idempotencyParams)
@@ -125,7 +153,7 @@ public final class JdbcHistoryStore implements HistoryStore {
     private static final String HEAD_COLUMNS =
             "execution_id, job_key, scheduled_at, created_at, actor, priority, correlation_id";
 
-    /** Mesma disciplina do {@code findPayloads} da ADR-0047: veredito POR LINHA — linha ilegível não contamina as vizinhas; só infra propaga. */
+    /** The same discipline as {@code findPayloads}: a PER-ROW verdict — an unreadable row does not contaminate its neighbours; only infrastructure propagates. */
     @Override
     public PayloadBatch findPayloads(List<ExecutionId> ids) {
         Objects.requireNonNull(ids, "ids");
@@ -178,7 +206,7 @@ public final class JdbcHistoryStore implements HistoryStore {
         String payloadType = rs.getString("payload_type");
         Class<?> type;
         try {
-            type = Class.forName(payloadType);
+            type = ClassUtils.forName(payloadType, ClassUtils.getDefaultClassLoader());
         } catch (ClassNotFoundException e) {
             throw new IllegalStateException("payload type '" + payloadType + "' not found on classpath", e);
         }
@@ -194,14 +222,30 @@ public final class JdbcHistoryStore implements HistoryStore {
                 """, new MapSqlParameterSource("executionId", executionId.value()), (rs, _) -> mapAttempt(rs));
     }
 
+    /**
+     * Bounded in TIME, not in rows, and the bound is the point: this runs on the engine's loop
+     * thread, ahead of the firing and the claim. Every node issues the same DELETE, so the node that
+     * gets there second waits on the first one's row locks — and a node blocked here is a node that
+     * is heartbeating, owning its share of the shards, and claiming nothing. That is the exact
+     * failure mode the tick's own comment describes, and {@code runMaintenance} does not shield
+     * against it: it catches exceptions, and waiting throws nothing.
+     *
+     * <p>A five-second ceiling ({@code PRUNE_TIMEOUT_SECONDS}) therefore caps the wait rather than
+     * the work. A prune cut short rolls
+     * back whole and makes no progress, which is the right trade at this cadence — the loser of the
+     * race would have deleted nothing anyway, since the winner is removing the same rows. What it
+     * costs is the pathological case: a first prune over a window that was never enforced can be
+     * large enough to time out on every node, forever. That surfaces as
+     * {@code mohs.tick.failed{step=idempotency-prune}} climbing hourly, and the answer is a one-off
+     * manual DELETE in batches — not a longer timeout, which would only move the stall into the
+     * claim.
+     */
     @Override
     public int pruneIdempotencyBefore(Instant cutoff) {
         Objects.requireNonNull(cutoff, "cutoff");
-        return jdbcTemplate.update("DELETE FROM mohs_idempotency WHERE created_at < :cutoff",
+        return pruneTemplate.update("DELETE FROM mohs_idempotency WHERE created_at < :cutoff",
                 new MapSqlParameterSource("cutoff", dialect.splitTimestamp(cutoff)));
     }
-
-    // ─── read model (§6.2): a derivação de estado sobre história+fila+posse ──
 
     private static final String READ_MODEL_COLUMNS = """
             e.execution_id, e.job_key, e.state, e.scheduled_at, e.created_at, e.actor, e.priority,
@@ -224,8 +268,8 @@ public final class JdbcHistoryStore implements HistoryStore {
                 "SELECT " + READ_MODEL_COLUMNS + READ_MODEL_FROM + "WHERE e.execution_id = :executionId",
                 new MapSqlParameterSource("executionId", id.value()),
                 rs -> mapDerived(rs, now, List.of()));
-        // detail view carrega attempts (contrato da era anterior preservado);
-        // duas leituras, não um join N×M — attempts multiplicariam a linha
+        // The detail view carries attempts (the earlier era's contract preserved); two reads, not an NxM
+        // join — attempts would multiply the row
         return summary.map(execution -> withAttempts(execution, findAttempts(id)));
     }
 
@@ -260,9 +304,8 @@ public final class JdbcHistoryStore implements HistoryStore {
             params.addValue("cursor", cursor.value());
         }
         if (status != null) {
-            // filtro sobre o estado DERIVADO: terminal mora na coluna;
-            // RUNNING mora na posse; ENQUEUED/RETRY_WAITING moram na fila,
-            // separados pela regra de visibilidade (§4.3)
+            // A filter over the DERIVED state: terminal lives in the column; RUNNING lives in the
+            // ownership; ENQUEUED/RETRY_WAITING live in the queue, separated by the visibility rule
             switch (status) {
                 case SUCCEEDED, FAILED, CANCELLED -> {
                     conditions.add("e.state = :status");
@@ -276,11 +319,11 @@ public final class JdbcHistoryStore implements HistoryStore {
         String where = conditions.isEmpty() ? "" : "WHERE " + String.join(" AND ", conditions) + "\n";
         String sql = "SELECT " + dialect.topClause() + READ_MODEL_COLUMNS + READ_MODEL_FROM + where
                 + "ORDER BY e.execution_id DESC " + dialect.limitClause();
-        // SUMÁRIO por contrato (era anterior preservada): attempts vazios na listagem
+        // A SUMMARY by contract (the earlier era preserved): empty attempts in the listing
         return jdbcTemplate.query(sql, params, (rs, _) -> mapDerived(rs, now, List.of()));
     }
 
-    /** A derivação do §4.3 — ver o Javadoc de {@link HistoryStore#find}. */
+    /** The derivation — see {@link HistoryStore#find}'s Javadoc. */
     private Execution mapDerived(ResultSet rs, Instant now, List<Attempt> attempts) throws SQLException {
         ExecutionId id = ExecutionId.of(rs.getString("execution_id"));
         String column = rs.getString("state");
@@ -300,8 +343,8 @@ public final class JdbcHistoryStore implements HistoryStore {
                 && Objects.requireNonNull(dialect.readSplitTimestamp(rs, "ready_visible_at"), "ready_visible_at").isAfter(now)) {
             state = ExecutionState.RETRY_WAITING;
         } else {
-            // na fila e visível — ou na janela de um flush de conclusão em
-            // curso (PENDING órfão): ENQUEUED, a staleness aceita do §6.2
+            // queued and visible — or inside the window of a completion flush in
+            // progress (an orphan PENDING): ENQUEUED, the read model's accepted staleness
             state = ExecutionState.ENQUEUED;
         }
         return new Execution(id, JobKey.of(rs.getString("job_key")), state,
@@ -314,8 +357,8 @@ public final class JdbcHistoryStore implements HistoryStore {
     public Map<ExecutionState, Long> countActiveByState(Instant now) {
         Objects.requireNonNull(now, "now");
         Map<ExecutionState, Long> counts = new LinkedHashMap<>();
-        // duas queries pequenas, custo = trabalho vivo por construção (§5.3):
-        // a fila É o backlog e a posse É o em-execução — a história não entra
+        // Two small queries, with a cost equal to the live work by construction: the queue IS the backlog
+        // and the ownership IS what is executing — history does not enter
         jdbcTemplate.query("""
                 SELECT COUNT(*) AS queued,
                        SUM(CASE WHEN attempt > 1 AND visible_at > :now THEN 1 ELSE 0 END) AS waiting

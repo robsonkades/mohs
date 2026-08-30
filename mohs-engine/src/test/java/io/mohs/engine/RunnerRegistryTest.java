@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -34,7 +49,7 @@ class RunnerRegistryTest {
         return MohsRunner.cpu(name).coreSize(1).maxSize(1).build();
     }
 
-    /** Executor de enfeite pros testes de ciclo de vida: quem importa ali é o {@code shutdown}, nunca a contagem. */
+    /** A placeholder executor for the lifecycle tests: what matters there is the {@code shutdown}, never the counting. */
     private static RunnerRegistry.CountingExecutor countingExecutor() {
         return new RunnerRegistry.CountingExecutor(new SimpleAsyncTaskExecutor());
     }
@@ -74,7 +89,7 @@ class RunnerRegistryTest {
         }
     }
 
-    /** O binder do Spring minusculiza chave de mapa não-bracketed — nome que difere só por caixa ganha diagnóstico que ensina a causa, não só "not found". */
+    /** Spring's binder lower-cases a non-bracketed map key — a name differing only in case gets a diagnostic that teaches the cause, not just "not found". */
     @Test
     void resolveNameDifferingOnlyInCaseTeachesTheCause() throws Exception {
         try (RunnerRegistry registry = new RunnerRegistry(List.of(io("io"), io("myupload")))) {
@@ -113,7 +128,7 @@ class RunnerRegistryTest {
         }
     }
 
-    /** close() usa o protocolo certo por tipo (close() pro IO, destroy() pro CPU) — depois de fechado, os dois rejeitam trabalho novo. */
+    /** close() uses the right protocol per type (close() for IO, destroy() for CPU) — once closed, both reject new work. */
     @Test
     void closeShutsDownBothIoAndCpuExecutors() {
         RunnerRegistry registry = new RunnerRegistry(List.of(io("io"), cpu("cpu")));
@@ -126,7 +141,7 @@ class RunnerRegistryTest {
         assertThatThrownBy(() -> cpuExecutor.execute(() -> { })).isInstanceOf(TaskRejectedException.class);
     }
 
-    /** A promessa do construtor ("nenhum pool órfão") vale pra falha NO MEIO da construção, não só pra pré-validação — inatingível com os builders reais, daí a fábrica injetada. */
+    /** The constructor's promise ("no orphan pool") holds for a failure MIDWAY through construction, not only for pre-validation — unreachable with the real builders, hence the injected factory. */
     @Test
     void buildFailureMidConstructionClosesTheAlreadyBuiltRunners() {
         AtomicBoolean ioShutDown = new AtomicBoolean();
@@ -142,7 +157,7 @@ class RunnerRegistryTest {
         assertThat(ioShutDown).isTrue();
     }
 
-    /** Sem best-effort, o vizinho que falhou ao morrer deixaria vivo um pool CPU de platform threads não-daemon — que segura o shutdown da JVM inteira. */
+    /** Without best-effort, a neighbour that failed to die would leave a CPU pool of non-daemon platform threads alive — which holds up the whole JVM's shutdown. */
     @Test
     void closeIsBestEffortAndRethrowsTheFirstFailureWithTheRestSuppressed() {
         AtomicBoolean s3ShutDown = new AtomicBoolean();
@@ -155,14 +170,14 @@ class RunnerRegistryTest {
         };
         RunnerRegistry registry = new RunnerRegistry(List.of(io("io"), cpu("cpu"), io("s3")), factory);
 
-        // Map.copyOf não preserva ordem de inserção — qual falha vem primeiro é indeterminado
+        // Map.copyOf does not preserve insertion order — which failure comes first is undetermined
         Throwable thrown = catchThrowable(registry::close);
         assertThat(thrown).isIn(ioFailure, cpuFailure);
         assertThat(thrown.getSuppressed()).containsExactly(thrown == ioFailure ? cpuFailure : ioFailure);
         assertThat(s3ShutDown).isTrue();
     }
 
-    /** O que o {@code GET /runners} promete: nome, modo e teto declarado, por runner, em ordem estável. */
+    /** What {@code GET /runners} promises: name, mode and declared ceiling, per runner, in a stable order. */
     @Test
     void snapshotsReportTheDeclaredModeAndCeiling() {
         try (RunnerRegistry registry = new RunnerRegistry(
@@ -177,9 +192,8 @@ class RunnerRegistryTest {
     }
 
     /**
-     * A ocupação sobe enquanto a task roda e volta quando ela termina — a
-     * task segura o contador aberto num latch, senão o teste mediria o
-     * depois e passaria com o contador quebrado.
+     * Occupancy rises while the task runs and comes back when it finishes — the task holds the counter
+     * open on a latch, otherwise the test would measure the aftermath and pass with a broken counter.
      */
     @Test
     void runningCountsWhatIsInFlightAndReleasesOnCompletion() throws InterruptedException {
@@ -199,7 +213,7 @@ class RunnerRegistryTest {
         }
     }
 
-    /** Handler que estoura tem que devolver a vaga: sem isso o contador só sobe e o número vira ficção. */
+    /** A handler that blows up has to give the slot back: without that the counter only rises and the number becomes fiction. */
     @Test
     void runningIsReleasedWhenTheTaskThrows() throws InterruptedException {
         CountDownLatch ran = new CountDownLatch(1);
@@ -215,10 +229,9 @@ class RunnerRegistryTest {
     }
 
     /**
-     * A parte do contrato que só existia em prosa: no modo CPU, {@code running}
-     * inclui quem espera na fila. Medir só o que ocupa thread esconderia o
-     * acúmulo — que é exatamente o que o operador precisa ver quando o pool
-     * não vaza mas também não anda.
+     * The part of the contract that existed only in prose: in CPU mode, {@code running} includes what
+     * waits in the queue. Measuring only what occupies a thread would hide the backlog — which is
+     * exactly what the operator needs to see when the pool neither leaks nor moves.
      */
     @Test
     void cpuRunningIncludesWhatIsWaitingInTheQueue() throws InterruptedException {
@@ -236,7 +249,7 @@ class RunnerRegistryTest {
             crunch.execute(() -> await(release));
             crunch.execute(() -> await(release));
 
-            // uma na thread, duas na fila
+            // One on a thread, two in the queue
             assertThat(runningOf(registry, "crunch")).isEqualTo(3);
 
             release.countDown();
@@ -244,7 +257,7 @@ class RunnerRegistryTest {
         }
     }
 
-    /** Submissão recusada não ocupou nada: sem devolver a vaga, a fila cheia empurraria o contador para cima de vez. */
+    /** A refused submission occupied nothing: without giving the slot back, a full queue would push the counter up for good. */
     @Test
     void aRejectedSubmissionDoesNotCount() throws InterruptedException {
         CountDownLatch started = new CountDownLatch(1);

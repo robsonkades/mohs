@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -9,54 +24,45 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 /**
- * Fábrica central de executor/scheduler do Mohs — nenhuma classe do motor
- * cria {@code Executor}/{@code ScheduledExecutorService} na mão; todas
- * recebem o que esta fábrica constrói, injetado no construtor (quem chama
- * também é dono do ciclo de vida do que recebe de volta — esta fábrica
- * nunca desliga o que cria, ver Javadoc de cada método). Ponto único onde
- * a disciplina de concorrência do CLAUDE.md vira código, não convenção
- * repetida em cada classe nova: threads sempre nomeadas
- * ({@code mohs-<recurso>-N}), I/O-bound sempre virtual thread com limite
- * real via {@code Semaphore} (nunca por tamanho de pool), CPU-bound sempre
- * pool limitado explícito, nunca fila sem teto "por omissão do Spring"
- * ({@link ThreadPoolTaskExecutor} sem {@code setQueueCapacity} explícito
- * herdaria fila efetivamente ilimitada — exatamente o que o CLAUDE.md
- * proíbe).
+ * Mohs's central executor and scheduler factory — no engine class creates an
+ * {@code Executor}/{@code ScheduledExecutorService} by hand; they all receive what this factory
+ * builds, injected through the constructor (and the caller also owns the lifecycle of what it gets
+ * back — this factory never shuts down what it creates; see each method's Javadoc).
  *
- * <p>"O motor usa a infraestrutura Spring livremente"
- * ({@code MOHS-DOCUMENTO-MESTRE.md} §4) — as três classes usadas aqui já
- * implementam boa parte do que o motor precisaria reescrever na mão:
- * {@code ExecutorConfigurationSupport} (classe-mãe de {@link
- * ThreadPoolTaskExecutor}/{@link ThreadPoolTaskScheduler}) implementa
- * {@code SmartLifecycle} diretamente — o mesmo gancho que a ADR-0007 já
- * escolheu pro shutdown gracioso do motor.
+ * <p>It is the single point where the project's concurrency discipline becomes code rather than a
+ * convention repeated in every new class: threads always named ({@code mohs-<resource>-N}), I/O-bound
+ * work always on virtual threads with a real limit through a {@code Semaphore} (never through pool
+ * size), CPU-bound work always on an explicitly bounded pool, and never an unbounded queue "by
+ * Spring's omission" (a {@link ThreadPoolTaskExecutor} without an explicit
+ * {@code setQueueCapacity} would inherit an effectively unlimited queue — exactly what is
+ * forbidden).
  *
- * <p>Métodos estáticos hoje porque {@code io.mohs.autoconfigure} ainda não
- * existe pra hospedar {@code @Bean}; quando existir, cada método aqui vira
- * um wrapper de uma linha (o corpo não muda), não uma reescrita.
+ * <p>The engine uses Spring's infrastructure freely — the three classes used
+ * here already implement much of what the engine would otherwise rewrite by hand:
+ * {@code ExecutorConfigurationSupport} (the parent of {@link ThreadPoolTaskExecutor} and
+ * {@link ThreadPoolTaskScheduler}) implements {@code SmartLifecycle} directly — the same hook already
+ * chosen for the engine's graceful shutdown.
  */
 public final class MohsExecutors {
 
-    /** Mesmo default de {@code mohs.lifecycle.shutdown.grace-period} (ADR-0007) — não um número arbitrário escolhido à parte. */
+    /** The same default as {@code mohs.lifecycle.shutdown.grace-period} — not an arbitrary number chosen separately. */
     private static final int AWAIT_TERMINATION_SECONDS = 30;
 
     private MohsExecutors() {
     }
 
     /**
-     * I/O-bound: uma virtual thread por tarefa, teto de concorrência real
-     * via {@code Semaphore} interno do Spring — nunca por tamanho de pool
-     * (CLAUDE.md, "Limite de concorrência com Semaphore, nunca via tamanho
-     * de pool"). Acima do limite, {@link java.util.concurrent.RejectedExecutionException}
-     * explícita — backpressure, não fila escondida nem espera infinita.
+     * I/O-bound: one virtual thread per task, with a real concurrency ceiling through Spring's
+     * internal {@code Semaphore} — never through pool size. Above the limit, an explicit
+     * {@link java.util.concurrent.RejectedExecutionException}: backpressure, not a hidden queue nor
+     * an unbounded wait.
      *
-     * <p>Ciclo de vida por conta de quem chama: devolve o tipo concreto
-     * (não a interface {@code AsyncTaskExecutor}, ao contrário do que este
-     * método fazia antes) porque {@link SimpleAsyncTaskExecutor} é
-     * {@code AutoCloseable} ({@code close()}), não tem {@code shutdown()} —
-     * quem recebeu o executor de volta precisa do tipo concreto pra poder
-     * fechá-lo, mesma razão de {@link #cpuBoundExecutor}/{@link #scheduler}
-     * devolverem o tipo concreto deles.
+     * <p>The lifecycle belongs to the caller. It returns the concrete type (rather than the
+     * {@code AsyncTaskExecutor} interface, as this method used to) because
+     * {@link SimpleAsyncTaskExecutor} is {@code AutoCloseable} ({@code close()}) and has no
+     * {@code shutdown()} — whoever received the executor needs the concrete type to be able to close
+     * it, the same reason {@link #cpuBoundExecutor} and {@link #scheduler} return their concrete
+     * types.
      */
     public static SimpleAsyncTaskExecutor ioBoundExecutor(String namePrefix, int concurrencyLimit) {
         requireNotBlank(namePrefix, "namePrefix");
@@ -73,16 +79,14 @@ public final class MohsExecutors {
     }
 
     /**
-     * CPU-bound: pool de platform threads limitado — mesmos quatro campos e
-     * mesma validação de {@link io.mohs.core.resource.MohsRunner#cpu}
-     * (coincidência não é acaso: o spec já foi desenhado nesse formato).
+     * CPU-bound: a bounded pool of platform threads — the same four fields and the same validation as
+     * {@link io.mohs.core.resource.MohsRunner#cpu} (not a coincidence: the spec was designed in that
+     * shape).
      *
-     * <p>Chama {@code initialize()} antes de devolver — sem
-     * {@code ApplicationContext} gerenciando o bean, ninguém mais chamaria
-     * (a inicialização de {@code ExecutorConfigurationSupport} normalmente
-     * vem de {@code InitializingBean#afterPropertiesSet}). Ciclo de vida
-     * por conta de quem chama a partir daqui: esta fábrica não desliga o
-     * que cria.
+     * <p>It calls {@code initialize()} before returning — with no {@code ApplicationContext} managing
+     * the bean, nobody else would ({@code ExecutorConfigurationSupport}'s initialisation normally
+     * comes from {@code InitializingBean#afterPropertiesSet}). From here on the lifecycle belongs to
+     * the caller: this factory does not shut down what it creates.
      */
     public static ThreadPoolTaskExecutor cpuBoundExecutor(String namePrefix, int coreSize, int maxSize, int queueCapacity, Duration keepAlive) {
         requireNotBlank(namePrefix, "namePrefix");
@@ -114,21 +118,18 @@ public final class MohsExecutors {
     }
 
     /**
-     * Scheduler dedicado — hoje o tick do poll loop ({@link Engine}, cujo
-     * corpo faz claim/reaper em JDBC bloqueante direto na thread do
-     * scheduler) e o resync do {@code DatabaseClock}
-     * ({@code io.mohs.autoconfigure}), genérico o bastante pra qualquer
-     * ciclo futuro. Ambos são I/O-bound pela classificação do CLAUDE.md —
-     * por isso virtual thread, não platform thread.
+     * A dedicated scheduler — today the poll loop's tick ({@link Engine}, whose body does claim and
+     * reaper work over blocking JDBC directly on the scheduler's thread) and the
+     * {@code DatabaseClock}'s resync ({@code io.mohs.autoconfigure}), generic enough for any future
+     * cycle. Both are I/O-bound by the project's classification — hence virtual threads rather than
+     * platform ones.
      *
-     * <p>Virtual thread aqui não abre mão do teto de concorrência: ao
-     * contrário de {@link #ioBoundExecutor} (thread-per-task sem limite,
-     * daí o {@code Semaphore}), {@link ThreadPoolTaskScheduler} continua
-     * envolto num {@code ScheduledThreadPoolExecutor(poolSize, threadFactory)}
-     * de verdade — {@code setVirtualThreads(true)} só troca o tipo da
-     * thread do worker, {@code poolSize} continua sendo o teto real de
-     * execuções concorrentes (confirmado na fonte do Spring 7.0.8, não só
-     * no Javadoc).
+     * <p>Virtual threads here do not give up the concurrency ceiling: unlike {@link #ioBoundExecutor}
+     * (thread-per-task with no limit, hence the {@code Semaphore}), {@link ThreadPoolTaskScheduler}
+     * remains wrapped in a real {@code ScheduledThreadPoolExecutor(poolSize, threadFactory)} —
+     * {@code setVirtualThreads(true)} only swaps the worker's thread type, and {@code poolSize}
+     * remains the real ceiling on concurrent executions (confirmed in Spring 7.0.8's source, not only
+     * in the Javadoc).
      */
     public static ThreadPoolTaskScheduler scheduler(String namePrefix, int poolSize) {
         requireNotBlank(namePrefix, "namePrefix");
@@ -151,7 +152,7 @@ public final class MohsExecutors {
         return namePrefix.endsWith("-") ? namePrefix : namePrefix + "-";
     }
 
-    /** Mesma checagem de {@code io.mohs.core.resource.Fields#requireNotBlank}, não reaproveitada de lá: pacote diferente, não vale expor como API pública por isto (mesmo raciocínio já registrado naquela classe). */
+    /** The same check as {@code io.mohs.core.resource.Fields#requireNotBlank}, deliberately not reused from there: a different package, and not worth exposing as public API for this (the same reasoning already recorded on that class). */
     private static void requireNotBlank(String value, String field) {
         Objects.requireNonNull(value, field);
         if (value.isBlank()) {

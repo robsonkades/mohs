@@ -87,11 +87,62 @@ async function command<T = void>(
 // ---- Overview ----------------------------------------------------------------------------
 
 /**
+ * A 200 whose body this client cannot read — version skew, not an HTTP failure. Deliberately NOT
+ * an `ApiError`: that type's `status` is the status of the failure, and the first
+ * `retry: (n, e) => e.status >= 500` written against it would treat an unusable body as a success.
+ */
+export class UnsupportedServerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsupportedServerError";
+  }
+}
+
+/** A throughput reading is only usable once `ratePerSecond` is there — it is the field the chart plots. */
+function isThroughput(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  return typeof (value as Record<string, unknown>).ratePerSecond === "number";
+}
+
+/**
+ * Structural check of the fields every reader of the overview dereferences without guarding.
+ *
+ * <p>Exported because this shape enters through TWO doors — this fetch and the stream's `overview`
+ * frame — and both write the SAME cache key. A guard on one door is worse than no guard: it reads
+ * as protection while the other door still admits a body the panels crash on.
+ */
+export function isOverview(data: unknown): data is OverviewResponse {
+  if (typeof data !== "object" || data === null) {
+    return false;
+  }
+  const { executionCountsByStatus, throughput, recent } = data as Record<string, unknown>;
+  return (
+    typeof executionCountsByStatus === "object" &&
+    executionCountsByStatus !== null &&
+    isThroughput(throughput) &&
+    // `recent` is required, not optional: it is what the activity panel plots, and a server older
+    // than ADR-0063 answers 200 without it. Failing the query here is what turns a TypeError three
+    // components away into the retry button the page already knows how to draw.
+    isThroughput(recent)
+  );
+}
+
+/**
  * The polling anchor: live-work counts plus throughput over the window. `window` accepts `15m` or
  * `PT15M`; absent means 60s, and the server clamps to 1s–1h.
+ *
+ * <p>Validated rather than cast: the type is what the server PROMISES, and this is the one call
+ * whose promise changed (ADR-0063 added `recent`). A cast would let a body without `recent` reach
+ * the panel and throw inside the render.
  */
-export function fetchOverview(window?: string) {
-  return request<OverviewResponse>("/overview", { window });
+export async function fetchOverview(window?: string): Promise<OverviewResponse> {
+  const body = await request<unknown>("/overview", { window });
+  if (!isOverview(body)) {
+    throw new UnsupportedServerError("This dashboard needs a newer Mohs server: /overview did not carry `recent`.");
+  }
+  return body;
 }
 
 // ---- Jobs --------------------------------------------------------------------------------

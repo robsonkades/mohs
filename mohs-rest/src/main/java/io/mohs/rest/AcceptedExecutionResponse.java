@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest;
 
 import java.time.Instant;
@@ -7,10 +22,9 @@ import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
 
 /**
- * Recibo `202 Accepted` de toda invocação (schedule, retry) — a forma
- * plana usada na borda HTTP do {@link Enqueued}: identidades cruzam como
- * {@code String}, nunca {@code JobKey}/{@code ExecutionId} diretamente
- * (ver {@code docs/REST-API-DESIGN.md}, exemplo de {@code POST .../schedule}).
+ * The {@code 202 Accepted} receipt of every invocation (schedule, retry) — the flat form of
+ * {@link Enqueued} used at the HTTP boundary: identities cross as {@code String}, never
+ * {@code JobKey}/{@code ExecutionId} directly, as in the {@code POST .../schedule} example.
  */
 public record AcceptedExecutionResponse(String executionId, String jobKey, Instant scheduledAt, String actor) {
 
@@ -26,7 +40,7 @@ public record AcceptedExecutionResponse(String executionId, String jobKey, Insta
                 enqueued.executionId().value(), enqueued.jobKey().value(), enqueued.scheduledAt(), enqueued.actor());
     }
 
-    /** A forma 202 do retry manual — a MESMA execução rearmada; o actor é o da invocação original (nada novo é inserido, ADR-0033). */
+    /** The 202 form of a manual retry — the SAME execution rearmed; the actor is the original invocation's, since nothing new is inserted. */
     public static AcceptedExecutionResponse from(Execution execution) {
         return new AcceptedExecutionResponse(
                 execution.id().value(), execution.jobKey().value(), execution.scheduledAt(), execution.actor());

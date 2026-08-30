@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Clock;
@@ -28,6 +43,7 @@ import io.mohs.core.OverviewSnapshot;
 import io.mohs.core.RateLimitSnapshot;
 import io.mohs.core.RunnerSnapshot;
 import io.mohs.core.ScheduleCommand;
+import io.mohs.core.ThroughputReading;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.event.BatchCompleted;
@@ -42,23 +58,38 @@ import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.schedule.Schedule;
 
 /**
- * {@link Mohs} sobre as portas da Phase 5 ({@link WorkQueue}/
- * {@link HistoryStore}/{@link LeaseStore}) — {@code define}/{@code remove}
- * delegam direto; {@code schedule} monta um {@link ScheduleCommandImpl}.
- * {@link #lifecycle()} devolve o {@link Engine} já injetado, que implementa
- * {@link MohsLifecycle} diretamente.
+ * {@link Mohs} over the persistence ports ({@link WorkQueue}/{@link HistoryStore}/
+ * {@link LeaseStore}) — {@code define} and {@code remove} delegate directly, while
+ * {@code schedule} assembles a {@link ScheduleCommandImpl}. {@link #lifecycle()} returns the
+ * injected {@link Engine}, which implements {@link MohsLifecycle} directly.
  *
- * <p>{@link #batch} escreve a linha do lote e os membros — história + fila
- * — numa ÚNICA transação ({@link StoreTransactions}): a falha parcial
- * "lote gravado com só parte dos membros" da BATCH-ARCHITECTURE-REVIEW
- * item 1 vira estruturalmente impossível (§7.5-1). A contagem de conclusão
- * segue na transação de conclusão (ADR-0043) — aqui não há contador.
+ * <p>{@link #batch} writes the batch row and its members — history plus queue — in a SINGLE
+ * transaction ({@link StoreTransactions}): the partial failure of "a batch written with only some of
+ * its members" becomes structurally impossible. The completion count stays in the completion
+ * transaction — there is no counter here.
  */
 public final class MohsImpl implements Mohs {
 
+    /**
+     * The overview's short reading window — fixed, and not a knob: it does not exist for the user to
+     * choose a slice, it exists to be DIVIDED. 10s is short enough to mean "now" and long enough not
+     * to become sampling noise at one execution per second.
+     *
+     * <p><b>And it is a floor, not merely a preference:</b> it must be at least the sampler's cadence
+     * ({@code OverviewStreamBroadcaster.STREAM_INTERVAL}, today 2s, whose Javadoc invites it to become
+     * a property). With a window SHORTER than the tick, each frame describes only a fraction of the
+     * elapsed interval and the panel starts IGNORING the rest of the work — with nothing to flag it,
+     * because each isolated reading remains correct. The two constants live in different modules and
+     * the compiler will never connect them: whoever raises the tick above 10s moves this along with it.
+     */
+    private static final Duration RECENT_WINDOW = Duration.ofSeconds(10);
+
+    /** The ceiling of mohs_batches' `name` column in all four dialects — validated here so it becomes an error that teaches, not an INSERT failure. */
+    private static final int MAX_BATCH_NAME_LENGTH = 255;
+
     private static final Logger log = LoggerFactory.getLogger(MohsImpl.class);
 
-    /** Actor de quem chama {@link Mohs#schedule}/{@link Mohs#batch} sem {@link ScheduleCommand#as(String)} explícito — o próprio processo, não um usuário identificável. */
+    /** The actor for callers of {@link Mohs#schedule}/{@link Mohs#batch} without an explicit {@link ScheduleCommand#as(String)} — the process itself, not an identifiable user. */
     static final String DEFAULT_ACTOR = "application";
 
     private final JobStore jobStore;
@@ -74,7 +105,7 @@ public final class MohsImpl implements Mohs {
     private final BatchStore batchStore;
     private final BatchCompletionCallbacks callbacks;
     private final RunnerRegistry runnerRegistry;
-    /** Tier 1 do wake-up (§5.5): acorda o loop do engine local pós-commit — {@code Engine#signalWorkScheduled}; best-effort por contrato (ADR-G). */
+    /** The local wake-up tier: wakes the local engine's loop after the commit — {@code Engine#signalWorkScheduled}; best-effort by contract. */
     private final Runnable localWakeSignal;
 
     public MohsImpl(JobStore jobStore, WorkQueue workQueue, HistoryStore historyStore, LeaseStore leaseStore,
@@ -114,16 +145,28 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * O total do lote é fixado na criação, então os membros são coletados
-     * ANTES de a linha existir: não há estado "ainda aceitando membros" para
-     * rastrear, e o lote nasce já sabendo quantas conclusões o fecham
-     * (ADR-0043). Lote vazio é recusado na entrada — ele nunca completaria,
-     * e um lote eternamente aberto é pior que um erro.
+     * The batch's total is fixed at creation, so members are collected BEFORE the row exists: there is
+     * no "still accepting members" state to track, and the batch is born already knowing how many
+     * completions will close it. An empty batch is refused at the door — it would never complete, and
+     * a forever-open batch is worse than an error.
      */
     @Override
     public Batch batch(String name, Consumer<BatchBuilder> configurer) {
+        // Validated HERE, and not only in BatchSnapshot/BatchCompleted's compact constructor: a blank
+        // name crossed the write, became durable, and only blew up on READ — BatchCompleted's
+        // constructor threw inside the event channel, where the exception is swallowed by design, and
+        // the user's onCompletion never ran. A value the API accepts must not be a value it cannot
+        // read back
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(configurer, "configurer");
+        if (name.isBlank()) {
+            throw new IllegalArgumentException("a batch name must not be blank — it is the label the operator reads"
+                    + " instead of the batchId");
+        }
+        if (name.length() > MAX_BATCH_NAME_LENGTH) {
+            throw new IllegalArgumentException("a batch name must be at most " + MAX_BATCH_NAME_LENGTH
+                    + " characters (the column limit in every dialect), got " + name.length());
+        }
         List<Member> members = collectMembers(configurer);
         if (members.isEmpty()) {
             throw new IllegalArgumentException("a batch needs at least one member — an empty batch would never complete");
@@ -132,11 +175,11 @@ public final class MohsImpl implements Mohs {
         requireAllDefined(members);
 
         String batchId = UUIDv7.randomUUIDString();
-        // linha do lote + membros (historia E fila) numa unica transacao
-        // (§7.5-1): a falha parcial que deixava o lote gravado com M < N
-        // membros — e um BatchCompleted que nunca vem — morre por construcao
+        // The batch row plus its members (history AND queue) in a single transaction: the partial
+        // failure that left the batch written with M < N members — and a BatchCompleted that never
+        // comes — dies by construction
         storeTransactions.inTransaction(() -> {
-            batchStore.insert(batchId, members.size());
+            batchStore.insert(batchId, name, members.size());
             enqueueMembers(members, batchId);
         });
         // membros nascem devidos (scheduledAt = now) — tier 1 acorda o loop
@@ -151,9 +194,9 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * Todo membro nasce {@code ENQUEUED} carregando o {@code batchId} — é ele
-     * que faz a conclusão contar no lote, e todos compartilham o mesmo
-     * {@code scheduledAt} porque o lote foi pedido de uma vez só.
+     * Every member is born {@code ENQUEUED} carrying the {@code batchId} — that is what makes its
+     * completion count towards the batch — and they all share the same {@code scheduledAt}, because
+     * the batch was requested in one go.
      */
     private void enqueueMembers(List<Member> members, String batchId) {
         Instant scheduledAt = clock.instant();
@@ -167,22 +210,20 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * TODOS os membros são validados antes de qualquer escrita, e não um a
-     * um durante o enfileiramento: um job inexistente no meio do lote
-     * deixaria a linha do lote gravada com {@code total} cheio e só parte dos
-     * membros enfileirada — o resto nunca existiria, o lote nunca fecharia e
-     * o {@code BatchCompleted} nunca dispararia, em silêncio. É exatamente o
-     * modo de falha que a ADR-0043 existe para não ter.
+     * ALL members are validated before any write, rather than one at a time during enqueueing: a
+     * nonexistent job halfway through would leave the batch row written with a full {@code total} and
+     * only part of the members queued — the rest would never exist, the batch would never close, and
+     * {@code BatchCompleted} would never fire, silently. That is exactly the failure mode the batch
+     * design exists to avoid.
      *
-     * <p>Chaves distintas, não uma consulta por membro: um lote grande
-     * costuma apontar para poucos jobs, e validar 1.000 membros de um job só
-     * é uma pergunta, não mil.
+     * <p>Distinct keys, not one query per member: a large batch usually points at few jobs, and
+     * validating 1,000 members of a single job is one question, not a thousand.
      */
     private void requireAllDefined(List<Member> members) {
         members.stream().map(Member::key).distinct().forEach(this::requireDefined);
     }
 
-    /** Mesmo motivo de {@code ScheduleCommandImpl.at}: sem isto o chamador veria uma violação de FK crua, não uma mensagem que ensina. */
+    /** The same reason as {@code ScheduleCommandImpl.at}: without this the caller would see a raw foreign-key violation rather than a message that teaches. */
     private void requireDefined(JobKey key) {
         if (jobStore.find(key).isEmpty()) {
             throw new IllegalArgumentException(
@@ -194,29 +235,28 @@ public final class MohsImpl implements Mohs {
     public Optional<BatchSnapshot> findBatch(String batchId) {
         Objects.requireNonNull(batchId, "batchId");
         return batchStore.find(batchId)
-                .map(counters -> new BatchSnapshot(counters.batchId(), counters.total(), counters.succeeded(),
+                .map(counters -> new BatchSnapshot(counters.batchId(), counters.name(), counters.total(), counters.succeeded(),
                         counters.failed()));
     }
 
     /**
-     * O lote já contou esta falha, e o contador não tem como devolvê-la sem
-     * reabrir o lote — o que faria {@code BatchCompleted} deixar de ser
-     * terminal e, pior, o segundo evento não encontraria mais o callback
-     * one-shot de {@code onCompletion}: quem salvou o membro é justamente
-     * quem ficaria sem a notificação do fim real. Recusa explícita, então,
-     * em vez de contagem dupla silenciosa (ADR-0043).
+     * The batch has already counted this failure, and the counter cannot give it back without
+     * reopening the batch — which would stop {@code BatchCompleted} being terminal and, worse, the
+     * second event would no longer find {@code onCompletion}'s one-shot callback: whoever rescued the
+     * member is precisely who would be left without the notification of the real end. An explicit
+     * refusal, then, rather than silent double counting.
      */
     private static IllegalStateException batchMemberNotRetryable(ExecutionId executionId, String batchId) {
         return new IllegalStateException("execution " + executionId + " is a member of batch " + batchId
                 + " — a batch member is not retried individually, because the batch already counted this"
                 + " failure and counting it again would close the batch early. Schedule the job standalone"
-                + " to redo the work (ADR-0043)");
+                + " to redo the work");
     }
 
     private record Member(JobKey key, Object payload) {
     }
 
-    /** Acumula os membros; nada é persistido enquanto o total não está fechado. */
+    /** Accumulates the members; nothing is persisted while the total is not closed. */
     private static final class CollectingBatchBuilder implements BatchBuilder {
 
         private final List<Member> members = new ArrayList<>();
@@ -229,7 +269,7 @@ public final class MohsImpl implements Mohs {
         }
     }
 
-    /** O recibo: {@code batchId} ja e duravel quando isto volta (ADR-0003, clausula 2). */
+    /** The receipt: {@code batchId} is already durable when this returns. */
     private record BatchImpl(String batchId, BatchCompletionCallbacks callbacks) implements Batch {
 
         @Override
@@ -245,7 +285,7 @@ public final class MohsImpl implements Mohs {
         jobStore.upsert(definition);
     }
 
-    /** Job desconhecido (ou já aposentado) é no-op — mesma postura de {@link Mohs#pause}. */
+    /** An unknown (or already retired) job is a no-op — the same stance as {@link Mohs#pause}. */
     @Override
     public void remove(JobKey jobKey) {
         Objects.requireNonNull(jobKey, "jobKey");
@@ -303,23 +343,20 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * ADR-0034 — a orquestração das duas metades do cancel: primeiro o CAS
-     * de pendente; perdeu (a linha já roda, ou já terminou), tenta a flag
-     * cooperativa de {@code RUNNING}. Os dois predicados particionam o
-     * espaço de estados, mas o estado pode migrar ENTRE as checagens
-     * (TOCTOU — DDIA cap. 7: um CAS cobre um predicado, não uma sequência):
-     * uma conclusão de attempt que leva {@code RUNNING → RETRY_WAITING}
-     * no meio do par faria a ordem do operador cair no vazio. A segunda
-     * passada fecha a janela — outra migração exigiria um ciclo de attempt
-     * inteiro dentro de microssegundos. Em terminal ambas continuam no-op:
-     * cancelar o que já decidiu não muda nada, e o retorno mostra o estado
-     * que valeu.
+     * The orchestration of cancellation's two halves: first the pending CAS; if that loses (the row is
+     * already running, or already finished), it tries {@code RUNNING}'s cooperative flag.
      *
-     * <p>Janela declarada da Phase 5: a flag cooperativa mora na LEASE e
-     * morre com ela — um cancel que aterrissa entre o fim do handler e o
-     * commit do flush (≤ flush-interval) se perde, e um eventual retry
-     * roda. Aceitável para cancel cooperativo (o operador re-cancela o
-     * retry); a era da flag na linha da execução não tinha essa janela.
+     * <p>The two predicates partition the state space, but the state can migrate BETWEEN the checks
+     * (time-of-check/time-of-use — DDIA ch. 7: a CAS covers a predicate, not a sequence): an attempt
+     * completion taking {@code RUNNING} to {@code RETRY_WAITING} in the middle of the pair would let
+     * the operator's order fall into the gap. The second pass closes the window — another migration
+     * would require a whole attempt cycle within microseconds. On a terminal state both remain no-ops:
+     * cancelling what has already decided changes nothing, and the return shows the state that stood.
+     *
+     * <p>A declared window: the cooperative flag lives on the LEASE and dies with it — a cancel landing
+     * between the end of the handler and the flush's commit (at most the flush interval) is lost, and
+     * an eventual retry runs. Acceptable for cooperative cancellation (the operator re-cancels the
+     * retry); the era with the flag on the execution row had no such window.
      */
     @Override
     public Optional<Execution> cancel(ExecutionId executionId) {
@@ -343,18 +380,17 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * ADR-0035 — cura da corrente fixed-delay: ocorrência do scheduler
-     * cancelada ainda pendente não passa pelo caminho de conclusão que
-     * rearma o trigger; sem isto a corrente morreria em silêncio (o
-     * {@code next_fire_at} ficou {@code NULL} aguardando um fim que nunca
-     * vem). Só ocorrência do scheduler — execução manual cancelada não é
-     * a corrente. O guard {@code IS NULL} de {@link JobStore#armNextFire}
-     * protege contra rearmar uma série já viva.
+     * The fixed-delay chain's cure: a cancelled scheduler occurrence that is still pending never goes
+     * through the completion path that rearms the trigger, and without this the chain would die in
+     * silence ({@code next_fire_at} left {@code NULL}, awaiting an end that never comes).
      *
-     * <p>Janela residual aceita: crash entre {@code cancelIfPending} e este
-     * rearme deixa a corrente desarmada — a cura de {@code NULL} do upsert
-     * (boot/define) rearma; mesma postura da janela residual documentada na
-     * ADR-0033. Transacionar exigiria vazar a fronteira de storage pra cá.
+     * <p>Only a scheduler occurrence — a cancelled manual execution is not the chain.
+     * {@link JobStore#armNextFire}'s {@code IS NULL} guard protects against rearming a series that is
+     * already live.
+     *
+     * <p>An accepted residual window: a crash between {@code cancelIfPending} and this rearm leaves the
+     * chain disarmed — the upsert's {@code NULL} cure (at boot, or on define) rearms it. Making it
+     * transactional would require leaking the storage boundary up to here.
      */
     private void rearmAfterFinishChain(Execution execution) {
         if (!Execution.SCHEDULER_ACTOR.equals(execution.actor())) {
@@ -374,19 +410,19 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * O CAS da porta é a autoridade; a leitura só distingue os motivos de
-     * derrota (inexistente × job aposentado × estado errado) — nunca
-     * decide. Derrota com a linha ainda {@code FAILED} = o guard de
-     * {@code retired} barrou (o CAS só recusa FAILED por essa via);
-     * {@code RETRY_WAITING} = provável POST duplicado. Perder a corrida
-     * pra outra mutação entre o CAS e a leitura muda a mensagem, não o
-     * desfecho: quem venceu o CAS foi ela.
+     * The port's CAS is the authority; the read only tells the reasons for defeat apart (nonexistent
+     * versus retired job versus wrong state) — it never decides.
+     *
+     * <p>A defeat with the row still {@code FAILED} means the {@code retired} guard blocked it (the CAS
+     * only refuses FAILED through that route); {@code RETRY_WAITING} means a likely duplicate POST.
+     * Losing the race to another mutation between the CAS and the read changes the message, not the
+     * outcome: whoever won the CAS won it.
      */
     @Override
     public Optional<Execution> retry(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
         if (workQueue.rearmForManualRetry(executionId, clock.instant())) {
-            log.info("execution {} manually rearmed for retry — rejoins the claim path bypassing the retries budget (ADR-0033)", executionId.value());
+            log.info("execution {} manually rearmed for retry — rejoins the claim path bypassing the retries budget", executionId.value());
             return historyStore.find(executionId, clock.instant());
         }
         Execution current = historyStore.find(executionId, clock.instant()).orElse(null);
@@ -397,7 +433,7 @@ public final class MohsImpl implements Mohs {
             case FAILED -> current.batchId() != null
                     ? batchMemberNotRetryable(executionId, current.batchId())
                     : new IllegalStateException("execution " + executionId + " belongs to a removed job — "
-                            + "a retried execution of a retired job would never be claimed (ADR-0033)");
+                            + "a retried execution of a retired job would never be claimed");
             case ENQUEUED, RETRY_WAITING -> new IllegalStateException("execution " + executionId
                     + " is already queued to run again — likely a duplicate retry request");
             default -> new IllegalStateException("execution " + executionId + " is " + current.state()
@@ -409,13 +445,13 @@ public final class MohsImpl implements Mohs {
     @Override
     public List<Execution> executions(ExecutionQuery query) {
         Objects.requireNonNull(query, "query");
-        // cursor em branco (ex.: ?cursor= na REST) = primeira página, não IAE de ExecutionId.of
+        // A blank cursor (?cursor= from REST) means the first page, not an IAE from ExecutionId.of
         String rawCursor = query.cursor();
         ExecutionId cursor = rawCursor == null || rawCursor.isBlank() ? null : ExecutionId.of(rawCursor);
         return historyStore.findPage(query.jobKey(), query.status(), query.from(), query.to(), cursor, query.limit(), clock.instant());
     }
 
-    /** Mais recente primeiro (empate por nodeId — ordem exposta em API é contrato, nunca a ordem física da tabela): o vivo interessa antes do suspeito — a idade do heartbeat É a informação (ADR-0012). */
+    /** Most recent first (ties broken by nodeId — an order exposed through an API is contract, never the table's physical order): the living matter before the suspect, and the heartbeat's age IS the information. */
     @Override
     public List<NodeSnapshot> nodes() {
         return nodeStore.findAll().stream()
@@ -425,13 +461,13 @@ public final class MohsImpl implements Mohs {
                 .toList();
     }
 
-    /** Única leitura da fachada que não toca o banco: runner é pool de threads deste processo (ver {@link RunnerSnapshot}). */
+    /** The only facade read that does not touch the database: a runner is this process's thread pool (see {@link RunnerSnapshot}). */
     @Override
     public List<RunnerSnapshot> runners() {
         return runnerRegistry.snapshots();
     }
 
-    /** Ordenado por nome: a lista é lida por gente, e ordem estável entre chamadas é o mínimo pra comparar dois retratos. */
+    /** Ordered by name: the list is read by people, and a stable order between calls is the minimum for comparing two snapshots. */
     @Override
     public List<RateLimitSnapshot> rateLimits() {
         try (var declared = rateLimitStore.findAll()) {
@@ -440,11 +476,11 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * Ajuste em duas etapas deliberadamente: {@link RateLimitStore#upsert}
-     * criaria o limite se ele não existisse, e criar limite não é ato de
-     * PATCH (ADR-0042/ADR-0006 — declarar é boot). A corrida entre o find e
-     * o upsert é aceita: dois operadores ajustando o MESMO limite no mesmo
-     * instante é "última escrita vence", que é o que um PATCH promete.
+     * Deliberately a two-step adjustment: {@link RateLimitStore#upsert} would create the limit if it
+     * did not exist, and creating a limit is not what a PATCH does — declaring is an act of boot.
+     *
+     * <p>The race between the find and the upsert is accepted: two operators adjusting the SAME limit
+     * at the same instant is "last write wins", which is what a PATCH promises.
      */
     @Override
     public Optional<RateLimitSnapshot> adjustRateLimit(String name, int max, Duration window) {
@@ -458,22 +494,36 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * Pura composição das duas contagens da porta — a normalização (zeros,
-     * só estados vivos) é do próprio {@link OverviewSnapshot}. A janela é
-     * validada ANTES de tocar o banco (Effective Java, Item 49): com
-     * {@code ?window=} exposto na REST, deixar o snapshot rejeitar no fim
-     * custaria duas queries com {@code since} no futuro pra chegar na
-     * mesma IAE — a regra continua uma só, a do record.
+     * Pure composition of the port's three counts — live work, the requested window's throughput and
+     * the short window's; normalisation (zeros, live states only) belongs to {@link OverviewSnapshot}
+     * itself.
+     *
+     * <p>The window is validated BEFORE touching the database (Effective Java, Item 49): with
+     * {@code ?window=} exposed over REST, letting the snapshot reject it at the end would cost three
+     * queries — one of them with {@code since} in the future — to arrive at the same IAE, and the rule
+     * remains a single one, the record's.
      */
     @Override
     public OverviewSnapshot overview(Duration throughputWindow) {
         Objects.requireNonNull(throughputWindow, "throughputWindow");
-        if (throughputWindow.isNegative() || throughputWindow.isZero()) {
+        if (!throughputWindow.isPositive()) {
             throw new IllegalArgumentException("throughputWindow must be positive, got " + throughputWindow);
         }
-        Map<ExecutionState, Long> outcomes =
-                historyStore.countTerminalOutcomesSince(clock.instant().minus(throughputWindow));
-        return new OverviewSnapshot(historyStore.countActiveByState(clock.instant()), throughputWindow,
+        // ONE clock for all three reads: with now re-read between them, the short window could end
+        // after the long one and the rate would come from an interval other than the one it declares
+        Instant now = clock.instant();
+        return new OverviewSnapshot(historyStore.countActiveByState(now),
+                reading(throughputWindow, now), reading(RECENT_WINDOW, now));
+    }
+
+    /**
+     * One throughput reading. The SHORT window exists to be divided: the live counts are instantaneous
+     * gauges and, by Little's Law, sit at zero for a fast job — without a rate, the dashboard has no
+     * way to tell "idle" from "working quickly".
+     */
+    private ThroughputReading reading(Duration window, Instant now) {
+        Map<ExecutionState, Long> outcomes = historyStore.countTerminalOutcomesSince(now.minus(window));
+        return new ThroughputReading(window,
                 outcomes.getOrDefault(ExecutionState.SUCCEEDED, 0L),
                 outcomes.getOrDefault(ExecutionState.FAILED, 0L));
     }
@@ -484,10 +534,9 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * {@code nextFireAt} é o estado real do trigger (ADR-0035), não um
-     * recálculo por cima do relógio — que mentia pra fixed-delay (o
-     * próximo disparo é desconhecido até a execução terminar) e ignorava
-     * misfire. Pausado exibe {@code null}: pausa bloqueia o trigger.
+     * {@code nextFireAt} is the trigger's real state, not a recomputation against the clock — which
+     * lied for fixed-delay (the next firing is unknown until the execution finishes) and ignored
+     * misfire. A paused job shows {@code null}: a pause blocks the trigger.
      */
     private JobSnapshot toSnapshot(StoredJob stored) {
         return new JobSnapshot(stored.definition(), stored.paused(), stored.paused() ? null : stored.nextFireAt());

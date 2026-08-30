@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.autoconfigure;
 
 import java.time.Duration;
@@ -17,10 +32,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Unitários diretos da montagem — os cenários de validação que antes só
- * existiam via {@code ApplicationContextRunner} (boot completo + H2). O
- * fio de ponta a ponta continua provado em
- * {@code MohsAutoConfigurationTest#propertyDefinedRunnerIsResolvable}/
+ * Direct unit tests of the assembly — the validation scenarios that used to exist only through
+ * {@code ApplicationContextRunner} (a full boot plus H2). The end-to-end thread is still proven in
+ * {@code MohsAutoConfigurationTest#propertyDefinedRunnerIsResolvable} and
  * {@code #beanDeclaredRunnerIsCollected}.
  */
 class MohsRunnersTest {
@@ -29,7 +43,7 @@ class MohsRunnersTest {
         return new MohsProperties(
                 true,
                 new MohsProperties.Jdbc(null, true),
-                new MohsProperties.Engine(Duration.ofSeconds(5), Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60), 64, 16, false),
+                new MohsProperties.Engine(Duration.ofSeconds(5), Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60), Duration.ofDays(7), 64, 16, false),
                 new MohsProperties.Lifecycle(MohsProperties.Lifecycle.StartMode.AUTO,
                         new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30))),
                 new MohsProperties.Time(MohsProperties.Time.Mode.APPLICATION, Duration.ofSeconds(1), Duration.ofSeconds(30)),
@@ -47,7 +61,7 @@ class MohsRunnersTest {
         List<MohsRunner> assembled = MohsRunners.assemble(props(Map.of()), List.of());
 
         assertThat(assembled).extracting(MohsRunner::name).containsExactly("io", "cpu");
-        // io reaproveita mohs.engine.dispatch-concurrency como maxConcurrent (documento mestre §3)
+        // io reuses mohs.engine.dispatch-concurrency as its maxConcurrent (the documented default)
         assertThat(assembled.getFirst().maxConcurrent()).isEqualTo(64);
         assertThat(assembled.getLast().mode()).isEqualTo(RunnerMode.CPU);
     }
@@ -74,7 +88,7 @@ class MohsRunnersTest {
                 .extracting(MohsRunner::maxConcurrent).isEqualTo(4);
     }
 
-    /** ADR-0039: io sobrescrito abaixo de dispatch-concurrency quebra a premissa do clamp — WARN de boot nomeando os dois valores, nunca degradação silenciosa. */
+    /** An {@code io} runner overridden below dispatch-concurrency breaks the clamp's premise — a boot WARN naming both values, never silent degradation. */
     @Test
     void ioRunnerSmallerThanTheClaimBoundIsWarnedAtAssembly() {
         ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(MohsRunners.class);
@@ -103,7 +117,7 @@ class MohsRunnersTest {
                 .hasMessage("runner 'batch' declared more than once: mohs.runners.batch and @Bean MohsRunner batch");
     }
 
-    /** core-size é campo de CPU e o mode default é io: erro apontando a propriedade, nunca descarte silencioso (que viraria runner IO de 64 threads pra trabalho CPU-bound). */
+    /** core-size is a CPU field and the default mode is io: an error pointing at the property, never a silent discard (which would become a 64-thread IO runner doing CPU-bound work). */
     @Test
     void wrongModeFieldFailsNamingTheProperty() {
         MohsProperties.Runner spec = new MohsProperties.Runner(RunnerMode.IO, null, 2, null, null, null);
@@ -114,7 +128,7 @@ class MohsRunnersTest {
                         + " — change mohs.runners.batch.mode or remove mohs.runners.batch.core-size");
     }
 
-    /** A IAE do builder ("maxSize must be >= coreSize") sozinha não diz qual runner nem qual propriedade — e core-size default depende da máquina; o embrulho dá o contexto. */
+    /** The builder's IAE ("maxSize must be >= coreSize") alone names neither the runner nor the property — and core-size's default depends on the machine; the wrapper supplies the context. */
     @Test
     void builderRejectionIsWrappedWithThePropertyPrefix() {
         MohsProperties.Runner spec = new MohsProperties.Runner(RunnerMode.CPU, null, 4, 2, null, null);

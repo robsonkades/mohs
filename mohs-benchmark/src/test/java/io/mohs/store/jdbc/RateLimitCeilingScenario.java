@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -16,23 +31,20 @@ import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.EngineSettings;
 
 /**
- * S7 do §20.2 — limite a uma fração da demanda, cluster de 3 nós, e o job
- * SEM limite disputando o mesmo claim. Duas perguntas, e a segunda é a que
- * ninguém mediu: o teto segura sob concorrência (ADR-0042 item 4, CAS em
- * duas fases), e o job ilimitado paga ou não pelo vizinho limitado —
- * porque a rodada de claim que não fecha o CAS é desfeita INTEIRA
- * (item 4), e nessa rodada podem estar execuções de jobs sem limite
- * nenhum.
+ * A rate limit set to a fraction of demand, a three-node cluster, and an UNLIMITED job competing
+ * for the same claim.
  *
- * <p>O critério de teto é o do token bucket, não o de janela fixa: a
- * capacidade é {@code max} e o refill é um token a cada
- * {@code window/max}, então o envelope legítimo da k-ésima entrega é
- * {@code t_k >= (k - max) × window/max}. Cobrar "nunca mais que max em
- * qualquer janela deslizante" seria cobrar um mecanismo que a ADR-0042
- * deliberadamente não escolheu (§ "Alternativa rejeitada: janela fixa").
+ * <p>Two questions, and the second is the one nobody measured: whether the ceiling holds under
+ * concurrency (a two-phase CAS), and whether the unlimited job pays for its limited neighbour —
+ * because a claim round that fails to close the CAS is undone ENTIRELY, and that round may contain
+ * executions of jobs with no limit at all.
  *
- * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
- * -Dtest=RateLimitCeilingScenario}.
+ * <p>The ceiling criterion is the token bucket's, not a fixed window's: capacity is {@code max} and
+ * refill is one token every {@code window/max}, so the legitimate envelope of the k-th delivery is
+ * {@code t_k >= (k - max) x window/max}. Demanding "never more than max in any sliding window"
+ * would be demanding a mechanism that was deliberately not chosen.
+ *
+ * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=RateLimitCeilingScenario}.
  */
 class RateLimitCeilingScenario {
 
@@ -43,10 +55,10 @@ class RateLimitCeilingScenario {
     private static final int LIMITED_SEED = 1_200;
     private static final int UNLIMITED_SEED = 1_200;
     private static final Duration OBSERVATION = Duration.ofSeconds(45);
-    /** O refill do bucket: um token a cada {@code window/max}. */
+    /** The bucket's refill: one token every {@code window/max}. */
     private static final long TOKEN_PERIOD_NANOS = WINDOW.toNanos() / MAX;
 
-    /** A primeira entrega que furou o envelope do bucket; {@link #NONE} quando nenhuma furou. */
+    /** The first delivery that broke the bucket's envelope; {@link #NONE} when none did. */
     private record OverDelivery(int k, long aheadNanos) {
         static final OverDelivery NONE = new OverDelivery(-1, -1);
     }
@@ -60,9 +72,9 @@ class RateLimitCeilingScenario {
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock)) {
             cluster.rateLimits().upsert(new RateLimit(LIMIT_NAME, MAX, WINDOW));
-            // retries(0) nos dois: o teto do bucket é cobrado por ENTREGA, e um
-            // retry por reclaim seria uma entrega a mais que não veio do seed —
-            // ruído numa asserção que conta exatamente entregas
+            // retries(0) on both: the bucket ceiling is billed per DELIVERY, and a retry from a
+            // reclaim would be one more delivery that did not come from the seed — noise in an
+            // assertion that counts deliveries exactly
             cluster.defineJob("limited", spec -> spec.rateLimit(LIMIT_NAME).retries(0));
             cluster.defineJob("unlimited", spec -> spec.retries(0));
 
@@ -81,11 +93,10 @@ class RateLimitCeilingScenario {
                     && limitedStarts.size() >= LIMITED_SEED);
             long observedNanos = System.nanoTime() - startedAt;
 
-            // sorted(): a leitura do relógio e o add na lista não são atômicos,
-            // então com ~192 handlers concorrentes a ORDEM DE INSERÇÃO não é a
-            // ordem de tempo — e firstOverDelivery indexa k por posição contra
-            // um envelope que cresce com k. Sem ordenar, um carimbo cedo numa
-            // posição tardia inventa (ou esconde) uma violação.
+            // sorted(): reading the clock and adding to the list are not atomic, so with ~192
+            // concurrent handlers INSERTION ORDER is not time order — and firstOverDelivery indexes
+            // k by position against an envelope that grows with k. Without sorting, an early stamp
+            // in a late position invents (or hides) a violation.
             List<Long> limited = limitedStarts.stream().sorted().toList();
             List<Long> unlimited = unlimitedStarts.stream().sorted().toList();
             OverDelivery overDelivery = firstOverDelivery(limited, startedAt);
@@ -94,11 +105,10 @@ class RateLimitCeilingScenario {
 
             report(observedNanos, limited.size(), unlimited.size(), unlimitedDrainNanos, overDelivery);
 
-            // duas provas, e a agregada é a que fecha a brecha do "smearing":
-            // o token é cobrado no CLAIM e o carimbo é do HANDLER, então uma
-            // rodada que cobrasse 300 tokens de uma vez poderia espalhar as 300
-            // execuções ao longo da janela e caber no envelope por-k. O total
-            // na janela não tem esse escape.
+            // Two proofs, and the aggregate one closes the "smearing" loophole: the token is charged
+            // at CLAIM while the stamp comes from the HANDLER, so a round charging 300 tokens at
+            // once could spread those 300 executions across the window and still fit the per-k
+            // envelope. The total within the window has no such escape.
             assertThat(limited.size())
                     .as("aggregate over-delivery: %d deliveries in %.1fs, the bucket authorises at most %.0f",
                             limited.size(), observedNanos / 1e9, nominalDeliveries(observedNanos))
@@ -115,16 +125,15 @@ class RateLimitCeilingScenario {
                     .isLessThan(Duration.ofSeconds(20));
 
             assertThat(limited.size() / nominalDeliveries(observedNanos))
-                    .as("under-delivery beyond the ADR-0042 item 5 burn (E4's kill line is 90%% of nominal)")
+                    .as("under-delivery beyond the expected burn (the kill line is 90%% of nominal)")
                     .isGreaterThan(0.90);
         }
     }
 
     /**
-     * Varre as entregas do job limitado atrás da primeira que começou ANTES
-     * do que o bucket permitiria: a k-ésima só é legítima a partir de
-     * {@code (k − MAX) × TOKEN_PERIOD_NANOS} depois do arranque, porque as
-     * MAX primeiras cabem no burst da capacidade cheia.
+     * Scans the limited job's deliveries for the first one that started EARLIER than the bucket
+     * would allow: the k-th is only legitimate from {@code (k - MAX) x TOKEN_PERIOD_NANOS} after
+     * start-up, because the first MAX fit in the burst of a full bucket.
      */
     private static OverDelivery firstOverDelivery(List<Long> limitedStarts, long startedAt) {
         for (int k = MAX + 1; k <= limitedStarts.size(); k++) {

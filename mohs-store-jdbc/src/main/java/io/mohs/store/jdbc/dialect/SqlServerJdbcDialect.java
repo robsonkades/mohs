@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc.dialect;
 
 import java.time.Instant;
@@ -8,12 +23,11 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 /**
- * SQL Server: sem {@code LIMIT} — usa {@code TOP (:batchSize)} logo após
- * {@code SELECT}, mudando a posição na query, não só o texto. Sem
- * {@code SKIP LOCKED} — usa o hint de tabela {@code WITH (UPDLOCK,
- * ROWLOCK, READPAST)}, confirmado via jOOQ (é o que jOOQ gera pra emular
- * {@code SKIP LOCKED} em SQL Server — ADR-0023). {@code BIT} compara com
- * {@code 1}, não {@code TRUE}.
+ * SQL Server: no {@code LIMIT} — it uses {@code TOP (:batchSize)} right after {@code SELECT}, changing
+ * the position in the query rather than only the text. No {@code SKIP LOCKED} — it uses the table hint
+ * {@code WITH (UPDLOCK, ROWLOCK, READPAST)}, confirmed through jOOQ (it is what jOOQ generates to
+ * emulate {@code SKIP LOCKED} on SQL Server). {@code BIT} compares against {@code 1}, not
+ * {@code TRUE}.
  */
 public final class SqlServerJdbcDialect implements JdbcDialect {
 
@@ -33,13 +47,12 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
     }
 
     /**
-     * Varredura de candidatos do claim (§5.4) na forma T-SQL: {@code TOP}
-     * + hint de tabela no lugar de {@code LIMIT … FOR UPDATE SKIP LOCKED}
-     * — a emulação que o jOOQ confirma (ver Javadoc da classe). O resto do
-     * claim (DELETE + INSERT da posse) segue o default portátil da
-     * interface. Duas constantes porque {@code NOT IN} de lista vazia não
-     * expande — a filtrada derivada por {@code replace}, como o
-     * {@code CLAIM_READY_FILTERED} do Postgres.
+     * The claim's candidate sweep in T-SQL form: {@code TOP} plus a table hint in place of
+     * {@code LIMIT … FOR UPDATE SKIP LOCKED} — the emulation jOOQ confirms (see the class Javadoc). The
+     * rest of the claim (the ownership's DELETE and INSERT) follows the interface's portable default.
+     *
+     * <p>Two constants because a {@code NOT IN} over an empty list does not expand — the filtered one
+     * derived through {@code replace}, like Postgres's {@code CLAIM_READY_FILTERED}.
      */
     private static final String TSQL_READY_CANDIDATES = """
             SELECT TOP (:limit) execution_id, job_key, attempt, priority
@@ -53,8 +66,8 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
             "WHERE shard = :shard AND visible_at <= :now AND job_key NOT IN (:inadmissible)");
 
     static {
-        // guarda do replace: se a âncora do WHERE mudar e o replace no-opar,
-        // o filtro de inadmissíveis sumiria em silêncio (review S5.2)
+        // A guard on the replace: if the WHERE anchor changes and the replace becomes a no-op,
+        // the inadmissible filter would vanish in silence
         if (!TSQL_READY_CANDIDATES_FILTERED.contains(":inadmissible")) {
             throw new ExceptionInInitializerError("TSQL_READY_CANDIDATES_FILTERED lost its :inadmissible predicate — the replace anchor drifted");
         }
@@ -75,17 +88,18 @@ public final class SqlServerJdbcDialect implements JdbcDialect {
     }
 
     /**
-     * {@code NOLOCK} (read uncommitted), não {@code READPAST}: skip de
-     * linha lockada subconta sistematicamente sob carga. O erro aceito é o
-     * do pior caso do mecanismo, não só "±1 em transição": sem ordem
-     * exigida ({@code COUNT}/{@code GROUP BY}) o otimizador pode escolher
-     * allocation-order scan, que sob page split concorrente conta linha
-     * duas vezes ou perde — erro proporcional ao churn de escrita; e o
-     * scan pode falhar com o erro 601 ("data movement"), que aqui vira
-     * falha transitória da leitura (500 no GET; WARN + retry no próximo
-     * tick no stream) — aceito, sem retry automático. Deployment com RCSI
-     * ({@code READ_COMMITTED_SNAPSHOT ON}) torna o hint redundante —
-     * decisão do operador, não da biblioteca.
+     * {@code NOLOCK} (read uncommitted), not {@code READPAST}: skipping a locked row systematically
+     * undercounts under load.
+     *
+     * <p>The accepted error is the mechanism's worst case, not merely "±1 in transition": with no
+     * required order ({@code COUNT}/{@code GROUP BY}) the optimiser may choose an allocation-order scan,
+     * which under a concurrent page split counts a row twice or loses it — an error proportional to
+     * write churn; and the scan may fail with error 601 ("data movement"), which here becomes a
+     * transient read failure (a 500 on the GET; a WARN plus a retry on the next tick in the stream) —
+     * accepted, with no automatic retry.
+     *
+     * <p>A deployment with RCSI ({@code READ_COMMITTED_SNAPSHOT ON}) makes the hint redundant — the
+     * operator's decision, not the library's.
      */
     @Override
     public String lockFreeReadHint() {

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.autoconfigure;
 
 import java.util.LinkedHashMap;
@@ -13,10 +28,9 @@ import io.mohs.core.resource.RunnerMode;
 import io.mohs.engine.RunnerRegistry;
 
 /**
- * Montagem dos runners nomeados — vocabulário puro do wiring, sem estado,
- * sem Spring, testável isolado (mesmo padrão de {@link MohsJobs}).
- * {@link MohsAutoConfiguration} é a única chamadora; package-private
- * (Effective Java Item 15: minimize acessibilidade).
+ * Assembly of the named runners — pure wiring vocabulary: no state, no Spring, testable in
+ * isolation (the same pattern as {@link MohsJobs}). {@link MohsAutoConfiguration} is its only
+ * caller; package-private (Effective Java Item 15: minimise accessibility).
  */
 final class MohsRunners {
 
@@ -27,19 +41,19 @@ final class MohsRunners {
     private MohsRunners() {
     }
 
-    /** Runner junto da fonte que o declarou — um mapa só carrega os dois, em vez de dois mapas paralelos com a mesma chave. */
+    /** A runner alongside the source that declared it — one map carries both, instead of two parallel maps sharing a key. */
     private record SourcedRunner(MohsRunner runner, String source) {
     }
 
     /**
-     * {@code io}/{@code cpu} built-in sempre presentes (defaults do
-     * documento mestre — {@code io} reaproveita
-     * {@code mohs.engine.dispatch-concurrency}, mesmo papel que tinha
-     * quando ainda era o único executor de dispatch fixo). Built-in pode
-     * ser sobrescrito por propriedade ou {@code @Bean}; nome duplicado
-     * entre {@code mohs.runners.*} e {@code @Bean MohsRunner} é erro de
-     * boot — mesma filosofia de "conflito de identidade falha sempre" já
-     * usada pro {@code annotation × programmatic} do {@link MohsJobScanner}.
+     * The built-in {@code io}/{@code cpu} runners are always present (the documented document's
+     * defaults — {@code io} reuses {@code mohs.engine.dispatch-concurrency}, the same role it had
+     * when it was still the only fixed dispatch executor).
+     *
+     * <p>A built-in may be overridden by a property or a {@code @Bean}; a name duplicated between
+     * {@code mohs.runners.*} and a {@code @Bean MohsRunner} is a boot error — the same "an identity
+     * conflict always fails" philosophy already used for {@code annotation x programmatic} in
+     * {@link MohsJobScanner}.
      */
     static List<MohsRunner> assemble(MohsProperties properties, List<MohsRunner> beanRunners) {
         Map<String, SourcedRunner> byName = new LinkedHashMap<>();
@@ -58,19 +72,18 @@ final class MohsRunners {
     }
 
     /**
-     * ADR-0039: o clamp de claim usa {@code mohs.engine.dispatch-concurrency}
-     * como teto do node — premissa de fonte única que um override do runner
-     * {@code io} com {@code max} menor quebra em silêncio: o excedente entre
-     * os dois valores volta a ser rejeitado pelo executor e fica RUNNING até
-     * o reaper (a patologia que a ADR eliminou). WARN, não erro de boot:
-     * capar o {@code io} é escolha operacional legítima e o caminho de
-     * recuperação existe — o aviso devolve ao operador a consequência.
+     * The claim clamp uses {@code mohs.engine.dispatch-concurrency} as the node's ceiling — a
+     * single-source assumption that overriding the {@code io} runner with a smaller {@code max}
+     * breaks silently: the surplus between the two values goes back to being rejected by the
+     * executor and stays RUNNING until the reaper picks it up, which is the pathology the clamp
+     * eliminated. A WARN rather than a boot error: capping {@code io} is a legitimate operational
+     * choice and the recovery path exists — the warning hands the consequence back to the operator.
      */
     private static void warnWhenIoRunnerIsSmallerThanTheClaimBound(Map<String, SourcedRunner> byName, int dispatchConcurrency) {
         MohsRunner ioRunner = byName.get(RunnerRegistry.DEFAULT_RUNNER).runner();
         if (ioRunner.mode() == RunnerMode.IO && ioRunner.maxConcurrent() < dispatchConcurrency) {
             log.warn("runner 'io' overridden with max-concurrent {} below mohs.engine.dispatch-concurrency {} — "
-                    + "the claim bound (ADR-0039) follows dispatch-concurrency, so the excess will be rejected by the "
+                    + "the claim bound follows dispatch-concurrency, so the excess will be rejected by the "
                     + "executor and sit RUNNING until the reaper reclaims it; align the two values",
                     ioRunner.maxConcurrent(), dispatchConcurrency);
         }
@@ -85,16 +98,15 @@ final class MohsRunners {
     }
 
     /**
-     * Campo do modo errado é erro de boot, nunca descarte silencioso —
-     * mesma postura do compact constructor de {@link MohsRunner}, que lança
-     * pra campo do modo errado (e mesma filosofia de "conflito de identidade
-     * falha sempre" de {@link #declare}): {@code core-size=2}
-     * com {@code mode} esquecido no default {@code io} viraria um runner de
-     * 64 virtual threads pra trabalho CPU-bound, sem aviso nenhum. A
-     * validação do próprio builder ganha o contexto que só a propriedade tem
-     * ("maxSize must be >= coreSize" sozinho não diz qual runner nem qual
-     * propriedade — e {@code core-size} default depende dos núcleos da
-     * máquina, então o boot falharia só em produção).
+     * A field belonging to the wrong mode is a boot error, never a silent discard — the same stance
+     * as {@link MohsRunner}'s compact constructor, which throws for a wrong-mode field, and the
+     * same "an identity conflict always fails" philosophy as {@link #declare}.
+     *
+     * <p>{@code core-size=2} with {@code mode} left at the {@code io} default would otherwise become
+     * a runner of 64 virtual threads for CPU-bound work, with no warning at all. The builder's own
+     * validation gains the context only the property has: "maxSize must be >= coreSize" alone says
+     * neither which runner nor which property — and {@code core-size}'s default depends on the
+     * machine's cores, so the boot would fail only in production.
      */
     private static MohsRunner toMohsRunner(String name, MohsProperties.Runner spec) {
         String prefix = "mohs.runners." + name;

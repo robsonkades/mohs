@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.job;
 
 import java.time.ZoneId;
@@ -9,11 +24,10 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 public record CronView(ScheduleType type, String expression, ZoneId zone) implements ScheduleView {
 
     /**
-     * Marca explicitamente o construtor canônico como o criador do Jackson
-     * — sem isso, a ambiguidade com o construtor de conveniência de 2 args
-     * abaixo faz o Jackson escolher o construtor errado na desserialização
-     * (falha tentando popular {@code type}, que records não expõem via
-     * setter).
+     * Marks the canonical constructor explicitly as Jackson's creator — without it, the ambiguity
+     * with the two-argument convenience constructor below makes Jackson pick the wrong one when
+     * deserialising (failing while trying to populate {@code type}, which records do not expose
+     * through a setter).
      */
     @JsonCreator
     public CronView {

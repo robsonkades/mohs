@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
 
 CREATE TABLE IF NOT EXISTS mohs_batches (
     id         VARCHAR(255) PRIMARY KEY,
+    name       VARCHAR(255) NOT NULL,
     total      INT NOT NULL DEFAULT 0,
     succeeded  INT NOT NULL DEFAULT 0,
     failed     INT NOT NULL DEFAULT 0,
@@ -116,7 +117,6 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     payload         TEXT         NOT NULL,
     payload_type    VARCHAR(500) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_mohs_execution_created ON mohs_execution (created_at);
 -- (job_key, execution_id): serve o ORDER BY/cursor do findPage — ver o V3 do Postgres
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_job     ON mohs_execution (job_key, execution_id DESC);
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_corr    ON mohs_execution (correlation_id);
@@ -141,3 +141,5 @@ CREATE TABLE IF NOT EXISTS mohs_idempotency (
     created_at      TIMESTAMP    NOT NULL,
     PRIMARY KEY (job_key, idempotency_key)
 );
+
+CREATE INDEX IF NOT EXISTS idx_mohs_idempotency_created ON mohs_idempotency (created_at);

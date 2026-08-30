@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.util.HashSet;
@@ -15,11 +30,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ShardsTest {
 
     /**
-     * Literais fixados de propósito (contrato de estabilidade do Javadoc de
-     * {@link Shards}): o shard é GRAVADO em {@code mohs_ready}/{@code
-     * mohs_execution} — se a função mudar entre versões, um rolling upgrade
-     * deixa linhas antigas em shards que ninguém mais deriva. Este teste
-     * quebrando = a mudança exige migração de dados, não é refactor.
+     * Literals pinned on purpose (the stability contract in {@link Shards}'s Javadoc): the shard is
+     * WRITTEN into {@code mohs_ready}/{@code mohs_execution} — if the function changes between
+     * versions, a rolling upgrade leaves old rows in shards nobody derives any more. This test breaking
+     * means the change requires a data migration; it is not a refactor.
      */
     @Test
     void hashIsPinnedAcrossVersions() {
@@ -37,9 +51,8 @@ class ShardsTest {
             assertThat(shard).isBetween(0, Shards.SHARD_COUNT - 1);
             seen.add(shard);
         }
-        // com 10k amostras em 64 baldes, um balde vazio denunciaria viés
-        // estrutural do hash sobre o formato UUIDv7 (prefixo de timestamp
-        // quase constante), não flutuação estatística
+        // With 10k samples across 64 buckets, an empty bucket would signal structural bias of the hash
+        // over the UUIDv7 format (an almost constant timestamp prefix), not statistical fluctuation
         assertThat(seen).hasSize(Shards.SHARD_COUNT);
     }
 
@@ -53,12 +66,12 @@ class ShardsTest {
             total += owned.size();
             covered.addAll(owned);
         }
-        // cobertura total E total == 64: junto, prova partição (sem furo, sem sobreposição)
+        // Full coverage AND a total of 64: together they prove a partition (no gap, no overlap)
         assertThat(covered).hasSize(Shards.SHARD_COUNT);
         assertThat(total).isEqualTo(Shards.SHARD_COUNT);
     }
 
-    /** A atribuição deriva da ORDEM dos ids, não da ordem da lista — todo node precisa chegar à mesma partição sem negociar. */
+    /** The assignment derives from the ORDER of the ids, not from the list's order — every node must reach the same partition without negotiating. */
     @Test
     void assignmentIsIndependentOfListOrder() {
         assertThat(Shards.ownedBy("node-b", List.of("node-c", "node-a", "node-b")))
@@ -70,7 +83,7 @@ class ShardsTest {
         assertThat(Shards.ownedBy("node-a", List.of("node-a"))).hasSize(Shards.SHARD_COUNT);
     }
 
-    /** Degeneração segura: fora da lista (foto atrasada de mohs_nodes) ou lista vazia → possui TODOS — sobreposição é o comportamento pré-shard (SKIP LOCKED resolve), fila parada não é opção. */
+    /** Safe degeneration: outside the list (a stale snapshot of mohs_nodes) or an empty list means owning ALL — an overlap is the pre-shard behaviour (SKIP LOCKED resolves it), a stalled queue is not an option. */
     @Test
     void nodeMissingFromTheListOwnsEveryShard() {
         assertThat(Shards.ownedBy("node-x", List.of("node-a", "node-b"))).hasSize(Shards.SHARD_COUNT);

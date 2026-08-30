@@ -1,13 +1,27 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 /**
- * Área de recurso "jobs": {@link io.mohs.rest.job.JobsController}
- * (definições registradas, invocação, pause/resume, histórico) e seus DTOs
- * — {@link io.mohs.rest.job.JobResponse}, o {@link io.mohs.rest.job.ScheduleView}
- * selado (espelha {@link io.mohs.core.schedule.Schedule}) e
- * {@link io.mohs.rest.job.ScheduleJobRequest}. Depende de
- * {@code io.mohs.core.definition}/{@code .schedule} (tipos reaproveitados
- * direto: {@code Misfire}, {@code DefinitionSource}) e de
- * {@code io.mohs.rest.execution} ({@code ExecutionResponse}, só no
- * histórico de execuções por job).
+ * The "jobs" resource area: {@link io.mohs.rest.job.JobsController} (registered definitions,
+ * invocation, pause/resume, history) and its DTOs — {@link io.mohs.rest.job.JobResponse}, the sealed
+ * {@link io.mohs.rest.job.ScheduleView} (mirroring {@link io.mohs.core.schedule.Schedule}) and
+ * {@link io.mohs.rest.job.ScheduleJobRequest}.
+ *
+ * <p>Depends on {@code io.mohs.core.definition}/{@code .schedule} (types reused directly:
+ * {@code Misfire}, {@code DefinitionSource}) and on {@code io.mohs.rest.execution}
+ * ({@code ExecutionResponse}, only in a job's execution history).
  */
 @NullMarked
 package io.mohs.rest.job;

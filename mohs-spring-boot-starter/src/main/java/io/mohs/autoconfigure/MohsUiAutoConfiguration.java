@@ -1,7 +1,24 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.autoconfigure;
 
 import java.io.IOException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -16,19 +33,21 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import org.springframework.web.servlet.resource.PathResourceResolver;
 import org.springframework.web.servlet.resource.ResourceHttpRequestHandler;
 
+import io.mohs.rest.ApiPaths;
+
 /**
- * Serve o dashboard do {@code mohs-ui}, quando ele está no classpath.
+ * Serves the {@code mohs-ui} dashboard when it is on the classpath.
  *
- * <p>A condição é o próprio bundle ({@code @ConditionalOnResource} sobre o {@code index.html}),
- * não uma classe marcadora: {@code mohs-ui} é um jar só de recurso, e o starter não depende dele
- * — quem quer o dashboard declara {@code io.mohs:mohs-ui} e ele aparece. Sem o jar, nada aqui
- * liga, e o aplicativo não paga nem a avaliação de um bean.
+ * <p>The condition is the bundle itself ({@code @ConditionalOnResource} over {@code index.html}),
+ * not a marker class: {@code mohs-ui} is a resource-only jar and the starter does not depend on it
+ * — whoever wants the dashboard declares {@code io.mohs:mohs-ui} and it appears. Without the jar
+ * nothing here activates, and the application does not even pay for evaluating a bean.
  *
- * <p>Roda no servidor do próprio aplicativo hospedeiro, deliberadamente como único modo: um
- * servidor nosso ficaria inteiramente fora da cadeia de filtros do Spring Security dele, e um
- * aplicativo que se protegeu com cuidado ainda assim exporia pause/cancel/retry numa porta
- * lateral. No servidor do host, a configuração de segurança do host se aplica — proteja lá o
- * prefixo de {@code mohs.api.base-path} e o {@code /mohs-ui}.
+ * <p>It runs on the host application's own server, deliberately as the only mode: a server of ours
+ * would sit entirely outside the host's Spring Security filter chain, and an application that
+ * protected itself carefully would still expose pause/cancel/retry on a side port. On the host's
+ * server, the host's security configuration applies — protect the {@code mohs.api.base-path} prefix
+ * and {@code /mohs-ui} there.
  */
 @AutoConfiguration
 @ConditionalOnClass(DispatcherServlet.class)
@@ -36,7 +55,9 @@ import org.springframework.web.servlet.resource.ResourceHttpRequestHandler;
 @ConditionalOnResource(resources = "classpath:/mohs-ui-webapp/index.html")
 public class MohsUiAutoConfiguration {
 
-    /** Onde o dashboard é montado. Casa com o {@code base} do Vite e com o basepath do router. */
+    private static final Logger log = LoggerFactory.getLogger(MohsUiAutoConfiguration.class);
+
+    /** Where the dashboard is mounted. It matches Vite's {@code base} and the router's basepath. */
     static final String UI_PATH = "/mohs-ui";
 
     private static final String WEBAPP_LOCATION = "classpath:/mohs-ui-webapp/";
@@ -46,18 +67,18 @@ public class MohsUiAutoConfiguration {
     private static final String FORWARD_TO_INDEX_VIEW = "forward:" + UI_PATH + "/index.html";
 
     /**
-     * Localização própria no classpath, e não um dos diretórios estáticos default do Boot (que
-     * mapeiam para {@code /}): assim o dashboard nunca colide com o que o hospedeiro já serve na
-     * raiz — um actuator com {@code base-path: /}, por exemplo.
+     * A classpath location of its own rather than one of Boot's default static directories (which
+     * map to {@code /}): that way the dashboard never collides with what the host already serves at
+     * the root — an actuator with {@code base-path: /}, for instance.
      *
-     * <p>O caminho pelado do mount ({@code /mohs-ui} e {@code /mohs-ui/}) precisa do forward
-     * explícito abaixo, à parte do fallback de {@link SpaFallbackResourceResolver}:
-     * {@link ResourceHttpRequestHandler} devolve 404 para caminho de recurso vazio antes de
-     * qualquer {@link PathResourceResolver} rodar, então o fallback do resolver nunca chega a se
-     * aplicar a ele.
+     * <p>The bare mount path ({@code /mohs-ui} and {@code /mohs-ui/}) needs the explicit forward
+     * below, separate from {@link SpaFallbackResourceResolver}'s fallback:
+     * {@link ResourceHttpRequestHandler} returns 404 for an empty resource path before any
+     * {@link PathResourceResolver} runs, so the resolver's fallback never gets to apply to it.
      */
     @Bean
-    WebMvcConfigurer mohsUiStaticAppConfigurer() {
+    WebMvcConfigurer mohsUiStaticAppConfigurer(MohsProperties properties) {
+        warnIfDashboardHasNoApiToRead(properties);
         return new WebMvcConfigurer() {
             @Override
             public void addViewControllers(ViewControllerRegistry registry) {
@@ -66,13 +87,14 @@ public class MohsUiAutoConfiguration {
             }
 
             /**
-             * {@code resourceChain(false)}: sem o {@code CachingResourceResolver}. Ele é um
-             * {@code ConcurrentMapCache} sem TTL nem teto, com o path da requisição como chave —
-             * e o fallback abaixo faz TODO caminho sob {@code /mohs-ui/**} resolver com sucesso,
-             * inclusive os inexistentes. Sem 404, some a válvula que normalmente impede o cache
-             * de crescer: um crawler batendo em paths aleatórios criaria uma entrada permanente
-             * por path, pela vida do processo. E não se perde nada em troca — os recursos são
-             * imutáveis dentro do jar, e resolvê-los pelo classloader já é barato.
+             * {@code resourceChain(false)}: no {@code CachingResourceResolver}. It is a
+             * {@code ConcurrentMapCache} with neither TTL nor ceiling, keyed by the request path —
+             * and the fallback below makes EVERY path under {@code /mohs-ui/**} resolve
+             * successfully, including nonexistent ones. With no 404, the valve that normally keeps
+             * the cache from growing disappears: a crawler hitting random paths would create a
+             * permanent entry per path, for the life of the process. And nothing is lost in
+             * exchange — the resources are immutable inside the jar, and resolving them through the
+             * classloader is already cheap.
              */
             @Override
             public void addResourceHandlers(ResourceHandlerRegistry registry) {
@@ -85,20 +107,41 @@ public class MohsUiAutoConfiguration {
     }
 
     /**
-     * Sub-caminho que não é um asset real cai no {@code index.html}, para que um refresh em rota
-     * de cliente ({@code /mohs-ui/jobs}) resolva em vez de dar 404 — o router montado naquele
-     * mesmo basepath então renderiza.
+     * The dashboard consumes the API but is not conditioned on it, and {@code api.ts} pins
+     * {@link ApiPaths#V1} while {@code mohs.api.base-path} is configurable. In both cases the page
+     * loaded, every fetch returned 404, and there was no log at all: the classic "I opened the
+     * dashboard and nothing shows up" at 3 a.m. A WARN closes the operational gap without inventing
+     * a new property.
+     */
+    private static void warnIfDashboardHasNoApiToRead(MohsProperties properties) {
+        if (!properties.api().enabled()) {
+            log.warn("mohs-ui is on the classpath but mohs.api.enabled=false — the dashboard will load and stay"
+                    + " empty, because it has no API to read. Set mohs.api.enabled=true, or drop the"
+                    + " io.mohs:mohs-ui dependency.");
+        } else if (!ApiPaths.V1.equals(properties.api().basePath())) {
+            log.warn("mohs-ui is pinned to {} but mohs.api.base-path={} — the dashboard will 404 on every call."
+                    + " Serve the API at the default prefix, or proxy {} to it.",
+                    ApiPaths.V1, properties.api().basePath(), ApiPaths.V1);
+        }
+    }
+
+    /**
+     * A sub-path that is not a real asset falls back to {@code index.html}, so that refreshing on a
+     * client route ({@code /mohs-ui/jobs}) resolves instead of 404ing — the router mounted at that
+     * same basepath then renders it.
      */
     private static final class SpaFallbackResourceResolver extends PathResourceResolver {
 
         /**
-         * {@code checkResource} vem do supertipo e é o que garante que o recurso resolvido ainda
-         * está DENTRO da location — a defesa contra {@code ../} e escape por symlink. Sobrescrever
-         * {@code getResource} sem reintroduzi-la deixaria só o {@code isInvalidPath} do
-         * {@code ResourceHttpRequestHandler} de pé; sobrescrever não é reimplementar do zero.
+         * {@code checkResource} comes from the supertype and is what guarantees the resolved
+         * resource is still INSIDE the location — the defence against {@code ../} and symlink
+         * escape. Overriding {@code getResource} without reintroducing it would leave only
+         * {@code ResourceHttpRequestHandler}'s {@code isInvalidPath} standing; overriding is not
+         * reimplementing from scratch.
          *
-         * <p>Recurso que não passa cai no {@code index.html} junto com o que simplesmente não
-         * existe: para quem chama, "não é asset desta aplicação" é a mesma resposta.
+         * <p>A resource that does not pass falls back to {@code index.html} together with one that
+         * simply does not exist: to the caller, "not an asset of this application" is the same
+         * answer.
          */
         @Override
         protected Resource getResource(String resourcePath, Resource location) throws IOException {

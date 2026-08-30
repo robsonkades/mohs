@@ -1,32 +1,41 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 /**
- * Persistência JDBC interna para jobs, fila, posse, história, lotes
- * e rate limits — Data Mapper (PoEAA) sobre as portas de
- * {@code io.mohs.engine}: {@link io.mohs.store.jdbc.JdbcJobStore} implementa
- * {@link io.mohs.engine.JobStore};
- * {@link io.mohs.store.jdbc.JdbcWorkQueue} implementa
- * {@link io.mohs.engine.WorkQueue} — o claim move {@code mohs_ready} →
- * {@code mohs_lease} sob {@code SKIP LOCKED} (statement único no
- * Postgres, forma portátil nos demais);
- * {@link io.mohs.store.jdbc.JdbcLeaseStore} implementa
- * {@link io.mohs.engine.LeaseStore} — a conclusão do §7.5-3, cercada pelo
- * fence {@code (node_id, epoch)};
- * {@link io.mohs.store.jdbc.JdbcHistoryStore} implementa
- * {@link io.mohs.engine.HistoryStore} (payload serializado via Jackson,
- * nunca campo de {@code Execution}; estado derivado no read model);
- * {@link io.mohs.store.jdbc.JdbcStoreTransactions} implementa
- * {@link io.mohs.engine.StoreTransactions} (savepoint/NESTED — a unidade
- * de enqueue compõe com a transação do host);
- * {@link io.mohs.store.jdbc.JdbcBatchStore} implementa
- * {@link io.mohs.engine.BatchStore}, e
- * {@link io.mohs.store.jdbc.JdbcRateLimitStore} implementa
+ * Internal JDBC persistence for jobs, the queue, ownership, history, batches and rate limits — a Data
+ * Mapper (PoEAA) over {@code io.mohs.engine}'s ports.
+ *
+ * <p>{@link io.mohs.store.jdbc.JdbcJobStore} implements {@link io.mohs.engine.JobStore};
+ * {@link io.mohs.store.jdbc.JdbcWorkQueue} implements {@link io.mohs.engine.WorkQueue} — the claim moves
+ * {@code mohs_ready} to {@code mohs_lease} under {@code SKIP LOCKED} (a single statement on Postgres, a
+ * portable form elsewhere); {@link io.mohs.store.jdbc.JdbcLeaseStore} implements
+ * {@link io.mohs.engine.LeaseStore} — the completion transaction, fenced by {@code (node_id, epoch)};
+ * {@link io.mohs.store.jdbc.JdbcHistoryStore} implements {@link io.mohs.engine.HistoryStore} (the
+ * payload serialised through Jackson, never a field of {@code Execution}; state derived in the read
+ * model); {@link io.mohs.store.jdbc.JdbcStoreTransactions} implements
+ * {@link io.mohs.engine.StoreTransactions} (a savepoint through NESTED — the enqueue unit composes with
+ * the host's transaction); {@link io.mohs.store.jdbc.JdbcBatchStore} implements
+ * {@link io.mohs.engine.BatchStore}; and {@link io.mohs.store.jdbc.JdbcRateLimitStore} implements
  * {@link io.mohs.engine.RateLimitStore}.
- * {@link io.mohs.store.jdbc.DatabaseClock}
- * também mora aqui — implementa {@code Clock} +
- * {@link io.mohs.engine.SyncableClock}, a implementação "database" da
- * ADR-0008; é a única classe do projeto onde ler o relógio de verdade é
- * o propósito, não uma violação (exceção nomeada em
- * {@code ArchitectureTest}). Não faz parte da API pública —
- * ver {@code io.mohs.core} para os contratos públicos.
+ *
+ * <p>{@link io.mohs.store.jdbc.DatabaseClock} also lives here — it implements {@code Clock} plus
+ * {@link io.mohs.engine.SyncableClock}, the "database" time source; it is the project's only class where
+ * reading the real clock is the purpose rather than a violation (a named exception in
+ * {@code ArchitectureTest}).
+ *
+ * <p>Not part of the public API — see {@code io.mohs.core} for the public contracts.
  */
 @NullMarked
 package io.mohs.store.jdbc;

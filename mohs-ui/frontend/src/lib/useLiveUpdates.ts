@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { API_BASE } from "./api";
+import { API_BASE, isOverview } from "./api";
 import { EXECUTIONS_KEY_PREFIX, queryKeys } from "./queryKeys";
 import { recordActivitySample } from "./executionActivity";
 import { useDocumentVisible } from "./useDocumentVisible";
 import { executionsLive } from "./liveExecutions";
-import type { JobResponse, NodeResponse, OverviewResponse } from "../types/api";
+import type { JobResponse, NodeResponse, RunnerResponse } from "../types/api";
 
 /**
  * Only used while the stream is not open. The server pushes every 2s; this interval is the safety
@@ -13,9 +13,9 @@ import type { JobResponse, NodeResponse, OverviewResponse } from "../types/api";
  * kills long-lived connections — and not the normal mode of operation.
  *
  * <p>Deliberately unscoped (`invalidateQueries()` with no key): while the stream is down this is
- * the ONLY thing refreshing the screen, including the queries the stream never fed — runners,
- * rate limits, an execution's detail. Scoping it to the stream's own keys would leave those
- * frozen exactly when nothing else is refreshing them. Only active queries actually refetch.
+ * the ONLY thing refreshing the screen, including the queries the stream never fed — rate limits,
+ * an execution's detail. Scoping it to the stream's own keys would leave those frozen exactly when
+ * nothing else is refreshing them. Only active queries actually refetch.
  */
 const FALLBACK_POLL_MS = 15_000;
 
@@ -67,7 +67,7 @@ function decodeEnvelope(raw: string): SnapshotEnvelope<unknown> | null {
   return { asOf, data };
 }
 
-/** The `jobs` and `nodes` frames are arrays; anything else is a frame this client does not understand. */
+/** The `jobs`, `nodes` and `runners` frames are arrays; anything else this client does not understand. */
 function seedArray<T>(client: QueryClient, key: readonly unknown[], raw: string): void {
   const envelope = decodeEnvelope(raw);
   if (envelope === null || !Array.isArray(envelope.data)) {
@@ -76,20 +76,11 @@ function seedArray<T>(client: QueryClient, key: readonly unknown[], raw: string)
   client.setQueryData(key, envelope.data as T[]);
 }
 
-/** Structural check of the two fields every reader of the overview dereferences without guarding. */
-function isOverview(data: unknown): data is OverviewResponse {
-  if (typeof data !== "object" || data === null) {
-    return false;
-  }
-  const { executionCountsByStatus, throughput } = data as Record<string, unknown>;
-  return typeof executionCountsByStatus === "object" && executionCountsByStatus !== null && typeof throughput === "object" && throughput !== null;
-}
-
 /**
- * Connects the dashboard to `GET /overview/stream`: the server pushes four snapshots
- * (`overview`, `jobs`, `nodes`, `executions`) every 2s, conflated per client. The first three are
- * seeded straight into the cache — the frame carries the data, not a "something changed" hint, so
- * refetching would be an extra round-trip for content already in hand.
+ * Connects the dashboard to `GET /overview/stream`: the server pushes five snapshots
+ * (`overview`, `jobs`, `nodes`, `runners`, `executions`) every 2s, conflated per client. The first
+ * four are seeded straight into the cache — the frame carries the data, not a "something changed"
+ * hint, so refetching would be an extra round-trip for content already in hand.
  *
  * `executions` is the exception: that frame carries the first page with NO filter, while the
  * screen is almost always filtered by status/jobKey/window. Seeding it would show the wrong list,
@@ -117,34 +108,57 @@ export function useLiveUpdates(): { status: StreamStatus; asOf: string | null } 
     let offlineTimer: number | undefined;
     const source = new EventSource(`${API_BASE}/overview/stream`);
 
-    source.addEventListener("open", () => {
+    // Silence is a failure too. A connection that opened and then stopped delivering bytes — a
+    // proxy that buffers, a half-open TCP — never fires `error`, so watching the socket alone
+    // leaves the header claiming "live" over numbers frozen minutes ago, which is the worst thing
+    // an operations panel can do. Every frame rearms the same timer the drop uses: three server
+    // ticks with nothing at all counts the same as a drop.
+    const heard = () => {
       window.clearTimeout(offlineTimer);
+      offlineTimer = window.setTimeout(() => setStatus("offline"), OFFLINE_GRACE_MS);
+    };
+
+    source.addEventListener("open", () => {
       setStatus("live");
+      heard();
     });
     source.addEventListener("error", () => {
       // Not a failure by itself: EventSource fires this on every drop and then retries. Only the
       // grace period turns it into a claim the header is allowed to make.
       setStatus((current) => (current === "offline" ? current : "connecting"));
-      window.clearTimeout(offlineTimer);
-      offlineTimer = window.setTimeout(() => setStatus("offline"), OFFLINE_GRACE_MS);
+      heard();
     });
 
     source.addEventListener("overview", (event) => {
+      heard();
       const envelope = decodeEnvelope(event.data);
       if (envelope === null || !isOverview(envelope.data)) {
         return;
       }
       queryClient.setQueryData(queryKeys.overview(STREAM_OVERVIEW_WINDOW), envelope.data);
-      recordActivitySample(envelope.asOf, envelope.data.executionCountsByStatus);
+      recordActivitySample(envelope.asOf, envelope.data.executionCountsByStatus, envelope.data.recent.ratePerSecond);
       setAsOf(envelope.asOf);
     });
     source.addEventListener("jobs", (event) => {
+      heard();
       seedArray<JobResponse>(queryClient, queryKeys.jobs(), event.data);
     });
     source.addEventListener("nodes", (event) => {
+      heard();
       seedArray<NodeResponse>(queryClient, queryKeys.nodes(), event.data);
     });
+    // Node-local by contract (ADR-0063 §5, which reverses the call recorded in
+    // DASHBOARD-STREAM-REVIEW §5): `max`/`running` describe the process that answered this SSE,
+    // not the cluster. It is here because concurrency without a denominator cannot say whether 59
+    // is slack or saturation — the panel labels the scope, and never divides the cluster-wide
+    // overview.RUNNING by this per-node max. Sole writer of this key: a page polling it in
+    // parallel would round-robin across the load balancer and interleave another node's counters.
+    source.addEventListener("runners", (event) => {
+      heard();
+      seedArray<RunnerResponse>(queryClient, queryKeys.runners(), event.data);
+    });
     source.addEventListener("executions", () => {
+      heard();
       // The one frame the operator can switch off. Paging through history or reading a custom
       // range is impossible while the list refetches under the cursor every 2s, so the
       // executions page owns a Live switch and this is where it takes effect — at the source of

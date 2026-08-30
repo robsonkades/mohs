@@ -14,8 +14,4 @@
 
     <name>Mohs :: Cron</name>
     <description>Parsing e próxima ocorrência de expressões cron seconds-first (L/W/# do Quartz).</description>
-
-    <!-- Sem dependência nenhuma além de JSpecify (herdada): o pacote é vendorizado de
-         org.springframework.scheduling.support e autocontido de propósito — não conhece
-         CronSpec nem JobDefinition (costurar ao vocabulário é trabalho do motor). -->
 </project>

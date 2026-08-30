@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.sql.ResultSet;
@@ -16,34 +31,32 @@ import io.mohs.engine.WorkQueue;
 import io.mohs.store.jdbc.dialect.JdbcDialect;
 
 /**
- * Convenções JDBC compartilhadas entre os stores de {@code io.mohs.store.jdbc} —
- * mesmo padrão idiomático já usado em {@code io.mohs.cron}
- * ({@code Assert}/{@code StringUtils}: classe final package-private,
- * métodos estáticos.
+ * JDBC conventions shared between the {@code io.mohs.store.jdbc} stores — the same idiom already used in
+ * {@code io.mohs.cron} ({@code Assert}/{@code StringUtils}): a package-private final class with static
+ * methods.
  */
 final class JdbcSupport {
 
     /**
-     * DBTUNE-7: sem isto, {@code queryForStream} não é um cursor de verdade
-     * nos drivers reais — pgjdbc materializa a consulta inteira em memória
-     * no {@code executeQuery} sem {@code fetchSize > 0} (e ainda exige
-     * {@code autoCommit = false} pra valer; Connector/J precisa da mesma
-     * coisa, ou {@code useCursorFetch=true}). O valor é um meio-termo
-     * (100-500 é a faixa recomendada) — nunca medido neste projeto, só
-     * fecha a lacuna entre o Javadoc de {@code HistoryStore#findAll} e o
-     * que os drivers realmente fazem sem isto configurado.
+     * Without this, {@code queryForStream} is not a real cursor in the actual drivers — pgjdbc
+     * materialises the entire query in memory during {@code executeQuery} without a
+     * {@code fetchSize > 0} (and it still requires {@code autoCommit = false} to take effect;
+     * Connector/J needs the same, or {@code useCursorFetch=true}).
+     *
+     * <p>The value is a middle ground (100-500 is the recommended range) — never measured in this
+     * project; it only closes the gap between {@code HistoryStore#findAll}'s Javadoc and what the drivers
+     * actually do without it configured.
      */
     static final int STREAM_FETCH_SIZE = 200;
 
-    /** Bem abaixo do teto de 2100 parâmetros do SQL Server pro {@code IN (:ids)} (DB-11) — o in-flight de um nó passa fácil de 1k ids. */
+    /** Well below SQL Server's 2100-parameter ceiling for {@code IN (:ids)} — one node's in-flight work easily exceeds 1k ids. */
     static final int MAX_IDS_PER_QUERY = 1000;
 
     /**
-     * {@code INSERT} em {@code mohs_ready} — enqueue, retry e requeue são a
-     * MESMA operação com {@code visibleAt} diferente (§5.8 do redesign):
-     * {@code JdbcWorkQueue#offer}/{@code #requeue} e o renascimento de retry
-     * na transação de conclusão de {@code JdbcLeaseStore#complete}
-     * compartilham este statement e {@link #readyEntryParams}.
+     * The {@code INSERT} into {@code mohs_ready} — enqueue, retry and requeue are the SAME operation with
+     * a different {@code visibleAt}: {@code JdbcWorkQueue#offer}/{@code #requeue} and the retry's rebirth
+     * inside {@code JdbcLeaseStore#complete}'s completion transaction share this statement and
+     * {@link #readyEntryParams}.
      */
     static final String READY_INSERT = """
             INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
@@ -51,11 +64,11 @@ final class JdbcSupport {
             """;
 
     /**
-     * {@code DELETE} de {@code mohs_lease} cercado por {@code (node_id,
-     * epoch)} — o fencing token do §6.3: a lease só cai se ainda for da
-     * encarnação observada. O MESMO statement decide o fence no requeue
-     * ({@code JdbcWorkQueue}) e na conclusão ({@code JdbcLeaseStore}) —
-     * compartilhado para a semântica jamais divergir entre os dois.
+     * The {@code DELETE} from {@code mohs_lease} fenced by {@code (node_id, epoch)} — the fencing token:
+     * the lease only drops if it still belongs to the observed incarnation.
+     *
+     * <p>The SAME statement decides the fence in the requeue ({@code JdbcWorkQueue}) and in the
+     * completion ({@code JdbcLeaseStore}) — shared so the semantics can never diverge between the two.
      */
     static final String FENCED_LEASE_DELETE = """
             DELETE FROM mohs_lease
@@ -65,7 +78,7 @@ final class JdbcSupport {
     private JdbcSupport() {
     }
 
-    /** Fatias de no máximo {@link #MAX_IDS_PER_QUERY} ids pro {@code IN (:ids)} — views de {@code subList}, sem cópia. */
+    /** Chunks of at most {@link #MAX_IDS_PER_QUERY} ids for {@code IN (:ids)} — {@code subList} views, with no copying. */
     static List<List<String>> chunksOf(List<String> ids) {
         List<List<String>> chunks = new ArrayList<>();
         for (int start = 0; start < ids.size(); start += MAX_IDS_PER_QUERY) {
@@ -74,7 +87,7 @@ final class JdbcSupport {
         return chunks;
     }
 
-    /** Parâmetros de {@link #READY_INSERT} — a travessia temporal de {@code visibleAt} é do dialeto ({@code splitTimestamp}). */
+    /** {@link #READY_INSERT}'s parameters — {@code visibleAt}'s temporal crossing belongs to the dialect ({@code splitTimestamp}). */
     static MapSqlParameterSource readyEntryParams(WorkQueue.ReadyEntry entry, JdbcDialect dialect) {
         return new MapSqlParameterSource()
                 .addValue("executionId", entry.executionId().value())
@@ -85,7 +98,7 @@ final class JdbcSupport {
                 .addValue("visibleAt", dialect.splitTimestamp(entry.visibleAt()));
     }
 
-    /** Parâmetros de {@link #FENCED_LEASE_DELETE}. */
+    /** {@link #FENCED_LEASE_DELETE}'s parameters. */
     static MapSqlParameterSource fencedLeaseDeleteParams(String executionId, String nodeId, long epoch) {
         return new MapSqlParameterSource()
                 .addValue("executionId", executionId)
@@ -93,7 +106,7 @@ final class JdbcSupport {
                 .addValue("epoch", epoch);
     }
 
-    /** {@code NamedParameterJdbcTemplate} com {@link #STREAM_FETCH_SIZE} — todo store que tem método {@code queryForStream} usa este construtor, não {@code new NamedParameterJdbcTemplate(dataSource)} direto. */
+    /** A {@code NamedParameterJdbcTemplate} with {@link #STREAM_FETCH_SIZE} — every store with a {@code queryForStream} method uses this constructor, not {@code new NamedParameterJdbcTemplate(dataSource)} directly. */
     static NamedParameterJdbcTemplate namedTemplateWithStreamFetchSize(DataSource dataSource) {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
         jdbcTemplate.setFetchSize(STREAM_FETCH_SIZE);
@@ -106,12 +119,11 @@ final class JdbcSupport {
     }
 
     /**
-     * Busca uma linha por uma condição que casa no máximo uma (chave
-     * primária ou única) — {@code ResultSetExtractor} guardado por
-     * {@code rs.next()} lê essa linha direto, sem passar por
-     * {@code List}/{@code stream}/{@code findFirst}, e sem o risco de
-     * {@code queryForObject} (que lança {@code EmptyResultDataAccessException}
-     * em vez de devolver vazio quando não há linha nenhuma).
+     * Fetches one row by a condition that matches at most one (a primary or unique key) — a
+     * {@code ResultSetExtractor} guarded by {@code rs.next()} reads that row directly, without going
+     * through a {@code List}/{@code stream}/{@code findFirst}, and without {@code queryForObject}'s
+     * hazard (which throws {@code EmptyResultDataAccessException} instead of returning empty when there
+     * is no row at all).
      */
     static <T> Optional<T> findOne(NamedParameterJdbcTemplate jdbcTemplate, String sql, MapSqlParameterSource params, SingleRowMapper<T> mapper) {
         T result = jdbcTemplate.query(sql, params, rs -> rs.next() ? mapper.map(rs) : null);

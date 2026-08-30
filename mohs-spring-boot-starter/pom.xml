@@ -20,15 +20,10 @@
             <groupId>io.mohs</groupId>
             <artifactId>mohs-engine</artifactId>
         </dependency>
-        <!-- JDBC não é optional: é a única implementação de store que existe, e sem ela
-             MohsAutoConfiguration não tem o que ligar. -->
         <dependency>
             <groupId>io.mohs</groupId>
             <artifactId>mohs-store-jdbc</artifactId>
         </dependency>
-        <!-- REST também não é optional: MohsRestAutoConfiguration referencia os controllers
-             fora de qualquer @ConditionalOnClass deles. O que é opcional é o stack web
-             (declarado optional em mohs-rest), e é ele que a condição de ligar checa. -->
         <dependency>
             <groupId>io.mohs</groupId>
             <artifactId>mohs-rest</artifactId>
@@ -49,14 +44,16 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jackson</artifactId>
         </dependency>
-        <!-- MohsRestAutoConfiguration compila contra DispatcherServlet; optional para que um
-             aplicativo sem web não herde o stack (a auto-config fica inerte). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-health</artifactId>
+            <optional>true</optional>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
             <optional>true</optional>
         </dependency>
-
         <dependency>
             <groupId>io.mohs</groupId>
             <artifactId>mohs-test</artifactId>
@@ -68,6 +65,11 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <scope>test</scope>
@@ -76,7 +78,17 @@
 
     <build>
         <plugins>
-            <!-- Metadata de autocomplete para MohsProperties. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <Automatic-Module-Name>io.mohs.autoconfigure</Automatic-Module-Name>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>

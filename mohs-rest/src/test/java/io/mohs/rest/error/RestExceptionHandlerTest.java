@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.error;
 
 import java.util.List;
@@ -66,10 +81,10 @@ class RestExceptionHandlerTest {
         assertThat(problem.getDetail()).contains("255");
     }
 
-    /** Racional de MohsRestAutoConfiguration: contrato v1 sem implementação é 501 honesto, nunca 500 "unexpected". */
+    /** MohsRestAutoConfiguration's rationale: a v1 contract without an implementation is an honest 501, never a 500 "unexpected". */
     @Test
     void unsupportedOperationBecomes501() {
-        ProblemDetail problem = handler.handleNotImplemented(new UnsupportedOperationException("M3: ainda não implementado"));
+        ProblemDetail problem = handler.handleNotImplemented(new UnsupportedOperationException("not implemented yet"));
 
         assertThat(problem.getStatus()).isEqualTo(HttpStatus.NOT_IMPLEMENTED.value());
         assertThat(problem.getTitle()).isEqualTo("Not implemented");

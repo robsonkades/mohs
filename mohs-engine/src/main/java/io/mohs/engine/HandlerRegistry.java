@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.util.Map;
@@ -10,19 +25,18 @@ import org.jspecify.annotations.Nullable;
 import io.mohs.core.job.JobKey;
 
 /**
- * Registro em memória de {@code JobKey → JobHandler} — a costura
- * manual que {@link Dispatcher} consulta pra saber o que chamar.
- * {@code io.mohs.autoconfigure} (fora de escopo ainda) povoa isto
- * escaneando {@code @MohsJob} no boot; até lá, quem já tem a referência em
- * mãos (testes, código que registra na mão) usa {@link #register} direto —
- * mesmo espírito de {@code io.mohs.test.InMemoryJobStore} como costura
- * manual de {@code JobStore}, sem JDBC.
+ * The in-memory {@code JobKey} to {@code JobHandler} registry — the manual seam {@link Dispatcher}
+ * consults to know what to call.
  *
- * <p>{@code payloadType} é opcional: só o scanner de {@code @MohsJob}
- * sabe o tipo real do parâmetro (reflection no método anotado); registro
- * manual (testes, {@link #register(JobKey, JobHandler)}) não tem essa
- * informação e não precisa dela — {@link #payloadType} existe só pra
- * REST (M3) converter JSON pro tipo esperado antes de agendar.
+ * <p>{@code io.mohs.autoconfigure} populates it by scanning for {@code @MohsJob} at boot; anyone who
+ * already has the reference in hand (tests, code registering by hand) uses {@link #register}
+ * directly — the same spirit as {@code io.mohs.test.InMemoryJobStore} being a manual seam for
+ * {@code JobStore}, with no JDBC.
+ *
+ * <p>{@code payloadType} is optional: only the {@code @MohsJob} scanner knows the parameter's real
+ * type (through reflection on the annotated method); a manual registration
+ * ({@link #register(JobKey, JobHandler)}) does not have that information and does not need it —
+ * {@link #payloadType} exists only so REST can convert JSON to the expected type before scheduling.
  */
 public final class HandlerRegistry {
 

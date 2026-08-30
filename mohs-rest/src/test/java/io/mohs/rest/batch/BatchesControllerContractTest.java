@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.batch;
 
 import java.util.Optional;
@@ -21,11 +36,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * Ver Javadoc de {@link io.mohs.rest.job.JobsControllerContractTest} sobre
- * o {@code @TestConfiguration}/{@code mohs.enabled=false} — mesmo motivo
- * aqui: {@link io.mohs.rest.RestSliceConfiguration} não escaneia {@code io.mohs.rest} no
- * component-scan, então controller e {@link RestExceptionHandler} entram
- * via {@code @Bean} explícito.
+ * See {@link io.mohs.rest.job.JobsControllerContractTest}'s Javadoc about the
+ * {@code @TestConfiguration}/{@code mohs.enabled=false} pair — the same reason applies here:
+ * {@link io.mohs.rest.RestSliceConfiguration} does not component-scan {@code io.mohs.rest}, so the
+ * controller and {@link RestExceptionHandler} arrive through an explicit {@code @Bean}.
  */
 @WebMvcTest(properties = "mohs.enabled=false")
 class BatchesControllerContractTest {
@@ -36,7 +50,7 @@ class BatchesControllerContractTest {
         @Bean
         Mohs mohs() {
             Mohs mohs = mock(Mohs.class);
-            when(mohs.findBatch("batch-1")).thenReturn(Optional.of(new BatchSnapshot("batch-1", 10, 7, 1)));
+            when(mohs.findBatch("batch-1")).thenReturn(Optional.of(new BatchSnapshot("batch-1", "nightly invoices", 10, 7, 1)));
             when(mohs.findBatch("ghost")).thenReturn(Optional.empty());
             return mohs;
         }
@@ -56,10 +70,9 @@ class BatchesControllerContractTest {
     private MockMvc mockMvc;
 
     /**
-     * {@code pending} e {@code state} não vêm do banco: são derivados dos três
-     * contadores (ADR-0043), então não há como a resposta contradizer a si
-     * mesma — 10 total com 8 terminados são 2 pendentes por construção, e o
-     * lote só é {@code COMPLETED} quando esse resto é zero.
+     * {@code pending} and {@code state} do not come from the database: they are derived from the
+     * three counters, so the response cannot contradict itself — 10 total with 8 terminated are 2
+     * pending by construction, and the batch is only {@code COMPLETED} when that remainder is zero.
      */
     @Test
     void getReturnsTheCountersWithPendingAndStateDerived() throws Exception {

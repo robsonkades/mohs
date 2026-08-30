@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.autoconfigure;
 
 import java.util.LinkedHashMap;
@@ -14,17 +29,14 @@ import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.RateLimitStore;
 
 /**
- * Monta os {@link RateLimit} declarados (beans + propriedades) e os
- * registra no store no boot — o equivalente de {@link MohsRunners} para o
- * eixo de vazão, com uma diferença que muda tudo: runner é estado local do
- * nó, rate limit é estado COMPARTILHADO, então registrar aqui é escrever
- * no banco e a divergência com o que já está lá segue a política
- * {@code mohs.registration.on-conflict} (ADR-0006), como a definição de
- * job.
+ * Assembles the declared {@link RateLimit}s (beans plus properties) and registers them in the store
+ * at boot — the equivalent of {@link MohsRunners} for the throughput axis, with one difference that
+ * changes everything: a runner is node-local state, while a rate limit is SHARED state. So
+ * registering here means writing to the database, and drift against what is already there follows
+ * the {@code mohs.registration.on-conflict} policy, exactly like a job definition.
  *
- * <p>O balde de tokens nunca é tocado por este caminho — quem preserva o
- * saldo é {@link RateLimitStore#upsert} (ADR-0042): boot manda na spec,
- * jamais no estado corrente.
+ * <p>The token bucket is never touched by this path — what preserves the balance is
+ * {@link RateLimitStore#upsert}: boot governs the spec, never the current state.
  */
 final class MohsRateLimits {
 
@@ -34,10 +46,9 @@ final class MohsRateLimits {
     }
 
     /**
-     * Bean define a estrutura, propriedade ajusta os números (mesmo
-     * contrato de {@code docs/API-DESIGN.md} para recursos nomeados): um
-     * nome declarado nos dois lugares fica com o valor da propriedade, que
-     * é o que se muda sem recompilar.
+     * A bean defines the structure and a property adjusts the numbers (the same contract as
+     * for named resources): a name declared in both places keeps the
+     * property's value, which is the one that can be changed without recompiling.
      */
     static List<RateLimit> assemble(MohsProperties properties, List<RateLimit> beanRateLimits) {
         Objects.requireNonNull(properties, "properties");
@@ -56,9 +67,9 @@ final class MohsRateLimits {
     }
 
     /**
-     * Os dois campos são obrigatórios e a falta de qualquer um derruba o
-     * boot com o nome da propriedade que falta — validação de boot no
-     * lugar de um limite que só se revelaria errado sob carga (§5.13).
+     * Both fields are mandatory, and a missing one brings the boot down naming the property that is
+     * absent — a boot validation instead of a limit that would only reveal itself as wrong under
+     * load.
      */
     private static RateLimit toRateLimit(String name, MohsProperties.RateLimitSpec spec) {
         if (spec.max() == null) {
@@ -70,7 +81,7 @@ final class MohsRateLimits {
         return new RateLimit(name, spec.max(), spec.window());
     }
 
-    /** Divergência entre o declarado e o armazenado segue {@code on-conflict}, exatamente como a definição de job em {@link MohsJobScanner}. */
+    /** Drift between what is declared and what is stored follows {@code on-conflict}, exactly like a job definition in {@link MohsJobScanner}. */
     static void register(RateLimitStore store, MohsProperties.Registration.OnConflict onConflict, List<RateLimit> declared) {
         for (RateLimit incoming : declared) {
             Optional<RateLimit> existing = store.find(incoming.name()).map(RateLimitSnapshot::rateLimit);

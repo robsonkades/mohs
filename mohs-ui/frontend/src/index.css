@@ -53,6 +53,7 @@
   --status-info: #3b82f6; /* RUNNING */
   --status-neutral: #94a3b8; /* WAITING */
   --status-cancelled: #71717a; /* CANCELLED — dimmed */
+  --metric-rate: #a855f7; /* executions/s — a RATE, not a state: no badge may use it */
 
   /* shadcn semantic tokens — aliased onto the tones above so every generated
      ui/*.tsx component themes correctly without introducing new colors. */

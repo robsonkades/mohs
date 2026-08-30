@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Duration;
@@ -104,10 +119,9 @@ class JdbcRateLimitStoreTest {
     }
 
     /**
-     * {@code charge} é tudo ou nada: quem decide QUANTO pedir é a fase 1
-     * ({@code available}), no claimer. Cobrar parcial aqui seria entregar
-     * menos tokens do que as execuções já reivindicadas na transação —
-     * exatamente a sobre-entrega que o CAS existe pra impedir.
+     * {@code charge} is all or nothing: what decides HOW MUCH to ask for is phase 1 ({@code available}),
+     * in the claimer. Charging partially here would deliver fewer tokens than the executions already
+     * claimed in the transaction — exactly the over-delivery the CAS exists to prevent.
      */
     @Test
     void chargeIsAllOrNothingAgainstTheRemainingBalance() {
@@ -119,7 +133,7 @@ class JdbcRateLimitStoreTest {
         assertThat(store.charge("smtp", 10, clock.instant())).isTrue();
     }
 
-    /** Um token a cada window/max (600ms para 100/min): meio intervalo não rende token nenhum. */
+    /** One token every window/max (600ms for 100/min): half an interval yields no token at all. */
     @Test
     void theBucketRefillsOneTokenPerIntervalAndNotBefore() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
@@ -133,19 +147,17 @@ class JdbcRateLimitStoreTest {
     }
 
     /**
-     * A fração pendente sobrevive: sem guardar o resto da divisão, cada
-     * chamada descartaria o tempo não convertido e o limite entregaria
-     * menos que {@code max} por janela para sempre.
+     * The pending fraction survives: without keeping the division's remainder, each call would discard the
+     * unconverted time and the limit would deliver less than {@code max} per window forever.
      */
     @Test
     void refillKeepsTheLeftoverTimeBetweenCalls() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
         store.charge("smtp", 100, clock.instant());
 
-        // três avanços de 400ms = 1200ms = 2 tokens de 600ms; o consumo em
-        // 800ms leva o primeiro, então sobra 1. Descartar a fração a cada
-        // chamada (refilledAt = "agora" em vez de += refill × intervalo)
-        // daria 0 aqui: os 200ms restantes de cada passo evaporariam.
+        // Three advances of 400ms make 1200ms, which is 2 tokens of 600ms; the consumption at 800ms takes
+        // the first, so 1 remains. Discarding the fraction on every call (refilledAt = "now" rather than
+        // += refill x interval) would give 0 here: each step's remaining 200ms would evaporate.
         clock.advance(Duration.ofMillis(400));
         store.charge("smtp", 1, clock.instant());
         clock.advance(Duration.ofMillis(400));
@@ -165,7 +177,7 @@ class JdbcRateLimitStoreTest {
         assertThat(store.find("smtp")).get().extracting(RateLimitSnapshot::available).isEqualTo(100);
     }
 
-    /** Relógio para trás atrasa a liberação; jamais libera dobrado (ADR-0042). */
+    /** A clock running backwards delays the release; it never releases twice as much. */
     @Test
     void aClockGoingBackwardsRefillsNothing() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
@@ -174,7 +186,7 @@ class JdbcRateLimitStoreTest {
         assertThat(store.charge("smtp", 1, NOW.minus(Duration.ofHours(1)))).isFalse();
     }
 
-    /** Fail-safe da ADR-0042: nome inexistente concede zero em vez de deixar passar sem limite. */
+    /** The fail-safe: a nonexistent name grants zero rather than letting work through with no limit. */
     @Test
     void anUnknownRateLimitGrantsNothingAndChargesNothing() {
         assertThat(store.available("ghost", clock.instant())).isZero();
@@ -182,9 +194,8 @@ class JdbcRateLimitStoreTest {
     }
 
     /**
-     * O balde é estado operacional e sobrevive ao boot — senão cada nó
-     * subindo num rolling deploy devolveria um balde cheio e o deploy
-     * viraria burst.
+     * The bucket is operational state and survives a boot — otherwise every node coming up in a rolling
+     * deploy would hand back a full bucket and the deploy would become a burst.
      */
     @Test
     void upsertKeepsTheBucketBalance() {
@@ -206,29 +217,27 @@ class JdbcRateLimitStoreTest {
     }
 
     /**
-     * Linha adulterada com saldo acima do teto — cenário real: a ADR-0042
-     * manda o operador rodar DDL manual nesta tabela no upgrade. Clampar o
-     * saldo em memória cegaria o CAS ({@code expectedTokens} nunca casaria
-     * com a linha) e o limite ficaria incobrável PARA SEMPRE, derrubando toda
-     * rodada que o tocasse. Aqui o clamp vive só na leitura de dashboard.
+     * A tampered row with a balance above the ceiling — a real scenario: the operator is told to run manual
+     * DDL on this table during an upgrade. Clamping the balance in memory would blind the CAS
+     * ({@code expectedTokens} would never match the row) and the limit would become uncharge­able FOREVER,
+     * taking down every round that touched it. Here the clamp lives only in the dashboard read.
      */
     @Test
     void chargeStillWorksOnARowHoldingMoreTokensThanItsCeiling() {
         store.upsert(new RateLimit("smtp", 10, Duration.ofMinutes(1)));
         new JdbcTemplate(dataSource).update("UPDATE mohs_rate_limits SET tokens = 50 WHERE name = 'smtp'");
 
-        // o excedente adulterado é descartado (clamp para a capacidade de 10),
-        // a cobrança de 5 é honrada, sobram 5 — e o limite continua cobrável,
-        // que é o ponto: com clamp em mapBucket, o CAS nunca mais casaria
+        // The tampered surplus is discarded (clamped to the capacity of 10), the charge of 5 is honoured and
+        // 5 remain — and the limit stays chargeable, which is the point: with a clamp in mapBucket, the CAS
+        // would never match again
         assertThat(store.charge("smtp", 5, clock.instant())).isTrue();
         assertThat(store.find("smtp")).get().extracting(RateLimitSnapshot::available).isEqualTo(5);
     }
 
     /**
-     * O texto de {@code window_duration} escrito à mão numa forma
-     * equivalente mas não canônica ({@code PT60S} em vez de {@code PT1M}) não
-     * pode travar a cobrança: o CAS compara TEXTO, e re-serializar o
-     * {@code Duration} parseado faria o predicado nunca casar.
+     * A {@code window_duration} text written by hand in an equivalent but non-canonical form
+     * ({@code PT60S} instead of {@code PT1M}) must not stall the charge: the CAS compares TEXT, and
+     * re-serialising the parsed {@code Duration} would make the predicate never match.
      */
     @Test
     void chargeWorksWhenTheStoredWindowTextIsNotCanonical() {
@@ -238,7 +247,7 @@ class JdbcRateLimitStoreTest {
         assertThat(store.charge("smtp", 1, clock.instant())).isTrue();
     }
 
-    /** Leitura é pura: consultar o saldo não pode consumir nem mover o balde. */
+    /** A read is pure: checking the balance must neither consume nor move the bucket. */
     @Test
     void findDoesNotConsumeTokens() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
@@ -250,14 +259,13 @@ class JdbcRateLimitStoreTest {
     }
 
     /**
-     * A afirmação central do mecanismo: duas transações concorrentes pedindo
-     * o balde inteiro não podem somar mais que a capacidade — sobre-entrega é
-     * a ÚNICA violação inaceitável do contrato (ADR-0042). Quem garante isso
-     * é o CAS sobre {@code (tokens, refilled_at)} dentro de {@code charge},
-     * não lock pessimista (revisão de duas fases, 2026-08-18): sem ele as
-     * duas leriam 10 e cobrariam 20. Vale como prova porque as duas rodam em
-     * transações de verdade, disputando a mesma linha via barrier — mesmo
-     * padrão de {@code upsertHandlesConcurrentFirstTimeInsertWithoutThrowing}.
+     * The mechanism's central claim: two concurrent transactions each asking for the whole bucket cannot
+     * add up to more than the capacity — over-delivery is the ONLY unacceptable violation of the contract.
+     *
+     * <p>What guarantees that is the CAS over {@code (tokens, refilled_at)} inside {@code charge}, not a
+     * pessimistic lock: without it, both would read 10 and charge 20. It counts as proof because both run
+     * in real transactions, contending for the same row through a barrier — the same pattern as
+     * {@code upsertHandlesConcurrentFirstTimeInsertWithoutThrowing}.
      */
     @Test
     void twoConcurrentConsumersNeverGrantMoreThanTheBucketHolds() throws Exception {

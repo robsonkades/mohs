@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Instant;
@@ -12,24 +27,23 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * ADR-0049 — a regressão do gap de horário de verão, o bug reportado em
- * 2026-08-19: o caminho legado ({@code Timestamp.valueOf}) resolvia um
- * {@code LocalDateTime} inexistente pelo fuso DEFAULT da JVM empurrando-o
- * 1h pra frente — durante a hora do gap, todo instante gravado saía
- * errado. A travessia por {@link LocalDateTime} (JDBC 4.2) não consulta
- * fuso nenhum; estes testes fixam isso trocando o default da JVM para uma
- * zona com DST e atravessando um instante DENTRO do gap.
+ * The daylight-saving gap regression, the bug reported on 2026-08-19: the legacy path
+ * ({@code Timestamp.valueOf}) resolved a nonexistent {@code LocalDateTime} through the JVM's DEFAULT
+ * zone by pushing it an hour forward — during the gap hour, every instant written came out wrong.
+ *
+ * <p>The {@link LocalDateTime} crossing (JDBC 4.2) consults no zone at all; these tests pin that by
+ * switching the JVM's default to a zone with DST and crossing an instant INSIDE the gap.
  */
 class JdbcTimestampsTest {
 
     /**
-     * O que atravessa a conversão legada é o WALL-CLOCK UTC — 02:30 — e é
-     * ELE que precisa ser hora inexistente na zona default (o gap de
-     * America/New_York em 2026-03-08 é 02:00–03:00 local): com o código
-     * antigo, {@code Timestamp.valueOf(LDT 02:30)} era empurrado pra 03:30
-     * e o round trip devolvia 03:30Z ≠ 02:30Z. A primeira versão deste
-     * teste usava 07:30Z (o INSTANTE cujo horário local é 02:30) — vácuo:
-     * passava com o bug presente (review da Phase 2).
+     * What crosses the legacy conversion is the UTC WALL CLOCK — 02:30 — and it is THAT which has to be a
+     * nonexistent time in the default zone (America/New_York's 2026-03-08 gap is 02:00-03:00 local): with
+     * the old code, {@code Timestamp.valueOf(LDT 02:30)} was pushed to 03:30 and the round trip returned
+     * 03:30Z, not 02:30Z.
+     *
+     * <p>The first version of this test used 07:30Z (the INSTANT whose local time is 02:30) — vacuous: it
+     * passed with the bug present.
      */
     private static final Instant INSIDE_THE_GAP = Instant.parse("2026-03-08T02:30:00Z");
 
@@ -50,7 +64,7 @@ class JdbcTimestampsTest {
                 .isEqualTo(INSIDE_THE_GAP));
     }
 
-    /** O mesmo gap por um round trip JDBC de verdade — é o driver que não pode consultar o fuso default, não só a conversão em memória. */
+    /** The same gap through a real JDBC round trip — it is the driver that must not consult the default zone, not only the in-memory conversion. */
     @Test
     void survivesTheGapThroughARealJdbcRoundTrip() {
         withJvmZone("America/New_York", () -> {

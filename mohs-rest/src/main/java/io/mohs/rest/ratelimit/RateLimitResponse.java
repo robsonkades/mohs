@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.ratelimit;
 
 import java.time.Duration;
@@ -6,11 +21,11 @@ import java.util.Objects;
 import io.mohs.core.RateLimitSnapshot;
 
 /**
- * Forma de wire de {@link io.mohs.core.resource.RateLimit} com o saldo
- * corrente do balde (ADR-0042). {@code available} — tokens disponíveis —
- * e não "usados": quem abre o dashboard quer saber quanto ainda cabe
- * AGORA, e "usado" nem é grandeza de balde (o refill é contínuo, não tem
- * virada de janela onde zerar um contador).
+ * The wire form of {@link io.mohs.core.resource.RateLimit} plus the bucket's current balance.
+ *
+ * <p>{@code available} — tokens available — rather than "used": whoever opens the dashboard wants to
+ * know how much still fits NOW, and "used" is not even a quantity a bucket has (refill is
+ * continuous, with no window boundary at which to reset a counter).
  */
 public record RateLimitResponse(String name, int max, Duration window, int available) {
 

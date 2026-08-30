@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core;
 
 import java.time.Instant;
@@ -10,15 +25,15 @@ import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 
 /**
- * Filtro + paginação de {@link Mohs#executions} — parameter object
- * (Fowler, "Introduce Parameter Object") pros 6 filtros/controles de
- * {@code GET /executions} do design REST, todos opcionais exceto
- * {@code limit}. {@code cursor} é opaco: o {@code id} (UUIDv7, ordenável
- * cronologicamente) do último item da página anterior — resultado
- * ordenado por {@code id} decrescente (mais recente primeiro), só
- * {@link Execution}s com {@code id < cursor} quando presente.
+ * The filter and pagination of {@link Mohs#executions} — a parameter object (Fowler, "Introduce
+ * Parameter Object") for the six filters and controls of {@code GET /executions} in the REST design,
+ * all optional except {@code limit}.
  *
- * @param limit teto de itens devolvidos, pelo menos 1
+ * <p>{@code cursor} is opaque: the {@code id} (UUIDv7, chronologically sortable) of the previous
+ * page's last item. Results are ordered by descending {@code id} (most recent first), and only
+ * {@link Execution}s with {@code id < cursor} are returned when it is present.
+ *
+ * @param limit the ceiling on items returned, at least 1
  */
 public record ExecutionQuery(
         @Nullable JobKey jobKey,

@@ -1,5 +1,21 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.definition;
 
+import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -14,104 +30,100 @@ import io.mohs.core.resource.RateLimit;
 import io.mohs.core.schedule.Misfire;
 
 /**
- * Declara um job num método de um bean gerenciado pelo Spring — sem
- * interface {@code Job}, sem {@code implements}. O starter transforma cada
- * método anotado em exatamente um {@link JobDefinition} no boot (source
- * {@link DefinitionSource#ANNOTATION}).
+ * Declares a job on a method of a Spring-managed bean — no {@code Job} interface, no
+ * {@code implements}. The starter turns each annotated method into exactly one
+ * {@link JobDefinition} at boot, with source {@link DefinitionSource#ANNOTATION}.
  *
- * <p>{@link #cron()}, {@link #every()} e {@link #everyAfterFinish()} são
- * mutuamente exclusivos; os três ausentes significam que o job só dispara
- * sob demanda (via {@link Mohs#schedule}, {@link Mohs#batch} ou o
- * dashboard). Os parâmetros do método seguem a mesma convenção
- * independente do gatilho: até um payload e um {@link JobContext},
- * opcionais, em qualquer ordem.
+ * <p>{@link #cron()}, {@link #every()} and {@link #everyAfterFinish()} are mutually exclusive; all
+ * three absent means the job fires only on demand (through {@link Mohs#schedule},
+ * {@link Mohs#batch} or the dashboard). The method's parameters follow the same convention
+ * regardless of the trigger: at most one payload and one {@link JobContext}, both optional, in any
+ * order.
  *
- * <p>Componível como meta-anotação ({@code ANNOTATION_TYPE} no target,
- * mesmo desenho do {@code @Scheduled} do Spring): {@link RecurringJob} e
- * {@link OnDemandJob} são estereótipos sobre esta anotação (ADR-0038), e
- * o consumidor pode compor os próprios — o scanner resolve via
- * merged annotations, com {@code @AliasFor} honrado.
+ * <p>Composable as a meta-annotation ({@code ANNOTATION_TYPE} in its target, the same design as
+ * Spring's {@code @Scheduled}): {@link RecurringJob} and {@link OnDemandJob} are stereotypes over
+ * this annotation, and a consumer may compose their own — the scanner resolves them through merged
+ * annotations, with {@code @AliasFor} honoured.
  */
 @Target({ElementType.METHOD, ElementType.ANNOTATION_TYPE})
+@Documented
 @Retention(RetentionPolicy.RUNTIME)
 public @interface MohsJob {
 
-    /** Identidade estável — vira o {@link JobKey}. Obrigatório, upsert no boot. */
+    /** The stable identity — it becomes the {@link JobKey}. Mandatory, upserted at boot. */
     String id();
 
-    /** Rótulo de exibição mutável. Default para o id quando deixado vazio. */
+    /** A mutable display label. Defaults to the id when left empty. */
     String name() default "";
 
-    /** Expressão cron estilo Quartz, seconds-first. Exige {@link #zone()}. */
+    /** A Quartz-style, seconds-first cron expression. Requires {@link #zone()}. */
     String cron() default "";
 
-    /** Zone em que a expressão cron é avaliada. Obrigatório quando {@link #cron()} está definido. */
+    /** The zone the cron expression is evaluated in. Mandatory when {@link #cron()} is set. */
     String zone() default "";
 
-    /** Intervalo fixed-rate (duração ISO-8601, ex. {@code "PT30S"}), ancorado no horário de disparo agendado. */
+    /** A fixed-rate interval (an ISO-8601 duration, e.g. {@code "PT30S"}), anchored to the scheduled firing time. */
     String every() default "";
 
-    /** Intervalo fixed-delay (duração ISO-8601), ancorado no fim da execução anterior. */
+    /** A fixed-delay interval (an ISO-8601 duration), anchored to the end of the previous execution. */
     String everyAfterFinish() default "";
 
-    /** {@link MohsRunner} nomeado em que este job executa. */
+    /** The named {@link MohsRunner} this job runs on. */
     String runner() default "";
 
-    /** {@link ExecutionWindow} nomeada que exclui horários de disparo. */
+    /** The named {@link ExecutionWindow} that excludes firing times. */
     String window() default "";
 
     /**
-     * {@link RateLimit} nomeado que limita a vazão de disparos deste job —
-     * cluster-wide, não por nó (ADR-0042). Nome inexistente bloqueia o job,
-     * de propósito: rodar sem o limite que alguém pediu é pior que parar.
+     * The named {@link RateLimit} bounding this job's firing rate — cluster-wide, not per node. A
+     * nonexistent name blocks the job on purpose: running without the limit somebody asked for is
+     * worse than stopping.
      */
     String rateLimit() default "";
 
-    /** Política de misfire. Default {@link Misfire#IGNORE}. */
+    /** The misfire policy. Defaults to {@link Misfire#IGNORE}. */
     Misfire misfire() default Misfire.IGNORE;
 
     /**
-     * Nasce pausado no PRIMEIRO registro da definição (ADR-0037): a agenda
-     * fica declarada e desarmada até um {@code POST /jobs/{id}/resume} (ou
-     * {@code Mohs.resume}); execução manual sob demanda continua valendo
-     * mesmo pausado. Depois do nascimento, {@code paused} é decisão de
-     * operador — redeploy nunca re-pausa.
+     * Born paused on the FIRST registration of the definition: the schedule is declared but
+     * disarmed until a {@code POST /jobs/{id}/resume} (or {@code Mohs.resume}); manual on-demand
+     * execution still works while paused. After birth, {@code paused} is an operator decision — a
+     * redeploy never re-pauses.
      */
     boolean startPaused() default false;
 
     /**
-     * Impede que mais de uma execução deste job fique {@code RUNNING} ao
-     * mesmo tempo. Default: concorrência permitida (ver {@link
-     * PolicySpec#preventOverlap()} pro raciocínio completo) — marque
-     * {@code true} pro caso estreito de um job cron/interval cujo próprio
-     * disparo seguinte pode ocorrer antes do anterior terminar.
+     * Prevents more than one execution of this job from being {@code RUNNING} at the same time.
+     *
+     * <p>The default is to allow concurrency (see {@link PolicySpec#preventOverlap()} for the full
+     * reasoning) — set {@code true} for the narrow case of a cron or interval job whose next firing
+     * may occur before the previous one finishes.
      */
     boolean allowConcurrentExecutions() default true;
 
     /**
-     * Teto de execuções concorrentes deste job — só lido quando {@link
-     * #allowConcurrentExecutions()} é {@code false} (ver {@link
-     * PolicySpec#maxConcurrentExecutions(int)}); nesse caso é obrigatório
-     * ser pelo menos 1 (o default {@code 0} falha o boot com uma mensagem
-     * clara em vez de assumir um valor).
+     * The ceiling on concurrent executions of this job — read only when
+     * {@link #allowConcurrentExecutions()} is {@code false} (see
+     * {@link PolicySpec#maxConcurrentExecutions(int)}); in that case it must be at least 1 (the
+     * default of {@code 0} fails the boot with a clear message rather than assuming a value).
      */
     int maxConcurrentExecutions() default 0;
 
     /**
-     * Tentativas de retry ALÉM da primeira execução. O default é 1, não 0:
-     * o contrato de entrega (ADR-0003) só é at-least-once quando há
-     * orçamento — sem ele, o reclaim de uma execução cuja posse se perdeu
-     * (nó morto, lease vencida, janela de shutdown) não tem para onde
-     * reagendar e vira {@code FAILED} terminal, isto é, trabalho perdido em
-     * silêncio num evento que o produto promete sobreviver. Quem prefere
-     * no máximo uma invocação por execução (at-most-once) declara
-     * {@code retries = 0} de propósito, e aceita a perda sob falha de nó.
+     * Retry attempts BEYOND the first execution. The default is 1, not 0.
+     *
+     * <p>The delivery contract is only at-least-once when there is budget: without it, reclaiming
+     * an execution whose ownership was lost (a dead node, an expired lease, the shutdown window)
+     * has nowhere to reschedule and becomes a terminal {@code FAILED} — silently lost work, in
+     * exactly the event the product promises to survive. Anyone preferring at most one invocation
+     * per execution declares {@code retries = 0} deliberately, and accepts the loss under node
+     * failure.
      */
     int retries() default 1;
 
-    /** Timeout da tentativa (duração ISO-8601, ex. {@code "PT5M"}). */
+    /** The attempt's timeout (an ISO-8601 duration, e.g. {@code "PT5M"}). */
     String timeout() default "";
 
-    /** Nome do bean de uma política de retry customizada, para casos que {@link #retries()} não expressa. */
+    /** The bean name of a custom retry policy, for cases {@link #retries()} cannot express. */
     String retryPolicy() default "";
 }

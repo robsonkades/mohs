@@ -1,18 +1,32 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest;
 
 import java.util.Objects;
 
 /**
- * Envelope de toda resposta de {@code PATCH} — carrega o aviso de que a
- * mudança é de emergência e vale só até o próximo boot (ver
- * {@code docs/REST-API-DESIGN.md}, seção "PATCH runtime × configuração de
- * boot"), a menos que {@code mohs.registration.on-conflict: preserve}
- * esteja configurado.
+ * The envelope of every {@code PATCH} response — it carries the warning that the change is an
+ * emergency one and holds only until the next boot ("runtime
+ * PATCH versus boot configuration"), unless {@code mohs.registration.on-conflict: preserve} is
+ * configured.
  */
 public record RuntimePatchResponse<T>(T resource, String notice) {
 
     public static final String BOOT_REVERSION_NOTICE =
-            "Mudança de emergência: vale até o próximo boot; codifique em properties para torná-la permanente.";
+            "Emergency change: it holds until the next boot; encode it in properties to make it permanent.";
 
     public RuntimePatchResponse {
         Objects.requireNonNull(resource, "resource");

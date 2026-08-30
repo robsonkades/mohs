@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.node;
 
 import java.util.List;
@@ -11,12 +26,12 @@ import io.mohs.core.Mohs;
 import io.mohs.rest.ApiPaths;
 
 /**
- * {@code GET /nodes} — visão de cluster: nodes com heartbeat recente,
- * last-seen, mais recente primeiro (a ordem vem de {@code Mohs#nodes}).
- * Morte não é campo da resposta: crash não escreve nada (ADR-0012) — o
- * leitor deriva vivo/suspeito da idade de {@code lastHeartbeatAt}, e
- * {@code STOPPED} é o único desfecho auto-reportado (shutdown limpo,
- * ADR-0041); o purge da mesma ADR limita a lista a nodes recentes.
+ * {@code GET /nodes} — the cluster view: nodes with a recent heartbeat and their last-seen time,
+ * most recent first (the order comes from {@code Mohs#nodes}).
+ *
+ * <p>Death is not a field of the response: a crash writes nothing — the reader derives alive versus
+ * suspect from the age of {@code lastHeartbeatAt}, and {@code STOPPED} is the only self-reported
+ * outcome (a clean shutdown); the purge keeps the list to recent nodes.
  */
 @RestController
 @RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/nodes")

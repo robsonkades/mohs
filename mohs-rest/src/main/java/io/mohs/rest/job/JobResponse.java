@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.job;
 
 import java.time.Duration;
@@ -12,9 +27,9 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.schedule.Misfire;
 
 /**
- * Forma de wire de {@link JobDefinition} — {@code paused}/{@code
- * nextFireAt} são estado operacional, sem lastro em M1 (que só modela
- * config estática); vêm de {@link JobSnapshot} no M3.
+ * The wire form of {@link JobDefinition} — {@code paused} and {@code nextFireAt} are operational
+ * state with no counterpart in the definition itself (which models only static configuration); they
+ * come from {@link JobSnapshot}.
  */
 public record JobResponse(
         String jobKey,
@@ -41,7 +56,7 @@ public record JobResponse(
         Objects.requireNonNull(source, "source");
     }
 
-    /** {@code name} cai pro valor de {@code jobKey} quando o rótulo legível não foi definido. */
+    /** {@code name} falls back to the {@code jobKey}'s value when no human-readable label was set. */
     public static JobResponse from(JobSnapshot snapshot) {
         JobDefinition definition = snapshot.definition();
         String name = definition.name() != null ? definition.name() : definition.key().value();

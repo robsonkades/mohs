@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
 
 CREATE TABLE IF NOT EXISTS mohs_batches (
     id         VARCHAR(255) PRIMARY KEY,
+    name       VARCHAR(255) NOT NULL,
     total      INT NOT NULL DEFAULT 0,
     succeeded  INT NOT NULL DEFAULT 0,
     failed     INT NOT NULL DEFAULT 0,
@@ -122,7 +123,6 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     idempotency_key VARCHAR(255),
     payload         MEDIUMTEXT   NOT NULL,
     payload_type    VARCHAR(500) NOT NULL,
-    INDEX idx_mohs_execution_created (created_at),
     INDEX idx_mohs_execution_job (job_key, execution_id DESC), -- ORDER BY/cursor do findPage — ver o V3 do Postgres
     INDEX idx_mohs_execution_corr (correlation_id)
 );
@@ -145,5 +145,6 @@ CREATE TABLE IF NOT EXISTS mohs_idempotency (
     idempotency_key VARCHAR(255) NOT NULL,
     execution_id    VARCHAR(255) NOT NULL,
     created_at      DATETIME(6)  NOT NULL,
-    PRIMARY KEY (job_key, idempotency_key)
+    PRIMARY KEY (job_key, idempotency_key),
+    INDEX idx_mohs_idempotency_created (created_at) -- pruneIdempotencyBefore: sem ele o DELETE por retenção é full scan
 );

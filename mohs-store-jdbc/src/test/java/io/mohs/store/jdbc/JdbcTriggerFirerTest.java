@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Duration;
@@ -34,9 +49,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link JdbcTriggerFirer} — o CAS transacional da ADR-0035 sobre as mesas
- * da Phase 5: avanço de {@code next_fire_at}, história ({@code
- * mohs_execution}) e fila ({@code mohs_ready}) vencem ou perdem juntos.
+ * {@link JdbcTriggerFirer} — the transactional CAS over the split tables: the {@code next_fire_at}
+ * advance, history ({@code mohs_execution}) and the queue ({@code mohs_ready}) all win or lose together.
  */
 class JdbcTriggerFirerTest {
 
@@ -71,15 +85,15 @@ class JdbcTriggerFirerTest {
         return h2;
     }
 
-    /** upsert arma o trigger em {@code NOW + 1min} — o valor observado dos testes. */
+    /** The upsert arms the trigger at {@code NOW + 1min} — the value the tests observe. */
     private Instant armEveryMinuteJob(String jobKey) {
         jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
         return NOW.plus(Duration.ofMinutes(1));
     }
 
     private static Execution occurrence(String id, String jobKey, Instant scheduledAt) {
-        return new Execution(ExecutionId.of(id), JobKey.of(jobKey), ExecutionState.ENQUEUED, scheduledAt, null,
-                List.of(), Execution.SCHEDULER_ACTOR, Priority.NORMAL, null);
+        return Execution.enqueued(ExecutionId.of(id), JobKey.of(jobKey), scheduledAt, Execution.SCHEDULER_ACTOR,
+                Priority.NORMAL);
     }
 
     private @Nullable Instant nextFireAtOf(String jobKey) {
@@ -104,7 +118,7 @@ class JdbcTriggerFirerTest {
 
         assertThat(fired).isTrue();
         assertThat(nextFireAtOf("poll")).isEqualTo(newNextFire);
-        // história advisory + fila devida em scheduledAt — a unidade de enqueue do §7.5-1
+        // Advisory history plus a queue entry due at scheduledAt — the enqueue unit
         assertThat(historyStateOf("occ-1")).isEqualTo("PENDING");
         assertThat(rawJdbc.queryForObject(
                 "SELECT actor FROM mohs_execution WHERE execution_id = 'occ-1'", String.class))
@@ -112,13 +126,13 @@ class JdbcTriggerFirerTest {
         assertThat(rawJdbc.queryForObject(
                 "SELECT visible_at FROM mohs_ready WHERE execution_id = 'occ-1'", LocalDateTime.class))
                 .isEqualTo(JdbcTimestamps.toUtcLocalDateTime(observed));
-        // createdAt = now do disparo (chave de partição), não o scheduledAt
+        // createdAt = the firing's now, not the scheduledAt
         assertThat(rawJdbc.queryForObject(
                 "SELECT created_at FROM mohs_execution WHERE execution_id = 'occ-1'", LocalDateTime.class))
                 .isEqualTo(JdbcTimestamps.toUtcLocalDateTime(NOW));
     }
 
-    /** A corrida entre nós: quem observa um next_fire_at que já avançou perde e não insere nada. */
+    /** The race between nodes: whoever observes a next_fire_at that has already advanced loses and inserts nothing. */
     @Test
     void fireLosesWhenTheObservedTriggerIsStale() {
         Instant observed = armEveryMinuteJob("poll");
@@ -132,7 +146,7 @@ class JdbcTriggerFirerTest {
         assertThat(historyStateOf("occ-1")).isNull();
     }
 
-    /** fixed-delay: o plano desarma o trigger — a conclusão rearma (ADR-0035). */
+    /** fixed-delay: the plan disarms the trigger — the completion rearms it. */
     @Test
     void fireCanDisarmTheTrigger() {
         Instant observed = armEveryMinuteJob("poll");
@@ -144,7 +158,7 @@ class JdbcTriggerFirerTest {
         assertThat(nextFireAtOf("poll")).isNull();
     }
 
-    /** Mohs.remove entre a varredura e o CAS: o predicado de retired impede materializar ocorrência zumbi que o cancel do remove já não alcança. */
+    /** A Mohs.remove between the sweep and the CAS: the retired predicate prevents materialising a zombie occurrence the remove's cancel can no longer reach. */
     @Test
     void fireLosesWhenTheJobWasRetiredAfterTheSweep() {
         Instant observed = armEveryMinuteJob("poll");
@@ -157,11 +171,11 @@ class JdbcTriggerFirerTest {
         assertThat(historyStateOf("occ-1")).isNull();
     }
 
-    /** Avanço e inserção são atômicos: inserção que falha desfaz o avanço — a ocorrência não é perdida, o próximo tick tenta de novo. */
+    /** The advance and the insert are atomic: a failing insert undoes the advance — the occurrence is not lost, and the next tick tries again. */
     @Test
     void aFailedInsertRollsBackTheAdvance() {
         Instant observed = armEveryMinuteJob("poll");
-        // segunda ocorrência colide com uma execução pré-existente — PK viola no record
+        // The second occurrence collides with a pre-existing execution — the primary key is violated in record
         rawJdbc.update("""
                 INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
                 VALUES ('occ-2', 'poll', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')

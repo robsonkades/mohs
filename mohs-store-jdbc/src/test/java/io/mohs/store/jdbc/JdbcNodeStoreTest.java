@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Duration;
@@ -20,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class JdbcNodeStoreTest {
 
-    /** Lease de nó dos cenários (ADR-0051) — o valor em si não importa, só a aritmética {@code at + TTL}. */
+    /** The scenarios' node lease — the value itself does not matter, only the {@code at + TTL} arithmetic. */
     private static final Duration NODE_LEASE_TTL = Duration.ofSeconds(15);
 
     private JdbcNodeStore store;
@@ -78,7 +93,7 @@ class JdbcNodeStoreTest {
         assertThat(store.findAll()).isEmpty();
     }
 
-    /** Tolerância de versão mista (ADR-0051): linha gravada por jar antigo, sem {@code expires_at}, volta com o campo nulo — o reaper decide pela staleness do heartbeat. */
+    /** Mixed-version tolerance: a row written by an older jar, with no {@code expires_at}, comes back with the field null — the reaper decides by the heartbeat's staleness. */
     @Test
     void findAllReadsALegacyRowWithoutANodeLease() {
         Instant at = Instant.parse("2026-08-14T12:00:00Z");
@@ -91,7 +106,7 @@ class JdbcNodeStoreTest {
                 new StoredNode("legacy-node", EngineState.RUNNING, at, 0, null));
     }
 
-    /** ADR-0041: corte estritamente ANTES do cutoff — linha exatamente no cutoff fica (heartbeat no limiar ainda é sinal, não lixo). */
+    /** A cutoff strictly BEFORE: a row exactly at the cutoff stays (a heartbeat at the threshold is still a signal, not rubbish). */
     @Test
     void deleteHeartbeatsBeforeRemovesOnlyStrictlyStaleNodes() {
         Instant cutoff = Instant.parse("2026-08-14T11:30:00Z");

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.autoconfigure;
 
 import java.io.IOException;
@@ -261,7 +276,7 @@ class MohsJobsTest {
                 .hasMessage("boom");
     }
 
-    /** A IAE crua do reflection ("argument type mismatch") não diz método nem tipos — o embrulho dá o contexto que {@code Attempt.error()} vai carregar. */
+    /** Reflection's raw IAE ("argument type mismatch") names neither the method nor the types — the wrapper supplies the context {@code Attempt.error()} will carry. */
     @Test
     void wrongTypedPayloadFailsNamingMethodAndTypes() {
         MohsJobs.AdaptedHandler adapted = MohsJobs.adaptHandler(new Handlers(), method("payloadOnly", Greeting.class));
@@ -274,9 +289,66 @@ class MohsJobsTest {
                 .hasCauseInstanceOf(IllegalArgumentException.class);
     }
 
+    // ---- ParameterBinding ----
+
+    @Test
+    void noArgsBindsNothing() {
+        MohsJobs.ParameterBinding binding = MohsJobs.ParameterBinding.of(method("noArgs"));
+
+        assertThat(binding.payloadIndex()).isEqualTo(-1);
+        assertThat(binding.contextIndex()).isEqualTo(-1);
+        assertThat(binding.argCount()).isZero();
+        assertThat(binding.payloadType()).isNull();
+    }
+
+    @Test
+    void payloadThenContextBindsInDeclarationOrder() {
+        MohsJobs.ParameterBinding binding =
+                MohsJobs.ParameterBinding.of(method("payloadThenContext", Greeting.class, JobContext.class));
+
+        assertThat(binding.payloadIndex()).isZero();
+        assertThat(binding.contextIndex()).isEqualTo(1);
+        assertThat(binding.argCount()).isEqualTo(2);
+        assertThat(binding.payloadType()).isEqualTo(Greeting.class);
+    }
+
+    /** The order is free by {@code @MohsJob}'s contract — the binding follows the declaration, not a convention. */
+    @Test
+    void contextThenPayloadBindsInDeclarationOrder() {
+        MohsJobs.ParameterBinding binding =
+                MohsJobs.ParameterBinding.of(method("contextThenPayload", JobContext.class, Greeting.class));
+
+        assertThat(binding.payloadIndex()).isEqualTo(1);
+        assertThat(binding.contextIndex()).isZero();
+        assertThat(binding.argCount()).isEqualTo(2);
+        assertThat(binding.payloadType()).isEqualTo(Greeting.class);
+    }
+
+    /**
+     * One {@code ParameterBinding} is shared by ALL concurrent executions of the same job: a single
+     * instance, captured in the lambda, registered once in the {@code HandlerRegistry}. Caching the
+     * array would hand one execution's payload to another — per-call confinement is the guarantee,
+     * not an implementation detail (JCIP 3.3).
+     */
+    @Test
+    void argumentsAreNotSharedBetweenInvocations() {
+        MohsJobs.ParameterBinding binding =
+                MohsJobs.ParameterBinding.of(method("payloadThenContext", Greeting.class, JobContext.class));
+        JobContext ctx = fakeContext();
+        Greeting first = new Greeting("ana");
+        Greeting second = new Greeting("bruno");
+
+        Object[] a = binding.arguments(first, ctx);
+        Object[] b = binding.arguments(second, ctx);
+
+        assertThat(a).isNotSameAs(b);
+        assertThat(a).containsExactly(first, ctx);
+        assertThat(b).containsExactly(second, ctx);
+    }
+
     // ---- toDefinition ----
 
-    /** ADR-0037: startPaused viaja da anotação pra definição; ausente, o job nasce armado (default de sempre). */
+    /** startPaused travels from the annotation into the definition; when absent, the job is born armed (the long-standing default). */
     @Test
     void translatesStartPaused() {
         JobDefinition dormant = MohsJobs.toDefinition(JobKey.of("dormant-job"), annotationOf("dormantMethod"), AnnotatedFixtures.class);
@@ -321,9 +393,9 @@ class MohsJobsTest {
         JobDefinition definition = MohsJobs.toDefinition(JobKey.of("on-demand-job"), annotationOf("onDemandMethod"), AnnotatedFixtures.class);
 
         assertThat(definition.retries())
-                .as("o caminho declarativo tem de nascer com o mesmo orçamento do builder: sem ele o reclaim de "
-                        + "uma posse perdida (nó morto, lease vencida) vira FAILED terminal e o contrato "
-                        + "at-least-once da ADR-0003 deixa de valer no default")
+                .as("the declarative path has to be born with the same budget as the builder: without it, reclaiming "
+                        + "lost ownership (a dead node, an expired lease) becomes a terminal FAILED and the "
+                        + "at-least-once contract stops holding under the defaults")
                 .isEqualTo(1);
     }
 
@@ -363,7 +435,7 @@ class MohsJobsTest {
         assertThat(definition.maxConcurrentExecutions()).isEqualTo(3);
     }
 
-    /** maxConcurrentExecutions no default (0) da anotação — o compact constructor de JobDefinition rejeita, mensagem já ensina. */
+    /** maxConcurrentExecutions left at the annotation's default (0) — JobDefinition's compact constructor rejects it, and its message already teaches. */
     @Test
     void allowConcurrentExecutionsFalseWithoutMaxFailsViaJobDefinitionConstructor() {
         assertThatThrownBy(() -> MohsJobs.toDefinition(JobKey.of("invalid-exclusive-job"), annotationOf("invalidExclusiveMethod"), AnnotatedFixtures.class))

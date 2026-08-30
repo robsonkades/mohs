@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Instant;
@@ -21,20 +36,17 @@ import io.mohs.engine.TriggerFirer;
 import io.mohs.engine.WorkQueue;
 
 /**
- * {@link TriggerFirer} sobre {@code mohs_job_definitions} + as mesas da
- * Phase 5 (ADR-0035 no split): o CAS de avanço do trigger e o nascimento
- * das ocorrências — história ({@code record}) e fila ({@code offer}) —
- * numa única transação, exatamente a unidade de enqueue do §7.5-1 com o
- * CAS como guarda de exclusão mútua cluster-wide. {@code historyStore}/
- * {@code workQueue} precisam apontar pro mesmo {@code DataSource} passado
- * aqui — é assim que participam da transação (mesmo padrão da era
- * anterior).
+ * {@link TriggerFirer} over {@code mohs_job_definitions} plus the split tables: the trigger's advance
+ * CAS and the occurrences' birth — history ({@code record}) and queue ({@code offer}) — in a single
+ * transaction, exactly the enqueue unit with the CAS as a cluster-wide mutual-exclusion guard.
  *
- * <p>O CAS compara {@code next_fire_at} com o valor que
- * {@code findDueRecurring} LEU da própria coluna — nunca um instante
- * calculado na JVM que não passou pelo banco (precisão temporal não faz
- * round-trip garantido entre JVM e os 4 dialetos; valor lido e
- * re-serializado por {@link JdbcTimestamps} compara igual por construção).
+ * <p>{@code historyStore}/{@code workQueue} must point at the same {@code DataSource} passed here — that
+ * is how they take part in the transaction.
+ *
+ * <p>The CAS compares {@code next_fire_at} against the value {@code findDueRecurring} READ from the
+ * column itself — never an instant computed in the JVM that never went through the database (temporal
+ * precision does not make a guaranteed round trip between the JVM and the four dialects; a value read
+ * and re-serialised by {@link JdbcTimestamps} compares equal by construction).
  */
 public final class JdbcTriggerFirer implements TriggerFirer {
 
@@ -47,8 +59,8 @@ public final class JdbcTriggerFirer implements TriggerFirer {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        // mesmo raciocínio da DBTUNE-4 em JdbcWorkQueue: CAS guardado assume
-        // "última escrita vence" (READ COMMITTED), não herda o default do banco.
+        // The same reasoning as in JdbcWorkQueue: a guarded CAS assumes "last write wins"
+        // (READ COMMITTED), and does not inherit the database's default.
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
         this.workQueue = Objects.requireNonNull(workQueue, "workQueue");
@@ -63,9 +75,9 @@ public final class JdbcTriggerFirer implements TriggerFirer {
         Objects.requireNonNull(payload, "payload");
         Objects.requireNonNull(now, "now");
         return Boolean.TRUE.equals(transactionTemplate.execute(_ -> {
-            // retired no predicado: um Mohs.remove entre a varredura e este CAS já
-            // cancelou o que estava na fila — inserir ocorrências DEPOIS dessa
-            // varredura as deixaria zumbis até uma eventual ressurreição.
+            // retired in the predicate: a Mohs.remove between the sweep and this CAS has already cancelled
+            // what was in the queue — inserting occurrences AFTER that sweep would leave them as zombies
+            // until an eventual resurrection.
             int advanced = jdbcTemplate.update("""
                     UPDATE mohs_job_definitions SET next_fire_at = :newNextFireAt
                     WHERE job_key = :jobKey AND next_fire_at = :observedNextFireAt AND retired = :retired
@@ -78,14 +90,13 @@ public final class JdbcTriggerFirer implements TriggerFirer {
             if (advanced == 0) {
                 return false;
             }
-            // createdAt = now, não scheduledAt: é o instante em que a linha
-            // NASCE, e num FIRE_ALL de misfire o scheduledAt está no passado —
-            // a história registraria um nascimento que não aconteceu ali.
-            // Ele lidera a PK de mohs_execution e viaja em memória até a
-            // conclusão, que casa a linha por igualdade. (Até a ADR-0058 a
-            // razão era outra: ele era a chave de partição, e um scheduledAt
-            // antigo apontaria partição que a retenção já podia ter dropado.)
-            // visible_at = scheduledAt: a ocorrência entra na fila já devida
+            // createdAt = now, not scheduledAt: it is the instant the row is BORN, and in a FIRE_ALL
+            // misfire the scheduledAt is in the past — history would record a birth that did not happen
+            // then. It leads mohs_execution's primary key and travels in memory until the completion,
+            // which matches the row by equality. (The reason used to be different: it was the partition
+            // key, and an old scheduledAt would point at a partition retention might already have
+            // dropped.)
+            // visible_at = scheduledAt: the occurrence enters the queue already due
             historyStore.record(occurrences.stream()
                     .map(occurrence -> new HistoryStore.NewExecution(occurrence.id(), occurrence.jobKey(),
                             Shards.of(occurrence.id()), occurrence.priority().value(), occurrence.scheduledAt(), now,

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.runner;
 
 import java.util.List;
@@ -11,17 +26,16 @@ import io.mohs.core.Mohs;
 import io.mohs.rest.ApiPaths;
 
 /**
- * {@code GET /runners} — visão node-local: modo, max, em execução. Só
- * leitura; runner é config, não runtime ajustável.
+ * {@code GET /runners} — the node-local view: mode, max, running. Read-only; a runner is
+ * configuration, not adjustable runtime.
  *
- * <p>Sem cursor, ao contrário das listagens de execução: a cardinalidade é o
- * que a aplicação declarou no boot, não o que ela acumulou rodando — mesmo
- * critério de {@code GET /jobs} e {@code GET /nodes}.
+ * <p>No cursor, unlike the execution listings: the cardinality is what the application declared at
+ * boot, not what it accumulated while running — the same criterion as {@code GET /jobs} and
+ * {@code GET /nodes}.
  *
- * <p>Node-local significa node-local: a resposta descreve o processo que
- * atendeu a requisição, não o cluster. Atrás de um load balancer, duas
- * chamadas seguidas podem legitimamente responder números diferentes — pool
- * de threads não é estado compartilhado.
+ * <p>Node-local means node-local: the response describes the process that served the request, not
+ * the cluster. Behind a load balancer, two consecutive calls may legitimately answer with different
+ * numbers — a thread pool is not shared state.
  */
 @RestController
 @RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/runners")

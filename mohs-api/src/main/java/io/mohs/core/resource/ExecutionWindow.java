@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.resource;
 
 import java.time.DayOfWeek;
@@ -13,34 +28,31 @@ import java.util.Set;
 import java.util.function.Predicate;
 
 /**
- * Janela de exclusão de disparo: um job cujo horário cai em alguma exclusão
- * configurada não dispara. Predicados só existem em código — não há
- * equivalente em properties, ao contrário de {@link MohsRunner}.
+ * A firing exclusion window: a job whose scheduled time falls inside any configured exclusion does
+ * not fire. Predicates exist only in code — there is no property-based equivalent, unlike
+ * {@link MohsRunner}.
  *
- * <p>Os predicados desta primeira versão avaliam o {@link Instant} em UTC.
- * Se a exclusão precisar respeitar o zone do próprio job, isso é decisão do
- * motor ao consumir esta janela (M3), não deste contrato.
+ * <p>This first version's predicates evaluate the {@link Instant} in UTC. Whether an exclusion
+ * should respect the job's own zone is a decision for the engine consuming this window, not for
+ * this contract.
  *
- * <p><b>{@code equals()}/{@code hashCode()} gerados pelo record são, na
- * prática, baseados em identidade</b> (API-4): {@code exclusions} é uma
- * lista de {@link Predicate}, e cada chamada de
- * {@link Builder#excludeWeekends()}/{@link Builder#excludeDaily}/
- * {@link Builder#excludeDates}/{@link Builder#exclude} cria uma lambda
- * nova e distinta — duas janelas construídas com exatamente as mesmas
- * chamadas nunca são {@code equals()}. Semântica de valor de verdade
- * exigiria modelar as exclusões como dado selado
- * ({@code Weekends}/{@code Dates}/{@code DailyRange}/{@code Custom}) em
- * vez de predicados crus — mudança maior, fora de escopo enquanto nada
- * depender de igualdade/dedupe deste tipo.
+ * <p><b>The record's generated {@code equals()}/{@code hashCode()} are, in practice, identity-based.</b>
+ * {@code exclusions} is a list of {@link Predicate}, and every call to
+ * {@link Builder#excludeWeekends()}/{@link Builder#excludeDaily}/{@link Builder#excludeDates}/
+ * {@link Builder#exclude} creates a new, distinct lambda — so two windows built from exactly the
+ * same calls are never {@code equals()}. True value semantics would require modelling the
+ * exclusions as sealed data ({@code Weekends}/{@code Dates}/{@code DailyRange}/{@code Custom})
+ * rather than raw predicates: a larger change, out of scope while nothing depends on equality or
+ * deduplication of this type.
  */
 public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) {
 
     public ExecutionWindow {
         Fields.requireNotBlank(name, "name");
-        exclusions = List.copyOf(exclusions); // cópia defensiva (Effective Java, Item 50)
+        exclusions = List.copyOf(exclusions); // a defensive copy (Effective Java, Item 50)
     }
 
-    /** {@code true} se o instante cai em alguma exclusão configurada. */
+    /** {@code true} if the instant falls inside any configured exclusion. */
     public boolean excludes(Instant instant) {
         return exclusions.stream().anyMatch(exclusion -> exclusion.test(instant));
     }
@@ -72,14 +84,13 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
         }
 
         /**
-         * Exclui o intervalo diário meio-aberto {@code [from, to)}, em UTC.
-         * Suporta cruzar a meia-noite (ex. {@code excludeDaily(22:00, 02:00)}
-         * pra uma janela de manutenção noturna) — quando {@code from} é
-         * depois de {@code to}, o intervalo é interpretado como
-         * {@code [from, 24:00) ∪ [00:00, to)} em vez de virar um no-op
-         * silencioso (TEST-9). {@code from} igual a {@code to} continua
-         * vazio por definição, como qualquer intervalo meio-aberto
-         * {@code [t, t)}.
+         * Excludes the half-open daily interval {@code [from, to)}, in UTC.
+         *
+         * <p>It supports crossing midnight (for example {@code excludeDaily(22:00, 02:00)} for an
+         * overnight maintenance window): when {@code from} is after {@code to}, the interval is
+         * read as {@code [from, 24:00) union [00:00, to)} instead of silently becoming a no-op.
+         * {@code from} equal to {@code to} remains empty by definition, as any half-open interval
+         * {@code [t, t)} is.
          */
         public Builder excludeDaily(LocalTime from, LocalTime to) {
             Objects.requireNonNull(from, "from");

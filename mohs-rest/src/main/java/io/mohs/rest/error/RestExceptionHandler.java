@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.error;
 
 import org.slf4j.Logger;
@@ -12,6 +27,8 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
@@ -19,20 +36,31 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 import io.mohs.core.job.JobKey;
 
 /**
- * Traduz as exceções de domínio REST para {@link ProblemDetail} (RFC 7807,
- * {@code application/problem+json}) — "erros com {@code detail} que ensina
- * a corrigir" (ver {@code docs/adr/0010-rest-api-v1.md}). Estende
- * {@link ResponseEntityExceptionHandler} pra herdar de graça a tradução de
- * erros de framework (JSON malformado, parâmetro ausente) via
- * {@code spring.mvc.problemdetails} — só precisa tratar as exceções de
- * domínio abaixo. Sem estado, sem dependência de construtor.
+ * Translates the REST domain exceptions into {@link ProblemDetail} (RFC 7807,
+ * {@code application/problem+json}) — "errors whose {@code detail} teaches you how to fix them".
  *
- * <p>{@code type} fica no default RFC 7807 ({@code about:blank}) — o
- * domínio {@code mohs.io} ainda não tem registro confirmado (ver
- * {@code docs/MOHS-DOCUMENTO-MESTRE.md} §7), então nenhuma URI própria é
- * inventada aqui ainda.
+ * <p>It extends {@link ResponseEntityExceptionHandler} to inherit the translation of framework
+ * errors (malformed JSON, a missing parameter) for free through
+ * {@code spring.mvc.problemdetails}, leaving only the domain exceptions below to handle. Stateless,
+ * with no constructor dependency.
+ *
+ * <p>{@code type} stays at RFC 7807's default ({@code about:blank}) — the {@code mohs.io} domain has
+ * no confirmed registry yet, so no URI of our own is invented here.
  */
-@RestControllerAdvice
+/*
+ * Scoped to the package of Mohs's controllers, and NEVER global: a @RestControllerAdvice without
+ * basePackages applies to every controller in the context, so turning on mohs.api.enabled would
+ * start deciding the error handling of the HOST APPLICATION — one of its @ResponseStatus(NOT_FOUND)
+ * would become a 500 because of the @ExceptionHandler(Exception.class) here, without a line of the
+ * app changing.
+ *
+ * HIGHEST_PRECEDENCE because, on Mohs's endpoints, the house advice has to beat a generic advice
+ * from the host; without it, the tie between two ResponseEntityExceptionHandlers at
+ * LOWEST_PRECEDENCE falls to bean registration order. The same care MohsUiAutoConfiguration already
+ * takes with static resources, applied to the exception axis.
+ */
+@RestControllerAdvice(basePackages = "io.mohs.rest")
+@Order(Ordered.HIGHEST_PRECEDENCE)
 public class RestExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(RestExceptionHandler.class);
@@ -93,19 +121,18 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     /**
-     * {@code ResponseEntityExceptionHandler.handleHttpMessageNotReadable}
-     * base substitui a mensagem original por um {@code detail} fixo
-     * ("Failed to read request") — perde a validação bem redigida que os
-     * records de request (ex.: {@link io.mohs.rest.ratelimit.RateLimitPatchRequest})
-     * já fazem no próprio compact constructor, disparada durante a
-     * desserialização do Jackson. Quando a causa raiz é uma {@link
-     * IllegalArgumentException} (validação de domínio, não JSON malformado),
-     * devolve 422 com a mensagem original — mesmo formato de {@link
-     * #handlePayloadValidation}, sem {@code field} estruturado porque essa
-     * exceção não carrega um (a mensagem já nomeia o campo por convenção,
-     * ex.: "max must be at least 1"). JSON genuinamente malformado (sem
-     * {@link IllegalArgumentException} na cadeia de causa) continua caindo
-     * no comportamento default do Spring.
+     * The base {@code ResponseEntityExceptionHandler.handleHttpMessageNotReadable} replaces the
+     * original message with a fixed {@code detail} ("Failed to read request"), losing the
+     * well-written validation the request records (e.g.
+     * {@link io.mohs.rest.ratelimit.RateLimitPatchRequest}) already perform in their compact
+     * constructors, thrown during Jackson's deserialisation.
+     *
+     * <p>When the root cause is an {@link IllegalArgumentException} (domain validation, not
+     * malformed JSON), it returns a 422 with the original message — the same shape as
+     * {@link #handlePayloadValidation}, without a structured {@code field} because that exception
+     * does not carry one (the message already names the field by convention, e.g. "max must be at
+     * least 1"). Genuinely malformed JSON, with no {@link IllegalArgumentException} in the cause
+     * chain, keeps falling through to Spring's default behaviour.
      */
     @Override
     protected ResponseEntity<Object> handleHttpMessageNotReadable(
@@ -123,14 +150,14 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     /**
-     * Linha disputada pelo caminho quente do motor — hoje só o balde de
-     * {@code mohs_rate_limits} (ADR-0042), cujo lock tem teto de tempo
-     * ({@code JdbcRateLimitStore#BUCKET_LOCK_TIMEOUT}). 503 com "nada mudou",
-     * não 500 genérico: sob contenção o {@code PATCH} é justamente a alavanca
-     * de emergência que o operador está puxando, e "unexpected error" o
-     * deixaria sem saber se aplicou — retentando por cima da linha já
-     * saturada. Transiente por definição ({@code TransientDataAccessException}):
-     * a mesma requisição repetida depois tende a passar.
+     * A row contended by the engine's hot path — today only the {@code mohs_rate_limits} bucket,
+     * whose lock has a time ceiling ({@code JdbcRateLimitStore#BUCKET_LOCK_TIMEOUT}).
+     *
+     * <p>A 503 meaning "nothing changed", not a generic 500: under contention the {@code PATCH} is
+     * precisely the emergency lever the operator is pulling, and "unexpected error" would leave them
+     * unsure whether it applied — retrying on top of an already saturated row. Transient by
+     * definition ({@code TransientDataAccessException}): the same request repeated later tends to
+     * succeed.
      */
     @ExceptionHandler({QueryTimeoutException.class, PessimisticLockingFailureException.class})
     public ProblemDetail handleContention(TransientDataAccessException ex) {
@@ -142,12 +169,11 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     /**
-     * Operação do contrato v1 ainda sem implementação (ex.:
-     * {@code OverviewController}, {@code BatchesController}) — 501 honesto em vez de
-     * o {@code UnsupportedOperationException} virar 500 "unexpected error"
-     * com stack trace no log: é exatamente o racional que
-     * {@code MohsRestAutoConfiguration} usa pra nem registrar os
-     * controllers M2 sem implementação.
+     * Every v1 route is implemented today, so this handler is a net rather than a route: an honest
+     * 501 for an operation that declares itself unimplemented, instead of letting the
+     * {@code UnsupportedOperationException} become a 500 "unexpected error" with a stack trace in
+     * the log. It stays because the alternative on the day a contract route lands ahead of its
+     * implementation is the worst of the two answers.
      */
     @ExceptionHandler(UnsupportedOperationException.class)
     public ProblemDetail handleNotImplemented(UnsupportedOperationException ex) {
@@ -158,11 +184,10 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     /**
-     * Rede de segurança pra qualquer exceção não prevista (falha de
-     * infraestrutura, bug) — sem isso, ela cai no {@code /error} padrão do
-     * Boot, com corpo estruturalmente diferente de RFC 7807 (REST-2). A
-     * causa real vai só pro log do servidor — nunca {@code ex.getMessage()}
-     * no corpo, pra não vazar detalhe interno pra um chamador não confiável.
+     * A safety net for any unforeseen exception (an infrastructure failure, a bug) — without it,
+     * that would fall through to Boot's default {@code /error}, whose body is structurally different
+     * from RFC 7807. The real cause goes only to the server's log — never {@code ex.getMessage()} in
+     * the body, so as not to leak internal detail to an untrusted caller.
      */
     @ExceptionHandler(Exception.class)
     public ProblemDetail handleUnexpected(Exception ex) {

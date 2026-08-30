@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Clock;
@@ -31,12 +46,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * ADR-0023: prova que o schema (todo ele, não só o que {@code JdbcWorkQueue} toca) e o DML de cada store fazem round-trip contra SQL
- * Server real, não só H2/Postgres — em particular {@code
- * mohs_execution.payload}/{@code mohs_attempt.error}
- * ({@code NVARCHAR(MAX)}, não {@code CLOB}/{@code TEXT} — deprecados em
- * SQL Server) e as colunas {@code DATETIME2}/{@code NVARCHAR}/
- * {@code BIT} (ver schema-sqlserver.sql).
+ * Proves that the schema (all of it, not only what {@code JdbcWorkQueue} touches) and each store's DML
+ * round-trip against a real SQL Server, not just H2 and Postgres — in particular
+ * {@code mohs_execution.payload}/{@code mohs_attempt.error} ({@code NVARCHAR(MAX)}, not
+ * {@code CLOB}/{@code TEXT}, which are deprecated on SQL Server) and the
+ * {@code DATETIME2}/{@code NVARCHAR}/{@code BIT} columns (see schema-sqlserver.sql).
  */
 class SchemaSqlServerRoundTripTest {
 
@@ -83,9 +97,9 @@ class SchemaSqlServerRoundTripTest {
     }
 
     /**
-     * A semântica do dedup no dialeto real, não só o DDL: na mesa nova o
-     * Idempotent Receiver é o conflito de PK de {@code mohs_idempotency} —
-     * mesma chave colide; execução sem chave nunca disputa a tabela.
+     * The deduplication's semantics in the real dialect, not just the DDL: the Idempotent Receiver is
+     * {@code mohs_idempotency}'s primary-key conflict — the same key collides, and an execution with no
+     * key never contends for the table.
      */
     @Test
     void idempotencyPrimaryKeyRejectsDuplicatesAndAllowsNullKeys() {
@@ -113,7 +127,7 @@ class SchemaSqlServerRoundTripTest {
     void batchStoreRoundTripsAgainstSqlServer() {
         JdbcBatchStore store = new JdbcBatchStore(dataSource, clock);
 
-        store.insert("batch-1", 10);
+        store.insert("batch-1", "nightly", 10);
         BatchCounters counters = store.find("batch-1").orElseThrow();
 
         assertThat(counters.total()).isEqualTo(10);
@@ -130,23 +144,22 @@ class SchemaSqlServerRoundTripTest {
     }
 
     /**
-     * O balde da ADR-0042 vive em duas colunas, e {@code refilled_at} é a que
-     * carrega a fração: o refill conta tokens pelo tempo decorrido desde ela e
-     * grava de volta o instante avançado pelo que converteu — nunca "agora".
-     * Se o dialeto engolir a fração sub-segundo desse instante, o balde acorda
-     * com a idade errada: mais velho libera token a mais e estoura justamente o
-     * limite que protege o recurso externo; mais novo segura job sem um erro
-     * sequer no log. Até aqui o caminho de {@code charge} só rodava em H2.
+     * The token bucket lives in two columns, and {@code refilled_at} is the one carrying the fraction: the
+     * refill counts tokens from the time elapsed since it and writes back the instant advanced by what it
+     * converted — never "now".
      *
-     * <p>A aritmética é escolhida para não absorver o erro. Com 100/min sai um
-     * token a cada 600ms, a linha nasce em {@code .500} e a segunda cobrança vem
-     * 1s depois: com a fração intacta o decorrido rende exatamente 1 token e
-     * sobram 50. O que este teste pega é desvio de {@code refilled_at} a partir
-     * de 200ms para o passado (dá 51) ou acima de 400ms para o futuro (dá 49) —
-     * coluna de segundo cheio cai fora dos dois lados: trunca, 51; arredonda,
-     * 49, medido degradando o MySQL para {@code DATETIME} sem precisão
-     * declarada. Perda mais fina passa aqui, e é inofensiva no intervalo por
-     * token de qualquer limite real.
+     * <p>If the dialect swallows that instant's sub-second fraction, the bucket wakes with the wrong age:
+     * older releases an extra token and blows precisely the limit protecting the external resource;
+     * younger holds a job back without a single error in the log. Until now the {@code charge} path only
+     * ran on H2.
+     *
+     * <p>The arithmetic is chosen so as not to absorb the error. At 100/min a token comes every 600ms, the
+     * row is born at {@code .500} and the second charge comes 1s later: with the fraction intact the
+     * elapsed time yields exactly 1 token and 50 remain. What this test catches is a deviation of
+     * {@code refilled_at} from 200ms into the past (giving 51) or beyond 400ms into the future (giving 49)
+     * — a whole-second column falls outside on both sides: truncating gives 51, rounding gives 49,
+     * measured by degrading MySQL to a {@code DATETIME} with no declared precision. Finer loss passes
+     * here, and is harmless within any real limit's per-token interval.
      */
     @Test
     void chargingAcrossATokenBoundaryProvesRefilledAtKeepsItsFraction() {

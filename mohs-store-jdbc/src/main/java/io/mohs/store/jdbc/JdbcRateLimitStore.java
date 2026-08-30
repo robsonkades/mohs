@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.sql.ResultSet;
@@ -25,43 +40,41 @@ import io.mohs.core.RateLimitSnapshot;
 import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.RateLimitStore;
 
-/** {@link RateLimitStore} sobre {@code mohs_rate_limits} (Data Mapper, PoEAA), incluindo o balde de tokens da ADR-0042. */
+/** {@link RateLimitStore} over {@code mohs_rate_limits} (a Data Mapper, PoEAA), including the token bucket. */
 public final class JdbcRateLimitStore implements RateLimitStore {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcRateLimitStore.class);
 
     /**
-     * Teto da espera pelo lock da linha do balde (hoje só o {@code UPDATE}
-     * de {@link #charge} a segura, e só até o commit) — a ÚNICA espera
-     * incondicional do caminho de claim, que até a ADR-0042 nunca bloqueava
-     * (o {@code SKIP LOCKED}/{@code READPAST} da seleção de candidatos pula
-     * o que está travado, nunca aguarda). Sem teto, um nó travado segurando
-     * a linha atrasa o tick dos OUTROS — e o tick é quem bate heartbeat e
-     * renova lease (ADR-0012), então a contenção viraria falso positivo de
-     * morte e o reaper reivindicaria execuções ainda rodando: duplicação de
-     * trabalho causada justamente pelo mecanismo que existe pra proteger o
-     * recurso externo. Estourado o teto, sai {@code QueryTimeoutException}
-     * — MEDIDO em H2 (SQLState 50200, 2013ms) e Postgres 18 (57014, 2022ms),
-     * não {@code CannotAcquireLockException}: o tradutor do Spring manda
-     * timeout de statement e deadlock para ramos IRMÃOS da hierarquia. Por
-     * isso o chamador do claim captura os dois
-     * explicitamente — perde-se a rodada, nunca o heartbeat.
+     * The ceiling on waiting for the bucket row's lock (today only {@link #charge}'s {@code UPDATE}
+     * holds it, and only until the commit) — the ONLY unconditional wait on the claim path, which never
+     * used to block at all (the candidate selection's {@code SKIP LOCKED}/{@code READPAST} skips what is
+     * locked, never waits).
      *
-     * <p>Dois segundos assumem {@code lease-ttl} folgado (30s no default): a
-     * espera precisa caber com sobra dentro do TTL, senão o teto que protege
-     * o heartbeat vira o que o consome. {@code lease-ttl} abaixo de ~10s
-     * pede revisão deste valor.
+     * <p>Without a ceiling, one stuck node holding the row delays OTHER nodes' ticks — and the tick is
+     * what beats the heartbeat and renews the lease, so contention would become a false positive of
+     * death and the reaper would reclaim executions that are still running: work duplicated by the very
+     * mechanism meant to protect the external resource.
+     *
+     * <p>Once the ceiling expires, a {@code QueryTimeoutException} comes out — MEASURED on H2 (SQLState
+     * 50200, 2013ms) and Postgres 18 (57014, 2022ms), not a {@code CannotAcquireLockException}: Spring's
+     * translator sends statement timeout and deadlock to SIBLING branches of the hierarchy. That is why
+     * the claim's caller catches both explicitly — the round is lost, never the heartbeat.
+     *
+     * <p>Two seconds assume a generous {@code lease-ttl} (30s by default): the wait has to fit
+     * comfortably inside the TTL, otherwise the ceiling that protects the heartbeat becomes what
+     * consumes it. A {@code lease-ttl} below about 10s calls for revisiting this value.
      */
     static final Duration BUCKET_LOCK_TIMEOUT = Duration.ofSeconds(2);
 
     /**
-     * Tentativas do CAS de {@link #charge} antes de devolver o fracasso pro
-     * chamador. Três porque o custo assimétrico manda: cada tentativa custa
-     * duas idas ao banco, e desistir custa a rodada inteira de claim (o CAS
-     * de até {@code batchSize} execuções). Colisão exige dois nós cobrando o
-     * MESMO limite na mesma janela de microssegundos entre leitura e
-     * escrita — três tentativas cobrem folgado o que não é contenção
-     * patológica; se for, a rodada perdida é o sinal certo.
+     * Attempts at {@link #charge}'s CAS before returning failure to the caller. Three, because the
+     * asymmetric cost dictates it: each attempt costs two round trips, while giving up costs the whole
+     * claim round (the CAS of up to {@code batchSize} executions).
+     *
+     * <p>A collision requires two nodes charging the SAME limit within the same microsecond window
+     * between read and write — three attempts amply cover anything that is not pathological contention;
+     * and if it is, the lost round is the right signal.
      */
     private static final int MAX_CHARGE_ATTEMPTS = 3;
 
@@ -70,9 +83,9 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     private final Set<String> unknownLimitsAlreadyWarned = ConcurrentHashMap.newKeySet();
 
     public JdbcRateLimitStore(DataSource dataSource, Clock clock) {
-        // template próprio, não JdbcSupport.namedTemplateWithStreamFetchSize:
-        // é o único store que precisa de teto de tempo (ver BUCKET_LOCK_TIMEOUT).
-        // O fetch size da convenção continua — findAll devolve Stream.
+        // Its own template, not JdbcSupport.namedTemplateWithStreamFetchSize: it is the only store that
+        // needs a time ceiling (see BUCKET_LOCK_TIMEOUT). The convention's fetch size stays — findAll
+        // returns a Stream.
         JdbcTemplate template = new JdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
         template.setFetchSize(JdbcSupport.STREAM_FETCH_SIZE);
         template.setQueryTimeout((int) BUCKET_LOCK_TIMEOUT.toSeconds());
@@ -81,10 +94,9 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     }
 
     /**
-     * O UPDATE toca só a spec e clampa o saldo ao novo teto; o INSERT nasce
-     * com o balde CHEIO — um limite recém-declarado não tem histórico de
-     * consumo para cobrar, e começar vazio faria o primeiro job esperar uma
-     * janela inteira por um limite que nunca foi excedido.
+     * The UPDATE touches only the spec and clamps the balance to the new ceiling; the INSERT is born
+     * with a FULL bucket — a freshly declared limit has no consumption history to charge for, and
+     * starting empty would make the first job wait a whole window for a limit that was never exceeded.
      */
     @Override
     public RateLimit upsert(RateLimit rateLimit) {
@@ -95,7 +107,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
                 .addValue("windowDuration", rateLimit.window().toString())
                 .addValue("refilledAt", JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
 
-        // ver CONC-2 em JdbcJobStore.upsert — mesma corrida, mesma correção.
+        // See the equivalent race in JdbcJobStore.upsert — same race, same fix.
         int updated = jdbcTemplate.update(UPDATE_SPEC, params);
         if (updated == 0) {
             try {
@@ -137,21 +149,19 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     }
 
     /**
-     * O refill é aplicado em MEMÓRIA na leitura: a linha só guarda o saldo
-     * do último consumo, e mostrar esse número cru faria o dashboard exibir
-     * um balde vazio muito depois de ele ter se recomposto. Escrever aqui
-     * seria pior — transformaria leitura de monitoramento em disputa pelo
-     * lock do caminho quente de claim.
+     * The refill is applied in MEMORY at read time: the row only stores the balance as of the last
+     * charge, and showing that raw number would make the dashboard display an empty bucket long after it
+     * had refilled. Writing here would be worse — it would turn a monitoring read into contention for
+     * the claim hot path's lock.
      */
     private static RateLimitSnapshot toSnapshot(ResultSet rs, Instant now) throws SQLException {
         RateLimit rateLimit = mapRow(rs);
-        // clamp SÓ aqui: uma linha adulterada (tokens > max_count) não pode
-        // derrubar o GET /rate-limits das outras — e nesta leitura o número
-        // não guarda CAS nenhum, ao contrário do saldo cru de mapBucket.
+        // Clamped ONLY here: a tampered row (tokens > max_count) must not take down the other limits'
+        // GET /rate-limits — and in this read the number guards no CAS, unlike mapBucket's raw balance.
         return new RateLimitSnapshot(rateLimit, Math.min(mapBucket(rs).refill(now).tokens(), rateLimit.max()));
     }
 
-    /** Leitura sem lock nenhum: fase 1 não pode custar serialização, é justamente o que a revisão da ADR-0042 comprou. */
+    /** A read with no lock at all: phase 1 must not cost serialisation, which is precisely what the revised design bought. */
     @Override
     public int available(String name, Instant now) {
         Objects.requireNonNull(name, "name");
@@ -165,16 +175,14 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     }
 
     /**
-     * CAS sobre o par {@code (tokens, refilled_at)} — atômico por
-     * construção, como todo {@code UPDATE} guardado do motor (ADR-0018), e
-     * não por lock especializado. Refill e cobrança viajam no MESMO
-     * statement: aplicar o refill separado abriria a janela para outro nó
-     * cobrar em cima de um saldo já recomposto, que é sobre-entrega.
+     * A CAS over the {@code (tokens, refilled_at)} pair — atomic by construction, like every guarded
+     * {@code UPDATE} in the engine, rather than through a specialised lock. The refill and the charge
+     * travel in the SAME statement: applying the refill separately would open a window for another node
+     * to charge on top of an already refilled balance, which is over-delivery.
      *
-     * <p>Retry interno em vez de derrubar a rodada na primeira colisão: um
-     * CAS perdido custa duas idas ao banco, enquanto desfazer a rodada joga
-     * fora o CAS de até {@code batchSize} execuções. Só depois de
-     * {@link #MAX_CHARGE_ATTEMPTS} o chamador é obrigado a desfazer.
+     * <p>An internal retry rather than dropping the round on the first collision: a lost CAS costs two
+     * round trips, while undoing the round throws away the CAS of up to {@code batchSize} executions.
+     * Only after {@link #MAX_CHARGE_ATTEMPTS} is the caller forced to undo.
      */
     @Override
     public boolean charge(String name, int permits, Instant now) {
@@ -203,13 +211,12 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     }
 
     /**
-     * {@code false} quando a linha já não é mais {@code expected}: outro nó
-     * cobrou — ou um {@code PATCH} mudou a spec — entre a leitura e este
-     * {@code UPDATE}. A guarda cobre as QUATRO colunas que entraram no
-     * cálculo, não só as duas que ele escreve: {@code max_count} e
-     * {@code window_duration} definem o intervalo de refill, e um PATCH que
-     * alargasse a janela no meio da rodada faria o saldo ser recomposto na
-     * taxa velha — burst silencioso acima do limite novo.
+     * {@code false} when the row is no longer {@code expected}: another node charged — or a {@code PATCH}
+     * changed the spec — between the read and this {@code UPDATE}.
+     *
+     * <p>The guard covers the FOUR columns that entered the calculation, not only the two it writes:
+     * {@code max_count} and {@code window_duration} define the refill interval, and a PATCH widening the
+     * window mid-round would refill the balance at the old rate — a silent burst above the new limit.
      */
     private boolean chargeIfUnchanged(String name, Bucket expected, Bucket refilled, int permits) {
         return jdbcTemplate.update(CHARGE_GUARDED_BY_CAS, new MapSqlParameterSource("name", name)
@@ -236,12 +243,10 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     }
 
     /**
-     * Uma vez por nome, não uma por rodada: {@link #available} roda a cada
-     * claim (20×/s por nó no ponto de operação de {@code poll=50ms}), e um
-     * único job com o nome errado transformaria o WARN que deveria chamar
-     * atenção às 3h na enchente que esconde todo o resto do log. O conjunto
-     * é limitado pelos nomes realmente referenciados por jobs — não cresce
-     * com o tráfego.
+     * Once per name, not once per round: {@link #available} runs on every claim (20 times a second per
+     * node at the {@code poll=50ms} operating point), and a single job with the wrong name would turn
+     * the WARN that ought to draw attention at 3 a.m. into the flood that hides everything else in the
+     * log. The set is bounded by the names jobs actually reference — it does not grow with traffic.
      */
     private void warnOnceAboutUnknownLimit(String name) {
         if (unknownLimitsAlreadyWarned.add(name)) {
@@ -255,15 +260,14 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     }
 
     /**
-     * A fronteira de desserialização também é fronteira de confiança: a
-     * invariante de {@link RateLimit} protege quem ESCREVE (boot, {@code
-     * @Bean}, PATCH), e o {@code ResultSet} não passa por lá. Uma linha
-     * editada à mão — cenário real, já que a ADR-0042 manda o operador rodar
-     * DDL manual nesta tabela no upgrade — com {@code max_count} maior que a
-     * janela em nanos ressuscitaria a divisão por zero do refill, derrubando
-     * a rodada de claim inteira. Aqui isso vira erro que diz o que fazer, e
-     * o saldo é clampado para uma linha ruim não cegar o {@code GET
-     * /rate-limits} das demais.
+     * The deserialisation boundary is also a trust boundary: {@link RateLimit}'s invariant protects
+     * WRITERS (boot, a {@code @Bean}, a PATCH), and the {@code ResultSet} does not go through it.
+     *
+     * <p>A hand-edited row — a real scenario, since the operator is told to run manual DDL on this table
+     * during an upgrade — with {@code max_count} larger than the window in nanoseconds would resurrect
+     * the refill's division by zero, taking down the whole claim round. Here that becomes an error that
+     * says what to do, and the balance is clamped so one bad row does not blind
+     * {@code GET /rate-limits} to the rest.
      */
     private static Bucket mapBucket(ResultSet rs) throws SQLException {
         int max = rs.getInt("max_count");
@@ -274,41 +278,38 @@ public final class JdbcRateLimitStore implements RateLimitStore {
             throw new IllegalStateException("rate limit row (max_count=" + max + ", window_duration=" + window
                     + ") cannot issue tokens — it was not written by Mohs; fix the row", notRefillable);
         }
-        // saldo CRU, sem clamp: o valor lido aqui vira o `expectedTokens` do
-        // CAS, e clampar em memória cegaria a guarda — numa linha com
-        // tokens > max_count o predicado nunca casaria e `charge` falharia
-        // para sempre, derrubando toda rodada que tocasse o limite. Quem
-        // clampa é a leitura de dashboard (`toSnapshot`), que não guarda nada.
-        // windowText é o texto CRU da linha, não window.toString(): o CAS compara
-        // texto, e Duration.parse é tolerante enquanto toString é canônico
-        // ('PT60S' escrito à mão volta como 'PT1M'). Re-serializar aqui faria o
-        // predicado nunca casar numa linha editada fora do Mohs — o limite
-        // ficaria incobrável para sempre, em silêncio.
+        // The RAW balance, unclamped: the value read here becomes the CAS's `expectedTokens`, and clamping
+        // it in memory would blind the guard — on a row with tokens > max_count the predicate would never
+        // match and `charge` would fail forever, taking down every round that touched the limit. What
+        // clamps is the dashboard read (`toSnapshot`), which guards nothing.
+        //
+        // windowText is the row's RAW text, not window.toString(): the CAS compares text, and
+        // Duration.parse is lenient while toString is canonical ('PT60S' written by hand comes back as
+        // 'PT1M'). Re-serialising here would make the predicate never match on a row edited outside Mohs
+        // — the limit would become uncharge­able forever, in silence.
         return new Bucket(max, window, rs.getString("window_duration"), rs.getInt("tokens"),
                 JdbcTimestamps.fromUtcLocalDateTime(rs.getObject("refilled_at", LocalDateTime.class)));
     }
 
     /**
-     * O balde da ADR-0042: um token a cada {@code window / max}, capacidade
-     * {@code max}.
+     * The token bucket: one token every {@code window / max}, with a capacity of {@code max}.
      */
     private record Bucket(int max, Duration window, String windowText, int tokens, Instant refilledAt) {
 
         /**
-         * O tempo decorrido convertido em tokens INTEIROS, com
-         * {@code refilledAt} avançando pelo que foi convertido — nunca para
-         * "agora". Guardar a fração pendente é o que impede o balde de
-         * entregar menos que {@code max} por janela para sempre (a cada
-         * chamada se perderia o resto da divisão). Relógio que anda para
-         * trás dá {@code earned <= 0} e não move nada: NTP step para o
-         * passado atrasa a liberação, jamais libera dobrado.
+         * Elapsed time converted into WHOLE tokens, with {@code refilledAt} advancing by what was
+         * converted — never to "now". Keeping the pending fraction is what stops the bucket from
+         * delivering less than {@code max} per window forever (each call would lose the division's
+         * remainder).
+         *
+         * <p>A clock running backwards gives {@code earned <= 0} and moves nothing: an NTP step into the
+         * past delays the release, it never releases twice as much.
          */
         Bucket refill(Instant now) {
             if (tokens > max) {
-                // linha adulterada: o saldo cru continua sendo o `expected` do
-                // CAS (quem guarda é `expected`, não este retorno), mas o que
-                // se pode GASTAR nunca passa da capacidade — sub-entregar é o
-                // erro seguro, sobre-entregar é a violação.
+                // A tampered row: the raw balance remains the CAS's `expected` (what guards is `expected`,
+                // not this return value), but what can be SPENT never exceeds the capacity — under-delivering
+                // is the safe error, over-delivering is the violation.
                 return new Bucket(max, window, windowText, max, now);
             }
             Duration perToken = window.dividedBy(max);
@@ -317,9 +318,8 @@ public final class JdbcRateLimitStore implements RateLimitStore {
                 return this;
             }
             if (earned >= max - tokens) {
-                // balde cheio não tem fração pendente a preservar — e o atalho
-                // evita multiplicar uma duração por um número de tokens
-                // arbitrariamente grande (linha parada desde o boot anterior).
+                // A full bucket has no pending fraction to preserve — and the shortcut avoids multiplying a
+                // duration by an arbitrarily large token count (a row untouched since the previous boot).
                 return new Bucket(max, window, windowText, max, now);
             }
             return new Bucket(max, window, windowText, tokens + (int) earned, refilledAt.plus(perToken.multipliedBy(earned)));

@@ -1,5 +1,21 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -10,6 +26,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -21,6 +38,7 @@ import javax.sql.DataSource;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.awaitility.Awaitility;
 import org.h2.jdbcx.JdbcDataSource;
@@ -132,9 +150,9 @@ class EngineTest {
     }
 
     /**
-     * Montagem comum: dispatcher, trigger firer e tick scheduler reais sobre
-     * as portas do fixture — os overrides simulam falha num único ponto
-     * (fila, posse, história ou node) sem tocar o resto.
+     * The common assembly: a real dispatcher, trigger firer and tick scheduler over the fixture's ports —
+     * the overrides simulate a failure at a single point (queue, ownership, history or node) without
+     * touching the rest.
      */
     private Engine assembleEngine(WorkQueue workQueueOverride, LeaseStore leaseStoreOverride, HistoryStore historyStoreOverride,
             NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings) {
@@ -152,12 +170,40 @@ class EngineTest {
     private Engine assembleEngine(JobStore jobStoreOverride, WorkQueue workQueueOverride, LeaseStore leaseStoreOverride,
             HistoryStore historyStoreOverride, NodeStore nodeStoreOverride, ExecutionWindowRegistry windowRegistry,
             List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings) {
+        return assembleEngine(jobStoreOverride, workQueueOverride, leaseStoreOverride, historyStoreOverride,
+                nodeStoreOverride, windowRegistry, listeners, runnerRegistry, settings, clock);
+    }
+
+    /**
+     * An explicit {@code engineClock}, because the loop's cadence is the one behaviour
+     * {@link MutableClock} cannot exercise: the sleep is real, the clock is frozen, and a PUNCTUALITY
+     * test needs both on the same scale (see
+     * {@code recurringJobFiresOnItsOwnIntervalNotOnTheBackoffPoints}).
+     *
+     * <p>It swaps the ENGINE's clock, not the fixture's: the {@code batchStore} inside
+     * {@code leaseStore}/{@code workQueue} and the {@code rateLimitStore} stay on the frozen
+     * {@link MutableClock}. Harmless while neither batches nor rate limits enter the test — anyone
+     * copying this overload into a scenario that uses both must pass the same clock to the stores too.
+     */
+    private Engine assembleEngine(JobStore jobStoreOverride, WorkQueue workQueueOverride, LeaseStore leaseStoreOverride,
+            HistoryStore historyStoreOverride, NodeStore nodeStoreOverride, ExecutionWindowRegistry windowRegistry,
+            List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings, Clock engineClock) {
+        return assembleEngine(jobStoreOverride, workQueueOverride, leaseStoreOverride, historyStoreOverride,
+                nodeStoreOverride, windowRegistry, listeners, runnerRegistry, settings, engineClock,
+                new SimpleMeterRegistry());
+    }
+
+    /** The overload with the registry in the caller's hands — for the tests that read a meter back. */
+    private Engine assembleEngine(JobStore jobStoreOverride, WorkQueue workQueueOverride, LeaseStore leaseStoreOverride,
+            HistoryStore historyStoreOverride, NodeStore nodeStoreOverride, ExecutionWindowRegistry windowRegistry,
+            List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings, Clock engineClock,
+            MeterRegistry meterRegistry) {
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
-        EngineMetrics metrics = new EngineMetrics(new SimpleMeterRegistry());
-        Dispatcher dispatcher = new Dispatcher(leaseStoreOverride, jobStoreOverride, handlerRegistry, clock, List.of(), listeners, eventExecutor, metrics);
+        EngineMetrics metrics = new EngineMetrics(meterRegistry);
+        Dispatcher dispatcher = new Dispatcher(leaseStoreOverride, jobStoreOverride, handlerRegistry, engineClock, List.of(), listeners, eventExecutor, metrics);
         return new Engine(workQueueOverride, dispatcher, historyStoreOverride, leaseStoreOverride, jobStoreOverride, nodeStoreOverride,
                 new JdbcTriggerFirer(dataSource, historyStore, workQueue), windowRegistry,
-                rateLimitStore, clock, settings, runnerRegistry, metrics);
+                rateLimitStore, engineClock, settings, runnerRegistry, metrics);
     }
 
     private static RunnerRegistry defaultRunnerRegistry() {
@@ -165,10 +211,9 @@ class EngineTest {
     }
 
     /**
-     * Engine com fila e node store gravando uma trilha única de
-     * {@code tick}/{@code claim:N} — como os dois só rodam na thread do
-     * tick, a ordem da trilha É a estrutura do tick, e prova quantos
-     * rounds de claim aconteceram DENTRO de cada um (ADR-0040).
+     * An engine whose queue and node store record a single trail of {@code tick}/{@code claim:N} — since
+     * both run only on the tick's thread, the trail's order IS the tick's structure, and it proves how
+     * many claim rounds happened INSIDE each one.
      */
     private Engine newEngineWithTickTrace(List<String> trace, CountingNodeStore counting, List<ExecutionListener> listeners, EngineSettings settings) {
         WorkQueue tracingQueue = new WorkQueue() {
@@ -184,6 +229,11 @@ class EngineTest {
                 boolean found = workQueue.hasVisibleWork(shards, now);
                 trace.add("probe:" + found);
                 return found;
+            }
+
+            @Override
+            public long countVisible(Instant now) {
+                return workQueue.countVisible(now);
             }
 
             @Override
@@ -227,13 +277,12 @@ class EngineTest {
     }
 
     /**
-     * Janelas completas da trilha: claims agrupados por tick, descartando a
-     * janela ainda aberta no fim. Desde o lap da Phase 6 (§5.4) cada
-     * statement sonda UM shard e o fixture semeia tudo no shard 0 — as
-     * sondas vazias ({@code claim:0}) são só o lap circulando shards
-     * possuídos-mas-vazios; a estrutura que o ADR-0040 afirma (quantos
-     * lotes por tick, encadeamento, parada antecipada) é a dos claims que
-     * acharam trabalho, então o zero sai da janela.
+     * Complete windows of the trail: claims grouped by tick, discarding the window still open at the end.
+     *
+     * <p>Since the lap arrived, each statement probes ONE shard and the fixture seeds everything into
+     * shard 0 — the empty probes ({@code claim:0}) are just the lap circling owned-but-empty shards. The
+     * structure being asserted (how many batches per tick, the chaining, the early stop) is that of the
+     * claims that found work, so the zeros leave the window.
      */
     private static List<List<Integer>> claimsPerTick(List<String> trace) {
         List<String> snapshot;
@@ -259,12 +308,12 @@ class EngineTest {
         return ticks;
     }
 
-    /** Sondas BRUTAS (vazias inclusive) do tick — pina a economia de SELECTs do ADR-0040, que o filtro de zeros acima esconderia. */
+    /** The RAW probes (empty ones included) of the tick — it pins the SELECT savings the empty-filter above would hide. */
     private static long rawClaimStatementsInTick(List<String> trace, int tickIndex) {
         return entriesInTick(trace, tickIndex, "claim:");
     }
 
-    /** Sondas de existência do gate ocioso (S6.5) — a alternativa de UM statement ao lap inteiro. */
+    /** The idle gate's existence probes — the ONE-statement alternative to the whole lap. */
     private static long emptyGateProbesInTick(List<String> trace, int tickIndex) {
         return entriesInTick(trace, tickIndex, "probe:");
     }
@@ -295,11 +344,10 @@ class EngineTest {
     }
 
     /**
-     * {@code retries(0)} declarado, não herdado: metade dos testes deste
-     * fixture mede o caminho TERMINAL (timeout, watchdog, shutdown, handler
-     * ausente), que só é alcançável sem orçamento de retry. Quem precisa do
-     * caminho com retentativa declara o seu, como
-     * {@link #aManuallyRearmedExecutionRunsOnceMoreAndFailsTerminally}.
+     * {@code retries(0)} declared, not inherited: half this fixture's tests measure the TERMINAL path
+     * (timeout, watchdog, shutdown, missing handler), which is only reachable without a retry budget.
+     * Whoever needs the path with a retry declares their own, as
+     * {@link #aManuallyRearmedExecutionRunsOnceMoreAndFailsTerminally} does.
      */
     private void seedEnqueuedExecution(String id, String jobKey, Object payload, Instant scheduledAt, @Nullable String runner) {
         jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> {
@@ -311,7 +359,7 @@ class EngineTest {
         recordAndOffer(id, jobKey, payload, scheduledAt);
     }
 
-    /** A unidade de enqueue do §7.5-1 sem o upsert — pra teste que registra a definição por conta própria. */
+    /** The enqueue unit without the upsert — for tests that register the definition themselves. */
     private void recordAndOffer(String id, String jobKey, Object payload, Instant scheduledAt) {
         recordAndOffer(id, jobKey, payload, scheduledAt, 0);
     }
@@ -322,7 +370,7 @@ class EngineTest {
         workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), shard, 20, 1, scheduledAt)));
     }
 
-    /** Estado do read model derivado (§4.3): advisory + lease + fila — o que a API pública vê. */
+    /** The derived read model's state: advisory plus lease plus queue — what the public API sees. */
     private ExecutionState stateOf(String id) {
         return historyStore.find(ExecutionId.of(id), clock.instant()).orElseThrow().state();
     }
@@ -365,7 +413,56 @@ class EngineTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
-    /** ADR-0035, ponta a ponta: trigger devido materializa a ocorrência no tick (história + fila), o claim do MESMO tick reivindica e o dispatch executa — e o trigger avança na série. */
+    /**
+     * The worst failure mode this cycle fixed: the tick's seven steps sat under ONE try/catch, and the
+     * heartbeat is the first — when a maintenance step blew up, the node stayed alive and RUNNING to its
+     * peers, owning 1/n of the shards, and claimed NOTHING. {@code purgeStaleNodeRows} is the natural
+     * candidate: it issues the same DELETE on every node on every tick, a SQL Server deadlock classic.
+     *
+     * <p>Without this test, the next refactor that regroups the tick under a single try returns to the
+     * previous state with nothing to flag it — and the production symptom (a node heartbeating, idle,
+     * with no visible error) is among the most expensive to diagnose.
+     */
+    @Test
+    void aFailingMaintenanceStepDoesNotStopTheClaimInTheSameTick() throws Exception {
+        jobStore.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofSeconds(10))));
+        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { });
+        CountDownLatch succeeded = new CountDownLatch(1);
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        NodeStore purgeAlwaysFails = new NodeStore() {
+            @Override
+            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+                nodeStore.heartbeat(nodeId, state, epoch, at, expiresAt);
+            }
+
+            @Override
+            public List<StoredNode> findAll() {
+                return nodeStore.findAll();
+            }
+
+            @Override
+            public int deleteHeartbeatsBefore(Instant cutoff) {
+                throw new DataAccessResourceFailureException("deadlock on mohs_nodes — every node deletes these rows");
+            }
+        };
+        clock.advance(Duration.ofSeconds(15)); // the firing armed at upsert (NOW+10s) becomes due
+        Engine engine = newEngine(purgeAlwaysFails, List.of(listener));
+
+        engine.start();
+        try {
+            assertThat(succeeded.await(5, TimeUnit.SECONDS))
+                    .as("failing maintenance must not steal the tick's fire and claim — the claim is why it exists")
+                    .isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+    }
+
+    /** End to end: a due trigger materialises the occurrence within the tick (history plus queue), the SAME tick's claim takes it and the dispatch runs it — and the trigger advances along the series. */
     @Test
     void recurringJobFiresWhenDueAndAdvancesTheTrigger() throws Exception {
         jobStore.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofSeconds(10))));
@@ -377,7 +474,7 @@ class EngineTest {
                 succeeded.countDown();
             }
         };
-        // o disparo armado no upsert (NOW+10s) fica devido, 5s de atraso — dentro do threshold, dispara normal
+        // The firing armed at upsert (NOW+10s) becomes due, 5s late — within the threshold, so it fires normally
         clock.advance(Duration.ofSeconds(15));
         Engine engine = newEngine(nodeStore, List.of(listener));
 
@@ -388,16 +485,111 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
 
-        // exatamente uma ocorrência (relógio congelado em NOW+15s: a próxima, NOW+20s, ainda não é devida)
+        // Exactly one occurrence (the clock frozen at NOW+15s: the next one, NOW+20s, is not due yet)
         String actor = rawJdbcTemplate.queryForObject(
                 "SELECT actor FROM mohs_execution WHERE job_key = 'poll'", String.class);
         assertThat(actor).isEqualTo(Execution.SCHEDULER_ACTOR);
         Instant scheduledAt = JdbcTimestamps.fromUtcLocalDateTime(rawJdbcTemplate.queryForObject(
                 "SELECT scheduled_at FROM mohs_execution WHERE job_key = 'poll'", LocalDateTime.class));
-        assertThat(scheduledAt).isEqualTo(NOW.plusSeconds(10)); // identidade da ocorrência, não o instante da inserção
+        assertThat(scheduledAt).isEqualTo(NOW.plusSeconds(10)); // the occurrence's identity, not the insertion's instant
         Instant nextFireAt = JdbcTimestamps.fromUtcLocalDateTime(rawJdbcTemplate.queryForObject(
                 "SELECT next_fire_at FROM mohs_job_definitions WHERE job_key = 'poll'", LocalDateTime.class));
         assertThat(nextFireAt).isEqualTo(NOW.plusSeconds(20));
+    }
+
+    /**
+     * The regression guard: the loop must not sleep past a {@code next_fire_at} it knows about.
+     *
+     * <p>It reproduces the REPORTED symptom — the demo's {@code PT1S} job firing in pairs of ~0.4s and
+     * ~1.6s, never at 1.0s — with the same configuration shape that produced it: a 25ms floor and a 2s
+     * ceiling, with the backoff waking at {@code 25, 75, 175, 375, 775, 1575ms}. None of those points is
+     * the round second: without the cap, an occurrence due at {@code +1000ms} waits until {@code 1575}
+     * and the next comes out almost on time — the pair repeats.
+     *
+     * <p>Hence the assertion is about the INTERVAL between successive executions, not the total time: the
+     * count was always right in the defect (one firing per second), what was wrong was the spacing. And
+     * it is ONE-SIDED: in the defect, every ~1.6s interval comes paired with a ~0.4s one, so the floor
+     * discriminates on its own — a ceiling would only convert a machine pause into a failure.
+     *
+     * <p>The floor is NOT immune to a slow machine: the stamp is taken INSIDE the handler, so a dispatch
+     * delay inflates one interval and steals the same amount from the next. Measured under an
+     * oversubscribed CPU: 0.83s. The 600ms is the margin between the defect (0.39-0.43s) and that
+     * jitter. A known residue: a tick more than a second late makes {@code FiringPlanner} materialise the
+     * overdue occurrences in the same firing — they come out in one batch and the interval goes to zero.
+     *
+     * <p>A REAL clock in this test (not the fixture's {@link MutableClock}): punctuality is precisely the
+     * relationship between the schedule's time and the sleep's time — freezing either erases the
+     * behaviour being measured.
+     */
+    @Test
+    void recurringJobFiresOnItsOwnIntervalNotOnTheBackoffPoints() throws Exception {
+        Clock realClock = Clock.systemUTC();
+        JdbcJobStore punctualJobStore = new JdbcJobStore(dataSource, realClock);
+        punctualJobStore.upsert(JobDefinition.of("punctual", Handler.class, spec -> spec.every(Duration.ofSeconds(1))));
+        List<Instant> firedAt = new CopyOnWriteArrayList<>();
+        CountDownLatch fired = new CountDownLatch(4);
+        handlerRegistry.register(JobKey.of("punctual"), (payload, ctx) -> {
+            firedAt.add(realClock.instant());
+            fired.countDown();
+        });
+        Engine engine = assembleEngine(punctualJobStore, workQueue, leaseStore, historyStore, nodeStore,
+                new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
+                new EngineSettings(Duration.ofMillis(25), Duration.ofSeconds(2), BATCH_SIZE, 10, 1,
+                        LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD), realClock);
+
+        engine.start();
+        try {
+            assertThat(fired.await(10, TimeUnit.SECONDS))
+                    .as("four occurrences of a PT1S job must fire inside a 10s budget")
+                    .isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+
+        List<Duration> gaps = new ArrayList<>();
+        for (int i = 1; i < firedAt.size(); i++) {
+            gaps.add(Duration.between(firedAt.get(i - 1), firedAt.get(i)));
+        }
+        assertThat(gaps)
+                .as("successive occurrences of a PT1S job — never the 0,4s leg of the backoff-point pair")
+                .isNotEmpty()
+                .allSatisfy(gap -> assertThat(gap).isGreaterThanOrEqualTo(Duration.ofMillis(600)));
+    }
+
+    /**
+     * The pairing the sleep cap depends on and that {@link EngineSleepTest} cannot reach: the sleep's
+     * horizon must not see a trigger {@code findDueRecurring} would not fire.
+     *
+     * <p>One side is the Java filter ({@code !paused && !orphaned}), the other is the SQL {@code WHERE} —
+     * and this is the only test that submits both to the SAME fixture, including the
+     * {@code retired = false} the horizon inherits from {@code findAll} and cannot repeat on its own.
+     * Diverging the two sides is a silent failure: the node wakes at the cadence of a trigger nobody
+     * fires, and only ticks per second reveals it.
+     */
+    @Test
+    void theHorizonSeesExactlyWhatFindDueRecurringWouldFire() {
+        for (String key : List.of("paused", "orphaned", "retired")) {
+            jobStore.upsert(JobDefinition.of(key, Handler.class, spec -> spec.every(Duration.ofMinutes(5))));
+        }
+        jobStore.pause(JobKey.of("paused"));
+        jobStore.markOrphaned(JobKey.of("orphaned"));
+        jobStore.remove(JobKey.of("retired"));
+        // The healthy one is armed LATER, and therefore LATER in time: if any of the three leaked into the
+        // horizon, the earliest of them would win the comparison
+        clock.advance(Duration.ofMinutes(1));
+        jobStore.upsert(JobDefinition.of("healthy", Handler.class, spec -> spec.every(Duration.ofMinutes(5))));
+        Instant healthyFire = jobStore.find(JobKey.of("healthy")).orElseThrow().nextFireAt();
+        List<StoredJob> snapshot;
+        try (var all = jobStore.findAll()) {
+            snapshot = all.toList();
+        }
+
+        assertThat(jobStore.findDueRecurring(NOW.plusSeconds(600), 100))
+                .extracting(job -> job.definition().key().value())
+                .containsExactly("healthy");
+        assertThat(Engine.earliestArmedFire(snapshot, null, NOW))
+                .as("waking for a trigger nobody fires is a silent failure — visible only in ticks per second")
+                .isEqualTo(healthyFire);
     }
 
     @Test
@@ -436,13 +628,12 @@ class EngineTest {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
             engine.pause();
 
-            // Ticks são serializados por scheduleWithFixedDelay (o próximo só
-            // agenda quando o anterior retorna). Dentro do tick, state.get() —
-            // o gate do claim — vem ANTES do heartbeat: o 1º heartbeat fresco
-            // pode ser do tick em voo que já leu RUNNING e ainda vai reivindicar.
-            // O 2º heartbeat é necessariamente de um tick que só começou depois
-            // do em-voo terminar, claim incluso — só então é seguro semear
-            // (flake real observado com a semeadura antes deste marco).
+            // Ticks are serialised by scheduleWithFixedDelay (the next is only scheduled when the previous
+            // returns). Within the tick, state.get() — the claim's gate — comes BEFORE the heartbeat: the
+            // 1st fresh heartbeat may belong to a tick already in flight that read RUNNING and is still
+            // going to claim. The 2nd heartbeat necessarily belongs to a tick that only started after the
+            // in-flight one finished, claim included — only then is it safe to seed (a real flake was
+            // observed with the seeding before this marker).
             counting.resetLatch(new CountDownLatch(2));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
@@ -451,8 +642,8 @@ class EngineTest {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.ENQUEUED);
 
-            // sem listener aqui — a asserção final é sobre o estado persistido, não sobre evento;
-            // esperar mais alguns ticks reais já é suficiente pra um handler no-op ser reivindicado e concluído.
+            // No listener here — the final assertion is about persisted state, not an event; waiting a few
+            // more real ticks is enough for a no-op handler to be claimed and completed.
             engine.resume();
             counting.resetLatch(new CountDownLatch(3));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
@@ -463,12 +654,11 @@ class EngineTest {
     }
 
     /**
-     * ADR-0051: a liveness mora no NÓ — handler mais lento que qualquer TTL
-     * sobrevive enquanto o node ticka, sem renovação por execução (a lease
-     * da Phase 5 nem carrega expiração própria). O avanço do relógio
-     * ultrapassa {@code lease-ttl} de propósito: nada reclama a posse,
-     * porque o heartbeat roda ANTES do reaper no mesmo tick (a ordem que
-     * mata o self-reap do S8) e a promessa do nó segue fresca.
+     * Liveness lives on the NODE: a handler slower than any TTL survives while the node keeps ticking,
+     * with no per-execution renewal (the lease does not even carry an expiry of its own). The clock's
+     * advance deliberately exceeds {@code lease-ttl}: nothing reclaims the ownership, because the
+     * heartbeat runs BEFORE the reaper within the same tick (the ordering that kills self-reaping) and
+     * the node's promise stays fresh.
      */
     @Test
     void aHandlerOutlivingItsExecutionLeaseSurvivesWhileTheNodeTicks() throws Exception {
@@ -489,7 +679,7 @@ class EngineTest {
             counting.resetLatch(new CountDownLatch(2));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
-            // a posse continua deste node e nenhum attempt sintético foi gravado
+            // The ownership still belongs to this node and no synthetic attempt was written
             assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
             assertThat(rawJdbcTemplate.queryForObject(
                     "SELECT COUNT(*) FROM mohs_attempt WHERE execution_id = 'exec-1'", Integer.class)).isZero();
@@ -501,10 +691,9 @@ class EngineTest {
     }
 
     /**
-     * ADR-0039: o claim de cada tick é limitado pela folga de dispatch
-     * ({@code dispatchConcurrency − in-flight}) — node saturado para de
-     * reivindicar em vez de estourar o teto do runner. O excedente fica na
-     * fila ({@code mohs_ready}), reivindicável por qualquer node com folga.
+     * Each tick's claim is bounded by the dispatch headroom ({@code dispatchConcurrency} minus in-flight)
+     * — a saturated node stops claiming rather than exceeding the runner's ceiling. The surplus stays in
+     * the queue ({@code mohs_ready}), claimable by any node with headroom.
      */
     @Test
     void claimIsBoundedByTheFreeDispatchCapacity() throws Exception {
@@ -531,7 +720,7 @@ class EngineTest {
         engine.start();
         try {
             assertThat(handlersStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            // >= 2 ticks completos com o node saturado: folga 0, nenhum claim novo pode acontecer
+            // At least 2 complete ticks with the node saturated: headroom 0, so no new claim can happen
             counting.resetLatch(new CountDownLatch(3));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
@@ -539,7 +728,7 @@ class EngineTest {
             assertThat(readyCount()).isEqualTo(3);
 
             releaseHandlers.countDown();
-            // com a folga de volta, os ticks seguintes drenam o excedente
+            // With the headroom back, the following ticks drain the surplus
             assertThat(allSucceeded.await(5, TimeUnit.SECONDS)).isTrue();
         } finally {
             releaseHandlers.countDown();
@@ -549,14 +738,14 @@ class EngineTest {
     }
 
     /**
-     * A corrida do define+schedule no mesmo tick (bug real do flip — ~50%
-     * de falha no E2E do starter que define e agenda em sequência): o
-     * snapshot de definições do tick PRECEDE o claim, então um job
-     * recém-nascido pode estar fora do snapshot com a entrada já na fila —
-     * e ele NÃO é um job removido. O miss do snapshot cura com consulta
-     * fresca ({@code jobStore.find}); sem ela, a execução morria FAILED
-     * terminal com a mensagem de "removed". O jobStore cego de findAll
-     * torna o miss determinístico.
+     * The define-plus-schedule race within one tick (a real bug — about 50% failure in the starter's
+     * end-to-end test that defines and schedules in sequence): the tick's definitions snapshot PRECEDES
+     * the claim, so a newborn job may be outside the snapshot with its entry already in the queue — and
+     * it is NOT a removed job.
+     *
+     * <p>A snapshot miss cures with a fresh query ({@code jobStore.find}); without it, the execution died
+     * a terminal FAILED with the "removed" message. A jobStore blind in findAll makes the miss
+     * deterministic.
      */
     @Test
     void aJobBornAfterTheTickSnapshotStillDispatches() throws Exception {
@@ -584,13 +773,13 @@ class EngineTest {
     }
 
     /**
-     * O complemento do heal (review S5.4): o achado da consulta fresca é
-     * MEMOIZADO no snapshot — sem isso, a Admission das rodadas seguintes
-     * do mesmo tick não veria as leases do recém-nascido ({@code leaseCount}
-     * = 0) e o mutex de {@code maxConcurrentExecutions} viraria no-op, até
-     * {@code claimRounds × cap} execuções concorrentes num só nó.
-     * {@code batchSize=1 + claimRounds=2} força exatamente a rodada 2
-     * dentro do tick de nascimento (o findAll cego só na primeira chamada).
+     * The heal's complement: the fresh query's find is MEMOISED into the snapshot — without that, the
+     * Admission of the same tick's later rounds would not see the newborn's leases ({@code leaseCount}
+     * = 0) and {@code maxConcurrentExecutions}'s mutex would become a no-op, up to
+     * {@code claimRounds x cap} concurrent executions on a single node.
+     *
+     * <p>{@code batchSize=1} plus {@code claimRounds=2} forces exactly round 2 inside the birth tick (the
+     * findAll is blind only on the first call).
      */
     @Test
     void aJobBornAfterTheSnapshotStillHonoursItsConcurrencyCapAcrossClaimRounds() throws Exception {
@@ -624,7 +813,7 @@ class EngineTest {
             counting.resetLatch(new CountDownLatch(3));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
-            // a rodada 2 do tick cego NÃO furou o mutex: uma posse, um na fila
+            // The blind tick's round 2 did NOT break the mutex: one ownership, one in the queue
             assertThat(leaseCount()).isEqualTo(1);
             assertThat(readyCount()).isEqualTo(1);
 
@@ -638,11 +827,10 @@ class EngineTest {
     }
 
     /**
-     * Janela como segunda linha de defesa (review S5.4): job recém-nascido
-     * (fora do snapshot) com janela FECHADA não roda — o {@code admitFor}
-     * barra e devolve pra fila com o MESMO attempt. É o único guard entre a
-     * fila e a janela quando o filtro pré-claim não conhece o job (ou foi
-     * descartado no modo degradado do {@code MAX_INADMISSIBLE_FILTER}).
+     * The window as a second line of defence: a newborn job (outside the snapshot) with a CLOSED window
+     * does not run — {@code admitFor} blocks it and returns it to the queue with the SAME attempt. It is
+     * the only guard between the queue and the window when the pre-claim filter does not know the job (or
+     * was discarded in {@code MAX_INADMISSIBLE_FILTER}'s degraded mode).
      */
     @Test
     void aJobBornAfterTheSnapshotInsideAClosedWindowIsRequeuedNotDispatched() throws Exception {
@@ -651,7 +839,7 @@ class EngineTest {
         AtomicBoolean handlerRan = new AtomicBoolean();
         handlerRegistry.register(JobKey.of("night-batch"), (payload, ctx) -> handlerRan.set(true));
         JobStore alwaysBlind = mock(JobStore.class, delegatesTo(jobStore));
-        // cego SEMPRE: toda rodada exercita o caminho do heal — o pior caso do guard
+        // ALWAYS blind: every round exercises the heal path — the guard's worst case
         doAnswer(_ -> java.util.stream.Stream.<StoredJob>empty()).when(alwaysBlind).findAll();
         ExecutionWindowRegistry closedWindow = new ExecutionWindowRegistry(
                 List.of(new ExecutionWindow("night", List.of(_ -> true))));
@@ -673,12 +861,12 @@ class EngineTest {
     }
 
     /**
-     * §5.4 — a corrida de admissão resolvida pós-claim: cap parcial (folga
-     * 1, a rodada trouxe 2) admite um e devolve o outro pra fila com o
-     * MESMO attempt e sem attempt sintético — perda de admissão nunca
-     * consome orçamento. Enquanto a posse viva satura o cap, o devolvido
-     * espera na fila (o guard o torna inadmissível nas rodadas seguintes);
-     * liberado o cap, ele roda normalmente.
+     * The admission race resolved post-claim: a partial cap (headroom 1, the round brought 2) admits one
+     * and returns the other to the queue with the SAME attempt and no synthetic attempt — an admission
+     * loss never consumes budget.
+     *
+     * <p>While the live ownership saturates the cap, the returned one waits in the queue (the guard makes
+     * it inadmissible on later rounds); once the cap frees up, it runs normally.
      */
     @Test
     void admissionCapOverflowRequeuesTheLoserWithoutBurningBudget() throws Exception {
@@ -706,7 +894,7 @@ class EngineTest {
             counting.resetLatch(new CountDownLatch(3));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
-            // um rodando, um de volta na fila — attempt intacto, nenhum attempt gravado
+            // one running, one back in the queue — the attempt intact, no attempt recorded
             assertThat(leaseCount()).isEqualTo(1);
             assertThat(readyCount()).isEqualTo(1);
             assertThat(rawJdbcTemplate.queryForObject("SELECT attempt FROM mohs_ready", Integer.class)).isEqualTo(1);
@@ -718,18 +906,16 @@ class EngineTest {
             releaseHandlers.countDown();
             engine.stop(Duration.ofSeconds(5));
         }
-        // cada um rodou exatamente uma vez — a perda de admissão não virou attempt
+        // Each ran exactly once — the admission loss did not become an attempt
         assertThat(rawJdbcTemplate.queryForList("SELECT number FROM mohs_attempt", Integer.class)).containsExactly(1, 1);
     }
 
     /**
-     * ADR-0033/M3, o caminho de falha do caminho de falha, de ponta a ponta:
-     * execução FAILED com attempts 1..2 já gravados é rearmada manualmente
-     * ({@code WorkQueue.rearmForManualRetry}: advisory volta a PENDING e a
-     * fila ganha a entrada do attempt 3 = COUNT(attempts)+1), o claim a
-     * reivindica, o attempt 3 grava SEM colisão de PK e, com o orçamento já
-     * exaurido, a nova falha termina FAILED terminal — o retry manual
-     * compra exatamente uma tentativa, nunca um loop.
+     * The failure path of the failure path, end to end: a FAILED execution with attempts 1 and 2 already
+     * recorded is manually rearmed ({@code WorkQueue.rearmForManualRetry}: the advisory returns to
+     * PENDING and the queue gains the attempt-3 entry, COUNT(attempts)+1), the claim takes it, attempt 3
+     * is written WITHOUT a primary-key collision and, with the budget already exhausted, the new failure
+     * ends as a terminal FAILED — a manual retry buys exactly one attempt, never a loop.
      */
     @Test
     void aManuallyRearmedExecutionRunsOnceMoreAndFailsTerminally() throws Exception {
@@ -766,12 +952,12 @@ class EngineTest {
     }
 
     /**
-     * ADR-0041: shutdown gracioso escreve o último heartbeat como STOPPED —
-     * sem ele, stop limpo e crash ficavam indistinguíveis no banco (linha
-     * RUNNING para sempre). Poll inalcançável de propósito: o primeiro tick
-     * roda imediatamente e é o ÚNICO — determinístico contra a corrida
-     * (aceita e documentada) de um tick em voo commitar depois do write
-     * final.
+     * A graceful shutdown writes the last heartbeat as STOPPED — without it, a clean stop and a crash were
+     * indistinguishable in the database (a row RUNNING forever).
+     *
+     * <p>The poll is deliberately unreachable: the first tick runs immediately and is the ONLY one —
+     * deterministic against the accepted, documented race of a tick in flight committing after the final
+     * write.
      */
     @Test
     void stopWritesAFinalStoppedHeartbeat() throws Exception {
@@ -787,13 +973,13 @@ class EngineTest {
                 .extracting(StoredNode::state).isEqualTo(EngineState.STOPPED);
     }
 
-    /** ADR-0041: o heartbeat final é best-effort — banco fora no shutdown vira WARN, nunca falha o stop. */
+    /** The final heartbeat is best-effort — a database down during shutdown becomes a WARN, never a failed stop. */
     @Test
     void stopCompletesEvenWhenTheFinalHeartbeatWriteFails() throws Exception {
         NodeStore blinkingStore = mock(NodeStore.class, delegatesTo(nodeStore));
-        // o purge é a ÚLTIMA chamada de NodeStore do tick — esperar por ele
-        // garante que a thread do tick não toca mais o mock durante o
-        // stubbing abaixo (Mockito detecta a interleaving como UnfinishedStubbing)
+        // The purge is the tick's LAST NodeStore call — waiting for it guarantees the tick's thread no
+        // longer touches the mock during the stubbing below (Mockito detects the interleaving as
+        // UnfinishedStubbing)
         CountDownLatch tickDone = new CountDownLatch(1);
         NodeStore tickCompletionProbe = new NodeStore() {
             @Override
@@ -825,7 +1011,7 @@ class EngineTest {
         assertThat(engine.state()).isEqualTo(EngineState.STOPPED);
     }
 
-    /** ADR-0041: heartbeat mais velho que 10× lease-ttl é purgado de carona no tick — cada boot gera node_id novo, e sem purge cada instância morta deixava uma linha órfã para sempre. */
+    /** A heartbeat older than 10x lease-ttl is purged as a passenger on the tick — each boot generates a new node_id, and without the purge every dead instance left an orphan row forever. */
     @Test
     void tickPurgesNodeRowsWithStaleHeartbeats() throws Exception {
         Instant staleAt = NOW.minus(LEASE_TTL.multipliedBy(10)).minusSeconds(1);
@@ -846,12 +1032,11 @@ class EngineTest {
     }
 
     /**
-     * ADR-0040: com {@code claimRounds > 1}, um MESMO tick encadeia claims
-     * enquanto o lote voltar cheio — limitado pelo número de rounds e pela
-     * folga de dispatch (ADR-0039), que encolhe a cada round. A trilha
-     * tick/claim gravada pelos wrappers prova o formato por dentro:
-     * [2,2] no tick saturador, [2] quando só resta folga pra um round,
-     * [] com o node cheio.
+     * With {@code claimRounds > 1}, ONE tick chains claims while the batch keeps coming back full —
+     * bounded by the number of rounds and by the dispatch headroom, which shrinks with each round.
+     *
+     * <p>The tick/claim trail recorded by the wrappers proves the shape from the inside: [2,2] on the
+     * saturating tick, [2] when only enough headroom for one round remains, [] with the node full.
      */
     @Test
     void aFullBatchChainsAnotherClaimRoundWithinTheSameTick() throws Exception {
@@ -876,9 +1061,9 @@ class EngineTest {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
             List<List<Integer>> ticks = claimsPerTick(trace);
 
-            assertThat(ticks.get(0)).containsExactly(2, 2); // rounds encadeados no mesmo tick, teto claimRounds=2
-            assertThat(ticks.get(1)).containsExactly(2);    // folga de dispatch (6−4) limita o round único
-            assertThat(ticks.get(2)).isEmpty();             // node cheio: tick sem claim (ADR-0039)
+            assertThat(ticks.get(0)).containsExactly(2, 2); // rounds chained within the same tick, ceiling claimRounds=2
+            assertThat(ticks.get(1)).containsExactly(2);    // the dispatch headroom (6-4) bounds the single round
+            assertThat(ticks.get(2)).isEmpty();             // a full node: a tick with no claim
 
             releaseHandlers.countDown();
             assertThat(allSucceeded.await(5, TimeUnit.SECONDS)).isTrue();
@@ -889,7 +1074,7 @@ class EngineTest {
         assertThat(terminalCount(ExecutionState.SUCCEEDED)).isEqualTo(6);
     }
 
-    /** ADR-0040: lote que volta menor que o pedido encerra os rounds — o round seguinte seria um SELECT de fila já drenada. */
+    /** A batch that comes back smaller than requested ends the rounds — the next round would be a SELECT over an already drained queue. */
     @Test
     void aShortBatchEndsTheClaimRoundsEarly() throws Exception {
         for (int i = 1; i <= 3; i++) {
@@ -913,10 +1098,10 @@ class EngineTest {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
             List<List<Integer>> ticks = claimsPerTick(trace);
 
-            assertThat(ticks.get(0)).containsExactly(2, 1); // 3º round não acontece apesar de claimRounds=3
-            // economia bruta: lap 1 para na 1ª sonda (orçamento cheio), lap 2 dá a
-            // volta (64) e não enche → SEM lap 3 — um lap extra de sondas vazias
-            // estouraria este teto
+            assertThat(ticks.get(0)).containsExactly(2, 1); // the 3rd round does not happen despite claimRounds=3
+            // Raw saving: lap 1 stops at the 1st probe (a full budget), lap 2 goes all the way round (64)
+            // and does not fill up, so there is NO lap 3 — one extra lap of empty probes would exceed this
+            // ceiling
             assertThat(rawClaimStatementsInTick(trace, 0)).isLessThanOrEqualTo(1 + Shards.SHARD_COUNT);
 
             releaseHandlers.countDown();
@@ -929,12 +1114,10 @@ class EngineTest {
     }
 
     /**
-     * S6.5 (BASELINE "Phase 6 — S6.4"): o lap de 64 sondas era 96% do
-     * custo de consulta de um nó OCIOSO. Enquanto a rodada anterior voltou
-     * vazia, o tick pergunta UMA vez se existe trabalho visível nos shards
-     * próprios — contenção é fenômeno de carga, e não há o que espalhar
-     * quando a resposta é "nada". O primeiro tick ainda não sabe disso e
-     * dá o lap inteiro.
+     * The 64-probe lap was measured at 96% of an IDLE node's query cost. While the previous round came back
+     * empty, the tick asks ONCE whether there is visible work in its own shards — contention is a
+     * phenomenon of load, and there is nothing to spread when the answer is "nothing". The first tick does
+     * not know that yet and does the whole lap.
      */
     @Test
     void anIdleTickProbesOnceInsteadOfLappingEveryShard() throws Exception {
@@ -957,9 +1140,8 @@ class EngineTest {
     }
 
     /**
-     * O gate ocioso é uma economia, nunca um filtro de correção: a sonda
-     * que acha trabalho devolve o MESMO tick ao lap — o enqueue não paga
-     * um poll a mais por ter chegado num engine estacionado.
+     * The idle gate is a saving, never a correctness filter: a probe that finds work returns the SAME tick
+     * to the lap — an enqueue does not pay one extra poll for having arrived at a parked engine.
      */
     @Test
     void workOfferedWhileIdleRunsWithoutAnExtraTick() throws Exception {
@@ -984,13 +1166,13 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(terminalCount(ExecutionState.SUCCEEDED)).isEqualTo(1);
-        // o latch sozinho passaria mesmo com um tick de atraso (o poll deste
-        // fixture é 20ms): quem prova a garantia é o lap estar no MESMO tick
+        // The latch alone would pass even with a tick's delay (this fixture's poll is 20ms): what proves
+        // the guarantee is the lap being in the SAME tick
         assertThat(rawClaimStatementsInTick(trace, tickThatProbedTrue(trace)))
-                .as("a sonda que achou trabalho devolve o mesmo tick ao lap").isPositive();
+                .as("the probe that found work returns the same tick to the lap").isPositive();
     }
 
-    /** O índice do tick em que o gate ocioso sondou e ACHOU trabalho — o tick que precisa conter o lap. */
+    /** The index of the tick in which the idle gate probed and FOUND work — the tick that must contain the lap. */
     private static int tickThatProbedTrue(List<String> trace) {
         List<String> snapshot;
         synchronized (trace) {
@@ -1008,13 +1190,13 @@ class EngineTest {
     }
 
     /**
-     * Risco nº 1 da Phase 6 (S6.2): o backoff no teto NÃO pode espaçar o
-     * heartbeat além de {@code node-lease-ttl/3} — o heartbeat sai uma vez
-     * por tick, então o sono do loop é limitado pela cadência da promessa
-     * de liveness, senão um nó apenas OCIOSO seria declarado morto pelo
-     * reaper dos pares e teria trabalho futuro reivindicado em vão. Teto
-     * absurdo (1h) de propósito: sem o cap, o segundo heartbeat só viria
-     * em ~1h e o await estouraria.
+     * The phase's number-one risk: the backoff at its ceiling must NOT space the heartbeat beyond
+     * {@code node-lease-ttl/3} — the heartbeat goes out once per tick, so the loop's sleep is bounded by
+     * the liveness promise's cadence; otherwise a merely IDLE node would be declared dead by its peers'
+     * reaper and have future work claimed for nothing.
+     *
+     * <p>An absurd ceiling (1h) on purpose: without the cap, the second heartbeat would only come in about
+     * an hour and the await would time out.
      */
     @Test
     void idleBackoffNeverStretchesTheHeartbeatPastAThirdOfTheNodeLease() throws Exception {
@@ -1025,14 +1207,14 @@ class EngineTest {
 
         engine.start();
         try {
-            // 4 heartbeats a ≤100ms (300ms/3) cabem com folga; a 1h de teto, jamais
+            // 4 heartbeats at 100ms or less (300ms/3) fit comfortably; at a 1h ceiling, never
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
     }
 
-    /** ADR-G/§5.5 tier 3: tick vazio dobra o intervalo até o teto — engine ocioso pola cada vez menos, e volta ao piso quando há trabalho (coberto pelos testes de claim, que rodam no piso). */
+    /** An empty tick doubles the interval up to the ceiling — an idle engine polls less and less, and returns to the floor when there is work (covered by the claim tests, which run at the floor). */
     @Test
     void emptyTicksBackOffTheLoopTowardsTheCeiling() throws Exception {
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
@@ -1043,9 +1225,9 @@ class EngineTest {
         engine.start();
         try {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
-            // após 3 ticks vazios o intervalo já dobrou pra ≥160ms: 9 ticks a mais
-            // em 500ms são IMPOSSÍVEIS com backoff (cabem ≤4) — e triviais na
-            // cadência fixa de 20ms que uma regressão restauraria (25 caberiam)
+            // After 3 empty ticks the interval has already doubled to 160ms or more: 9 more ticks in 500ms
+            // are IMPOSSIBLE with backoff (at most 4 fit) — and trivial at the fixed 20ms cadence a
+            // regression would restore (25 would fit)
             CountDownLatch nineMore = new CountDownLatch(9);
             counting.resetLatch(nineMore);
             assertThat(nineMore.await(500, TimeUnit.MILLISECONDS)).isFalse();
@@ -1054,7 +1236,7 @@ class EngineTest {
         }
     }
 
-    /** Tier 1 do wake-up (§5.5): enqueue local já devido acorda o loop na hora — a latência de dispatch não espera o intervalo de poll. */
+    /** The local wake-up tier: an already-due local enqueue wakes the loop immediately — dispatch latency does not wait for the poll interval. */
     @Test
     void aDueLocalEnqueueWakesTheLoopWithoutWaitingThePoll() throws Exception {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
@@ -1067,17 +1249,17 @@ class EngineTest {
             }
         };
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(1));
-        // piso de 2s: sem o wake, o claim seguinte só viria 2s depois do
-        // primeiro tick vazio — o await de 1s abaixo é impossível sem tier 1
+        // A 2s floor: without the wake, the next claim would only come 2s after the first empty tick — the
+        // 1s await below is impossible without the local tier
         Engine engine = newEngine(counting, List.of(listener), defaultRunnerRegistry(),
                 new EngineSettings(Duration.ofSeconds(2), Duration.ofSeconds(2), BATCH_SIZE, 10, 1,
                         LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
 
         engine.start();
         try {
-            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue(); // primeiro tick (vazio) já passou
+            assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue(); // the first (empty) tick has already passed
             recordAndOffer("exec-1", "welcome-email", "hello", NOW.minusSeconds(1));
-            engine.signalWorkScheduled(); // fora de transação → wake imediato
+            engine.signalWorkScheduled(); // outside a transaction, so an immediate wake
             assertThat(succeeded.await(1, TimeUnit.SECONDS)).isTrue();
         } finally {
             engine.stop(Duration.ofSeconds(5));
@@ -1085,11 +1267,10 @@ class EngineTest {
     }
 
     /**
-     * §8.3/S6.1: com um par RUNNING vivo, a partição derivada dos node ids
-     * ordenados dá a cada node metade dos shards — este node NÃO reivindica
-     * dos shards do par, mesmo com a execução devida e folga de sobra.
-     * "zzz-peer" ordena depois do node_id UUID deste engine, então este
-     * node é o índice 0 e possui os shards PARES.
+     * With a live RUNNING peer, the partition derived from the ordered node ids gives each node half the
+     * shards — this node does NOT claim from the peer's shards, even with the execution due and plenty of
+     * headroom. "zzz-peer" sorts after this engine's UUID node_id, so this node is index 0 and owns the
+     * EVEN shards.
      */
     @Test
     void shardOwnershipLeavesThePeersShardsUnclaimed() throws Exception {
@@ -1111,8 +1292,8 @@ class EngineTest {
         engine.start();
         try {
             assertThat(succeeded.await(5, TimeUnit.SECONDS)).isTrue();
-            // mais dois ticks completos DEPOIS do sucesso: a chance que o node
-            // teria de reivindicar o shard alheio, se fosse reivindicar
+            // Two more complete ticks AFTER the success: the chance the node would have had to claim the
+            // other's shard, if it were going to
             CountDownLatch twoMoreTicks = new CountDownLatch(2);
             counting.resetLatch(twoMoreTicks);
             assertThat(twoMoreTicks.await(5, TimeUnit.SECONDS)).isTrue();
@@ -1124,7 +1305,7 @@ class EngineTest {
         }
     }
 
-    /** §11.2: par não-RUNNING (DRAINING/PAUSED) não reivindica — mantê-lo na atribuição deixaria 1/n da fila parada; excluídos os dois, os shards deles voltam pra cá e a execução roda. */
+    /** A non-RUNNING peer (DRAINING/PAUSED) does not claim — keeping it in the assignment would leave 1/n of the queue stalled; with both excluded, their shards come back here and the execution runs. */
     @Test
     void aNonRunningPeerIsExcludedFromShardAssignment() throws Exception {
         nodeStore.heartbeat("zzz-peer", EngineState.DRAINING, 1, NOW, NOW.plusSeconds(3600));
@@ -1152,12 +1333,11 @@ class EngineTest {
     }
 
     /**
-     * §6.3: posse perdida (reclaim externo) não tem detecção ativa — o
-     * zumbi termina sozinho e o resultado tardio é descartado pelo fence
-     * {@code (node_id, epoch)}: a lease agora pertence à encarnação nova, e
-     * a conclusão do zumbi não deleta a posse alheia, não grava attempt e
-     * não toca o advisory. Sem o fence, a conclusão zumbi mataria a
-     * encarnação nova saudável.
+     * Lost ownership (an external reclaim) has no active detection — the zombie finishes on its own and its
+     * late result is discarded by the {@code (node_id, epoch)} fence: the lease now belongs to the new
+     * incarnation, and the zombie's completion neither deletes somebody else's ownership, nor writes an
+     * attempt, nor touches the advisory. Without the fence, the zombie's completion would kill the healthy
+     * new incarnation.
      */
     @Test
     void aZombieResultAfterAnExternalReclaimIsDiscardedByTheFencedCompletion() throws Exception {
@@ -1173,15 +1353,15 @@ class EngineTest {
         engine.start();
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            // re-claim externo simulado: outro nó VIVO (senão o reaper deste
-            // engine o declararia morto e reclamaria no meio do teste) já
-            // reexecuta a mesma linha — a posse é de outra encarnação
+            // A simulated external re-claim: another LIVE node (otherwise this engine's reaper would declare
+            // it dead and reclaim mid-test) is already re-executing the same row — the ownership belongs to
+            // another incarnation
             nodeStore.heartbeat("other-node", EngineState.RUNNING, 1, NOW, NOW.plusSeconds(3600));
             rawJdbcTemplate.update(
                     "UPDATE mohs_lease SET node_id = 'other-node', epoch = 9 WHERE execution_id = 'exec-1'");
         } finally {
             releaseHandler.countDown();
-            engine.stop(Duration.ofSeconds(5)); // drena o handler — a conclusão tardia roda e perde o FENCE
+            engine.stop(Duration.ofSeconds(5)); // drains the handler — the late completion runs and loses the FENCE
         }
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
         assertThat(rawJdbcTemplate.queryForObject(
@@ -1191,15 +1371,14 @@ class EngineTest {
     }
 
     /**
-     * ADR-0034 fim-a-fim: o timeout do job dispara de carona no tick,
-     * interrompe o handler bloqueado, e o desfecho é passivo — segue o
-     * orçamento quando o handler responde (aqui retries=0 → FAILED com
-     * causa de timeout).
+     * End to end: the job's timeout fires as a passenger on the tick, interrupts the blocked handler, and
+     * the outcome is passive — following the budget when the handler responds (here retries=0, so FAILED
+     * with a timeout cause).
      */
     @Test
     void jobTimeoutInterruptsTheHandlerAndTheOutcomeFollowsTheRetryBudget() throws Exception {
-        // retries(0) declarado: é o que faz o timeout ser o DESFECHO e não uma
-        // tentativa a mais — o teste mede o outcome sob orçamento esgotado
+        // retries(0) declared: it is what makes the timeout the OUTCOME rather than one more attempt — the
+        // test measures the outcome with the budget exhausted
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class,
                 spec -> spec.onDemand().timeout(Duration.ofMillis(50)).retries(0)));
         recordAndOffer("exec-1", "welcome-email", "hello", NOW.minusSeconds(1));
@@ -1238,10 +1417,9 @@ class EngineTest {
     }
 
     /**
-     * API-DESIGN (shutdown gracioso, passo 3) / ADR-0034: grace estourado
-     * escala pela maquinaria de cancelamento — flag + interrupt; o attempt
-     * falha com causa NodeShutdown e segue o retry normal (aqui retries=0 →
-     * FAILED). Durante o grace nada disso acontece: drain ≠ cancel.
+     * An expired grace escalates through the cancellation machinery — flag plus interrupt; the attempt fails
+     * with a NodeShutdown cause and follows the normal retry (here retries=0, so FAILED). During the grace
+     * none of this happens: a drain is not a cancel.
      */
     @Test
     void drainGraceOverflowInterruptsInFlightWorkAndItFailsWithNodeShutdown() throws Exception {
@@ -1272,12 +1450,11 @@ class EngineTest {
     }
 
     /**
-     * ADR-0034 fim-a-fim: cancel manual gravado no banco (o que o POST
-     * /executions/{id}/cancel faz de outro processo — agora a flag mora na
-     * POSSE, {@code mohs_lease.cancel_requested}) é observado pelo tick em
-     * ≤ 1 poll-interval — flag pura, sem interrupt (cancel é cooperativo
-     * por contrato); o handler observa via JobContext, sai, e o desfecho é
-     * CANCELLED com evento Cancelled.
+     * End to end: a manual cancel recorded in the database (what {@code POST /executions/{id}/cancel} does
+     * from another process — the flag now living on the OWNERSHIP, {@code mohs_lease.cancel_requested}) is
+     * observed by the tick within one poll interval — a pure flag, with no interrupt (cancellation is
+     * cooperative by contract); the handler observes it through JobContext, exits, and the outcome is
+     * CANCELLED with a Cancelled event.
      */
     @Test
     void manualCancelRequestedInTheDatabaseCancelsTheRunningExecution() throws Exception {
@@ -1310,12 +1487,11 @@ class EngineTest {
     }
 
     /**
-     * O sucessor da expiração por execução que o split aposentou: uma lease
-     * DESTE node sem encarnação em memória (trabalho perdido entre claim e
-     * dispatch — payload query que falhou, executor que rejeitou) seria
-     * invisível ao reaper (o nó está vivo) e ao watchdog (nunca entrou no
-     * mapa). O passe de reconciliação a devolve pra fila em duas rodadas,
-     * com o MESMO attempt — e ela conclui sem queimar orçamento.
+     * The successor to the per-execution expiry the split retired: a lease belonging to THIS node with no
+     * in-memory incarnation (work lost between claim and dispatch — a failed payload query, a rejecting
+     * executor) would be invisible to the reaper (the node is alive) and to the watchdog (it never entered
+     * the map). The reconciliation pass returns it to the queue in two rounds, with the SAME attempt — and
+     * it completes without burning budget.
      */
     @Test
     void aStrayLeaseOnAHealthyNodeIsRequeuedAndCompletes() throws Exception {
@@ -1330,7 +1506,7 @@ class EngineTest {
             }
         };
         Engine engine = newEngine(nodeStore, List.of(listener));
-        // a posse é DESTE engine (nodeId/epoch reais), mas nenhum dispatch a conhece
+        // the ownership belongs to THIS engine (real nodeId/epoch), but no dispatch knows about it
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested)
                 VALUES ('exec-1', 'welcome-email', ?, 1, 1, 20, ?, FALSE)
@@ -1343,18 +1519,16 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
-        // rodou UMA vez, attempt 1 — a reconciliação devolveu, não puniu
+        // It ran ONCE, attempt 1 — the reconciliation returned it, it did not punish it
         assertThat(rawJdbcTemplate.queryForList("SELECT number FROM mohs_attempt WHERE execution_id = 'exec-1'", Integer.class))
                 .containsExactly(1);
     }
 
     /**
-     * O grace do S5.5: lease sem encarnação mas RECÉM-claimada não é
-     * candidata do reconcile — a alta vazão ela é quase sempre uma
-     * conclusão em trânsito no batcher, e requeueá-la é o bug medido no
-     * bench (requeues fantasma, deadlocks com o flush). Só depois de
-     * {@code max(2s, 4×poll)} + duas rodadas ela vira órfã de verdade e
-     * volta pra fila.
+     * The grace: a lease with no incarnation but RECENTLY claimed is not a reconcile candidate — at high
+     * throughput it is almost always a completion in transit in the batcher, and requeueing it is the bug
+     * measured in the bench (phantom requeues, deadlocks with the flush). Only after
+     * {@code max(2s, 4xpoll)} plus two rounds does it become a genuine orphan and return to the queue.
      */
     @Test
     void aFreshStrayLeaseWaitsTheClaimedAtGraceBeforeRequeue() throws Exception {
@@ -1370,7 +1544,7 @@ class EngineTest {
         };
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
         Engine engine = newEngine(counting, List.of(listener));
-        // posse deste engine SEM encarnação, claimed_at = agora — dentro do grace
+        // Ownership held by this engine WITHOUT an incarnation, claimed_at = now — inside the grace
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested)
                 VALUES ('exec-1', 'welcome-email', ?, 1, 1, 20, ?, FALSE)
@@ -1378,12 +1552,12 @@ class EngineTest {
 
         engine.start();
         try {
-            // vários ticks com o relógio parado: dentro do grace, NADA é requeueado
+            // Several ticks with the clock stopped: inside the grace, NOTHING is requeued
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(readyCount()).isZero();
             assertThat(leaseCount()).isEqualTo(1);
 
-            // além do grace (2s no poll de teste): duas rodadas depois, requeue → claim → conclui
+            // Beyond the grace (2s at the test's poll): two rounds later, requeue, claim, complete
             clock.advance(Duration.ofSeconds(3));
             assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("stray requeued after the grace and completed").isTrue();
         } finally {
@@ -1394,7 +1568,7 @@ class EngineTest {
                 .containsExactly(1);
     }
 
-    /** Uma lease possuída por um nó AUSENTE de mohs_nodes (morto por definição, ADR-0051) — a matéria-prima dos testes de reaper. */
+    /** A lease owned by a node ABSENT from mohs_nodes (dead by definition) — the raw material of the reaper tests. */
     private void seedOrphanedLease(String id, String jobKey, boolean cancelRequested) {
         recordAndOffer(id, jobKey, "hello", NOW.minusSeconds(60));
         rawJdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = ?", id);
@@ -1404,7 +1578,7 @@ class EngineTest {
                 """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)), cancelRequested);
     }
 
-    /** Pendência 8 fechada: desfecho do reaper publica os mesmos eventos do dispatch — o alerta de morte de nó (Javadoc de Failed) passa a disparar de verdade. */
+    /** The reaper's outcome publishes the same events as a dispatch — the node-death alert (Javadoc de Failed) passa a disparar de verdade. */
     @Test
     void reclaimOfADeadNodesExecutionPublishesRetryEvents() throws Exception {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
@@ -1428,11 +1602,11 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        // o estado final não é assertado: após o reclaim, o retry pode ser re-reivindicado
-        // no mesmo teste (jitter pode ser ~0) — o contrato sob teste são os eventos
+        // The final state is not asserted: after the reclaim, the retry may be re-claimed within the same
+        // test (the jitter can be about 0) — the contract under test is the events
     }
 
-    /** ADR-0034 no caminho de crash-recovery: reclaim de execução de nó morto com cancel pendente publica Cancelled — nem retry, nem Failed; a ordem do operador sobrevive à morte do nó. */
+    /** On the crash-recovery path: reclaiming a dead node's execution with a pending cancel publishes Cancelled — neither a retry nor a Failed; the operator's order survives the node's death. */
     @Test
     void reclaimOfACancelRequestedExecutionPublishesCancelled() throws Exception {
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
@@ -1455,11 +1629,9 @@ class EngineTest {
     }
 
     /**
-     * Review ADR-0034: zumbi (posse perdida por reclaim externo) continua
-     * no mapa de in-flight até a conclusão — e por isso a escalada do
-     * shutdown ainda o interrompe (pra job sem timeout, a única chance de
-     * pará-lo antes de a JVM morrer). O resultado tardio é descartado pelo
-     * fence, como todo zumbi.
+     * A zombie (ownership lost to an external reclaim) stays in the in-flight map until completion — and so
+     * the shutdown's escalation still interrupts it (for a job with no timeout, the only chance of stopping
+     * it before the JVM dies). Its late result is discarded by the fence, like every zombie's.
      */
     @Test
     void aZombieAfterAnExternalReclaimStillReceivesTheShutdownInterrupt() throws Exception {
@@ -1482,7 +1654,7 @@ class EngineTest {
         engine.start();
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            // reclaim externo: a posse caiu, mas a entrada fica no mapa até a conclusão
+            // An external reclaim: the ownership dropped, but the entry stays in the map until completion
             rawJdbcTemplate.update("DELETE FROM mohs_lease WHERE execution_id = 'exec-1'");
             counting.resetLatch(new CountDownLatch(2));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
@@ -1493,7 +1665,7 @@ class EngineTest {
         assertThat(interrupted.await(5, TimeUnit.SECONDS)).as("escalation still reaches the dropped zombie").isTrue();
     }
 
-    /** Drain ≠ cancel (ADR-0007): o in-flight continua executando em PAUSED — a promessa de liveness do NÓ (ADR-0051) tem que acompanhar o TRABALHO, não o modo do control loop; sem isto, pause/drain mais longo que a lease do nó vira dupla execução do que o próprio drain espera. */
+    /** A drain is not a cancel: in-flight work keeps executing in PAUSED — the NODE's liveness promise has to follow the WORK, not the control loop's mode; without this, a pause or drain longer than the node's lease becomes a double execution of what the drain itself is waiting for. */
     @Test
     void theNodeLeaseKeepsBeingPromisedWhilePaused() throws Exception {
         seedEnqueuedExecution("exec-1", "welcome-email", "hello");
@@ -1533,7 +1705,7 @@ class EngineTest {
         return expiresAt;
     }
 
-    /** ADR-G: o teto do backoff abaixo do piso inverteria a rampa — rejeitado na construção, nomeando as duas propriedades. */
+    /** A backoff ceiling below the floor would invert the ramp — rejected at construction, naming both properties. */
     @Test
     void maxPollIntervalMustBeAtLeastThePollInterval() {
         assertThatThrownBy(() -> new EngineSettings(Duration.ofSeconds(1), Duration.ofMillis(500), BATCH_SIZE, 10, 1,
@@ -1543,7 +1715,7 @@ class EngineTest {
                 .hasMessageContaining("mohs.engine.poll-interval");
     }
 
-    /** Bound menor/igual à lease do NÓ liberaria posse antes de o node sequer poder ser considerado morto (ADR-0051) — rejeitado na construção, nomeando as duas propriedades. */
+    /** A bound at or below the NODE's lease would release ownership before the node could even be considered dead — rejected at construction, naming both properties. */
     @Test
     void watchdogTimeoutMustExceedNodeLeaseTtl() {
         assertThatThrownBy(() -> new EngineSettings(POLL_INTERVAL, BATCH_SIZE, Duration.ofSeconds(30), Duration.ofSeconds(30)))
@@ -1553,11 +1725,10 @@ class EngineTest {
     }
 
     /**
-     * Watchdog Bound pós-ADR-0051: passado o bound (tempo monotônico real,
-     * ~200ms aqui), o node LIBERA a posse explicitamente — attempt
-     * sintético consome o orçamento (retries = 0 → FAILED terminal) sem
-     * reaper nem avanço de relógio envolvidos; o handler zumbi segue
-     * rodando e seu resultado tardio é descartado pelo fence.
+     * The Watchdog Bound: once the bound passes (real monotonic time, ~200ms here), the node RELEASES the
+     * ownership explicitly — a synthetic attempt consumes the budget (retries = 0, so a terminal FAILED)
+     * with neither a reaper nor a clock advance involved; the zombie handler keeps running and its late
+     * result is discarded by the fence.
      */
     @Test
     void watchdogBoundReleasesOwnershipAndFailsTheExecution() throws Exception {
@@ -1632,21 +1803,17 @@ class EngineTest {
     }
 
     /**
-     * A janela entre {@code runAsync} e {@code inFlight.add} de
-     * {@code submitDispatch}: nela a execução tem lease no banco e está
-     * ausente do conjunto que o drain observa, então achar {@code inFlight}
-     * vazio prova que o dispatch ainda não foi REGISTRADO, não que ele
-     * acabou. Se o {@code stop} devolvesse ali, o heartbeat final gravaria
-     * a lease do nó já vencida (ADR-0051) com o handler rodando, e o
-     * reaper de um par reclamaria trabalho vivo — o resultado bom é
-     * descartado pelo fence e, sem orçamento de retry, vira FAILED
-     * terminal.
+     * The window between {@code submitDispatch}'s {@code runAsync} and {@code inFlight.add}: within it the
+     * execution has a lease in the database and is absent from the set the drain observes, so finding
+     * {@code inFlight} empty proves the dispatch has not been REGISTERED yet, not that it finished.
      *
-     * <p>Quem torna a janela determinística é
-     * {@link #registryTrappingTheTickAfterSubmit} — sem ele a corrida é de
-     * microssegundos e não se reproduz. Sem a segunda espera do
-     * {@code stop}, o {@code stopCall} abaixo completa de imediato e a
-     * asserção de timeout falha.
+     * <p>If {@code stop} returned there, the final heartbeat would write the node's lease already expired
+     * with the handler running, and a peer's reaper would reclaim live work — the good result is discarded
+     * by the fence and, with no retry budget, becomes a terminal FAILED.
+     *
+     * <p>What makes the window deterministic is {@link #registryTrappingTheTickAfterSubmit} — without it
+     * the race is a matter of microseconds and does not reproduce. Without {@code stop}'s second wait, the
+     * {@code stopCall} below completes immediately and the timeout assertion fails.
      */
     @Test
     void stopWaitsForADispatchSubmittedButNotYetRegistered() throws Exception {
@@ -1665,18 +1832,16 @@ class EngineTest {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
 
             CompletableFuture<Void> stopCall = CompletableFuture.runAsync(() -> engine.stop(Duration.ofSeconds(10)));
-            // esperar STOPPED é o que dá determinismo ao cenário: o estado só
-            // muda depois da espera do drain, e ela só passa por um `inFlight`
-            // VAZIO — é exatamente esse vazio enganoso que o teste precisa
-            // produzir. Liberar o submit antes disto deixaria o drain ver a
-            // future e esperar sozinho: o teste passaria mesmo sem a segunda
-            // espera.
-            // o teto tem de ficar ABAIXO de nodeLeaseTtl/4 (7,5s com o
-            // LEASE_TTL de 30s do fixture), que é o orçamento do join do
-            // loop: estourá-lo faria a espera pós-join ler `inFlight` ainda
-            // vazio e o stop voltar — vermelho por ambiente, não por defeito
+            // Waiting for STOPPED is what makes the scenario deterministic: the state only changes after the
+            // drain's wait, and that only passes through an EMPTY `inFlight` — it is exactly that misleading
+            // emptiness the test needs to produce. Releasing the submit before this would let the drain see
+            // the future and wait on its own: the test would pass even without the second wait.
+            //
+            // The ceiling has to stay BELOW nodeLeaseTtl/4 (7.5s with the fixture's 30s LEASE_TTL), which is
+            // the loop join's budget: exceeding it would make the post-join wait read `inFlight` still empty
+            // and the stop return — red because of the environment, not because of a defect
             Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> engine.state() == EngineState.STOPPED);
-            releaseSubmit.countDown(); // só agora o tick registra a future e o loop encerra
+            releaseSubmit.countDown(); // only now does the tick register the future and the loop end
 
             assertThatThrownBy(() -> stopCall.get(1, TimeUnit.SECONDS))
                     .as("stop returned while the handler was still running — the final heartbeat would hand live work to a peer's reaper")
@@ -1685,8 +1850,8 @@ class EngineTest {
             releaseHandler.countDown();
             stopCall.get(10, TimeUnit.SECONDS);
         } finally {
-            // solta as duas pontas: sem isto, uma asserção que falhe antes
-            // deixaria a thread do tick presa no submit e o handler pendurado
+            // Release both ends: without this, an assertion failing earlier would leave the tick's thread
+            // stuck in the submit and the handler hanging
             releaseSubmit.countDown();
             releaseHandler.countDown();
         }
@@ -1694,29 +1859,26 @@ class EngineTest {
     }
 
     /**
-     * Registry cujo executor prende a thread do tick DENTRO do
-     * {@code execute}, depois de já ter submetido a tarefa ao executor
-     * real: é assim que o tick congela na janela entre o {@code runAsync} e
-     * o {@code inFlight.add} do {@code submitDispatch}. Entra pela seam
-     * package-private {@code RunnerRegistry(List, Function)} — a única
-     * forma de trocar o executor de um runner sem mexer no engine.
+     * A registry whose executor traps the tick's thread INSIDE {@code execute}, after having already
+     * submitted the task to the real executor: that is how the tick freezes in the window between
+     * {@code submitDispatch}'s {@code runAsync} and {@code inFlight.add}. It enters through the
+     * package-private {@code RunnerRegistry(List, Function)} seam — the only way to swap a runner's
+     * executor without touching the engine.
      *
-     * <p>Desligamento no-op, como o executor de eventos de
-     * {@code assembleEngine}: ninguém fecha o registry no teste (o
-     * {@code Engine} não é dono dele) e o executor real é de virtual
-     * threads, sem pool pra vazar entre testes.
+     * <p>A no-op shutdown, like {@code assembleEngine}'s event executor: nobody closes the registry in the
+     * test (the {@code Engine} does not own it) and the real executor uses virtual threads, with no pool to
+     * leak between tests.
      */
     private static RunnerRegistry registryTrappingTheTickAfterSubmit(CountDownLatch releaseSubmit) {
         AsyncTaskExecutor realExecutor = MohsExecutors.ioBoundExecutor("mohs-runner-gated", BATCH_SIZE);
         AsyncTaskExecutor trappingExecutor = task -> {
             realExecutor.execute(task);
             try {
-                // a thread do tick para AQUI: já submeteu, ainda não registrou.
-                // Expirar é FALHA, não via de escape: um trap que se solta
-                // sozinho registraria a future e faria o teste passar sem a
-                // segunda espera — verde pelo motivo errado. A exceção sai
-                // pela guarda de "runner executor rejected" do submitDispatch,
-                // a future nunca é registrada, e o teste fica vermelho.
+                // The tick's thread stops HERE: already submitted, not yet registered. Expiring is a FAILURE,
+                // not an escape hatch: a trap that releases itself would register the future and make the
+                // test pass without the second wait — green for the wrong reason. The exception exits through
+                // submitDispatch's "runner executor rejected" guard, the future is never registered, and the
+                // test goes red.
                 if (!releaseSubmit.await(10, TimeUnit.SECONDS)) {
                     throw new IllegalStateException("submit trap expired — the test never released it");
                 }
@@ -1759,10 +1921,10 @@ class EngineTest {
         assertThat(handlerCalled.get()).isFalse();
         Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
         assertThat(found.attempts().get(0).error()).contains("payload could not be read");
-        // RESP-3 (docs/codereview-naming.md): payload ilegível também publica Failed, mesmo caminho de qualquer outra falha terminal.
+        // An unreadable payload also publishes Failed, the same path as any other terminal failure.
         assertThat(failedEvent.get()).isNotNull();
         assertThat(failedEvent.get().error()).hasMessageContaining("payload could not be read");
-        // terminal por natureza, não por orçamento (ADR-0033): exhausted=false em falha pré-dispatch
+        // Terminal by nature, not by budget: exhausted=false on a pre-dispatch failure
         assertThat(failedEvent.get().attemptsExhausted()).isFalse();
     }
 
@@ -1791,7 +1953,7 @@ class EngineTest {
         assertThat(dispatchThreadName.get()).startsWith("mohs-runner-s3-");
     }
 
-    /** Mesmo padrão de unreadablePayloadFailsTheExecutionWithoutHangingTheTick — falha só a execução, não o tick nem o node. */
+    /** The same pattern as unreadablePayloadFailsTheExecutionWithoutHangingTheTick — it fails only the execution, not the tick nor the node. */
     @Test
     void unknownRunnerFailsTheExecutionWithoutHangingTheTick() throws Exception {
         seedEnqueuedExecution("exec-1", "welcome-email", "hello", NOW.minusSeconds(1), "ghost-runner");
@@ -1820,11 +1982,9 @@ class EngineTest {
     }
 
     /**
-     * ADR-0047 sobre a porta nova: falha TRANSIENTE da consulta de payloads
-     * em lote é infra, nunca veredito sobre as execuções — o lote já
-     * reivindicado fica com a posse de pé até um reaper o devolver se este
-     * node morrer; o soluço nunca vira falha TERMINAL imediata (o achado
-     * do S8).
+     * Over the new port: a TRANSIENT failure of the batched payload query is infrastructure, never a verdict
+     * on the executions — the already claimed batch keeps its ownership standing until a reaper returns it
+     * if this node dies; the hiccup never becomes an immediate TERMINAL failure.
      */
     @Test
     void transientPayloadQueryErrorLeavesTheBatchLeasedForTheReaper() throws Exception {
@@ -1860,10 +2020,9 @@ class EngineTest {
     }
 
     /**
-     * {@code Mohs.remove} entre claim e dispatch: a definição sumiu de
-     * verdade (fora do snapshot de definições do tick) — falha terminal com
-     * diagnóstico próprio, não o "runner could not be resolved" (que
-     * apontaria o operador pro problema errado).
+     * A {@code Mohs.remove} between claim and dispatch: the definition is genuinely gone (outside the tick's
+     * definitions snapshot) — a terminal failure with a diagnostic of its own, not "runner could not be
+     * resolved" (which would point the operator at the wrong problem).
      */
     @Test
     void removedDefinitionFailsTheExecutionWithItsOwnError() throws Exception {
@@ -1893,15 +2052,14 @@ class EngineTest {
     }
 
     /**
-     * A gravação da falha terminal (failBeforeDispatch) roda no for de
-     * tick(): se ela própria lançar (banco, executor de eventos saturado), o
-     * resto do lote ainda precisa ser despachado — sem a guarda, a exceção
-     * abortava o for e exec-2, já possuída no banco, ficava órfã até um
+     * The terminal-failure write (failBeforeDispatch) runs inside tick()'s for loop: if it throws itself (the
+     * database, a saturated event executor), the rest of the batch still needs dispatching — without the
+     * guard, the exception aborted the loop and exec-2, already owned in the database, was orphaned until a
      * reaper.
      */
     @Test
     void tickContinuesWhenRecordingATerminalFailureThrows() throws Exception {
-        // exec-1: job sem definição registrada — o caminho de failBeforeDispatch
+        // exec-1: a job with no registered definition — the failBeforeDispatch path
         recordAndOffer("exec-1", "ghost-job", "hello", NOW.minusSeconds(2));
         seedEnqueuedExecution("exec-2", "welcome-email", "hello", NOW.minusSeconds(1));
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
@@ -1933,16 +2091,14 @@ class EngineTest {
     }
 
     /**
-     * Engine.submitDispatch: item novo do achado "A" (docs/codereview-naming.md,
-     * addendum 2026-08-14) — um {@code dispatchExecutor} saturado rejeita a
-     * 2ª/3ª submissão do mesmo lote de claim; antes da correção, a exceção
-     * síncrona de {@code CompletableFuture.runAsync} abortava o {@code for}
-     * de {@code tick()} assim que a 1ª rejeição acontecia, deixando as
-     * execuções seguintes do lote sem sequer tentar {@code submitDispatch}.
-     * `exec-1` prende o único slot do executor (concorrência 1); `exec-2` e
-     * `exec-3` são reivindicadas no mesmo lote e têm que ser rejeitadas
-     * individualmente — as duas aparecem no log, não só a primeira, o que só
-     * é possível se o loop continuou depois da rejeição de `exec-2`.
+     * Engine.submitDispatch: a saturated {@code dispatchExecutor} rejects the 2nd and 3rd submission of the
+     * same claim batch; before the fix, the synchronous exception from {@code CompletableFuture.runAsync}
+     * aborted {@code tick()}'s {@code for} as soon as the 1st rejection happened, leaving the batch's
+     * remaining executions without even attempting {@code submitDispatch}.
+     *
+     * <p>{@code exec-1} holds the executor's only slot (concurrency 1); {@code exec-2} and {@code exec-3} are
+     * claimed in the same batch and must be rejected individually — both appear in the log, not just the
+     * first, which is only possible if the loop continued after {@code exec-2}'s rejection.
      */
     @Test
     void submitDispatchContinuesAfterDispatchExecutorRejectsOne() throws Exception {
@@ -1952,10 +2108,9 @@ class EngineTest {
         CountDownLatch releaseFirstHandler = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseFirstHandler.await(5, TimeUnit.SECONDS));
 
-        // CountDownLatch, não ListAppender.list: o append() de um Appender roda na
-        // thread do tick scheduler, esta asserção roda na thread do teste —
-        // contar um latch dá a publicação segura (JCIP) que ler uma lista comum
-        // concorrentemente não dá (ListAppender.list é um ArrayList cru).
+        // A CountDownLatch, not ListAppender.list: an Appender's append() runs on the tick scheduler's thread
+        // while this assertion runs on the test's — counting a latch gives the safe publication (JCIP) that
+        // reading a plain list concurrently does not (ListAppender.list is a raw ArrayList).
         CountDownLatch exec2Rejected = new CountDownLatch(1);
         CountDownLatch exec3Rejected = new CountDownLatch(1);
         AppenderBase<ILoggingEvent> rejectionWatcher = new AppenderBase<>() {
@@ -1973,14 +2128,14 @@ class EngineTest {
         rejectionWatcher.start();
         engineLogger.addAppender(rejectionWatcher);
 
-        // concorrência 1 de propósito — exec-1 esgota o único slot, forçando exec-2/exec-3 a rejeitar.
+        // Concurrency 1 on purpose — exec-1 exhausts the only slot, forcing exec-2 and exec-3 to be rejected.
         RunnerRegistry oneSlotRunnerRegistry = new RunnerRegistry(List.of(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(1).build()));
         Engine engine = newEngine(nodeStore, List.of(), oneSlotRunnerRegistry);
 
         engine.start();
         try {
-            // as duas têm que disparar — só é possível se o loop de tick() continuou
-            // depois da rejeição de exec-2 e chegou a tentar exec-3 também.
+            // Both have to fire — only possible if tick()'s loop continued after exec-2's rejection and got as
+            // far as attempting exec-3 too.
             assertThat(exec2Rejected.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(exec3Rejected.await(5, TimeUnit.SECONDS)).isTrue();
         } finally {
@@ -1990,7 +2145,7 @@ class EngineTest {
         }
     }
 
-    /** Decorator só pra dar ao teste um jeito determinístico de esperar N ticks reais, sem Thread.sleep. */
+    /** A decorator purely to give the test a deterministic way to wait for N real ticks, without Thread.sleep. */
     private static final class CountingNodeStore implements NodeStore {
         private final NodeStore delegate;
         private final AtomicReference<CountDownLatch> latch;
@@ -2023,5 +2178,89 @@ class EngineTest {
         public int deleteHeartbeatsBefore(Instant cutoff) {
             return delegate.deleteHeartbeatsBefore(cutoff);
         }
+    }
+
+    /**
+     * The gauge is fed by the TICK, never by the scrape: it exists from boot (a series that only
+     * appears once there is a backlog cannot be alerted on), and the value it holds is the one the
+     * loop sampled — the first tick counts three entries BEFORE claiming them, which is exactly why
+     * the number survives the dispatch that follows.
+     */
+    @Test
+    void theBacklogGaugeIsSampledByTheTickAndExistsFromBoot() throws Exception {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
+        recordAndOffer("exec-1", "welcome-email", "a", NOW.minusSeconds(1));
+        recordAndOffer("exec-2", "welcome-email", "b", NOW.minusSeconds(1));
+        recordAndOffer("exec-3", "welcome-email", "c", NOW.minusSeconds(1));
+        MeterRegistry registry = new SimpleMeterRegistry();
+        Engine engine = assembleEngine(jobStore, workQueue, leaseStore, historyStore, nodeStore,
+                new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), clock, registry);
+
+        assertThat(registry.get("mohs.queue.depth").gauge().value())
+                .as("the series exists before the first tick — an alert cannot tell a missing series from zero")
+                .isZero();
+
+        engine.start();
+        try {
+            Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(registry.get("mohs.queue.depth").gauge().value()).isEqualTo(3.0));
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+    }
+
+    /**
+     * The deduplication window is the row's lifetime, so enforcing the window IS pruning: a key older
+     * than {@code idempotency-retention} stops deduplicating because its row is gone. Without this the
+     * window was the installation's lifetime — the method existed, was indexed, and nothing called it.
+     */
+    @Test
+    void anIdempotencyKeyOlderThanTheRetentionIsPrunedOnTheTick() throws Exception {
+        insertIdempotencyKey("stale", NOW.minus(Duration.ofDays(2)));
+        insertIdempotencyKey("fresh", NOW.minus(Duration.ofHours(1)));
+        Engine engine = newEngine(nodeStore, List.of(), defaultRunnerRegistry(),
+                settingsWithIdempotencyRetention(Duration.ofDays(1)));
+
+        engine.start();
+        try {
+            Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(rawJdbcTemplate.queryForList("SELECT idempotency_key FROM mohs_idempotency", String.class))
+                            .containsExactly("fresh"));
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+    }
+
+    /** Zero is the opt-out, not "prune everything": the operator who sets it keeps every key, and the growth that comes with it. */
+    @Test
+    void aZeroRetentionKeepsEveryIdempotencyKey() throws Exception {
+        insertIdempotencyKey("ancient", NOW.minus(Duration.ofDays(3650)));
+        Engine engine = newEngine(nodeStore, List.of(), defaultRunnerRegistry(),
+                settingsWithIdempotencyRetention(Duration.ZERO));
+
+        engine.start();
+        try {
+            // A heartbeat row proves a tick completed — the point at which the prune would have run
+            Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_nodes", Integer.class)).isPositive());
+            assertThat(rawJdbcTemplate.queryForList("SELECT idempotency_key FROM mohs_idempotency", String.class))
+                    .containsExactly("ancient");
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+    }
+
+    private EngineSettings settingsWithIdempotencyRetention(Duration retention) {
+        return new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, BATCH_SIZE, BATCH_SIZE, 1, LEASE_TTL, LEASE_TTL, null,
+                EngineSettings.DEFAULT_MISFIRE_THRESHOLD, retention);
+    }
+
+    private void insertIdempotencyKey(String key, Instant createdAt) {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at)
+                VALUES ('welcome-email', ?, ?, ?)
+                """, key, "exec-" + key, JdbcTimestamps.toUtcLocalDateTime(createdAt));
     }
 }

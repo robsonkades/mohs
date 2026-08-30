@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -17,28 +32,24 @@ import io.mohs.engine.EngineSettings;
 import io.mohs.engine.JobHandler;
 
 /**
- * S9 do §20.2 — deploy que ADICIONA um job: durante a janela do rollout,
- * parte do cluster ainda não tem o handler. Dois cenários, porque são duas
- * perguntas com respostas diferentes, e misturá-las produziria um gate
- * permanentemente vermelho que todo mundo aprende a ignorar:
+ * A deploy that ADDS a job: during the rollout window, part of the cluster does not have the
+ * handler yet. Two scenarios, because they are two questions with different answers, and mixing
+ * them would produce a permanently red gate that everyone learns to ignore:
  *
  * <ol>
- *   <li>o rollout TERMINA dentro do orçamento de retry — o trabalho
- *       sobrevive? É a pergunta que decide se a release pode sair;</li>
- *   <li>um nó nunca aprende o handler — quanto custa? É o gap conhecido
- *       (decisão 2 do PLAN.md da Phase 6: handler-aware claiming ficou de
- *       fora), afirmado no valor que ele TEM hoje, para gritar quando
- *       piorar.</li>
+ *   <li>the rollout FINISHES within the retry budget — does the work survive? This is the question
+ *       that decides whether the release can ship;</li>
+ *   <li>a node never learns the handler — what does that cost? This is the known gap
+ *       (handler-aware claiming was left out), asserted at the value it HAS today, so that it
+ *       shouts when it gets worse.</li>
  * </ol>
  *
- * <p>O custo do segundo é aritmética de sharding, não azar: {@code Shards.of}
- * é função do id, {@code ownedBy} parte 64 shards igualmente entre os 2 nós,
- * e o retry re-deriva o MESMO shard. Toda execução que cair nos 32 shards do
- * nó cego é reentregue a ele até o orçamento acabar — metade do backlog,
- * deterministicamente.
+ * <p>The second cost is sharding arithmetic, not bad luck: {@code Shards.of} is a function of the
+ * id, {@code ownedBy} splits 64 shards evenly between the 2 nodes, and the retry re-derives the
+ * SAME shard. Every execution landing in the blind node's 32 shards is redelivered to it until the
+ * budget runs out — half the backlog, deterministically.
  *
- * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
- * -Dtest=RollingUpdateScenario}.
+ * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=RollingUpdateScenario}.
  */
 class RollingUpdateScenario {
 
@@ -62,9 +73,8 @@ class RollingUpdateScenario {
             cluster.seedReady(JOB, SEED, 20);
             cluster.startAll();
 
-            // o rollout alcança o segundo nó: é o que um deploy real faz, e é
-            // a diferença entre "janela de rollout" e "cluster heterogêneo
-            // para sempre"
+            // The rollout reaches the second node: that is what a real deploy does, and it is the
+            // difference between "a rollout window" and "a permanently heterogeneous cluster"
             ScenarioCluster.awaitUntil(Duration.ofSeconds(10), () -> executed.get() > 0);
             lagging.handlers().register(JobKey.of(JOB), handler);
 
@@ -87,10 +97,9 @@ class RollingUpdateScenario {
     }
 
     /**
-     * O gap conhecido, medido. Afirma o número ATUAL com o link para a
-     * decisão que o criou — assim fica verde e ainda grita se piorar; uma
-     * asserção de {@code failed == 0} aqui seria TODO disfarçado de teste,
-     * porque cobra o handler-aware claiming que a Phase 6 não implementou.
+     * The known gap, measured. It asserts the CURRENT number, so it stays green and still shouts if
+     * it gets worse; a {@code failed == 0} assertion here would be a TODO disguised as a test,
+     * because it would demand the handler-aware claiming that was never implemented.
      */
     @Test
     void aNodeThatNeverLearnsTheHandlerBurnsTheRetryBudgetOfItsShards() {
@@ -100,7 +109,7 @@ class RollingUpdateScenario {
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC())) {
             cluster.defineJob(JOB, spec -> spec.retries(RETRIES));
             ScenarioCluster.Node upgraded = cluster.addNode(settings(), List.of());
-            cluster.addNode(settings(), List.of()); // cego para sempre
+            cluster.addNode(settings(), List.of()); // blind forever
             upgraded.handlers().register(JobKey.of(JOB), (_, _) -> executed.incrementAndGet());
 
             cluster.seedReady(JOB, SEED, 20);
@@ -116,13 +125,13 @@ class RollingUpdateScenario {
             assertThat(settled).as("the queue must drain even when half of it fails").isTrue();
             assertThat(succeeded + failed).as("every seeded execution must reach a terminal state").isEqualTo(SEED);
             assertThat(failed)
-                    .as("KNOWN GAP (PLAN.md Phase 6, decision 2 — no handler-aware claiming): the blind node owns "
+                    .as("KNOWN GAP (there is no handler-aware claiming): the blind node owns "
                             + "half of the 64 shards and burns the whole retry budget of every execution that lands "
                             + "there. A number far from half the seed means the shard assignment changed")
                     .isBetween(SEED / 2 - SEED / 20, SEED / 2 + SEED / 20);
-            // pela MENSAGEM, não pelo tipo: o motor usa IllegalStateException
-            // para handler ausente, shutdown e nó morto — só o texto separa
-            // as três, e sem essa distinção a asserção não atribui nada
+            // By MESSAGE, not by type: the engine uses IllegalStateException for a missing handler,
+            // for shutdown and for a dead node — only the text separates the three, and without
+            // that distinction the assertion attributes nothing
             assertThat(cluster.failureKinds().keySet())
                     .as("the loss must be attributable to the missing handler, not to a reclaim or a shutdown")
                     .anyMatch(kind -> kind.contains("no handler registered for job"));

@@ -78,14 +78,13 @@ function RunnerRow({ runner }: { runner: RunnerResponse }) {
  * has no reason to assume this one is different.
  */
 export function RunnersPage() {
-  // Polled by the page instead of pushed by the stream, and the reason is meaning, not cost:
-  // `/overview/stream` promises a cluster-wide picture, and runner occupancy belongs to one
-  // process. In that channel the number's meaning would depend on which node answered the SSE
-  // handshake, and the reader has no way to know which. See docs/DASHBOARD-STREAM-REVIEW.md §5.
+  // Fed by the stream's `runners` frame (ADR-0063 §5, which reverses the "node-local data stays
+  // out of a cluster-wide channel" call recorded in DASHBOARD-STREAM-REVIEW §5). No interval of
+  // its own: with both, an SSE pinned to one node and a poll round-robining across the load
+  // balancer would write two different nodes' counters into one cache key twice a second.
   const runners = useQuery({
     queryKey: queryKeys.runners(),
     queryFn: fetchRunners,
-    refetchInterval: 2_000,
   });
   const nodes = useQuery({ queryKey: queryKeys.nodes(), queryFn: fetchNodes });
 

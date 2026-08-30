@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Clock;
@@ -27,9 +42,9 @@ import io.mohs.store.jdbc.dialect.H2JdbcDialect;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@link JdbcWorkQueue} sobre H2 — a forma portátil do claim (SELECT com
- * lock → DELETE → INSERT da posse). O statement único do Postgres tem o
- * espelho destes cenários em {@code JdbcWorkQueuePostgresTest}.
+ * {@link JdbcWorkQueue} over H2 — the claim's portable form (a locking SELECT, then DELETE, then the
+ * ownership INSERT). Postgres's single statement has these scenarios mirrored in
+ * {@code JdbcWorkQueuePostgresTest}.
  */
 class JdbcWorkQueueTest {
 
@@ -51,7 +66,7 @@ class JdbcWorkQueueTest {
         queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC)));
     }
 
-    /** ADR-0043: membro de lote não rearma — o lote já contou esta falha; re-rodar contaria o desfecho DUAS vezes num lote possivelmente já fechado (mesmo guard do CAS da era anterior). */
+    /** A batch member does not rearm — the batch already counted this failure; re-running would count the outcome TWICE in a batch that may already be closed (the same guard as the earlier era's CAS). */
     @Test
     void rearmForManualRetryRefusesABatchMember() {
         new JdbcJobStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC))
@@ -81,11 +96,10 @@ class JdbcWorkQueueTest {
     }
 
     /**
-     * S6.5: a sonda do gate ocioso ({@code hasVisibleWork}) atravessa o
-     * driver com a LISTA de shards do nó — 64 parâmetros num nó único. O
-     * binding de coleção é do driver, não do dialeto, então cada um paga o
-     * seu teste; o resto do cenário prova o predicado: shard alheio não
-     * conta, entrada ainda invisível não conta.
+     * The idle gate's probe ({@code hasVisibleWork}) crosses the driver with the node's LIST of shards —
+     * 64 parameters on a single node. Collection binding belongs to the driver, not the dialect, so each
+     * one pays for its own test; the rest of the scenario proves the predicate: another node's shard does
+     * not count, and an entry that is still invisible does not count.
      */
     @Test
     void hasVisibleWorkSeesOnlyVisibleEntriesInTheOwnedShards() {
@@ -93,10 +107,10 @@ class JdbcWorkQueueTest {
         assertThat(queue.hasVisibleWork(owned, NOW)).isFalse();
 
         queue.offer(List.of(shardedEntry("exec-alheio", 7, NOW.minusSeconds(1))));
-        assertThat(queue.hasVisibleWork(owned, NOW)).as("shard de outro nó").isFalse();
+        assertThat(queue.hasVisibleWork(owned, NOW)).as("another node's shard").isFalse();
 
         queue.offer(List.of(shardedEntry("exec-futuro", 8, NOW.plusSeconds(60))));
-        assertThat(queue.hasVisibleWork(owned, NOW)).as("ainda não visível").isFalse();
+        assertThat(queue.hasVisibleWork(owned, NOW)).as("not visible yet").isFalse();
 
         queue.offer(List.of(shardedEntry("exec-devido", 8, NOW.minusSeconds(1))));
         assertThat(queue.hasVisibleWork(owned, NOW)).isTrue();
@@ -104,6 +118,24 @@ class JdbcWorkQueueTest {
 
     private WorkQueue.ReadyEntry shardedEntry(String id, int shard, Instant visibleAt) {
         return new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of("job-a"), shard, 20, 1, visibleAt);
+    }
+
+    /**
+     * The gauge's number, and the two ways it differs from the probe above: no shard predicate — a
+     * backlog belongs to the queue, not to whoever asks — and the same visibility rule, so a retry
+     * still waiting out its backoff is not backlog.
+     */
+    @Test
+    void countVisibleCountsEveryShardAndOnlyWhatAClaimCouldTakeNow() {
+        assertThat(queue.countVisible(NOW)).isZero();
+
+        queue.offer(List.of(shardedEntry("exec-a", 7, NOW.minusSeconds(1)),
+                shardedEntry("exec-b", 8, NOW.minusSeconds(1))));
+        assertThat(queue.countVisible(NOW)).as("every shard, not one node's slice").isEqualTo(2);
+
+        queue.offer(List.of(shardedEntry("exec-later", 9, NOW.plusSeconds(60))));
+        assertThat(queue.countVisible(NOW)).as("waiting is not backlog").isEqualTo(2);
+        assertThat(queue.countVisible(NOW.plusSeconds(61))).isEqualTo(3);
     }
 
     @Test
@@ -118,7 +150,7 @@ class JdbcWorkQueueTest {
 
         assertThat(claimed).extracting(w -> w.executionId().value())
                 .containsExactly("exec-high", "exec-normal-old", "exec-normal-new", "exec-low");
-        // a fila esvaziou (DELETE, não UPDATE de estado — §5.3) e a posse nasceu na mesma transação (§6.2)
+        // The queue emptied (a DELETE, not a state UPDATE) and the ownership was born in the same transaction
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_ready", Integer.class)).isZero();
         assertThat(rawJdbcTemplate.queryForList("SELECT execution_id FROM mohs_lease WHERE node_id = 'node-a' AND epoch = 1", String.class))
                 .containsExactlyInAnyOrder("exec-high", "exec-normal-old", "exec-normal-new", "exec-low");
@@ -158,7 +190,7 @@ class JdbcWorkQueueTest {
         assertThat(queue.claim(0, NODE, EPOCH, 2, List.of(), NOW)).hasSize(1);
     }
 
-    /** §5.4: um shard por statement — entradas de outro shard são invisíveis à rodada. */
+    /** One shard per statement — entries from another shard are invisible to the round. */
     @Test
     void claimSeesOnlyItsShard() {
         queue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("exec-other-shard"), JobKey.of("job-a"), 5, 20, 1, NOW.minusSeconds(1))));
@@ -170,7 +202,7 @@ class JdbcWorkQueueTest {
                 .extracting(w -> w.executionId().value()).containsExactly("exec-other-shard");
     }
 
-    /** A lista de inadmissíveis (§5.4) filtra POR JOB na própria query — janela fechada/cap sem folga/handler ausente nunca viram claim + requeue. */
+    /** The inadmissible list filters PER JOB in the query itself — a closed window, a cap with no headroom or a missing handler never become a claim followed by a requeue. */
     @Test
     void claimSkipsInadmissibleJobs() {
         queue.offer(List.of(
@@ -189,7 +221,7 @@ class JdbcWorkQueueTest {
         assertThat(queue.claim(0, NODE, EPOCH, 10, List.of(), NOW)).isEmpty();
     }
 
-    /** Requeue (§4.3): a lease cai CERCADA pela encarnação observada e a entrada renasce na fila — o caminho único de recuperação e de perda de admissão. */
+    /** Requeue: the lease drops FENCED by the observed incarnation and the entry is reborn in the queue — the single path for recovery and for admission loss. */
     @Test
     void requeueDropsTheLeaseAndRebirthsTheEntryWhenTheFenceHolds() {
         queue.offer(List.of(entry("exec-1", "job-a", 20, 1, NOW.minusSeconds(1))));
@@ -204,7 +236,7 @@ class JdbcWorkQueueTest {
                 "SELECT attempt FROM mohs_ready WHERE execution_id = 'exec-1'", Integer.class)).isEqualTo(2);
     }
 
-    /** O fence do §6.3 em ação: um requeue com epoch defasado (reaper zumbi) perde e NÃO duplica a entrada na fila. */
+    /** The fence in action: a requeue with a stale epoch (a zombie reaper) loses and does NOT duplicate the entry in the queue. */
     @Test
     void requeueWithAStaleFenceLosesAndDoesNotDuplicate() {
         queue.offer(List.of(entry("exec-1", "job-a", 20, 1, NOW.minusSeconds(1))));

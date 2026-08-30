@@ -16,8 +16,6 @@
     <description>API pública: contratos de job, schedule, definition, execution, event e resource (ADR-0015).</description>
 
     <dependencies>
-        <!-- @AliasFor/@CheckReturnValue nas annotations públicas (@MohsJob, @OnExecution).
-             Só spring-core: a API pública não conhece contexto, transação nem web. -->
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-core</artifactId>

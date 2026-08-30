@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.node;
 
 import java.time.Instant;
@@ -22,7 +37,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-/** Ver Javadoc de {@link io.mohs.rest.job.JobsControllerContractTest} — mesmo padrão de teste. */
+/** See {@link io.mohs.rest.job.JobsControllerContractTest}'s Javadoc — the same test pattern. */
 @WebMvcTest(properties = "mohs.enabled=false")
 class NodesControllerContractTest {
 
@@ -48,7 +63,7 @@ class NodesControllerContractTest {
     @MockitoBean
     private Mohs mohs;
 
-    /** A resposta é a forma plana do NodeSnapshot, na ordem da fachada (mais recente primeiro) — o controller não reordena nem deriva nada. */
+    /** The response is the flat form of NodeSnapshot, in the facade's order (most recent first) — the controller neither reorders nor derives anything. */
     @Test
     void listReturnsTheClusterNodesInFacadeOrder() throws Exception {
         when(mohs.nodes()).thenReturn(List.of(

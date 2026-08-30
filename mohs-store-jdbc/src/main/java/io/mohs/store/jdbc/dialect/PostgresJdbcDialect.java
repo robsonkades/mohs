@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc.dialect;
 
 import java.sql.ResultSet;
@@ -13,7 +28,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import io.mohs.store.jdbc.JdbcTimestamps;
 
-/** PostgreSQL — {@code LIMIT} no fim, {@code SKIP LOCKED} nativo (é de onde a sintaxe vem — ADR-0022/0023). */
+/** PostgreSQL — {@code LIMIT} at the end, native {@code SKIP LOCKED} (this is where the syntax comes from). */
 public final class PostgresJdbcDialect implements JdbcDialect {
 
     @Override
@@ -21,7 +36,7 @@ public final class PostgresJdbcDialect implements JdbcDialect {
         return "classpath:io/mohs/store/jdbc/migration/postgresql";
     }
 
-    /** Tabelas do split são {@code TIMESTAMPTZ} aqui (§7.2): {@code OffsetDateTime} UTC — {@code LocalDateTime} seria lido pelo fuso da SESSÃO (ver Javadoc da interface). */
+    /** The split tables are {@code TIMESTAMPTZ} here: UTC {@code OffsetDateTime} — a {@code LocalDateTime} would be read in the SESSION's zone (see the interface's Javadoc). */
     @Override
     public Object splitTimestamp(Instant instant) {
         return JdbcTimestamps.toUtcOffsetDateTime(instant);
@@ -34,16 +49,15 @@ public final class PostgresJdbcDialect implements JdbcDialect {
     }
 
     /**
-     * O claim do §5.4 na forma que só o Postgres tem: UM statement — a CTE
-     * seleciona com {@code SKIP LOCKED}, o {@code DELETE … USING} consome
-     * a fila, o {@code INSERT} (também CTE) grava a posse e o SELECT final
-     * devolve NA ORDEM {@code (priority, visible_at)} — a ordem de um
-     * {@code RETURNING} de INSERT não é garantida, e a forma portátil dos
-     * outros dialetos devolve ordenado: o contrato da porta é um só nos
-     * quatro (review S5.2). O INSERT lê de {@code picked} — idêntico a ler
-     * de {@code gone}, que deleta exatamente {@code picked}. Duas
-     * constantes (com/sem filtro de inadmissíveis) porque {@code NOT IN}
-     * de lista vazia não expande.
+     * The claim in the form only Postgres has: ONE statement — the CTE selects with
+     * {@code SKIP LOCKED}, the {@code DELETE … USING} consumes the queue, the {@code INSERT} (also a
+     * CTE) writes the ownership, and the final SELECT returns IN {@code (priority, visible_at)} ORDER —
+     * an INSERT's {@code RETURNING} order is not guaranteed, and the other dialects' portable form
+     * returns ordered: the port's contract is one and the same across all four.
+     *
+     * <p>The INSERT reads from {@code picked} — identical to reading from {@code gone}, which deletes
+     * exactly {@code picked}. Two constants (with and without the inadmissible filter) because a
+     * {@code NOT IN} over an empty list does not expand.
      */
     public static final String CLAIM_READY = """
             WITH picked AS (
@@ -71,8 +85,8 @@ public final class PostgresJdbcDialect implements JdbcDialect {
             "WHERE shard = :shard AND visible_at <= :now AND job_key NOT IN (:inadmissible)");
 
     static {
-        // guarda do replace: se a âncora do WHERE mudar e o replace no-opar,
-        // o filtro de inadmissíveis sumiria em silêncio (review S5.2)
+        // A guard on the replace: if the WHERE anchor changes and the replace becomes a no-op,
+        // the inadmissible filter would vanish in silence
         if (!CLAIM_READY_FILTERED.contains(":inadmissible")) {
             throw new ExceptionInInitializerError("CLAIM_READY_FILTERED lost its :inadmissible predicate — the replace anchor drifted");
         }

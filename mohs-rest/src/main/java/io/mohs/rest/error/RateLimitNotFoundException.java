@@ -1,14 +1,29 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.error;
 
 import java.io.Serial;
 import java.util.Objects;
 
 /**
- * {@code PATCH /rate-limits/{name}} contra um limite que não existe.
- * Ajustar é ato de emergência sobre algo declarado; DECLARAR é ato de boot
- * (ADR-0042/ADR-0006) — por isso 404, e não criação implícita: um limite
- * nascido de um PATCH sumiria no próximo deploy sem deixar rastro no
- * repositório.
+ * {@code PATCH /rate-limits/{name}} against a limit that does not exist.
+ *
+ * <p>Adjusting is an emergency act over something declared; DECLARING is an act of boot. Hence a
+ * 404 rather than implicit creation: a limit born from a PATCH would vanish on the next deploy
+ * without leaving a trace in the repository.
  */
 public final class RateLimitNotFoundException extends RuntimeException {
 

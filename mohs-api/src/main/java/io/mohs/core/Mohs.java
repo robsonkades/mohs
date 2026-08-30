@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core;
 
 import java.time.Duration;
@@ -15,198 +30,205 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.schedule.Schedule;
 
 /**
- * Fachada pública do Mohs — um verbo por operação, sempre sobre definição
- * existente. Corpo ainda não ligado ao motor: M1 é só o contrato; a
- * implementação real vive em {@code io.mohs.engine}, fiada por
- * {@code io.mohs.autoconfigure} (M3).
+ * Mohs's public facade — one verb per operation, always over an existing definition.
  *
- * <p>Os métodos de leitura ({@link #findJob}/{@link #jobs}/
- * {@link #findExecution}/{@link #executions}/{@link #payloadType}) existem
- * pra {@code io.mohs.rest} (M3): a fronteira arquitetural
- * ({@code ArchitectureTest#rest_only_sees_public_api}) proíbe a REST de
- * enxergar {@code io.mohs.engine} diretamente — esta fachada é o único
- * caminho de leitura que ela pode usar.
+ * <p>The read methods ({@link #findJob}/{@link #jobs}/{@link #findExecution}/{@link #executions}/
+ * {@link #payloadType}) exist for {@code io.mohs.rest}: the architectural boundary
+ * ({@code ArchitectureTest#rest_only_sees_public_api}) forbids the REST layer from seeing
+ * {@code io.mohs.engine} directly, so this facade is the only read path available to it.
  */
 public interface Mohs {
 
     @CheckReturnValue
     <T> ScheduleCommand schedule(JobRef<T> ref, T payload);
 
-    /** Overload por string; tipo do payload é checado em runtime contra a definição (erro claro, não CCE). */
+    /** The string overload; the payload type is checked at runtime against the definition (a clear error, not a ClassCastException). */
     @CheckReturnValue
     ScheduleCommand schedule(String jobId, Object payload);
 
     /**
-     * Agenda vários jobs como um lote: o {@code configurer} coleta os
-     * membros, o total é fixado na criação e cada execução já nasce
-     * carregando o {@code batchId} — é ele que faz a conclusão de cada
-     * membro contar no lote (ADR-0043). Lote vazio é recusado: sem membro
-     * nenhum ele nunca completaria, e um lote eternamente aberto é pior que
-     * um erro.
+     * Schedules several jobs as one batch: the {@code configurer} collects the members, the total is
+     * fixed at creation, and each execution is born already carrying the {@code batchId} — which is
+     * what makes each member's completion count towards the batch. An empty batch is refused: with
+     * no members it would never complete, and a forever-open batch is worse than an error.
      *
-     * @return o recibo do lote, com {@code batchId} já durável (ADR-0003,
-     *         cláusula 2)
+     * <p>{@code name} is the batch's label and is PERSISTED: it appears in
+     * {@link BatchSnapshot#name()}, in the {@link io.mohs.core.event.BatchCompleted} handed to
+     * {@link Batch#onCompletion}, and in {@code GET /batches/{id}}. It is what ties the batch back
+     * to the intent of whoever created it, so the operator is not left with only a UUID at 3 a.m.
+     *
+     * <p><b>All-or-nothing:</b> ALL members are validated before any write, and the batch row plus
+     * its members enter in a single transaction. An exception from here guarantees nothing was
+     * persisted — the call can be repeated with no risk of a partial batch.
+     *
+     * @return the batch's receipt, with {@code batchId} already durable
+     * @throws IllegalArgumentException if the batch is empty (it would never complete) or if any
+     *         member references an undefined job — no write occurred in either case
      */
     @CheckReturnValue
     Batch batch(String name, Consumer<BatchBuilder> configurer);
 
+    /**
+     * Registers (or updates) a job definition. An upsert by {@link JobDefinition#key()}: redefining
+     * the same job replaces the definitional part and NEVER touches the operational one
+     * ({@code paused}/{@code orphaned}/{@code next_fire_at}).
+     */
     void define(JobDefinition definition);
 
     /**
-     * Aposentadoria: cancela disparos futuros (execuções {@code ENQUEUED}
-     * viram {@code CANCELLED}), preserva histórico. Só pra definições
-     * programáticas — pra um job {@code @MohsJob}, remova a anotação (o
-     * scanner o marca {@code ORPHANED} no próximo boot); chamar isto nele
-     * lança {@link IllegalArgumentException}. Job desconhecido é no-op.
+     * Retirement: cancels future firings ({@code ENQUEUED} executions become {@code CANCELLED}) and
+     * preserves history.
+     *
+     * <p>Only for programmatic definitions — for a {@code @MohsJob} job, remove the annotation and
+     * the scanner marks it {@code ORPHANED} on the next boot; calling this on one throws
+     * {@link IllegalArgumentException}. An unknown job is a no-op.
      */
     void remove(JobKey jobKey);
 
     /**
-     * Cancela uma execução (ADR-0034). Pendente ({@code ENQUEUED}/
-     * {@code RETRY_WAITING}) vira {@code CANCELLED} na hora;
-     * {@code RUNNING} recebe o pedido cooperativo — o node dono observa em
-     * até um intervalo do seu loop (entre {@code mohs.engine.poll-interval}
-     * e {@code mohs.engine.max-poll-interval}, conforme o backoff) e o
-     * handler decide quando parar (via
-     * {@link io.mohs.core.execution.JobContext#cancellationRequested()});
-     * estado terminal não muda. Nunca é imediato nem garantido: uma
-     * conclusão pode vencer a corrida, e nesse caso ela vale.
+     * Cancels an execution. A pending one ({@code ENQUEUED}/{@code RETRY_WAITING}) becomes
+     * {@code CANCELLED} immediately; a {@code RUNNING} one receives the cooperative request — the
+     * owning node observes it within at most one interval of its loop (between
+     * {@code mohs.engine.poll-interval} and {@code mohs.engine.max-poll-interval}, depending on the
+     * backoff) and the handler decides when to stop (through
+     * {@link io.mohs.core.execution.JobContext#cancellationRequested()}); a terminal state does not
+     * change.
      *
-     * @return a execução no estado corrente logo após o pedido — não
-     *         necessariamente terminal; vazio se o id não existe
+     * <p>It is never immediate nor guaranteed: a completion may win the race, and in that case it
+     * stands.
+     *
+     * @return the execution in its current state right after the request — not necessarily
+     *         terminal; empty if the id does not exist
      */
     Optional<Execution> cancel(ExecutionId executionId);
 
     /**
-     * Retry manual de uma execução {@code FAILED} (M3 sobre a ADR-0033):
-     * rearma a MESMA linha como {@code RETRY_WAITING} devida agora — a
-     * nova tentativa viaja pelo caminho normal do claim, disputando como
-     * qualquer candidato. Bypassa o orçamento de {@code retries} de
-     * propósito: a política protege o sistema de loops automáticos; aqui a
-     * decisão é do operador. Não passa pela dedupe de Idempotency-Key
-     * (nada novo é inserido — ADR-0030/0033); a idempotência natural é o
-     * próprio CAS: repetir a chamada encontra a execução já rearmada e
-     * falha com a exceção de estado.
+     * A manual retry of a {@code FAILED} execution: it rearms the SAME row as {@code RETRY_WAITING}
+     * due now, and the new attempt travels the normal claim path, competing like any other
+     * candidate.
      *
-     * @return a execução já rearmada ({@code RETRY_WAITING}); vazio se o
-     *         id não existe
-     * @throws IllegalStateException se a execução existe mas não está
-     *         {@code FAILED} (cancelada foi decisão explícita; os demais
-     *         estados têm dono — o motor) ou pertence a um job aposentado
-     *         (a linha rearmada nunca seria reivindicada — ADR-0033)
+     * <p>It bypasses the {@code retries} budget on purpose: the policy protects the system from
+     * automatic loops, whereas here the decision is the operator's. It does not go through
+     * Idempotency-Key deduplication (nothing new is inserted); the natural idempotence is the CAS
+     * itself — repeating the call finds the execution already rearmed and fails with the state
+     * exception.
+     *
+     * @return the execution already rearmed ({@code RETRY_WAITING}); empty if the id does not exist
+     * @throws IllegalStateException if the execution exists but is not {@code FAILED} (a cancelled
+     *         one was an explicit decision; the other states have an owner — the engine), belongs to
+     *         a retired job (the rearmed row would never be claimed), or is a BATCH MEMBER — the
+     *         batch already counted this failure, and counting it again would close the batch early;
+     *         schedule the job standalone to redo the work
      */
     Optional<Execution> retry(ExecutionId executionId);
 
     Optional<JobSnapshot> findJob(JobKey jobKey);
 
-    /** Todos os jobs registrados — cardinalidade limitada (definição, não execução), sem paginação. */
+    /** Every registered job — bounded cardinality (a definition, not an execution), so no pagination. */
     List<JobSnapshot> jobs();
 
     /**
-     * Os nodes do cluster com heartbeat registrado (ADR-0012/0041), mais
-     * recente primeiro — cardinalidade limitada (tamanho do cluster + o
-     * resíduo que o purge da ADR-0041 ainda não recolheu), sem
-     * paginação, como {@link #jobs()}. Morte não é campo: deriva da idade
-     * de {@link NodeSnapshot#lastHeartbeatAt()} na leitura; {@code STOPPED}
-     * é o único desfecho auto-reportado (shutdown limpo).
+     * The cluster's nodes with a registered heartbeat, most recent first — bounded cardinality (the
+     * cluster's size plus whatever residue the purge has not collected yet), with no pagination,
+     * like {@link #jobs()}.
+     *
+     * <p>Death is not a field: it is derived from the age of {@link NodeSnapshot#lastHeartbeatAt()}
+     * at read time. {@code STOPPED} is the only self-reported outcome (a clean shutdown).
      */
     List<NodeSnapshot> nodes();
 
     /**
-     * Os runners DESTE node — configuração declarada e ocupação atual.
-     * Cardinalidade limitada (o que a aplicação declarou no boot), sem
-     * paginação, como {@link #jobs()}.
+     * THIS node's runners — their declared configuration and current occupancy. Bounded cardinality
+     * (whatever the application declared at boot), with no pagination, like {@link #jobs()}.
      *
-     * <p>Diferente de {@link #nodes()} e {@link #jobs()}, esta leitura não
-     * toca o banco e não enxerga o cluster: pool de threads é do processo.
-     * Quem consome precisa dizer de qual node está falando — ver
-     * {@link RunnerSnapshot}.
+     * <p>Unlike {@link #nodes()} and {@link #jobs()}, this read touches no database and does not see
+     * the cluster: a thread pool belongs to the process. Consumers must say which node they are
+     * talking about — see {@link RunnerSnapshot}.
      */
     List<RunnerSnapshot> runners();
 
     /**
-     * Os limites de vazão declarados e o saldo corrente do balde de cada um
-     * (ADR-0042), por nome — cardinalidade limitada, sem paginação, como
-     * {@link #jobs()}. Leitura pura: consultar o saldo não consome token.
+     * The declared rate limits and each one's current bucket balance, by name — bounded
+     * cardinality, no pagination, like {@link #jobs()}. A pure read: checking the balance consumes
+     * no token.
      */
     List<RateLimitSnapshot> rateLimits();
 
     /**
-     * Ajusta {@code max}/{@code window} de um limite JÁ declarado, em
-     * runtime e cluster-wide — mudança de emergência sob o mesmo contrato
-     * de PATCH do {@link #reschedule}: o boot reaplica o valor do código no
-     * próximo start sob o default {@code on-conflict: override}. O balde
-     * sobrevive ao ajuste (saldo clampado ao novo teto): baixar o limite
-     * corta a vazão futura, não devolve o que já foi consumido.
+     * Adjusts {@code max}/{@code window} of an ALREADY declared limit, at runtime and cluster-wide —
+     * an emergency change under the same PATCH contract as {@link #reschedule}: the boot reapplies
+     * the code's value on the next start under the default {@code on-conflict: override}.
      *
-     * @return o limite ajustado, ou vazio se {@code name} não existir — declarar limite novo é ato de boot, não de emergência
+     * <p>The bucket survives the adjustment (its balance clamped to the new ceiling): lowering the
+     * limit cuts future throughput, it does not give back what was already consumed.
+     *
+     * @return the adjusted limit, or empty if {@code name} does not exist — declaring a new limit is
+     *         an act of boot, not of emergency
      */
     Optional<RateLimitSnapshot> adjustRateLimit(String name, int max, Duration window);
 
-    /** Suspende disparos automáticos; schedule manual continua permitido (espelha o motor). Sem efeito se {@code jobKey} não existir. */
+    /** Suspends automatic firings; manual scheduling is still allowed (mirroring the engine). No effect if {@code jobKey} does not exist. */
     void pause(JobKey jobKey);
 
     void resume(JobKey jobKey);
 
     /**
-     * Muda a agenda armazenada do job em runtime (ADR-0036) — mudança de
-     * emergência sob o contrato de PATCH runtime: num job {@code ANNOTATION}
-     * vale até o próximo boot sob {@code on-conflict=override} (o scanner
-     * restaura a versão do código com diff logado); {@code preserve} a
-     * mantém; num job {@code PROGRAMMATIC} dura até a aplicação redefinir.
-     * O trigger é recomputado do relógio na mesma escrita —
-     * {@code ON_DEMAND} desarma a recorrência.
+     * Changes the job's stored schedule at runtime — an emergency change under the runtime PATCH
+     * contract: on an {@code ANNOTATION} job it holds until the next boot under
+     * {@code on-conflict=override} (the scanner restores the code's version with a logged diff),
+     * while {@code preserve} keeps it; on a {@code PROGRAMMATIC} job it lasts until the application
+     * redefines it.
      *
-     * @return o snapshot já com a agenda nova; vazio se o job não existe
-     *         (ou está aposentado)
-     * @throws IllegalArgumentException se a agenda for irrealizável
-     *         (ex.: cron sintaticamente válido que nunca dispara)
+     * <p>The trigger is recomputed from the clock in the same write — {@code ON_DEMAND} disarms the
+     * recurrence.
+     *
+     * @return the snapshot already carrying the new schedule; empty if the job does not exist (or is
+     *         retired)
+     * @throws IllegalArgumentException if the schedule is unrealisable (a syntactically valid cron
+     *         that never fires, for instance)
      */
     Optional<JobSnapshot> reschedule(JobKey jobKey, Schedule schedule);
 
     /**
-     * Tipo real do parâmetro de payload do handler de {@code jobKey}, ou
-     * vazio se o job não existir ou o método anotado não declarar payload
-     * (só {@code JobContext}, ou nenhum parâmetro). Usado pela REST pra
-     * converter o corpo JSON de {@code POST .../schedule} antes de
-     * agendar, em vez de persistir um {@code Map} cru que o handler não
-     * consegue consumir. Só o scanner de {@code @MohsJob} conhece o tipo:
-     * um handler registrado manualmente (caminho interno/de teste do
-     * {@code HandlerRegistry}) sem declarar {@code payloadType} é tratado
-     * pela REST como job que não aceita payload.
+     * The real type of the payload parameter of {@code jobKey}'s handler, or empty if the job does
+     * not exist or the annotated method declares no payload (only a {@code JobContext}, or no
+     * parameters).
+     *
+     * <p>Used by the REST layer to convert the JSON body of {@code POST .../schedule} before
+     * scheduling, rather than persisting a raw {@code Map} the handler cannot consume. Only the
+     * {@code @MohsJob} scanner knows the type: a handler registered manually (the
+     * {@code HandlerRegistry}'s internal or test path) without declaring a {@code payloadType} is
+     * treated by REST as a job that accepts no payload.
      */
     Optional<Class<?>> payloadType(JobKey jobKey);
 
     Optional<Execution> findExecution(ExecutionId executionId);
 
     /**
-     * O lote pelo id devolvido por {@link #batch}. Leitura barata e plana no
-     * tamanho do lote: o contador é mantido, não agregado dos membros
-     * (ADR-0043).
+     * The batch by the id returned from {@link #batch}. A cheap read, flat in the batch's size: the
+     * counter is maintained rather than aggregated from the members.
      */
     Optional<BatchSnapshot> findBatch(String batchId);
 
     /**
-     * A visão agregada do dashboard ({@code GET /overview}): contagens do
-     * trabalho vivo e a vazão terminal da última {@code throughputWindow}
-     * — ver {@link OverviewSnapshot} pro contrato (e pro porquê de não
-     * haver contagem all-time de estados terminais). Quem escolhe a
-     * janela é o chamador: ela é parte da resposta, não política do motor.
+     * The dashboard's aggregate view ({@code GET /overview}): live-work counts and the terminal
+     * throughput over the last {@code throughputWindow} — see {@link OverviewSnapshot} for the
+     * contract, and for why there is no all-time count of terminal states. The caller chooses the
+     * window: it is part of the response, not engine policy.
      *
-     * <p>As contagens saem de leituras independentes, não de um corte
-     * transacional — execuções que transitam durante a consulta podem
-     * divergir entre os números (read skew, DDIA cap. 7): aceitável para
-     * polling, e o preço de um corte serializável aqui seria custo sem
-     * benefício.
+     * <p>The counts come from independent reads rather than one transactional cut, so executions
+     * transitioning during the query may disagree between the numbers (read skew, DDIA ch. 7). That
+     * is acceptable for polling, and a serialisable cut here would be cost without benefit.
      */
     OverviewSnapshot overview(Duration throughputWindow);
 
     /**
-     * Até {@code query.limit()} execuções, ordenadas por id (UUIDv7)
-     * decrescente — ver {@link ExecutionQuery}. SUMÁRIO: {@code attempts()}
-     * volta vazio em listagem (leitura de dashboard — uma query, sem a
-     * coluna {@code error} de tamanho arbitrário); o detalhe com attempts
-     * é {@link #findExecution}.
+     * Up to {@code query.limit()} executions, ordered by descending id (UUIDv7) — see
+     * {@link ExecutionQuery}.
+     *
+     * <p>A SUMMARY: {@code attempts()} comes back empty in a listing (a dashboard read — one query,
+     * without the arbitrarily large {@code error} column); the detail with attempts is
+     * {@link #findExecution}.
      */
     List<Execution> executions(ExecutionQuery query);
 

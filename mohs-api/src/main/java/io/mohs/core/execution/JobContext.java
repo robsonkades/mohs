@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.execution;
 
 import java.time.Instant;
@@ -5,11 +20,11 @@ import java.time.Instant;
 import io.mohs.core.job.JobKey;
 
 /**
- * Parâmetro opcional do handler carregando contexto por tentativa:
- * identidade, timing, cancelamento cooperativo e relato de progresso.
- * Deliberadamente uma interface simples, não fluente — isso vive no
- * caminho quente (à parte da disciplina de Effective Java, um DSL aqui só
- * poluiria stack trace).
+ * The handler's optional parameter, carrying per-attempt context: identity, timing, cooperative
+ * cancellation and progress reporting.
+ *
+ * <p>Deliberately a plain interface rather than a fluent one — this lives on the hot path, and
+ * beyond the Effective Java discipline a DSL here would only pollute stack traces.
  */
 public interface JobContext {
 
@@ -17,30 +32,28 @@ public interface JobContext {
 
     ExecutionId executionId();
 
-    /** 1-based; retry incrementa isto, o id da execução permanece o mesmo. */
+    /** 1-based; a retry increments this, while the execution's id stays the same. */
     int attempt();
 
     Instant scheduledAt();
 
     /**
-     * O instante em que ESTE attempt começou a ser despachado — não é a
-     * coluna {@code fired_at} de {@code Execution}, que desde a ADR-0047
-     * registra o claim (dezenas de ms antes, sob carga).
+     * The instant THIS attempt began being dispatched — not {@code Execution}'s {@code fired_at}
+     * column, which records the claim (tens of milliseconds earlier, under load).
      */
     Instant firedAt();
 
     /**
-     * Cooperativo (ADR-0034) — vira {@code true} quando o timeout do job
-     * dispara, o shutdown escala no estouro do grace de drain, ou um
-     * {@code POST /executions/{id}/cancel} é observado pelo node dono
-     * (staleness ≤ um intervalo do loop — de
-     * {@code mohs.engine.poll-interval} a
-     * {@code mohs.engine.max-poll-interval}, conforme o backoff).
-     * O handler decide quando e como parar: sair com exceção depois de
-     * observar um cancel manual encerra a execução como {@code CANCELLED};
-     * concluir normalmente registra {@code SUCCEEDED} — trabalho terminado
-     * vale, mesmo com pedido pendente. Timeout e shutdown também entregam
-     * {@code Thread.interrupt()}; o cancel manual, não — é flag pura.
+     * Cooperative cancellation: becomes {@code true} when the job's timeout fires, when shutdown
+     * escalates after the drain grace expires, or when a {@code POST /executions/{id}/cancel} is
+     * observed by the owning node (staleness of at most one loop interval — from
+     * {@code mohs.engine.poll-interval} to {@code mohs.engine.max-poll-interval}, depending on the
+     * backoff).
+     *
+     * <p>The handler decides when and how to stop: throwing after observing a manual cancel ends the
+     * execution as {@code CANCELLED}, while completing normally records {@code SUCCEEDED} —
+     * finished work counts, even with a request pending. Timeout and shutdown additionally deliver
+     * {@code Thread.interrupt()}; a manual cancel does not, being a pure flag.
      */
     boolean cancellationRequested();
 

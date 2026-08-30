@@ -1,13 +1,28 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.definition;
 
 import io.mohs.core.Mohs;
 
 /**
- * De onde veio um {@link JobDefinition}. Definições anotadas que
- * desaparecem do código num redeploy viram {@code ORPHANED} em vez de
- * apagadas silenciosamente (ver
- * {@code docs/adr/0006-registration-lifecycle-and-conflict-policy.md});
- * as programáticas são aposentadas explicitamente via {@link Mohs#remove}.
+ * Where a {@link JobDefinition} came from.
+ *
+ * <p>Annotated definitions that disappear from the code on a redeploy become {@code ORPHANED}
+ * rather than being deleted silently; programmatic ones are retired explicitly through
+ * {@link Mohs#remove}.
  */
 public enum DefinitionSource {
     ANNOTATION,

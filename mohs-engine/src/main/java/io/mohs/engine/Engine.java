@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Clock;
@@ -20,6 +35,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
@@ -48,81 +64,88 @@ import io.mohs.core.job.JobKey;
 import io.mohs.core.schedule.IntervalSpec;
 
 /**
- * O motor sobre as portas da Phase 5 (ADR-A): liga {@link WorkQueue},
- * {@link Dispatcher}, {@link HistoryStore}, {@link LeaseStore} e
- * {@link NodeStore} num ciclo que roda de fato. Implementa
- * {@link MohsLifecycle} diretamente: "exposta via {@code mohs.lifecycle()}"
- * (ADR-0007) já é a mesma máquina de estados que o poll loop precisa.
+ * The engine over the persistence ports: it wires {@link WorkQueue}, {@link Dispatcher},
+ * {@link HistoryStore}, {@link LeaseStore} and {@link NodeStore} into a cycle that actually runs. It
+ * implements {@link MohsLifecycle} directly: "exposed through {@code mohs.lifecycle()}" is already
+ * the same state machine the poll loop needs.
  *
- * <p>Poll ADAPTATIVO com hand-off local (Phase 6, §5.5/ADR-G): o loop
- * dorme entre o piso e o teto conforme acha trabalho, e um enqueue DESTA
- * JVM já devido o acorda ({@link #signalWorkScheduled}). Wakeup
- * event-driven cross-nó (LISTEN/NOTIFY) foi implementado, MEDIDO e
- * retirado — a transação notificante não participa de group commit e
- * serializou o ingest (ADR-0054, com os números); o poll adaptativo é o
- * único backstop cross-nó, latência limitada por
- * {@code max-poll-interval}. {@code nodeId} é um UUID gerado por
- * instância.
+ * <p>An ADAPTIVE poll with local hand-off: the loop sleeps between the floor and the ceiling
+ * depending on whether it finds work, and an enqueue from THIS JVM that is already due wakes it
+ * ({@link #signalWorkScheduled}). A cross-node event-driven wakeup (LISTEN/NOTIFY) was implemented,
+ * MEASURED and withdrawn — the notifying transaction does not take part in group commit and
+ * serialised the ingest; the adaptive poll is the only cross-node backstop, with latency bounded by
+ * {@code max-poll-interval}. {@code nodeId} is a UUID generated per instance.
  *
- * <p><b>Guards de admissão (§5.4):</b> os predicados que a era da tabela
- * única pagava POR CANDIDATO no SQL do claim (janela, rate limit, cap de
- * concorrência) viraram a lista de inadmissíveis POR JOB, computada em
- * memória antes de cada rodada — e a sobra é resolvida DEPOIS do claim
- * pelo caminho de perda de admissão ({@link WorkQueue#requeue}, sem
- * consumir orçamento). O cap é DERIVADO de {@code mohs_lease} (§5.7,
- * ADR-D): contar a posse viva substitui o contador quente
- * {@code running_execution_count}; sobre-admissão entre nós é limitada a
- * 1 rodada × nós e corrige na rodada seguinte.
+ * <p><b>Admission guards:</b> the predicates the single-table era paid for PER CANDIDATE in the
+ * claim's SQL (window, rate limit, concurrency cap) became a PER-JOB inadmissible list, computed in
+ * memory before each round — and the remainder is resolved AFTER the claim through the
+ * admission-loss path ({@link WorkQueue#requeue}, without consuming budget). The cap is DERIVED from
+ * {@code mohs_lease}: counting live ownership replaces the hot {@code running_execution_count}
+ * counter; over-admission between nodes is bounded to one round times the node count and corrects
+ * itself on the next round.
  *
- * <p><b>Liveness (ADR-0051 sobre a mesa nova):</b> por NÓ — heartbeat com
- * promessa {@code now + node-lease-ttl}; o reaper deste motor reclama
- * leases de nós mortos ({@link LeaseStore#findOrphaned}) decidindo pelo
- * orçamento de retry, e TODA conclusão é cercada por
- * {@code (node_id, epoch)} (§6.3). Sob falha de nó a garantia é
- * <b>at-least-once</b> quando {@code retries > 0} — o default de
- * {@link JobDefinition#retries()}; com orçamento zero o órfão reclamado não
- * tem para onde reagendar e a garantia cai para at-most-once.
+ * <p><b>Liveness:</b> per NODE — a heartbeat promising {@code now + node-lease-ttl}; this engine's
+ * reaper reclaims dead nodes' leases ({@link LeaseStore#findOrphaned}) deciding by the retry budget,
+ * and EVERY completion is fenced by {@code (node_id, epoch)}. Under node failure the guarantee is
+ * <b>at-least-once</b> when {@code retries > 0} — {@link JobDefinition#retries()}'s default; with a
+ * zero budget a reclaimed orphan has nowhere to reschedule and the guarantee drops to at-most-once.
  *
- * <p><b>Timeout e cancelamento (ADR-0034):</b> verificados de carona no
- * tick — flag + interrupt via {@link CancellationSignal}, desfecho passivo
- * no {@link Dispatcher}. Handler que ignora o interrupt continua zumbi até
- * terminar sozinho e tem o resultado descartado pelo fence — é o caso do
- * Watchdog Bound, o degrau seguinte da escada.
+ * <p><b>Timeout and cancellation:</b> checked as a passenger on the tick — the flag plus an interrupt
+ * through {@link CancellationSignal}, with a passive outcome in the {@link Dispatcher}. A handler
+ * that ignores the interrupt stays a zombie until it finishes on its own and has its result discarded
+ * by the fence — that is the Watchdog Bound's case, the next rung of the ladder.
  */
 public final class Engine implements MohsLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(Engine.class);
 
     /**
-     * Teto de triggers disparados por tick — um boot depois de downtime
-     * longo não vira uma varredura sem limite; o excedente continua devido
-     * e drena nos ticks seguintes, mais antigo primeiro.
+     * The ceiling on triggers fired per tick — a boot after a long downtime must not become an
+     * unbounded sweep; the surplus stays due and drains over the following ticks, oldest first.
      */
     static final int FIRE_LIMIT = 500;
 
     /**
-     * Teto de reclaims por tick — morte de nó em massa não vira uma
-     * transação sem limite de locks; o excedente drena nos ticks
-     * seguintes, mais antigo primeiro ({@code claimed_at}).
+     * The ceiling on reclaims per tick — a mass node death must not become a transaction with
+     * unbounded locks; the surplus drains over the following ticks, oldest first
+     * ({@code claimed_at}).
      */
     static final int RECLAIM_LIMIT = 500;
 
     /**
-     * Retention da linha de heartbeat (ADR-0041), em múltiplos de
-     * {@code lease-ttl} — derivada de propósito, nenhum knob novo. 10
-     * leases (5 min no default) mantém o node morto VISÍVEL como stale por
-     * tempo de sobra para {@code GET /nodes} e alertas.
+     * The heartbeat row's retention, in multiples of {@code node-lease-ttl} — derived on purpose, with
+     * no new knob. Ten leases (2.5 minutes by default) keeps a dead node VISIBLE as stale for more than
+     * enough time for {@code GET /nodes} and alerts.
+     *
+     * <p>It multiplies the NODE's lease, not the execution's: node liveness is what this retention is
+     * about, and deriving it from the execution TTL let an operator who lowered that one delete the row
+     * of a node whose promise was still alive (see {@link #purgeStaleNodeRows}).
      */
     static final int STALE_NODE_RETENTION_LEASES = 10;
 
     private static final String NODE_DEAD_ERROR = "node lease expired — node presumed dead";
 
     /**
-     * Teto da lista de inadmissíveis que vai ao {@code NOT IN} do claim —
-     * folga confortável sob o limite de ~2100 parâmetros do driver do SQL
-     * Server (o menor dos 4 dialetos), já descontado o restante do bind.
+     * The ceiling on the inadmissible list that goes into the claim's {@code NOT IN} — a comfortable
+     * margin under the ~2100-parameter limit of SQL Server's driver (the smallest of the four
+     * dialects), with the rest of the bind already discounted.
      */
     static final int MAX_INADMISSIBLE_FILTER = 1000;
+
+    /**
+     * How often the backlog is counted for {@code mohs.queue.depth}. Ten seconds sits under every
+     * usual scrape interval (15–60s), so the gauge is never stale by more than one scrape, and far
+     * above the tick's floor of 25ms, so the count is a rounding error next to the claim: at three
+     * nodes it is 0.3 statements per second against the 4.0 an idle node already issues.
+     */
+    private static final Duration QUEUE_DEPTH_SAMPLE_INTERVAL = Duration.ofSeconds(10);
+
+    /**
+     * How often {@code mohs_idempotency} is pruned. The retention is measured in days, so an hour is
+     * already two orders of magnitude finer than the window it enforces — pruning more often would
+     * only issue the same DELETE against rows that are not old enough yet.
+     */
+    private static final Duration IDEMPOTENCY_PRUNE_INTERVAL = Duration.ofHours(1);
 
     private final WorkQueue workQueue;
     private final Dispatcher dispatcher;
@@ -138,71 +161,78 @@ public final class Engine implements MohsLifecycle {
     private final EngineSettings settings;
     private final String nodeId;
     private final EngineMetrics metrics;
+    private final RetryPolicyRegistry retryPolicies;
+
+    /**
+     * Sampled by the loop thread, read by whatever thread scrapes the registry — an {@code AtomicLong}
+     * for the safe publication, not for atomicity: there is exactly one writer.
+     */
+    private final AtomicLong queueDepth = new AtomicLong();
+    private final Cadence queueDepthSample = new Cadence(QUEUE_DEPTH_SAMPLE_INTERVAL);
+    /** {@code null} when {@code mohs.engine.idempotency-retention} is zero: the operator opted out of pruning. */
+    private final @Nullable Cadence idempotencyPrune;
 
     private final AtomicReference<EngineState> state = new AtomicReference<>(EngineState.CREATED);
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
     /**
-     * As execuções em voo NESTE node — a base do watchdog (ADR-0051) e da
-     * escada de timeout/cancelamento (ADR-0034) a cada tick. Entrada nasce
-     * no submit e SÓ morre na conclusão ({@code whenComplete}): a
-     * liberação de posse pelo watchdog MARCA a encarnação
-     * ({@code ownershipReleased}) em vez de removê-la — o zumbi continua
-     * alcançável pela escalada de drain e pelo poll de cancel (review
-     * ADR-0034). Exceção única: um re-claim DESTE node pro mesmo id
-     * substitui a entrada marcada no {@code put} do submit (o mapa
-     * comporta uma encarnação por id de propósito).
+     * The executions in flight on THIS node — the basis of the watchdog and of the timeout and
+     * cancellation ladder on every tick.
+     *
+     * <p>An entry is born at the submit and dies ONLY at the completion ({@code whenComplete}): the
+     * watchdog's ownership release MARKS the incarnation ({@code ownershipReleased}) rather than
+     * removing it — the zombie stays reachable by the drain escalation and by the cancel poll. One
+     * exception: a re-claim by THIS node for the same id replaces the marked entry at the submit's
+     * {@code put} (the map deliberately holds one incarnation per id).
      */
     private final ConcurrentHashMap<ExecutionId, InFlightAttempt> inFlightAttempts = new ConcurrentHashMap<>();
-    /** Candidatas do passe de reconciliação ({@link #reconcileOwnStrayLeases}) — só a thread do tick toca (JCIP 3.3). */
+    /** Candidates of the reconciliation pass ({@link #reconcileOwnStrayLeases}) — touched only by the tick's thread (JCIP 3.3). */
     private final Set<ExecutionId> strayLeaseCandidates = new HashSet<>();
     /**
-     * Cursor de rotação do lap de claim (§5.4) — avança a cada shard
-     * sondado e PERSISTE entre ticks, então o primeiro shard de cada lap
-     * gira em vez de sempre recomeçar no mesmo: sem ele, um tick que esgota
-     * o orçamento no shard 0 deixaria os últimos da lista famintos. Só a
-     * thread do tick toca (JCIP 3.3); overflow é benigno via
-     * {@code Math.floorMod}.
+     * The claim lap's rotation cursor — it advances on every probed shard and PERSISTS between ticks,
+     * so each lap's first shard rotates rather than always restarting at the same one: without it, a
+     * tick that exhausts its budget on shard 0 would starve the last ones in the list. Touched only by
+     * the tick's thread (JCIP 3.3); overflow is benign through {@code Math.floorMod}.
      */
     private int shardCursor;
     /**
-     * A última volta COMPLETA pelos shards próprios voltou vazia? É o que
-     * arma o gate ocioso do S6.5 (ver {@link #claimAndDispatch}); "completa"
-     * é a distinção que o {@link LapOutcome} existe pra fazer — zero
-     * reivindicado por saturação de dispatch ou orçamento estourado não é
-     * fila vazia. Só a thread do tick toca (JCIP 3.3). Nasce {@code false}:
-     * o primeiro tick de um engine que acabou de subir não tem direito a
-     * supor fila vazia.
+     * Did the last COMPLETE lap over the node's own shards come back empty? That is what arms the idle
+     * gate (see {@link #claimAndDispatch}); "complete" is the distinction {@link LapOutcome} exists to
+     * make — claiming zero because dispatch saturated or the budget ran out is not an empty queue.
+     *
+     * <p>Touched only by the tick's thread (JCIP 3.3). It starts {@code false}: the first tick of an
+     * engine that has just come up has no right to assume the queue is empty.
      */
     private boolean queueLooksEmpty;
+
+    /** The latch for the "I own no shard" WARN: the condition is persistent, the log must not be. Confined to the tick's thread. */
+    private boolean warnedAboutOwningNoShard;
     private final RunnerRegistry runnerRegistry;
 
     /**
-     * O despertador do loop (§5.5): {@code ReentrantLock}+{@code Condition}
-     * no lugar de {@code synchronized}/{@code wait} (JCIP 13 — timeout no
-     * await é o que o backoff precisa) e a flag {@code wakeRequested}
-     * absorve o sinal que chega ANTES do await (um {@code signal} sem
-     * ninguém esperando se perde; a flag não — o padrão condition-predicate
-     * de JCIP 14.2).
+     * The loop's alarm clock: a {@code ReentrantLock} plus a {@code Condition} rather than
+     * {@code synchronized}/{@code wait} (JCIP 13 — a timeout on the await is what the backoff needs),
+     * and the {@code wakeRequested} flag absorbs a signal arriving BEFORE the await (a {@code signal}
+     * with nobody waiting is lost; the flag is not — JCIP 14.2's condition-predicate pattern).
      */
     private final ReentrantLock wakeLock = new ReentrantLock();
     private final Condition wakeCondition = wakeLock.newCondition();
     /** Guardado por {@code wakeLock}. */
     private boolean wakeRequested;
 
-    /** {@code volatile}: escrito por {@link #start} e lido por {@link #stop}, que podem vir de threads distintas ({@code MohsLifecycle} é API pública) — publicação segura, JCIP 3.1. */
+    /** {@code volatile}: written by {@link #start} and read by {@link #stop}, which may come from different threads ({@code MohsLifecycle} is public API) — safe publication, JCIP 3.1. */
     private volatile @Nullable Thread loopThread;
 
-    /** O WARN de escalada de grace é único por shutdown — o SINAL não é guardado por ele (ver {@link #escalateAfterDrainGrace}). */
+    /** The grace-escalation WARN is one per shutdown — the SIGNAL is not guarded by it (see {@link #escalateAfterDrainGrace}). */
     private final AtomicBoolean drainEscalated = new AtomicBoolean();
 
     /**
-     * A encarnação e o lease do NÓ (ADR-0051) — escritos só pela thread do
-     * tick ({@link #renewNodeLease}). Epoch começa em 1 e só sobe quando o
-     * próprio node percebe o lease expirado (§11.2 do redesign); desde a
-     * Phase 5 ele também é o fence de toda conclusão (§6.3).
-     * {@code volatile} no epoch só pelo leitor de fora:
-     * {@link #writeFinalStoppedHeartbeat} lê de outra thread no stop
-     * (JCIP 3.1; JLS 17.7 pra {@code long}) — mesma razão de {@code tickHandle}.
+     * The NODE's incarnation and lease — written only by the tick's thread ({@link #renewNodeLease}).
+     * The epoch starts at 1 and only rises when the node itself notices its lease expired; it is also
+     * the fence on every completion.
+     *
+     * <p>{@code volatile} on the epoch only because of the outside reader:
+     * {@link #writeFinalStoppedHeartbeat} reads it from another thread during the stop (JCIP 3.1; JLS
+     * 17.7 for a {@code long}) — the same reason as {@code tickHandle}.
      */
     private volatile long nodeEpoch = 1;
     private @Nullable Instant nodeLeaseExpiresAt;
@@ -222,6 +252,28 @@ public final class Engine implements MohsLifecycle {
             RunnerRegistry runnerRegistry,
             EngineMetrics metrics
     ) {
+        this(workQueue, dispatcher, historyStore, leaseStore, jobStore, nodeStore, triggerFirer, windowRegistry,
+                rateLimitStore, clock, settings, runnerRegistry, metrics, RetryPolicyRegistry.empty());
+    }
+
+    /** The form that knows the declared {@link io.mohs.core.execution.RetryPolicy} beans — what the starter builds. */
+    public Engine(
+            WorkQueue workQueue,
+            Dispatcher dispatcher,
+            HistoryStore historyStore,
+            LeaseStore leaseStore,
+            JobStore jobStore,
+            NodeStore nodeStore,
+            TriggerFirer triggerFirer,
+            ExecutionWindowRegistry windowRegistry,
+            RateLimitStore rateLimitStore,
+            Clock clock,
+            EngineSettings settings,
+            RunnerRegistry runnerRegistry,
+            EngineMetrics metrics,
+            RetryPolicyRegistry retryPolicies
+    ) {
+        this.retryPolicies = Objects.requireNonNull(retryPolicies, "retryPolicies");
         this.workQueue = Objects.requireNonNull(workQueue, "workQueue");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
         this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
@@ -238,6 +290,9 @@ public final class Engine implements MohsLifecycle {
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.nodeId = UUIDv7.randomUUID().toString();
         metrics.bindNodeGauges(inFlightAttempts::size, settings.dispatchConcurrency());
+        metrics.bindQueueDepthGauge(queueDepth::get);
+        Duration retention = settings.idempotencyRetention();
+        this.idempotencyPrune = retention.isPositive() ? new Cadence(IDEMPOTENCY_PRUNE_INTERVAL) : null;
     }
 
     @Override
@@ -245,22 +300,21 @@ public final class Engine implements MohsLifecycle {
         return state.get();
     }
 
-    /** CAS guardado (mesma disciplina do resto do projeto — ADR-0018), não lock: transição só vale se o estado de origem ainda for o esperado. */
+    /** A guarded CAS (the project's discipline throughout), not a lock: a transition only applies if the source state is still the expected one. */
     @Override
     public void start() {
         if (!state.compareAndSet(EngineState.CREATED, EngineState.RUNNING)) {
             throw new IllegalStateException("start() only valid from CREATED, was " + state.get());
         }
-        // UMA platform thread, nunca scheduler/virtual (§12.1): latência-crítica,
-        // imune a starvation de carrier, e aparece com nome próprio em qualquer
-        // profiler/thread dump — o que importa às 3h da manhã. Daemon: um engine
-        // vazado nunca segura o exit da JVM (crash já é semântica coberta —
-        // lease do nó expira, reaper reclama).
+        // ONE platform thread, never a scheduler or a virtual one: latency-critical, immune to carrier
+        // starvation, and it appears with a name of its own in any profiler or thread dump — which is
+        // what matters at 3 a.m. Daemon: a leaked engine never holds up the JVM's exit (a crash is
+        // already covered semantics — the node's lease expires and the reaper reclaims).
         Duration heartbeatCadence = settings.nodeLeaseTtl().dividedBy(3);
         if (settings.pollInterval().compareTo(heartbeatCadence) > 0) {
-            // o cap de liveness do awaitWork também engole o PISO — o operador
-            // pediu ticks mais espaçados do que a promessa de vida permite;
-            // liveness vence, mas em silêncio seria um mistério de tuning
+            // The liveness cap in awaitWork also swallows the FLOOR — the operator asked for ticks
+            // spaced further apart than the liveness promise allows; liveness wins, but doing so in
+            // silence would be a tuning mystery
             log.warn("effective tick cadence is capped at node-lease-ttl/3 ({}) — mohs.engine.poll-interval ({}) "
                     + "exceeds it; the heartbeat each tick carries is what keeps this node alive to its peers",
                     heartbeatCadence, settings.pollInterval());
@@ -268,7 +322,7 @@ public final class Engine implements MohsLifecycle {
         Thread thread = Thread.ofPlatform().name("mohs-engine-loop").daemon(true).unstarted(this::runLoop);
         loopThread = thread;
         thread.start();
-        if (state.get() == EngineState.STOPPED) { // stop() venceu a corrida durante a largada — acorda o loop que ele não viu
+        if (state.get() == EngineState.STOPPED) { // stop() won the race during start-up — wake the loop it never saw
             wake();
         }
     }
@@ -285,12 +339,12 @@ public final class Engine implements MohsLifecycle {
         if (!state.compareAndSet(EngineState.PAUSED, EngineState.RUNNING)) {
             throw new IllegalStateException("resume() only valid from PAUSED, was " + state.get());
         }
-        // pausa longa deixa o backoff no teto — o operador que resumiu não
-        // deve esperar o teto vencer pra ver o primeiro claim
+        // A long pause leaves the backoff at its ceiling — the operator who resumed should not have to
+        // wait for the ceiling to expire before seeing the first claim
         wake();
     }
 
-    /** Não agenda claim/reclaim novo; espera o in-flight até {@code grace}. Drain ≠ cancel (ADR-0007). */
+    /** It schedules no new claim or reclaim and waits for in-flight work up to {@code grace}. A drain is not a cancel. */
     @Override
     public void drain(Duration grace) {
         Objects.requireNonNull(grace, "grace");
@@ -301,54 +355,53 @@ public final class Engine implements MohsLifecycle {
         if (!state.compareAndSet(current, EngineState.DRAINING)) {
             throw new IllegalStateException("concurrent state change during drain(), was " + state.get());
         }
+        // The INFO exists because this wait is the MOST EXPENSIVE stretch of the shutdown and was the
+        // only one with no trace: whoever read the log saw the web server's graceful shutdown (which
+        // runs afterwards) and blamed it for the whole time. The "at least" is literal, not modesty:
+        // with the loop still alive, a tick between the runAsync and the inFlight.add does not yet
+        // appear in this count (the same window that forces the stop to wait twice)
+        log.info("draining: at least {} dispatch(es) in flight, waiting up to {}", inFlight.size(), grace);
         awaitInFlight(DrainDeadline.startingNow(grace));
     }
 
     /**
-     * {@link #drain} seguido de encerrar o loop, nesta ordem: drain →
-     * {@code STOPPED} → join do loop → espera do in-flight → heartbeat
-     * final. {@code runnerRegistry} continua vivo — não é desta classe pra
-     * desligar (ver Javadoc da classe).
+     * {@link #drain} followed by ending the loop, in this order: drain, {@code STOPPED}, join the
+     * loop, wait for in-flight work, final heartbeat. {@code runnerRegistry} stays alive — it is not
+     * this class's to shut down (see the class Javadoc).
      *
-     * <p>O join espera o tick em curso até {@code nodeLeaseTtl/4} (o
-     * próprio orçamento de lap do tick) — encolhe a janela da corrida
-     * documentada em {@link #writeFinalStoppedHeartbeat} sem acoplar o
-     * shutdown a um tick pendurado.
+     * <p>The join waits for the current tick up to {@code nodeLeaseTtl/4} (the tick's own lap budget) —
+     * shrinking the window of the race documented in {@link #writeFinalStoppedHeartbeat} without
+     * coupling the shutdown to a hung tick.
      *
-     * <p>Esperar in-flight de novo depois do join não é redundância com o
-     * drain: a espera do drain observa {@code inFlight} com o loop ainda
-     * rodando, e um tick que já reivindicou um lote registra as futures
-     * DEPOIS do {@code runAsync} — achar o conjunto vazio ali prova que o
-     * trabalho ainda não foi registrado, não que ele acabou. Com o loop já
-     * parado nenhum submit novo entra e vazio é vazio (join estourado
-     * encolhe essa janela em vez de fechá-la). Sem a segunda espera o
-     * heartbeat final declararia a lease vencida (ADR-0051) com execuções
-     * rodando, e o reaper de um par as reclamaria: o resultado bem-sucedido
-     * é descartado pelo fence e vira re-entrega — ou perda terminal, quando
-     * não há orçamento de retry.
+     * <p>Waiting for in-flight work again after the join is not redundant with the drain: the drain's
+     * wait observes {@code inFlight} with the loop still running, and a tick that has already claimed
+     * a batch registers its futures AFTER the {@code runAsync} — finding the set empty there proves the
+     * work has not been registered yet, not that it finished. With the loop already stopped no new
+     * submit enters and empty means empty (a timed-out join shrinks that window rather than closing
+     * it).
      *
-     * <p>Os dois prazos de UM {@code stop} nascem no mesmo instante — este
-     * abre o seu {@link DrainDeadline} e o {@link #drain} abre o dele em
-     * seguida —, então o shutdown continua limitado ao {@code grace}
-     * pedido: o daqui é o mais antigo dos dois e é ele que a espera
-     * pós-loop cobra. Já {@code drain(g)} seguido de {@code stop(g)} são
-     * dois prazos SEPARADOS no tempo — a sequência pode custar até
-     * {@code 2×g} quando o drain escala e o handler ignora o interrupt.
+     * <p>Without the second wait, the final heartbeat would declare the lease expired with executions
+     * still running, and a peer's reaper would reclaim them: the successful result is discarded by the
+     * fence and becomes a redelivery — or a terminal loss, when there is no retry budget.
      *
-     * <p>Duas coisas que a espera pós-loop NÃO cobre, e que decidem o
-     * comportamento com os defaults:
+     * <p>Both deadlines of ONE {@code stop} are born at the same instant — this one opens its
+     * {@link DrainDeadline} and {@link #drain} opens its own right after — so the shutdown stays
+     * bounded by the requested {@code grace}: the one here is the older of the two, and it is what the
+     * post-loop wait charges against. By contrast, {@code drain(g)} followed by {@code stop(g)} are two
+     * SEPARATE deadlines in time — that sequence can cost up to {@code 2xg} when the drain escalates
+     * and the handler ignores the interrupt.
+     *
+     * <p>Two things the post-loop wait does NOT cover, which decide the behaviour under the defaults:
      * <ul>
-     *   <li><b>Ninguém renova a lease do nó durante ela</b> —
-     *       {@code renewNodeLease} só roda no tick, que já parou. A proteção
-     *       acaba no máximo {@code node-lease-ttl} depois do último tick —
-     *       menos, na prática, porque o resíduo já vinha correndo: com TTL
-     *       de 15s e {@code grace} de 30s, mais da metade da espera está
-     *       descoberta e um par pode reclamar o que ainda roda aqui.</li>
-     *   <li><b>A escada de sinalização fica suspensa</b> — sem tick não há
-     *       {@code signalJobTimeouts}, {@code pollCancelRequests} nem
-     *       Watchdog Bound (ADR-0034). Um job com {@code timeout} menor que
-     *       o {@code grace} deixa de ser interrompido no prazo dele:
-     *       durante esta janela quem decide é só o {@code grace}.</li>
+     *   <li><b>Nobody renews the node's lease during it</b> — {@code renewNodeLease} only runs on the
+     *       tick, which has stopped. The protection ends at most {@code node-lease-ttl} after the last
+     *       tick — less in practice, because the remainder was already running: with a 15s TTL and a
+     *       30s {@code grace}, more than half the wait is uncovered and a peer may reclaim what is
+     *       still running here.</li>
+     *   <li><b>The signalling ladder is suspended</b> — with no tick there is no
+     *       {@code signalJobTimeouts}, no {@code pollCancelRequests} and no Watchdog Bound. A job with
+     *       a {@code timeout} shorter than the {@code grace} stops being interrupted at its own
+     *       deadline: during this window only the {@code grace} decides.</li>
      * </ul>
      */
     @Override
@@ -358,6 +411,7 @@ public final class Engine implements MohsLifecycle {
         if (current == EngineState.STOPPED) {
             throw new IllegalStateException("already STOPPED");
         }
+        long startNanos = System.nanoTime();
         DrainDeadline deadline = DrainDeadline.startingNow(grace);
         if (current != EngineState.DRAINING) {
             drain(grace);
@@ -366,33 +420,39 @@ public final class Engine implements MohsLifecycle {
         wake();
         joinLoopThread();
         awaitInFlight(deadline);
+        // A mandatory order: durability BEFORE announcing death. The final heartbeat zeroes expires_at,
+        // and from then on every peer considers us dead — a result still in the group commit's queue
+        // would be reclaimed as an orphan.
+        // The deadline is whatever is left of the grace, with a floor of 1s: zero would turn the join
+        // into a no-op and lose the durability this step exists to guarantee
+        dispatcher.drainCompletions(Duration.ofMillis(Math.max(1_000, deadline.remainingMillis())));
         writeFinalStoppedHeartbeat();
+        // The counterpart of drain()'s INFO: it closes the interval the operator needs in order to
+        // separate the engine's cost from the web server's during a shutdown
+        log.info("engine stopped in {}", Duration.ofNanos(System.nanoTime() - startNanos));
     }
 
     /**
-     * Espera o tick em curso terminar até {@code nodeLeaseTtl/4} — o
-     * próprio orçamento de lap do tick. Join completo é o que autoriza o
-     * {@link #stop} a ler {@code inFlight} vazio como trabalho terminado:
-     * sem loop, não há submit novo. Join estourado devolve o controle
-     * assim mesmo — shutdown não fica pendurado em tick travado.
+     * Waits for the current tick to finish, up to {@code nodeLeaseTtl/4} — the tick's own lap budget. A
+     * complete join is what authorises {@link #stop} to read an empty {@code inFlight} as finished
+     * work: with no loop, there is no new submit. A timed-out join hands control back anyway — a
+     * shutdown must not hang on a stuck tick.
      */
     private void joinLoopThread() {
         Thread thread = loopThread;
-        // NEW: start() publica a thread ANTES de iniciá-la, e stop() pode ter
-        // vencido a largada (a corrida que o próprio start() trata). Nesse
-        // estado join(Duration) lança IllegalThreadStateException — e não há
-        // tick em curso pra esperar de qualquer forma: o runLoop testa
-        // STOPPED na entrada do while e não chega a ticar.
+        // NEW: start() publishes the thread BEFORE starting it, and stop() may have won the race (the
+        // one start() itself handles). In that state join(Duration) throws
+        // IllegalThreadStateException — and there is no tick in progress to wait for anyway: runLoop
+        // tests STOPPED at the top of the while and never ticks.
         if (thread == null || thread.getState() == Thread.State.NEW) {
             return;
         }
         Duration budget = settings.nodeLeaseTtl().dividedBy(4);
         try {
-            // join(Duration) em vez de join(millis): não tem a armadilha do
-            // join(0) esperar para sempre (o que obrigava um max(1,...) com
-            // TTL < 4ms) e devolve SE o loop parou — e é justamente o falso
-            // que marca o modo degradado, onde a espera seguinte volta a
-            // poder perder um dispatch ainda não registrado
+            // join(Duration) rather than join(millis): it has no join(0)-waits-forever trap (which
+            // forced a max(1, ...) with a TTL below 4ms) and it returns WHETHER the loop stopped — and
+            // it is precisely the false case that marks the degraded mode, where the following wait can
+            // again miss a dispatch that has not been registered yet
             if (!thread.join(budget)) {
                 log.warn("engine loop did not stop within {} — the in-flight wait below can still miss a dispatch "
                         + "the tick in progress had not registered yet; work may be re-delivered", budget);
@@ -403,25 +463,21 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * ADR-0041: o último heartbeat do shutdown gracioso grava STOPPED — sem
-     * ele, stop limpo e crash ficam indistinguíveis no banco. Best-effort
-     * de propósito: shutdown nunca falha por banco fora — quem morre sem
-     * conseguir escrever fica coberto pela staleness (ADR-0012) e pelo
-     * purge (ver {@link #purgeStaleNodeRows}).
+     * The last heartbeat of a graceful shutdown writes STOPPED — without it, a clean stop and a crash
+     * would be indistinguishable in the database. Best-effort on purpose: a shutdown never fails
+     * because the database is down; whoever dies without managing to write is covered by staleness and
+     * by the purge (see {@link #purgeStaleNodeRows}).
      *
-     * <p>Corrida aceita de propósito (review ADR-0041, custo revisto pela
-     * ADR-0051): um tick que leu o estado antes do {@code state.set(STOPPED)}
-     * pode commitar seu heartbeat DEPOIS deste — a linha fica
-     * RUNNING/DRAINING com uma promessa fresca de +{@code node-lease-ttl},
-     * e órfãos deste node esperam esse TTL extra pelo reaper (o mesmo custo
-     * de um crash). Fechar isso exigiria o stop esperar o tick em curso,
-     * acoplando a latência de shutdown a uma janela que staleness + purge
-     * já cobrem.
+     * <p>A deliberately accepted race: a tick that read the state before {@code state.set(STOPPED)} may
+     * commit its heartbeat AFTER this one — the row stays RUNNING/DRAINING with a fresh promise of
+     * +{@code node-lease-ttl}, and this node's orphans wait that extra TTL for the reaper (the same
+     * cost as a crash). Closing it would require the stop to wait for the current tick, coupling
+     * shutdown latency to a window that staleness plus the purge already cover.
      */
     private void writeFinalStoppedHeartbeat() {
         try {
-            // ADR-0051: node parado não promete liveness — expires_at = now
-            // (lease já vencida) diz aos pares "o que era meu está livre"
+            // A stopped node promises no liveness — expires_at = now (an already expired lease) tells
+            // the peers "what was mine is free"
             Instant now = clock.instant();
             nodeStore.heartbeat(nodeId, EngineState.STOPPED, nodeEpoch, now, now);
         } catch (RuntimeException e) {
@@ -431,14 +487,35 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * ADR-0041: recolhe heartbeats mais velhos que
-     * {@code lease-ttl × }{@link #STALE_NODE_RETENTION_LEASES} — de carona
-     * no tick. Não é detecção de morte (essa é derivada na LEITURA): é só
-     * recolher linhas que nenhum leitor tem mais uso, porque cada boot gera
-     * {@code node_id} novo e a tabela cresceria para sempre.
+     * Collects idempotency keys older than {@code mohs.engine.idempotency-retention}, which IS the
+     * deduplication window: while the row exists, reusing the key returns the original execution; once
+     * it is gone, the same key starts a new one. Without this the window was the lifetime of the
+     * installation, and the table grew forever.
+     *
+     * <p>Every node issues the same DELETE, exactly like {@link #purgeStaleNodeRows} — isolated by
+     * {@code runMaintenance} for the same reason, and an order of magnitude rarer.
+     */
+    private void pruneIdempotencyKeys(Instant now) {
+        Duration retention = settings.idempotencyRetention();
+        int pruned = historyStore.pruneIdempotencyBefore(now.minus(retention));
+        if (pruned > 0) {
+            log.info("pruned {} idempotency key(s) older than {} — reusing one of those keys now starts a new execution",
+                    pruned, retention);
+        }
+    }
+
+    /**
+     * Collects heartbeats older than {@code node-lease-ttl x }{@link #STALE_NODE_RETENTION_LEASES} —
+     * riding along on the tick. This is not death detection (that is derived at READ time): it merely
+     * collects rows no reader has any use for, because each boot generates a new {@code node_id} and
+     * the table would grow forever.
      */
     private void purgeStaleNodeRows() {
-        Instant cutoff = clock.instant().minus(settings.leaseTtl().multipliedBy(STALE_NODE_RETENTION_LEASES));
+        // node-lease-ttl, not lease-ttl: NODE liveness is governed by the node's lease. Deriving it from
+        // the EXECUTION TTL let an operator who lowered lease-ttl delete the row of a node whose promise
+        // is still alive — and an absent row IS death at read time, so the reaper would reclaim work in
+        // flight on a live node
+        Instant cutoff = clock.instant().minus(settings.nodeLeaseTtl().multipliedBy(STALE_NODE_RETENTION_LEASES));
         int purged = nodeStore.deleteHeartbeatsBefore(cutoff);
         if (purged > 0) {
             log.info("purged {} stale node heartbeat row(s) — instances dead or restarted more than {} lease TTLs ago",
@@ -447,20 +524,18 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * O prazo de uma espera por in-flight: o instante monotônico em que ela
-     * acaba e o {@code grace} que o operador pediu (só a mensagem de
-     * {@link Engine#escalateAfterDrainGrace} usa o segundo). É um objeto
-     * porque o {@link Engine#stop} espera duas vezes e as duas medem contra
-     * o MESMO prazo — esperar duas vezes não pode cobrar duas vezes o
-     * grace.
+     * One in-flight wait's deadline: the monotonic instant at which it ends, plus the {@code grace} the
+     * operator asked for (only {@link Engine#escalateAfterDrainGrace}'s message uses the latter).
+     *
+     * <p>It is an object because {@link Engine#stop} waits twice and both measure against the SAME
+     * deadline — waiting twice must not charge the grace twice.
      */
     private record DrainDeadline(Duration requestedGrace, long deadlineNanos) {
 
         /**
-         * {@code System.nanoTime}, não {@code clock.instant()}: duração se
-         * mede com tempo monotônico — o Clock injetado pode ser o
-         * DatabaseClock, cujo offset salta a cada resync e encurtaria ou
-         * esticaria o grace de shutdown.
+         * {@code System.nanoTime}, not {@code clock.instant()}: a duration is measured with monotonic
+         * time — the injected Clock may be the DatabaseClock, whose offset jumps on every resync and
+         * would shorten or stretch the shutdown grace.
          */
         static DrainDeadline startingNow(Duration grace) {
             return new DrainDeadline(grace, System.nanoTime() + grace.toNanos());
@@ -472,18 +547,16 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Espera {@code inFlight} esvaziar em laço, não num snapshot só — um
-     * tick que já tinha passado do claim no instante exato do CAS pra
-     * {@code DRAINING} ainda vai submeter as execuções que acabou de
-     * reivindicar, e a volta do laço pega o que o snapshot anterior perdeu.
-     * Para quando {@code inFlight} esvazia de verdade ou o prazo acaba, o
-     * que vier primeiro.
+     * Waits for {@code inFlight} to empty in a loop, not on a single snapshot — a tick that had already
+     * passed its claim at the exact instant of the CAS to {@code DRAINING} will still submit the
+     * executions it just claimed, and the next turn of the loop catches what the previous snapshot
+     * missed. It stops when {@code inFlight} genuinely empties or the deadline expires, whichever comes
+     * first.
      *
-     * <p>O laço só enxerga o que JÁ foi registrado: com o conjunto vazio no
-     * teste de entrada ele volta na hora, mesmo que um tick esteja
-     * exatamente entre o {@code runAsync} e o {@code inFlight.add} do
-     * {@link #submitDispatch}. Essa janela só fecha com o loop parado — é o
-     * que o {@link #stop} faz, esperando de novo depois do join.
+     * <p>The loop only sees what has ALREADY been registered: with the set empty at the entry test it
+     * returns immediately, even if a tick is exactly between the {@code runAsync} and the
+     * {@code inFlight.add} in {@link #submitDispatch}. That window only closes with the loop stopped —
+     * which is what {@link #stop} does, waiting again after the join.
      */
     private void awaitInFlight(DrainDeadline deadline) {
         while (!inFlight.isEmpty()) {
@@ -508,29 +581,26 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * API-DESIGN (shutdown gracioso, passo 3) / ADR-0034: grace estourado
-     * escala pela maquinaria de cancelamento — flag + interrupt em tudo que
-     * sobrou; os attempts falham assincronamente com causa NodeShutdown e
-     * seguem o retry normal pelo caminho de conclusão de sempre. Sem
-     * segunda janela de espera configurável (YAGNI, ADR-0034); handler
-     * surdo ao interrupt fica órfão com o fim dos ticks — o heartbeat para,
-     * a lease do nó expira e o reaper de outro node reclama (ADR-0051).
-     * Durante o grace nada disso acontece: drain ≠ cancel (ADR-0007).
+     * An expired grace escalates through the cancellation machinery — flag plus interrupt on everything
+     * left; the attempts fail asynchronously with a NodeShutdown cause and follow the normal retry
+     * through the usual completion path.
+     *
+     * <p>There is no second configurable wait window (YAGNI); a handler deaf to the interrupt is
+     * orphaned once the ticks end — the heartbeat stops, the node's lease expires and another node's
+     * reaper reclaims. During the grace none of this happens: a drain is not a cancel.
      */
     private void escalateAfterDrainGrace(DrainDeadline deadline) {
-        // o guard cerca só o LOG, nunca o laço: o sinal é first-wins por
-        // attempt (CancellationSignal), mas um dispatch registrado DEPOIS da
-        // primeira escalada — exatamente a janela runAsync/inFlight.add que a
-        // segunda espera existe pra cobrir — nunca teria sido sinalizado se o
-        // guard pulasse o laço junto
+        // The guard fences only the LOG, never the loop: the signal is first-wins per attempt
+        // (CancellationSignal), but a dispatch registered AFTER the first escalation — exactly the
+        // runAsync/inFlight.add window the second wait exists to cover — would never have been
+        // signalled if the guard skipped the loop along with it
         if (drainEscalated.compareAndSet(false, true)) {
-            // as duas contagens de propósito: inFlight (futures) é quem segura
-            // o grace; o mapa é quem a escalada alcança — com a marca de posse
-            // liberada (zumbi fica no mapa), divergem só na janela de conclusão
-            // do whenComplete
+            // Both counts on purpose: inFlight (the futures) is what holds the grace; the map is what
+            // the escalation reaches — with the ownership-released mark (a zombie stays in the map),
+            // they diverge only during the whenComplete's completion window
             log.warn("drain grace period ({}) elapsed with {} dispatch(es) still in flight ({} still signallable) — "
                     + "signalling cancellation and interrupting them; their attempts will fail with a node-shutdown cause "
-                    + "and follow the retry policy (ADR-0034)",
+                    + "and follow the retry policy",
                     deadline.requestedGrace(), inFlight.size(), inFlightAttempts.size());
         } else {
             log.debug("drain grace already escalated — re-signalling {} in-flight attempt(s)", inFlightAttempts.size());
@@ -541,22 +611,36 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * O loop do engine (§5.5/§12.1): tick, depois dormir — o intervalo
-     * começa no piso ({@code pollInterval}), dobra a cada tick que não
-     * achou trabalho até {@code maxPollInterval} e volta ao piso no
-     * primeiro que achou. O sono é interrompível por {@link #wake} (tier 1
-     * — enqueue local; e stop/resume) e SEMPRE limitado por
-     * {@code nodeLeaseTtl/3}: o heartbeat roda uma vez por tick, então a
-     * cadência do tick é a cadência da promessa de liveness — um teto de
-     * backoff mal configurado não pode fazer o nó idle ser declarado morto
-     * pelo reaper dos pares (risco nº 1 da Phase 6).
+     * The engine's loop: tick, then sleep — the interval starts at the floor ({@code pollInterval}),
+     * doubles on every tick that found no work up to {@code maxPollInterval}, and returns to the floor
+     * on the first that did.
+     *
+     * <p>The sleep is interruptible by {@link #wake} (a local enqueue; and stop/resume) and is ALWAYS
+     * bounded by {@code nodeLeaseTtl/3}: the heartbeat runs once per tick, so the tick's cadence is the
+     * liveness promise's cadence — a badly configured backoff ceiling must not let an idle node be
+     * declared dead by its peers' reaper.
+     *
+     * <p>On top of that, the per-trigger cap ({@link #cappedByNextFire}): the backoff is blind to
+     * deadlines, and a recurring job has a known one — {@code next_fire_at}. Both caps shorten the
+     * SLEEP without touching the backoff's state.
      */
     private void runLoop() {
         Duration delay = settings.pollInterval();
-        while (state.get() != EngineState.STOPPED) {
-            boolean workFound = tick();
-            delay = workFound ? settings.pollInterval() : nextBackoff(delay);
-            awaitWork(delay);
+        try {
+            while (state.get() != EngineState.STOPPED) {
+                TickOutcome outcome = tick();
+                delay = outcome.workFound() ? settings.pollInterval() : nextBackoff(delay);
+                awaitWork(cappedByNextFire(delay, outcome.earliestNextFireAt(), clock.instant(), settings.pollInterval()));
+            }
+        } catch (Throwable t) {
+            // JCIP §7.3: every service thread declares what happens when it dies, and this one IS the
+            // engine. tick() handles RuntimeException; an Error (OOME, a NoClassDefFoundError from a
+            // listener loaded late, a StackOverflow in a recursive interceptor) used to escape here in
+            // silence — the thread died, state stayed RUNNING forever, MohsLifecycle#state and
+            // GET /nodes lied, and the only clue was the JVM's default handler
+            log.error("engine loop died — this node stops claiming. Its node lease will expire and peers will"
+                    + " reclaim the work still running here (at-least-once). Restart the instance.", t);
+            throw t;
         }
     }
 
@@ -565,29 +649,67 @@ public final class Engine implements MohsLifecycle {
         return doubled.compareTo(settings.maxPollInterval()) > 0 ? settings.maxPollInterval() : doubled;
     }
 
+    /**
+     * Shortens the sleep down to the nearest armed trigger — the one deadline the engine KNOWS in
+     * advance, and which the plain backoff ignored.
+     *
+     * <p>Without it the backoff wakes at {@code 25, 75, 175, 375, 775, 1575ms} and an occurrence due at
+     * {@code +1000ms} waits until {@code 1575} (measured on the demo: a PT1S job firing in pairs of
+     * ~0.4s and ~1.6s, never at 1.0s). It gets the same treatment as {@link #awaitWork}'s liveness cap:
+     * it shortens the SLEEP, never the backoff's state — a tick brought forward by a trigger does not
+     * count as a tick with work, and the progression stays intact.
+     *
+     * <p>{@code floor} is the {@code poll-interval}, and it is what stops the cap from REDEFINING the
+     * tick's cadence: without it, what determines the loop's frequency stops being configuration and
+     * becomes the schedule's density — N recurring jobs of interval T would wake the node roughly every
+     * {@code T/N}, each trigger paying for a whole tick alone instead of coming out in the same batch as
+     * its neighbours. With the floor, a trigger's maximum delay goes back to what the knob promises
+     * (25ms by default) and {@code poll-interval} remains the sleep's floor.
+     *
+     * <p>The floor also subsumes the busy-spin guard: an already-due trigger sleeps the poll, never
+     * {@code await(0)} in a loop against the database. That it only SHORTENS depends on
+     * {@code floor <= delay}, an invariant of {@link EngineSettings}
+     * ({@code max-poll-interval >= poll-interval}): without it, the floor would lengthen the sleep above
+     * the backoff.
+     *
+     * <p>{@code now} comes from the injected {@link Clock} and the distance from {@code Duration.between},
+     * not from {@code nanoTime}: the distance to a wall-clock INSTANT only exists on the wall-clock
+     * scale — the wait itself stays monotonic ({@code awaitNanos}). It is the same calculation as
+     * {@link RetrySchedule}, not a measurement of elapsed duration.
+     */
+    static Duration cappedByNextFire(Duration delay, @Nullable Instant earliestNextFireAt, Instant now, Duration floor) {
+        if (earliestNextFireAt == null) {
+            return delay;
+        }
+        Duration untilDue = Duration.between(now, earliestNextFireAt);
+        if (untilDue.compareTo(delay) >= 0) {
+            return delay;
+        }
+        return untilDue.compareTo(floor) > 0 ? untilDue : floor;
+    }
+
     private void awaitWork(Duration delay) {
         Duration heartbeatCadence = settings.nodeLeaseTtl().dividedBy(3);
         Duration bounded = delay.compareTo(heartbeatCadence) > 0 ? heartbeatCadence : delay;
         wakeLock.lock();
         try {
             if (!wakeRequested) {
-                // um único await, não loop: acordar sem sinal (spurious/timeout)
-                // só antecipa um tick — o predicado de verdade é a fila no banco
+                // A single await, not a loop: waking without a signal (spurious or timeout) only brings
+                // a tick forward — the real predicate is the queue in the database
                 wakeCondition.awaitNanos(bounded.toNanos());
             }
             wakeRequested = false;
         } catch (InterruptedException e) {
-            // a Engine é DONA desta thread (JCIP 7.1.3): o protocolo de parada
-            // é state + wake — interrupt não significa nada aqui. Re-armar a
-            // flag viraria busy-spin (todo awaitNanos seguinte lançaria na
-            // entrada). Engolir É a política de interrupção da dona, não um
-            // catch vazio.
+            // The Engine OWNS this thread (JCIP 7.1.3): the stop protocol is state plus wake — an
+            // interrupt means nothing here. Re-arming the flag would become a busy-spin (every
+            // subsequent awaitNanos would throw on entry). Swallowing IS the owner's interruption
+            // policy, not an empty catch.
         } finally {
             wakeLock.unlock();
         }
     }
 
-    /** Acorda o loop agora — de stop/resume e do tier 1 do wake-up (§5.5). Seguro de qualquer thread. */
+    /** Wakes the loop now — from stop/resume and from the local wake-up tier. Safe from any thread. */
     void wake() {
         wakeLock.lock();
         try {
@@ -599,12 +721,11 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Tier 1 do wake-up (§5.5): um enqueue DESTA JVM já devido acorda o
-     * loop sem esperar o poll — pós-commit quando o chamador está numa
-     * transação (acordar antes do commit seria um lap que ainda não vê a
-     * linha), imediatamente quando não está (a transação da unidade de
-     * enqueue já commitou). Best-effort por contrato (ADR-G): sinal
-     * perdido é coberto pelo tier 3, nunca por correção daqui.
+     * The local wake-up tier: an enqueue from THIS JVM that is already due wakes the loop without
+     * waiting for the poll — after the commit when the caller is in a transaction (waking before the
+     * commit would be a lap that still does not see the row), and immediately when it is not (the
+     * enqueue unit's transaction has already committed). Best-effort by contract: a lost signal is
+     * covered by the poll tier, never by correctness here.
      */
     public void signalWorkScheduled() {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -620,78 +741,202 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Publica heartbeat sempre, refletindo o estado atual — mesmo fora de
-     * {@code RUNNING} (ADR-0012: útil pra {@code GET /nodes} mostrar
-     * "pausado"/"drenando"). Claim e reclaim só rodam em {@code RUNNING}.
+     * It always publishes a heartbeat reflecting the current state — even outside {@code RUNNING}
+     * (useful for {@code GET /nodes} to show "paused" or "draining"). Claim and reclaim only run in
+     * {@code RUNNING}.
      *
-     * @return se este tick achou trabalho no banco (claim ou trigger) — o
-     *         que zera o backoff do loop; sinais/manutenção não contam
+     * @return what the loop needs to know in order to decide the next sleep ({@link TickOutcome})
      */
-    private boolean tick() {
+    private TickOutcome tick() {
         try {
             EngineState current = state.get();
             Instant now = clock.instant();
+            // renewNodeLease stays OUTSIDE the isolation on purpose: with no heartbeat the node is
+            // already considered dead by its peers, so continuing the tick would help nobody. The three
+            // signals are maintenance like the others — a pollCancelRequests failing persistently
+            // (permissions, a missing table) would produce exactly the symptom runMaintenance exists to
+            // prevent: a live node, RUNNING, owning shards, claiming nothing
             renewNodeLease(current, now);
-            signalJobTimeouts();
-            pollCancelRequests();
-            signalWatchdogOverruns();
+            runMaintenance("signal-job-timeouts", this::signalJobTimeouts);
+            runMaintenance("poll-cancel-requests", this::pollCancelRequests);
+            runMaintenance("signal-watchdog-overruns", this::signalWatchdogOverruns);
+            // Both are cadenced rather than per-tick, and both belong ABOVE the RUNNING check: a paused
+            // or draining node still owes the operator the backlog it can see, and housekeeping is not
+            // claiming
+            if (queueDepthSample.due()) {
+                runMaintenance("queue-depth-sample", () -> queueDepth.set(workQueue.countVisible(now)));
+            }
+            if (idempotencyPrune != null && idempotencyPrune.due()) {
+                runMaintenance("idempotency-prune", () -> pruneIdempotencyKeys(now));
+            }
             if (current != EngineState.RUNNING) {
-                return false;
+                // No trigger horizon outside RUNNING: what does not fire has no deadline to honour —
+                // PAUSED/DRAINING owe only the heartbeat
+                return TickOutcome.idle();
             }
             Map<JobKey, StoredJob> definitions = loadDefinitions();
-            // UMA leitura de mohs_nodes por tick serve o reaper (vivos) e a
-            // atribuição de shards (elegíveis) — depois do heartbeat, então a
-            // própria linha recém-renovada está na foto
+            // ONE read of mohs_nodes per tick serves both the reaper (the living) and the shard
+            // assignment (the eligible) — after the heartbeat, so the freshly renewed row is in the
+            // picture
             List<StoredNode> nodes = nodeStore.findAll();
-            reapOrphanedLeases(definitions, aliveNodeIds(nodes, now), now);
-            reconcileOwnStrayLeases(now);
-            purgeStaleNodeRows();
-            boolean fired = fireDueTriggers();
+            // Maintenance is best-effort and runs ISOLATED: the claim is the reason the tick exists and
+            // must not be its hostage. Previously a single try covered all seven steps — and
+            // purgeStaleNodeRows issues the SAME delete on every node on every tick, a classic deadlock
+            // candidate on SQL Server. A purge failing persistently stole fire and claim forever, with
+            // the node alive, heartbeating and owning 1/n of the shards: exactly the failure mode
+            // probeSaysThereIsWork's Javadoc describes and shields only the probe from
+            runMaintenance("reap-orphaned-leases", () -> reapOrphanedLeases(definitions, aliveNodeIds(nodes, now), now));
+            runMaintenance("reconcile-stray-leases", () -> reconcileOwnStrayLeases(now));
+            runMaintenance("stale-node-purge", this::purgeStaleNodeRows);
+            FiringOutcome firing = fireDueTriggers();
             int claimed = claimAndDispatch(definitions, Shards.ownedBy(nodeId, shardEligibleNodeIds(nodes, now)));
-            return fired || claimed > 0;
+            return new TickOutcome(firing.fired() || claimed > 0,
+                    earliestArmedFire(definitions.values(), firing.rearmedAt(), now));
         } catch (RuntimeException e) {
             log.error("engine tick failed — will retry next tick", e);
-            // falha ≠ fila vazia, mas backoff é a resposta certa pras duas:
-            // banco fora não melhora sendo martelado no piso de 25ms
-            return false;
+            // A failure is not an empty queue, but backoff is the right answer to both: a database that
+            // is down does not improve by being hammered at the 25ms floor — nor by the trigger cap,
+            // whose horizon this tick never got to determine
+            return TickOutcome.idle();
         }
     }
 
     /**
-     * ADR-0051: perceber o PRÓPRIO lease de nó expirado ANTES de renová-lo
-     * — este node esteve "morto" para o cluster (pausa/stall >
-     * node-lease-ttl) e pares podem ter reclamado o que estava em voo. O
-     * bump de epoch registra a reencarnação (§11.2 do redesign) e, desde a
-     * Phase 5, derruba as escritas dos zumbis por si só: o fence é
-     * {@code (node_id, epoch)}. O heartbeat sai em qualquer estado —
-     * PAUSED/DRAINING incluídos (ADR-0007: drain ≠ cancel).
+     * Runs one maintenance step without letting its failure reach the claim. The granularity of error
+     * handling is the granularity of degradation: a {@code try} covering independent steps turns any one
+     * of them into a single point of failure for the whole set.
+     */
+    private void runMaintenance(String step, Runnable maintenance) {
+        try {
+            maintenance.run();
+        } catch (RuntimeException e) {
+            metrics.tickStepFailed(step);
+            log.warn("tick step '{}' failed — claim and dispatch continue this tick", step, e);
+        }
+    }
+
+    /**
+     * Lets a tick that runs every 25ms host work whose natural cadence is seconds or hours.
+     *
+     * <p>Monotonic ({@code System.nanoTime}), never the injected {@link Clock}: this is the distance
+     * between two events in this process, and {@code DatabaseClock}'s offset jumps at every resync —
+     * a backwards jump would suppress the step for as long as the jump lasted. Confined to the loop
+     * thread, which is the only caller, so it needs no synchronization.
+     */
+    private static final class Cadence {
+
+        private final long intervalNanos;
+        private long nextDueNanos = System.nanoTime();
+
+        Cadence(Duration interval) {
+            this.intervalNanos = interval.toNanos();
+        }
+
+        /** True at most once per interval — and always on the first call, so the first tick samples. */
+        boolean due() {
+            long now = System.nanoTime();
+            // Subtraction, not <: the difference is correct across nanoTime's rollover, the comparison is not
+            if (now - nextDueNanos < 0) {
+                return false;
+            }
+            nextDueNanos = now + intervalNanos;
+            return true;
+        }
+    }
+
+    /**
+     * The tick's verdict for the loop: whether it found work in the database (a claim or a trigger) —
+     * which resets the backoff; signals and maintenance do not count — and the nearest armed trigger,
+     * the horizon that shortens the sleep. {@code null} means no armed trigger ahead: only the backoff
+     * governs.
+     */
+    private record TickOutcome(boolean workFound, @Nullable Instant earliestNextFireAt) {
+
+        /** A tick with no work and no horizon — outside RUNNING, or a tick that failed before determining either. */
+        static TickOutcome idle() {
+            return new TickOutcome(false, null);
+        }
+    }
+
+    /**
+     * The nearest armed {@code next_fire_at} after this tick.
+     *
+     * <p>Two sources, because the definitions snapshot predates the firing: the triggers THIS tick did
+     * not touch count as the snapshot says, and the ones we fired count as of the instant the CAS just
+     * armed ({@code rearmedAt}, determined by {@link #fireDueTriggers}, which already hands it over
+     * filtered to the future — which is why it enters as the seed rather than as one more candidate).
+     */
+    static @Nullable Instant earliestArmedFire(Collection<StoredJob> snapshot, @Nullable Instant rearmedAt, Instant now) {
+        Instant earliest = rearmedAt;
+        for (StoredJob job : snapshot) {
+            // The same filter as JobStore#findDueRecurring: a paused or orphaned job has an armed
+            // next_fire_at that NOBODY fires — shortening the sleep for it would mean waking up for a
+            // trigger that does not exist. The snapshot comes from findAll, which only discards retired
+            // ones
+            if (!job.paused() && !job.orphaned()) {
+                earliest = earlierFutureFire(earliest, job.nextFireAt(), now);
+            }
+        }
+        return earliest;
+    }
+
+    /**
+     * The nearest of the horizon determined so far and one more candidate — the step
+     * {@link #earliestArmedFire} and {@link #fireDueTriggers} repeat over different sources.
+     *
+     * <p>Only a candidate STILL IN THE FUTURE counts: a disarmed trigger ({@code null}) has no deadline
+     * to honour, and a due one we did not fire is already late — it drains on the next tick, without
+     * shortening any sleep.
+     */
+    private static @Nullable Instant earlierFutureFire(@Nullable Instant earliest, @Nullable Instant candidate, Instant now) {
+        if (candidate == null || !candidate.isAfter(now)) {
+            return earliest;
+        }
+        return earliest == null || candidate.isBefore(earliest) ? candidate : earliest;
+    }
+
+    /**
+     * Noticing this node's OWN node lease has expired BEFORE renewing it — this node was "dead" to the
+     * cluster (a pause or stall longer than node-lease-ttl) and peers may have reclaimed what was in
+     * flight. The epoch bump records the reincarnation and, since the fence is {@code (node_id, epoch)},
+     * it defeats the zombies' writes by itself.
+     *
+     * <p>The heartbeat goes out in any state — PAUSED and DRAINING included (a drain is not a cancel).
      */
     private void renewNodeLease(EngineState current, Instant now) {
-        // !isBefore, não isAfter: o predicado do PAR (aliveNodeIds) considera o nó
-        // morto já na igualdade — o auto-diagnóstico tem que ser simétrico, senão
-        // no instante exato da expiração um par reaparia sem este nó bumpar o epoch
+        // !isBefore, not isAfter: a PEER's predicate (aliveNodeIds) considers the node dead already at
+        // equality — the self-diagnosis has to be symmetric, otherwise at the exact instant of
+        // expiry a peer would reap without this node bumping its epoch
         if (nodeLeaseExpiresAt != null && !now.isBefore(nodeLeaseExpiresAt)) {
             nodeEpoch++;
             log.warn("node lease expired at {} while this node was stalled — epoch bumped to {}; peers may have "
                     + "reclaimed in-flight work (their re-runs stand; this node's fenced completions will be discarded)",
                     nodeLeaseExpiresAt, nodeEpoch);
         }
+        // A NEGATIVE clock jump: the node's lease is wall-clock by nature (it is a promise peers read),
+        // so nanoTime does not help here. What can be done is to make it diagnosable — without this,
+        // "why did the cluster re-execute 60 jobs at 04:12?" has no log line connecting symptom to
+        // cause
         Instant promised = now.plus(settings.nodeLeaseTtl());
+        if (nodeLeaseExpiresAt != null && promised.isBefore(nodeLeaseExpiresAt)) {
+            log.warn("clock moved backwards between heartbeats — the new lease promise ({}) is EARLIER than the"
+                    + " previous one ({}). Peers may declare this node dead and reclaim work still running here"
+                    + " (duplicate execution). Check NTP, or mohs.time.mode/sync-interval if the database clock"
+                    + " is the source.", promised, nodeLeaseExpiresAt);
+        }
         nodeStore.heartbeat(nodeId, current, nodeEpoch, now, promised);
-        // só a promessa que o cluster REALMENTE viu conta pra detectar a
-        // própria morte: se o heartbeat falha (catch do tick), o campo retém
-        // a última promessa persistida e o bump dispara na primeira renovação
-        // bem-sucedida depois de > TTL
+        // Only the promise the cluster ACTUALLY saw counts for detecting one's own death: if the
+        // heartbeat fails (the tick's catch), the field retains the last persisted promise and the bump
+        // fires on the first successful renewal after more than a TTL
         nodeLeaseExpiresAt = promised;
     }
 
     /**
-     * O snapshot de definições do tick (DBTUNE-18 evoluída): uma varredura
-     * da tabela fria de definições serve admissão (janela/cap/rate por
-     * job), dispatch e reaper — no lugar dos N finds por job_key. Vira o
-     * cache em memória com invalidação por versão quando o plano §7.2
-     * chegar (registrado no PLAN.md); a staleness de um tick é a mesma da
-     * memoização anterior.
+     * The tick's definitions snapshot: one scan of the cold definitions table serves admission
+     * (window, cap and rate per job), dispatch and the reaper — in place of N finds per job_key.
+     *
+     * <p>It becomes an in-memory cache with version-based invalidation when that work arrives; the
+     * staleness of one tick is the same as the previous memoisation's.
      */
     private Map<JobKey, StoredJob> loadDefinitions() {
         Map<JobKey, StoredJob> byKey = new HashMap<>();
@@ -702,22 +947,20 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * O {@link StoredJob} do snapshot do tick, com consulta fresca no miss:
-     * o snapshot pode PRECEDER um define+schedule do mesmo instante (o
-     * claim vê a fila fresca, o snapshot não) — sem a consulta fresca, um
-     * job recém-definido seria tratado como removido (bug real: ~50% de
-     * falha no E2E do starter que define e agenda em sequência). Job
-     * removido de verdade continua {@code null} — cada chamador decide o
-     * desfecho. Custo só no miss: recém-nascido ou removido, nunca o hot
-     * path.
+     * The tick snapshot's {@link StoredJob}, with a fresh query on a miss: the snapshot may PRECEDE a
+     * define-plus-schedule from the same instant (the claim sees the fresh queue, the snapshot does
+     * not) — without the fresh query, a newly defined job would be treated as removed (a real bug:
+     * about 50% failure in the starter's end-to-end test that defines and schedules in sequence).
      *
-     * <p>O achado curado entra no snapshot (mapa mutável confinado à thread
-     * do tick, JCIP 3.3): sem a memoização, a {@code Admission} das rodadas
-     * seguintes do MESMO tick não incluiria o recém-nascido em
-     * {@code capped} — {@code leaseCount} devolveria 0 e o mutex de
-     * {@code maxConcurrentExecutions} viraria no-op até
-     * {@code claimRounds × cap} execuções concorrentes num só nó (review
-     * S5.4). Aposentado não é memoizado: {@code null} não é achado.
+     * <p>A genuinely removed job still yields {@code null} — each caller decides the outcome. The cost
+     * falls only on a miss: newborn or removed, never the hot path.
+     *
+     * <p>A cured find enters the snapshot (a mutable map confined to the tick's thread, JCIP 3.3):
+     * without the memoisation, the {@code Admission} of the SAME tick's later rounds would not include
+     * the newborn in {@code capped} — {@code leaseCount} would return 0 and
+     * {@code maxConcurrentExecutions}'s mutex would become a no-op up to
+     * {@code claimRounds x cap} concurrent executions on a single node. A retired job is not memoised:
+     * {@code null} is not a find.
      */
     private @Nullable StoredJob storedJobFor(JobKey jobKey, Map<JobKey, StoredJob> definitions) {
         StoredJob stored = definitions.get(jobKey);
@@ -731,21 +974,16 @@ public final class Engine implements MohsLifecycle {
         return fresh;
     }
 
-    // ─── reaper (§4.3: recuperação e retry são o MESMO caminho) ─────────────
-
     /**
-     * Reclama as leases de nós mortos — vivo é promessa não vencida
-     * ({@code expires_at > now}) ou, em linha de jar antigo sem
-     * {@code expires_at}, heartbeat mais novo que {@code lease-ttl}
-     * (tolerância de versão mista, ADR-0051); ausente de {@code mohs_nodes}
-     * é morto por definição. Cada lease órfã vira um
-     * {@link LeaseStore.CompletionResult} cercado pela posse DO MORTO:
-     * com orçamento → attempt sintético FAILED + renascimento na fila na
-     * mesma transação; sem orçamento/retired → FAILED terminal; com
-     * {@code cancel_requested} → CANCELLED (a ordem do operador vence o
-     * orçamento, ADR-0034). O attempt sintético consome orçamento como
-     * qualquer falha (ADR-0033) e o fence garante que uma encarnação nova
-     * saudável nunca é morta (§6.3).
+     * Reclaims dead nodes' leases — alive means an unexpired promise ({@code expires_at > now}) or, on
+     * a row from an older jar with no {@code expires_at}, a heartbeat newer than {@code lease-ttl}
+     * (mixed-version tolerance); absent from {@code mohs_nodes} is dead by definition.
+     *
+     * <p>Each orphaned lease becomes a {@link LeaseStore.CompletionResult} fenced by the DEAD node's
+     * ownership: with budget, a synthetic FAILED attempt plus a rebirth in the queue in the same
+     * transaction; without budget, or retired, a terminal FAILED; with {@code cancel_requested},
+     * CANCELLED (the operator's order beats the budget). The synthetic attempt consumes budget like any
+     * failure, and the fence guarantees a healthy new incarnation is never killed.
      */
     private void reapOrphanedLeases(Map<JobKey, StoredJob> definitions, List<String> aliveNodeIds, Instant now) {
         List<LeaseStore.Lease> orphans = leaseStore.findOrphaned(aliveNodeIds, RECLAIM_LIMIT);
@@ -757,8 +995,8 @@ public final class Engine implements MohsLifecycle {
                 .forEach(head -> heads.put(head.executionId(), head));
 
         List<ReclaimDecision> decisions = orphans.stream()
-                // miss do snapshot → consulta fresca (storedJobFor): job
-                // recém-definido não é job aposentado
+                // A snapshot miss falls back to a fresh query (storedJobFor): a newly defined job is not
+                // a retired job
                 .map(orphan -> decideReclaim(orphan, storedJobFor(orphan.jobKey(), definitions),
                         heads.get(orphan.executionId()), now))
                 .toList();
@@ -774,43 +1012,38 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * O sucessor da expiração por execução que o split aposentou: uma lease
-     * DESTE node sem encarnação em {@code inFlightAttempts} é trabalho
-     * perdido entre claim e dispatch (falha da consulta de payloads,
-     * rejeição do executor, gravação de falha terminal que lançou) — e o
-     * reaper nunca a alcançaria, porque este node está vivo. Sem este
-     * passe, o único remédio seria reiniciar o nó (violação de liveness —
-     * DDIA cap. 8: toda posse precisa de um caminho de expiração
-     * alcançável). Devolve pra fila com o MESMO attempt (nada rodou,
-     * orçamento intacto), pelo requeue cercado de sempre.
+     * The successor to the per-execution expiry the table split retired: a lease belonging to THIS node
+     * with no incarnation in {@code inFlightAttempts} is work lost between claim and dispatch (a failed
+     * payload query, an executor rejection, a terminal-failure write that threw) — and the reaper would
+     * never reach it, because this node is alive. Without this pass, the only remedy would be restarting
+     * the node (a liveness violation — DDIA ch. 8: every ownership needs a reachable expiry path). It
+     * returns the work to the queue with the SAME attempt (nothing ran, the budget is intact), through
+     * the usual fenced requeue.
      *
-     * <p>Duas guardas contra falso positivo, porque o normal a alta vazão é
-     * a lease de uma conclusão EM TRÂNSITO no {@link CompletionBatcher} (a
-     * entrada sai do mapa quando o dispatch retorna; a lease só cai no
-     * commit do flush): (1) grace por {@code claimed_at} —
-     * {@link #strayLeaseGrace()} — porque a 10k+/s SEMPRE há dezenas de
-     * leases em trânsito e o esquema de rodadas sozinho as pegava aos
-     * milhares (medido no bench do S5.5: 199k WARNs, requeues fantasma
-     * disputando lock com o flush até deadlock); (2) duas rodadas
-     * consecutivas ausente. Órfã legítima tem {@code claimed_at} parado —
-     * a recuperação custa o grace + 2 rodadas: ~2s no ponto de operação do
-     * bench (poll 20ms), ~30s no poll default de 5s — a era por-execução
-     * também recuperava em lease-ttl de 30s, então nunca pior, e ordens de
-     * magnitude melhor com poll curto. Se mesmo assim uma conclusão perder
-     * a corrida, o fence do requeue decide e o pior caso é uma re-execução
-     * (at-least-once), nunca corrupção. Estado confinado à thread do tick
-     * (JCIP 3.3).
+     * <p>Two guards against false positives, because the normal case at high throughput is the lease of
+     * a completion IN TRANSIT in the {@link CompletionBatcher} (the entry leaves the map when the
+     * dispatch returns; the lease only drops at the flush's commit): (1) a grace on {@code claimed_at}
+     * ({@link #strayLeaseGrace()}), because at 10k+/s there are ALWAYS dozens of leases in transit and
+     * the rounds scheme alone caught them by the thousand (measured in the bench: 199k WARNs, phantom
+     * requeues contending for the lock with the flush until deadlock); and (2) two consecutive rounds
+     * absent.
+     *
+     * <p>A legitimate orphan has a frozen {@code claimed_at} — its recovery costs the grace plus two
+     * rounds: about 2s at the bench's operating point (20ms poll), about 30s at the 5s default poll —
+     * the per-execution era also recovered in a 30s lease-ttl, so never worse, and orders of magnitude
+     * better with a short poll. If a completion still loses the race, the requeue's fence decides and
+     * the worst case is one re-execution (at-least-once), never corruption. The state is confined to the
+     * tick's thread (JCIP 3.3).
      */
     private void reconcileOwnStrayLeases(Instant now) {
         Instant strayBefore = now.minus(strayLeaseGrace());
         Set<ExecutionId> absentNow = new HashSet<>();
         List<WorkQueue.Requeue> strays = new ArrayList<>();
         for (LeaseStore.Lease lease : leaseStore.findByNodes(List.of(nodeId))) {
-            // três guardas, na ordem estado > estado > tempo: encarnação em
-            // voo; conclusão em trânsito no batcher (cobre job que roda MAIS
-            // que o grace — review S5.5); e o grace por claimed_at, que fica
-            // pro único caso sem estado consultável (perda entre claim e
-            // dispatch)
+            // Three guards, in the order state, state, time: an in-flight incarnation; a completion in
+            // transit in the batcher (which covers a job running LONGER than the grace); and the grace
+            // on claimed_at, which is left for the one case with no consultable state (work lost between
+            // claim and dispatch)
             if (inFlightAttempts.containsKey(lease.executionId())
                     || dispatcher.completionInTransit(lease.executionId())
                     || lease.claimedAt().isAfter(strayBefore)) {
@@ -832,23 +1065,23 @@ public final class Engine implements MohsLifecycle {
                 log.warn("requeued {} lease(s) this node was holding with no in-flight incarnation — "
                         + "work lost between claim and dispatch (same attempt, retry budget untouched)", requeued);
             } else {
-                // fence perdeu pra todas: as conclusões commitaram entre o
-                // findByNodes e o requeue — rotina a alta vazão, não achado
+                // The fence lost on all of them: the completions committed between the findByNodes and
+                // the requeue — routine at high throughput, not a finding
                 log.debug("stray-lease candidates all vanished before the requeue — completions won the race");
             }
         }
     }
 
     /**
-     * Idade mínima pra uma lease sem encarnação virar candidata:
-     * {@code max(2s, 4×poll)} — acima do pior trânsito plausível pelo
-     * batcher. O piso de 2s não é teórico: no cold start do bench do S5.5
-     * (JIT/warmup), o flusher atrasou além de 500ms e o reconcile requeueou
-     * LOTES inteiros de conclusões em trânsito (blocos de 256/512, 10,7k
-     * fences perdidos num round frio); com 2s o regime frio fica limpo. O
-     * custo (recuperação de órfã legítima esperar o grace) depende do poll:
-     * ~2s a 20ms, ~20s no default de 5s — nunca pior que o lease-ttl de 30s
-     * da era por-execução. Deriva do poll-interval — nenhum knob novo.
+     * The minimum age for a lease with no incarnation to become a candidate: {@code max(2s, 4xpoll)} —
+     * above the worst plausible transit through the batcher.
+     *
+     * <p>The 2s floor is not theoretical: during the bench's cold start (JIT and warm-up) the flusher
+     * fell behind by more than 500ms and the reconcile requeued WHOLE BATCHES of completions in transit
+     * (blocks of 256 and 512, 10.7k lost fences in one cold round); with 2s the cold regime stays clean.
+     * The cost (a legitimate orphan's recovery waiting out the grace) depends on the poll: about 2s at
+     * 20ms, about 20s at the 5s default — never worse than the per-execution era's 30s lease-ttl. It
+     * derives from poll-interval, so no new knob.
      */
     private Duration strayLeaseGrace() {
         Duration fourPolls = settings.pollInterval().multipliedBy(4);
@@ -856,33 +1089,32 @@ public final class Engine implements MohsLifecycle {
         return fourPolls.compareTo(floor) > 0 ? fourPolls : floor;
     }
 
-    /** Vivos deste instante — inclui SEMPRE este node (a promessa dele acabou de ser renovada neste mesmo tick, antes do reaper: a ordem que mata o self-reap do S8). */
+    /** The living as of this instant — it ALWAYS includes this node (whose promise was just renewed on this same tick, before the reaper: the ordering that kills self-reaping). */
     private List<String> aliveNodeIds(List<StoredNode> nodes, Instant now) {
         return nodeIdsMatching(nodes, node -> isAlive(node, now));
     }
 
     private boolean isAlive(StoredNode node, Instant now) {
         Instant expiresAt = node.expiresAt();
-        // linha de jar antigo sem expires_at: staleness de lease-ttl (tolerância de versão mista, ADR-0051)
+        // A row from an older jar with no expires_at: staleness of lease-ttl (mixed-version tolerance)
         return expiresAt != null ? expiresAt.isAfter(now) : node.lastHeartbeatAt().isAfter(now.minus(settings.leaseTtl()));
     }
 
     /**
-     * Quem participa da atribuição de shards (§8.3/§11.2): vivo E
-     * {@code RUNNING} — {@code PAUSED}/{@code DRAINING}/{@code STOPPED}
-     * não reivindicam, então dar-lhes shards deixaria 1/n da fila parada
-     * enquanto os pares têm folga (o plano só nomeia DRAINING; PAUSED sai
-     * pela mesma razão — decisão registrada no PLAN.md da fase). Este node
-     * sempre entra quando chega ao claim: o heartbeat do próprio tick
-     * acabou de gravar RUNNING. Se a lista sair vazia ou sem este node,
-     * {@link Shards#ownedBy} degrada pra "possui todos" — sobreposição é o
-     * comportamento pré-shard, fila parada não é opção.
+     * Who takes part in the shard assignment: alive AND {@code RUNNING} —
+     * {@code PAUSED}/{@code DRAINING}/{@code STOPPED} do not claim, so giving them shards would leave
+     * 1/n of the queue stalled while their peers have headroom.
+     *
+     * <p>This node always enters by the time it reaches the claim: its own tick's heartbeat has just
+     * written RUNNING. If the list comes out empty, or without this node, {@link Shards#ownedBy}
+     * degrades to "owns them all" — an overlap is the pre-shard behaviour, whereas a stalled queue is
+     * not an option.
      */
     private List<String> shardEligibleNodeIds(List<StoredNode> nodes, Instant now) {
         return nodeIdsMatching(nodes, node -> node.state() == EngineState.RUNNING && isAlive(node, now));
     }
 
-    /** Os ids que passam no predicado, SEMPRE incluindo este node — o invariante comum de reaper e atribuição de shards (ver os chamadores). */
+    /** The ids that pass the predicate, ALWAYS including this node — the invariant shared by the reaper and the shard assignment (see the callers). */
     private List<String> nodeIdsMatching(List<StoredNode> nodes, Predicate<StoredNode> included) {
         List<String> ids = new ArrayList<>();
         for (StoredNode node : nodes) {
@@ -896,7 +1128,7 @@ public final class Engine implements MohsLifecycle {
         return ids;
     }
 
-    /** Um desfecho de reclaim decidido — o resultado cercado + o que publicar/medir se o fence vencer. */
+    /** One decided reclaim outcome — the fenced result plus what to publish and measure if the fence wins. */
     private record ReclaimDecision(LeaseStore.CompletionResult result, ExecutionState reclaimedState,
             boolean attemptsExhausted, @Nullable Instant retryAt) {
     }
@@ -906,27 +1138,28 @@ public final class Engine implements MohsLifecycle {
         ExecutionId id = orphan.executionId();
         JobKey jobKey = orphan.jobKey();
         String batchId = head == null ? null : head.correlationId();
-        Instant createdAt = head == null ? null : head.createdAt();
         boolean retired = storedJob == null;
         JobDefinition definition = storedJob == null ? null : storedJob.definition();
 
         if (orphan.cancelRequested()) {
-            // o nó morreu, mas a ordem do operador já estava dada — reagendar
-            // seria desobedecê-la (ADR-0034); attempt CANCELLED com error nulo
+            // The node died, but the operator's order was already given — rescheduling would disobey it;
+            // a CANCELLED attempt with a null error
             return new ReclaimDecision(new LeaseStore.CompletionResult(id, jobKey, orphan.nodeId(), orphan.epoch(),
                     orphan.attemptNumber(), orphan.claimedAt(), now, ExecutionState.CANCELLED, null, null,
-                    ExecutionState.CANCELLED, createdAt, null, batchId, rearmFor(head, definition, retired, now)),
+                    ExecutionState.CANCELLED, null, batchId, rearmFor(head, definition, retired, now)),
                     ExecutionState.CANCELLED, false, null);
         }
         Optional<Instant> nextRetry = retired
-                ? Optional.empty() // job aposentado nunca reagenda: a entrada ficaria presa pra sempre (claim... a fila não filtra retired — a aposentadoria drena a fila, S5.4)
-                : RetrySchedule.nextRetryAt(orphan.attemptNumber(), Objects.requireNonNull(definition).retries(), now);
+                ? Optional.empty() // a retired job never reschedules: the entry would be stuck forever (the queue does not filter retired — retirement drains the queue)
+                // No Throwable: the failure happened in a JVM that is no longer running — a custom
+                // policy sees null and decides on the attempt number alone
+                : retryPolicies.nextRetryAt(Objects.requireNonNull(definition), orphan.attemptNumber(), null, now);
         if (nextRetry.isPresent()) {
             Instant retryAt = nextRetry.orElseThrow();
             return new ReclaimDecision(new LeaseStore.CompletionResult(id, jobKey, orphan.nodeId(), orphan.epoch(),
                     orphan.attemptNumber(), orphan.claimedAt(), now, ExecutionState.FAILED,
                     IllegalStateException.class.getName(), NODE_DEAD_ERROR,
-                    null, createdAt,
+                    null,
                     new WorkQueue.ReadyEntry(id, jobKey, Shards.of(id), orphan.priority(), orphan.attemptNumber() + 1, retryAt),
                     batchId, null),
                     ExecutionState.RETRY_WAITING, false, retryAt);
@@ -934,15 +1167,14 @@ public final class Engine implements MohsLifecycle {
         return new ReclaimDecision(new LeaseStore.CompletionResult(id, jobKey, orphan.nodeId(), orphan.epoch(),
                 orphan.attemptNumber(), orphan.claimedAt(), now, ExecutionState.FAILED,
                 IllegalStateException.class.getName(), NODE_DEAD_ERROR,
-                ExecutionState.FAILED, createdAt, null, batchId, rearmFor(head, definition, retired, now)),
+                ExecutionState.FAILED, null, batchId, rearmFor(head, definition, retired, now)),
                 ExecutionState.FAILED, !retired, null);
     }
 
     /**
-     * ADR-0035: reclaim terminal de ocorrência do scheduler em job
-     * fixed-delay rearma a corrente — o "fim" de um zumbi é desconhecido,
-     * {@code now} (a observação do reaper) ancora. Execução manual não é a
-     * corrente; job aposentado nunca rearma.
+     * A terminal reclaim of a scheduler occurrence on a fixed-delay job rearms the chain — a zombie's
+     * "end" is unknown, so {@code now} (the reaper's observation) anchors it. A manual execution is not
+     * the chain; a retired job never rearms.
      */
     private static @Nullable Instant rearmFor(HistoryStore.@Nullable ExecutionHead head,
             @Nullable JobDefinition definition, boolean retired, Instant now) {
@@ -953,12 +1185,10 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Desfechos do reclaim publicam os mesmos eventos do caminho de
-     * dispatch, espelhando exatamente os pares do {@link Dispatcher}:
-     * retry → {@code AttemptFailed} + {@code RetryScheduled}; cancel
-     * pendente honrado (ADR-0034) → {@code Cancelled}; terminal → só
-     * {@code Failed}. É o gancho de alerta de morte de nó que o Javadoc de
-     * {@link Failed} anuncia.
+     * Reclaim outcomes publish the same events as the dispatch path, mirroring the {@link Dispatcher}'s
+     * pairs exactly: a retry gives {@code AttemptFailed} plus {@code RetryScheduled}; an honoured
+     * pending cancel gives {@code Cancelled}; a terminal one gives {@code Failed} alone. It is the
+     * node-death alerting hook {@link Failed}'s Javadoc announces.
      */
     private void publishReclaimOutcome(ReclaimDecision decision) {
         LeaseStore.CompletionResult result = decision.result();
@@ -977,34 +1207,46 @@ public final class Engine implements MohsLifecycle {
         }
     }
 
-    // ─── aquisição → dispatch (§5.4) ────────────────────────────────────────
-
     /**
-     * A etapa "aquisição → dispatch" do tick, com o gate ocioso do S6.5 na
-     * frente: enquanto a rodada anterior voltou vazia, uma sonda de
-     * existência responde pelo lap inteiro — 1 statement no lugar de
-     * {@link Shards#SHARD_COUNT}, que media 96% do custo de consulta de um
-     * nó parado (BASELINE "Phase 6 — S6.4"). Quando a sonda acha trabalho,
-     * o lap roda NESTE mesmo tick: economia, nunca latência.
+     * The tick's "acquisition to dispatch" step, with the idle gate in front: while the previous round
+     * came back empty, an existence probe answers for the whole lap — 1 statement in place of
+     * {@link Shards#SHARD_COUNT}, which was measured at 96% of an idle node's query cost. When the
+     * probe finds work, the lap runs on THIS same tick: a saving, never added latency.
      */
     private int claimAndDispatch(Map<JobKey, StoredJob> definitions, List<Integer> ownedShards) {
+        if (ownedShards.isEmpty()) {
+            // Once per transition, not per tick: the condition is PERSISTENT (it only changes when the
+            // cluster shrinks or SHARD_COUNT rises), and at the 25ms floor it would be ~40 lines/s per
+            // node — the log that diagnoses the problem burying everything else
+            if (!warnedAboutOwningNoShard) {
+                warnedAboutOwningNoShard = true;
+            // Owning zero shards is NOT an empty queue — it is this node being outside the partition.
+            // Shards.ownedBy returns an empty list for an index >= SHARD_COUNT, and the inner lap then
+            // does not run: LapOutcome said "I swept everything and found nothing", armed
+            // queueLooksEmpty, and the node sat idle FOREVER announcing RUNNING and occupying a shard
+            // slice of its peers', with not one line of log
+                log.warn("this node owns no shard of {} — it will never claim. The cluster has more RUNNING nodes"
+                        + " than shards; reduce the node count or raise Shards.SHARD_COUNT.", Shards.SHARD_COUNT);
+            }
+            return 0;
+        }
+        warnedAboutOwningNoShard = false;
         if (queueLooksEmpty && !probeSaysThereIsWork(ownedShards)) {
             return 0;
         }
         LapOutcome outcome = claimLaps(definitions, ownedShards);
-        // dispatch saturado e orçamento estourado devolvem zero SEM a fila estar
-        // vazia: armar neles faria o gate pagar uma sonda por tick no caminho
-        // quente, que é o oposto do que ele existe pra fazer
+        // Saturated dispatch and an exhausted budget also return zero WITHOUT the queue being empty:
+        // arming on those would make the gate pay for a probe per tick on the hot path, the opposite of
+        // what it exists to do
         queueLooksEmpty = outcome.claimed() == 0 && outcome.sweptEveryOwnedShard();
         return outcome.claimed();
     }
 
     /**
-     * A sonda do gate, à prova de si mesma: ela é economia, nunca
-     * autoridade — sonda que falha devolve o tick ao lap. Sem isto, uma
-     * falha PERSISTENTE dela deixaria este node vivo, heartbeatando e dono
-     * de 1/n dos shards, sem nunca reivindicar nada — ninguém o reaparia,
-     * porque ele não está morto.
+     * The gate's probe, made proof against itself: it is a saving, never an authority — a probe that
+     * fails returns the tick to the lap. Without this, a PERSISTENT failure of it would leave this node
+     * alive, heartbeating and owning 1/n of the shards while never claiming anything — and nobody would
+     * reap it, because it is not dead.
      */
     private boolean probeSaysThereIsWork(List<Integer> ownedShards) {
         try {
@@ -1016,36 +1258,30 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * O resultado de uma rodada de claim: quanto veio e se a volta pelos
-     * shards próprios foi COMPLETA. Só uma volta completa e vazia é prova
-     * de fila vazia — as saídas antecipadas (folga de dispatch esgotada,
-     * orçamento de tempo, saída de {@code RUNNING}) devolvem zero por
-     * outros motivos.
+     * One claim round's result: how much came back, and whether the pass over the node's own shards was
+     * COMPLETE. Only a complete, empty pass is proof of an empty queue — the early exits (dispatch
+     * headroom exhausted, time budget, leaving {@code RUNNING}) return zero for other reasons.
      *
-     * <p>A saída por esgotar {@code claimRounds} devolve {@code false} por
-     * conservadorismo, e é inobservável: chegar lá exige todo lap ter
-     * enchido o orçamento, o que garante {@code claimed > 0}. Não
-     * "uniformize" pra {@code true} — o valor não muda nada e a regra
-     * "só arma com prova" para de ser legível.
+     * <p>Exiting through exhausted {@code claimRounds} returns {@code false} out of conservatism, and it
+     * is unobservable: reaching there requires every lap to have filled its budget, which guarantees
+     * {@code claimed > 0}. Do not "tidy" it to {@code true} — the value changes nothing and the "only
+     * arm with proof" rule stops being legible.
      */
     private record LapOutcome(int claimed, boolean sweptEveryOwnedShard) {
     }
 
     /**
-     * Os laps de claim propriamente ditos. ADR-0039: cada claim é limitado
-     * pela folga de dispatch — node saturado não reivindica; o excedente
-     * fica na fila, reivindicável por qualquer node com folga. ADR-0040:
-     * sob backlog, um tick encadeia até {@code claimRounds} claims, com
-     * dois guards entre rounds: drain/pause interrompe o encadeamento, e
-     * um orçamento monotônico de {@code nodeLeaseTtl/4} limita a duração
-     * total — o heartbeat roda UMA vez por tick, antes daqui, e rounds que
-     * se aproximassem do TTL deixariam a lease do NÓ vencer no meio do
-     * tick (lease é detecção de falha — DDIA).
+     * The claim laps proper. Each claim is bounded by the dispatch headroom — a saturated node does not
+     * claim; the surplus stays in the queue, claimable by any node with headroom.
      *
-     * <p>§5.4: a lista de inadmissíveis é recomputada por round (janela
-     * fechada, cap sem folga — derivado de {@code mohs_lease}, §5.7 —,
-     * rate limit sem saldo), e a sobra de admissão pós-claim volta pra
-     * fila SEM consumir orçamento ({@link #admit}).
+     * <p>Under backlog, one tick chains up to {@code claimRounds} claims, with two guards between
+     * rounds: a drain or pause breaks the chain, and a monotonic budget of {@code nodeLeaseTtl/4} bounds
+     * the total duration — the heartbeat runs ONCE per tick, before this, and rounds approaching the TTL
+     * would let the NODE's lease expire mid-tick (a lease is failure detection — DDIA).
+     *
+     * <p>The inadmissible list is recomputed per round (a closed window, a cap with no headroom —
+     * derived from {@code mohs_lease} — an exhausted rate limit), and post-claim admission leftovers go
+     * back to the queue WITHOUT consuming budget ({@link #admit}).
      */
     private LapOutcome claimLaps(Map<JobKey, StoredJob> definitions, List<Integer> ownedShards) {
         long lapsBudgetNanos = settings.nodeLeaseTtl().toNanos() / 4;
@@ -1060,26 +1296,26 @@ public final class Engine implements MohsLifecycle {
                 return new LapOutcome(totalClaimed, false);
             }
             Instant now = clock.instant();
-            // admissão UMA vez por lap, nunca por statement (§5.7): o bound de
-            // sobre-admissão continua "nós × 1 lap", mesmo sentido de erro
+            // Admission ONCE per lap, never per statement: the over-admission bound stays "nodes x 1
+            // lap", with the error in the same direction
             Admission admission = Admission.compute(definitions, windowRegistry, rateLimitStore, leaseStore, now);
-            // o filtro no SQL é otimização de churn, não correção — o admit() pós-claim
-            // é a autoridade. Acima do teto de parâmetros de IN (SQL Server quebra
-            // ~2100), claim sem filtro e o admit devolve os inadmissíveis (mesmo
-            // attempt, orçamento intacto) em vez de TODA rodada falhar no driver
+            // The SQL filter is a churn optimisation, not correctness — the post-claim admit() is the
+            // authority. Above the IN parameter ceiling (SQL Server breaks around 2100) the filter is
+            // TRUNCATED, never switched off: degradation has to be monotonic. Switching it off made the
+            // claim bring back jobs with a closed window and admit return them with visible_at = now,
+            // immediately re-claimable — 2,000 jobs with a business window closing at midnight became a
+            // requeue livelock consuming the claim budget of the admissible work
             Collection<JobKey> inadmissibleFilter = admission.inadmissible().size() > MAX_INADMISSIBLE_FILTER
-                    ? List.of()
+                    ? admission.inadmissible().stream().limit(MAX_INADMISSIBLE_FILTER).toList()
                     : admission.inadmissible();
-            // o LAP (§5.4/E2): um shard PRÓPRIO por statement, round-robin com
-            // cursor persistente entre ticks — multi-shard no predicado mataria
-            // a ordenação do índice (lição do E2); volta completa vazia encerra
+            // The LAP: one OWN shard per statement, round-robin with a cursor that persists between
+            // ticks — a multi-shard predicate would kill the index's ordering (a measured lesson); a complete
+            // empty pass ends it
             int remaining = lapBudget;
             for (int probe = 0; probe < ownedShards.size() && remaining > 0; probe++) {
-                // o mesmo guard da fronteira de lap, POR SONDA: um lap são até 64
-                // statements, e um orçamento de tempo só protege na granularidade
-                // em que é checado — banco degradado a 300ms/claim estouraria o
-                // lease do NÓ no meio do tick (review S6.1); a primeira sonda do
-                // tick sempre roda
+                // The same lap-boundary guard, PER PROBE: one lap is up to 64 statements, and a time
+                // budget only protects at the granularity it is checked — a degraded database at
+                // 300ms/claim would blow the NODE's lease mid-tick; the tick's first probe always runs
                 if ((lap > 0 || probe > 0) && mustStopClaiming(startNanos, lapsBudgetNanos)) {
                     return new LapOutcome(totalClaimed, false);
                 }
@@ -1091,9 +1327,9 @@ public final class Engine implements MohsLifecycle {
                 if (claimed.isEmpty()) {
                     continue;
                 }
-                // o reivindicado desconta MESMO quando o admit devolve losers:
-                // deliberado — simplicidade > utilização (o churn de admissão é
-                // raro por construção e autolimitado a um lap)
+                // What was claimed counts against the budget EVEN when admit returns losers: deliberate —
+                // simplicity over utilisation (admission churn is rare by construction and self-limited
+                // to one lap)
                 remaining -= claimed.size();
                 totalClaimed += claimed.size();
                 List<WorkQueue.ClaimedWork> admitted = admit(claimed, definitions, admission, now);
@@ -1102,10 +1338,10 @@ public final class Engine implements MohsLifecycle {
                 }
             }
             if (remaining > 0) {
-                // lap não encheu o orçamento — fila drenada o bastante; um lap a
-                // mais seria uma volta de SELECTs em filas já vazias (ADR-0040).
-                // Chegar aqui exige o loop interno ter esgotado os shards
-                // próprios: a volta foi COMPLETA, e zero aqui É fila vazia
+                // The lap did not fill the budget — the queue has drained enough; one more lap would be a
+                // pass of SELECTs over already empty queues. Reaching here requires the inner loop to
+                // have exhausted the node's own shards: the pass was COMPLETE, and zero here IS an empty
+                // queue
                 return new LapOutcome(totalClaimed, true);
             }
         }
@@ -1113,26 +1349,23 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * O guard entre claims do mesmo tick (ADR-0040): drain/pause interrompe
-     * o encadeamento, e o orçamento monotônico de {@code nodeLeaseTtl/4}
-     * idem — o porquê de cada ponto de checagem (fronteira de lap e por
-     * sonda) está nos chamadores.
+     * The guard between claims of the same tick: a drain or pause breaks the chain, and so does the
+     * monotonic budget of {@code nodeLeaseTtl/4} — the reason for each checkpoint (the lap boundary and
+     * each probe) is at the call sites.
      */
     private boolean mustStopClaiming(long startNanos, long lapsBudgetNanos) {
         return state.get() != EngineState.RUNNING || System.nanoTime() - startNanos >= lapsBudgetNanos;
     }
 
     /**
-     * A resolução da corrida de admissão (§5.4, "Admission races, named"):
-     * a lista de inadmissíveis é um snapshot do início da rodada — um cap
-     * pode ter sido parcial (folga 2, rodada trouxe 5) e o rate limit é
-     * cobrado AGORA, tudo-ou-nada por job ({@code RateLimitStore.charge},
-     * ADR-0042: cobrar o reivindicado, nunca entregar sem token — a única
-     * violação inaceitável). Perdedor volta pra fila com o MESMO attempt
-     * (nada rodou, orçamento intacto) e {@code visible_at = now} — a
-     * rodada seguinte deste ou de outro node decide; o churn é limitado a
-     * uma rodada por virada de guard e contado
-     * ({@code mohs.claim.requeued}).
+     * The resolution of the admission race: the inadmissible list is a snapshot from the start of the
+     * round — a cap may have been partial (headroom 2, the round brought 5) and the rate limit is
+     * charged NOW, all-or-nothing per job ({@code RateLimitStore.charge}: charge what was claimed, never
+     * deliver without a token — the one unacceptable violation).
+     *
+     * <p>A loser goes back to the queue with the SAME attempt (nothing ran, the budget is intact) and
+     * {@code visible_at = now} — the next round of this or another node decides; the churn is bounded to
+     * one round per guard flip and is counted ({@code mohs.claim.requeued}).
      */
     private List<WorkQueue.ClaimedWork> admit(List<WorkQueue.ClaimedWork> claimed, Map<JobKey, StoredJob> definitions,
             Admission admission, Instant now) {
@@ -1145,10 +1378,10 @@ public final class Engine implements MohsLifecycle {
         for (Map.Entry<JobKey, List<WorkQueue.ClaimedWork>> entry : byJob.entrySet()) {
             JobKey jobKey = entry.getKey();
             List<WorkQueue.ClaimedWork> ofJob = entry.getValue();
-            // consulta fresca no miss (storedJobFor): o recém-nascido passa
-            // pelos MESMOS guards — janela inclusive; sem ela, ele rodaria
-            // dentro de janela fechada, o bug que o E2E do starter pegou.
-            // Removido de verdade segue pro dispatch falhar com a mensagem certa
+            // A fresh query on a miss (storedJobFor): the newborn goes through the SAME guards — the
+            // window included; without it, it would run inside a closed window, the bug the starter's
+            // end-to-end test caught. A genuinely removed one goes on to the dispatch, to fail with the
+            // right message
             StoredJob stored = storedJobFor(jobKey, definitions);
             Admitted share = stored == null
                     ? Admitted.all(ofJob.size())
@@ -1170,7 +1403,7 @@ public final class Engine implements MohsLifecycle {
         return admitted;
     }
 
-    /** Quanto da rodada um job levou e — quando nem tudo — qual guard barrou (o label de {@code mohs.claim.requeued}). */
+    /** How much of the round a job took and — when not all of it — which guard blocked it (the label of {@code mohs.claim.requeued}). */
     private record Admitted(int count, String reason) {
 
         static Admitted all(int requested) {
@@ -1179,13 +1412,13 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Os guards pós-claim do §5.4, na ordem: janela, folga de cap (derivada
-     * de {@code mohs_lease}) e cobrança tudo-ou-nada do rate limit — quem
-     * reduziu por último assina o {@code reason}. A janela aqui é
-     * segunda linha de defesa, não redundância: o filtro pré-claim é um
-     * snapshot (e é DESCARTADO acima de {@link #MAX_INADMISSIBLE_FILTER}) —
-     * job recém-nascido ou rodada sem filtro chegam aqui como a única
-     * barreira entre a fila e uma janela fechada.
+     * The post-claim guards, in order: the window, the cap's headroom (derived from
+     * {@code mohs_lease}) and the rate limit's all-or-nothing charge — whichever reduced last signs the
+     * {@code reason}.
+     *
+     * <p>The window here is a second line of defence, not redundancy: the pre-claim filter is a snapshot
+     * (and is DISCARDED above {@link #MAX_INADMISSIBLE_FILTER}) — a newborn job, or a round with no
+     * filter, arrives here with this as the only barrier between the queue and a closed window.
      */
     private Admitted admitFor(JobDefinition definition, int requested, Admission admission, Instant now) {
         if (windowRegistry.excludes(definition.window(), now)) {
@@ -1204,7 +1437,7 @@ public final class Engine implements MohsLifecycle {
         if (rateLimit != null && allowed > 0) {
             int granted = Math.min(allowed, rateLimitStore.available(rateLimit, now));
             if (granted > 0 && !rateLimitStore.charge(rateLimit, granted, now)) {
-                granted = 0; // outro nó levou o saldo entre as duas fases — a rodada devolve tudo deste job
+                granted = 0; // another node took the balance between the two phases — the round returns everything for this job
             }
             if (granted < allowed) {
                 allowed = granted;
@@ -1215,11 +1448,12 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Os guards por job do lap (§5.4): quem está fora deste lap e as
-     * contagens de posse que decidem folga de cap. Classe, não record: o
-     * lap MUTA as contagens ({@link #consume}) e record comunica valor
-     * imutável (Effective Java 17 — a convenção do projeto reserva record
-     * pra value object). Confinado à thread do tick (JCIP 3.3).
+     * The lap's per-job guards: who is out of this lap, and the ownership counts that decide the cap's
+     * headroom.
+     *
+     * <p>A class, not a record: the lap MUTATES the counts ({@link #consume}) and a record communicates
+     * an immutable value (Effective Java 17 — the project's convention reserves records for value
+     * objects). Confined to the tick's thread (JCIP 3.3).
      */
     private static final class Admission {
 
@@ -1240,13 +1474,11 @@ public final class Engine implements MohsLifecycle {
         }
 
         /**
-         * Desconta do headroom o que este lap acabou de admitir — o
-         * snapshot é UM por lap (§5.7), mas o lap tem N statements: sem o
-         * desconto, cada sonda re-concederia o mesmo headroom e um cap de 1
-         * admitiria 1 por shard (o perdedor devolvido com
-         * {@code visible_at = now} num shard à frente do cursor seria
-         * re-admitido na MESMA volta). Com ele, o bound de sobre-admissão
-         * segue "nós × 1 lap", o que o plano prometeu.
+         * Deducts from the headroom what this lap has just admitted — the snapshot is ONE per lap, but
+         * the lap has N statements: without the deduction, every probe would re-grant the same headroom
+         * and a cap of 1 would admit 1 per shard (the loser returned with {@code visible_at = now} in a
+         * shard ahead of the cursor would be re-admitted on the SAME pass). With it, the over-admission
+         * bound stays "nodes x 1 lap", which is what was promised.
          */
         void consume(JobKey jobKey, int count) {
             if (count > 0) {
@@ -1272,7 +1504,7 @@ public final class Engine implements MohsLifecycle {
                     inadmissible.add(definition.key());
                 }
             }
-            // cópia mutável: o lap desconta o que admite ({@link #consume})
+            // A mutable copy: the lap deducts what it admits ({@link #consume})
             Map<JobKey, Integer> leaseCounts = new HashMap<>(capped.isEmpty() ? Map.of() : leaseStore.countByJob(capped));
             for (JobKey jobKey : capped) {
                 StoredJob stored = definitions.get(jobKey);
@@ -1286,14 +1518,12 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * ADR-0047: UMA consulta de payload+cabeçalho por round, não uma por
-     * execução. Falha da consulta é infra, nunca veredito sobre as
-     * execuções: o lote fica com a lease de pé e o reaper de outro node o
-     * devolve se este morrer — o soluço nunca vira falha TERMINAL imediata
-     * (o achado do S8).
+     * ONE payload-plus-header query per round, not one per execution. A failure of the query is
+     * infrastructure, never a verdict on the executions: the batch keeps its lease up and another node's
+     * reaper returns it if this one dies — a hiccup never becomes an immediate TERMINAL failure.
      *
-     * @return {@code false} se a consulta falhou — o chamador encerra os
-     *         rounds do tick (o lote já reivindicado fica pro reaper)
+     * @return {@code false} if the query failed — the caller ends the tick's rounds (the already claimed
+     *         batch is left to the reaper)
      */
     private boolean dispatchClaimedBatch(List<WorkQueue.ClaimedWork> claimed, Map<JobKey, StoredJob> definitions,
             Instant claimInstant) {
@@ -1312,21 +1542,19 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Fire-and-forget em relação ao próximo tick: um handler lento não trava
-     * a próxima rodada de claim. O executor do runner pode rejeitar
-     * ({@link MohsExecutors#ioBoundExecutor} rejeita acima do teto de
-     * concorrência, de propósito — backpressure real) — sem capturar aqui,
-     * uma única rejeição no meio do lote abortaria o {@code for} e deixaria
-     * as execuções seguintes já possuídas órfãs até um reaper.
+     * Fire-and-forget with respect to the next tick: a slow handler does not block the next claim round.
+     * The runner's executor may reject ({@link MohsExecutors#ioBoundExecutor} rejects above the
+     * concurrency ceiling, on purpose — real backpressure) — without catching here, a single rejection
+     * mid-batch would abort the {@code for} and leave the following, already owned executions orphaned
+     * until a reaper.
      */
     private void submitDispatch(WorkQueue.ClaimedWork work, HistoryStore.PayloadBatch payloads,
             Map<JobKey, StoredJob> definitions, Instant claimInstant) {
         ExecutionId id = work.executionId();
         HistoryStore.PayloadRow row = payloads.rows().get(id);
-        Dispatcher.Grant grant = new Dispatcher.Grant(nodeId, nodeEpoch, work.attemptNumber(), claimInstant,
-                row == null ? null : row.head().createdAt());
-        // consulta fresca no miss (storedJobFor) — sem ela, um job
-        // recém-nascido morreria FAILED terminal como se tivesse sido removido
+        Dispatcher.Grant grant = new Dispatcher.Grant(nodeId, nodeEpoch, work.attemptNumber(), claimInstant);
+        // A fresh query on a miss (storedJobFor) — without it, a newborn job would die a terminal FAILED
+        // as if it had been removed
         StoredJob storedJob = storedJobFor(work.jobKey(), definitions);
         if (storedJob == null) {
             failBeforeDispatchGuarded(executionFor(work, row, claimInstant), null, new IllegalStateException(
@@ -1344,10 +1572,9 @@ public final class Engine implements MohsLifecycle {
             return;
         }
 
-        // ADR-0047: o payload chegou na leitura em lote do round. Linha que
-        // não desserializou é terminal por natureza (payload corrompido não
-        // sara re-lendo); a falha TRANSIENTE da consulta nunca chega aqui
-        // (tratada no round, lote inteiro fica pro reaper).
+        // The payload arrived in the round's batched read. A row that did not deserialise is terminal by
+        // nature (a corrupt payload does not heal by re-reading); a TRANSIENT failure of the query never
+        // reaches here (it is handled in the round, and the whole batch is left to the reaper).
         RuntimeException unreadable = payloads.unreadable().get(id);
         if (unreadable != null) {
             failUnreadablePayload(executionFor(work, row, claimInstant), definition, unreadable, grant);
@@ -1355,18 +1582,18 @@ public final class Engine implements MohsLifecycle {
         }
         if (row == null) {
             failUnreadablePayload(executionFor(work, null, claimInstant), definition, new IllegalStateException(
-                    "execution " + id + " has a lease but no history row — the enqueue unit was broken (§7.5-1 violated upstream)"), grant);
+                    "execution " + id + " has a lease but no history row — the enqueue unit was broken: the execution,"
+                            + " its queue entry and its idempotency key must be written in ONE transaction, and something"
+                            + " upstream split them"), grant);
             return;
         }
         Execution execution = executionFor(work, row, claimInstant);
 
-        // registrado ANTES do runAsync: a posse existe desde o claim — a
-        // varredura do tick (timeout/cancel/watchdog) precisa alcançá-la
-        // mesmo que o executor a deixe na fila por um tick inteiro. Remoções
-        // sempre com o remove de dois argumentos: o mesmo ExecutionId pode
-        // ser re-reivindicado por este node após um requeue, e o whenComplete
-        // tardio de um zumbi não pode apagar a entrada da encarnação nova
-        // (ABA em memória — InFlightAttempt tem igualdade de identidade).
+        // Registered BEFORE the runAsync: the ownership has existed since the claim — the tick's sweep
+        // (timeout, cancel, watchdog) has to reach it even if the executor leaves it queued for a whole
+        // tick. Removals always use the two-argument remove: the same ExecutionId may be re-claimed by
+        // this node after a requeue, and a zombie's late whenComplete must not erase the new
+        // incarnation's entry (an in-memory ABA — InFlightAttempt has identity equality).
         InFlightAttempt attempt = new InFlightAttempt(definition.timeout(), execution, definition, grant);
         inFlightAttempts.put(id, attempt);
         CompletableFuture<Void> future;
@@ -1380,9 +1607,8 @@ public final class Engine implements MohsLifecycle {
         }
         inFlight.add(future);
         future.whenComplete((_, thrown) -> {
-            // Dispatcher.dispatch trata as falhas conhecidas — throwable aqui
-            // significa que a própria gravação do desfecho lançou; engolir
-            // esconderia o único rastro do zumbi
+            // Dispatcher.dispatch handles the known failures — a throwable here means the outcome write
+            // itself threw; swallowing it would hide the zombie's only trace
             if (thrown != null) {
                 log.error("dispatch of execution {} threw outside the normal failure paths", id, thrown);
             }
@@ -1391,11 +1617,11 @@ public final class Engine implements MohsLifecycle {
         });
     }
 
-    /** A visão pública da encarnação em voo — construída do cabeçalho da história; sem attempts (§5.3: nada conta attempts no hot path). */
+    /** The public view of the in-flight incarnation — built from history's header; without attempts (nothing counts attempts on the hot path). */
     private Execution executionFor(WorkQueue.ClaimedWork work, HistoryStore.@Nullable PayloadRow row, Instant claimInstant) {
         if (row == null) {
-            // linha de história sumida/ilegível: o mínimo verdadeiro pros
-            // eventos — identidade, estado e a posse; o resto é desconhecido
+            // A history row that is missing or unreadable: the minimum that is true for the
+            // events — identity, state and ownership; the rest is unknown
             return new Execution(work.executionId(), work.jobKey(), ExecutionState.RUNNING, claimInstant, claimInstant,
                     List.of(), "unknown", Priority.NORMAL, null, null, nodeId);
         }
@@ -1404,43 +1630,59 @@ public final class Engine implements MohsLifecycle {
                 List.of(), head.actor(), Priority.fromValue(head.priority()), null, head.correlationId(), nodeId);
     }
 
-    // ─── triggers (ADR-0035) ────────────────────────────────────────────────
-
     /**
-     * ADR-0035: a etapa "trigger devido → aquisição" — ANTES do claim, no
-     * mesmo tick, pra ocorrência recém-materializada já ser reivindicável
-     * sem esperar o próximo poll. {@link FiringPlanner} decide o que a
-     * política de misfire do job dispara; {@link TriggerFirer#fire} é o
-     * CAS transacional que resolve a corrida entre nós — perder é rotina,
-     * não erro. Falha de um job não derruba a varredura dos demais.
+     * The "due trigger to acquisition" step — BEFORE the claim, on the same tick, so a freshly
+     * materialised occurrence is already claimable without waiting for the next poll.
+     *
+     * <p>{@link FiringPlanner} decides what the job's misfire policy fires; {@link TriggerFirer#fire} is
+     * the transactional CAS that resolves the race between nodes — losing is routine, not an error. One
+     * job's failure does not take down the sweep of the others.
      */
-    private boolean fireDueTriggers() {
+    private FiringOutcome fireDueTriggers() {
         Instant now = clock.instant();
         List<StoredJob> due = jobStore.findDueRecurring(now, FIRE_LIMIT);
+        Instant rearmedAt = null;
         for (StoredJob job : due) {
             JobDefinition definition = job.definition();
             try {
-                // dentro do try: contrato violado por um store custom falha SÓ este job, não a varredura nem o claim do tick
+                // Inside the try: a contract violated by a custom store fails ONLY this job, not the sweep nor the tick's claim
                 Instant observed = Objects.requireNonNull(job.nextFireAt(), "findDueRecurring returned an unarmed trigger");
-                fireTrigger(definition, observed, now);
+                rearmedAt = earlierFutureFire(rearmedAt, fireTrigger(definition, observed, now), now);
             } catch (RuntimeException e) {
                 log.error("firing job '{}' failed — will retry next tick", definition.key().value(), e);
             }
         }
-        // trigger devido = trabalho no banco, MESMO perdendo o CAS (outro nó
-        // materializou ocorrências que podem cair nos shards deste) — zera o
-        // backoff pelo lado conservador
-        return !due.isEmpty();
+        // A due trigger means work in the database, EVEN on losing the CAS (another node materialised
+        // occurrences that may land in this node's shards) — reset the backoff on the conservative side
+        return new FiringOutcome(!due.isEmpty(), rearmedAt);
     }
 
-    /** Um trigger devido: o plano da política de misfire vira ocorrências materializadas pelo CAS — perder o CAS sai calado (ver {@link #fireDueTriggers}). */
-    private void fireTrigger(JobDefinition definition, Instant observed, Instant now) {
+    /**
+     * What the trigger sweep returns to the tick: whether there was a due trigger — which resets the
+     * backoff — and the nearest of the {@code next_fire_at} values this sweep's CAS operations have just
+     * armed ({@code null} means none: nobody fired, everyone lost the CAS, or all were fixed-delay
+     * awaiting an end).
+     *
+     * <p>The definitions snapshot does not know this: it predates the firing (see
+     * {@link #earliestArmedFire}).
+     */
+    private record FiringOutcome(boolean fired, @Nullable Instant rearmedAt) {
+    }
+
+    /**
+     * One due trigger: the misfire policy's plan becomes occurrences materialised by the CAS — losing
+     * the CAS exits quietly (see {@link #fireDueTriggers}).
+     *
+     * @return the {@code next_fire_at} THIS call armed, or {@code null} if the CAS was lost or the plan
+     *         disarmed the trigger (fixed-delay awaiting the end)
+     */
+    private @Nullable Instant fireTrigger(JobDefinition definition, Instant observed, Instant now) {
         FiringPlanner.Plan plan = firingPlanner.plan(definition.schedule(), definition.misfire(), observed, now);
         List<Execution> occurrences = plan.occurrences().stream()
                 .map(occurrenceAt -> newOccurrence(definition.key(), occurrenceAt))
                 .toList();
         if (!triggerFirer.fire(definition.key(), observed, plan.nextFireAt(), occurrences, emptyPayload(), now)) {
-            return;
+            return null;
         }
         if (plan.misfired()) {
             log.warn("job '{}' missed occurrence(s) — next_fire_at was {} at tick time {}; misfire policy {} applied: "
@@ -1450,58 +1692,55 @@ public final class Engine implements MohsLifecycle {
             log.debug("job '{}' fired {} occurrence(s), next fire at {}",
                     definition.key().value(), occurrences.size(), plan.nextFireAt());
         }
+        return plan.nextFireAt();
     }
 
     /**
-     * O payload vazio das ocorrências do scheduler — classe concreta de
-     * propósito, nunca {@code Map.of()}: {@code payload_type} persiste a
-     * classe exata, e a releitura precisa de um tipo que o Jackson
-     * instancie de volta.
+     * The empty payload of scheduler occurrences — a concrete class on purpose, never {@code Map.of()}:
+     * {@code payload_type} persists the exact class, and reading it back needs a type Jackson can
+     * instantiate again.
      */
     private static LinkedHashMap<String, Object> emptyPayload() {
         return new LinkedHashMap<>();
     }
 
     /**
-     * Ocorrência materializada pelo trigger: {@code scheduled_at} = o
-     * instante da ocorrência (identidade do disparo), {@code actor}
-     * distingue a corrente do scheduler de disparos manuais, payload vazio.
+     * An occurrence materialised by the trigger: {@code scheduled_at} is the occurrence's instant (the
+     * firing's identity), {@code actor} distinguishes the scheduler's chain from manual firings, and the
+     * payload is empty.
      */
     private static Execution newOccurrence(JobKey jobKey, Instant occurrenceAt) {
-        return new Execution(ExecutionId.of(UUIDv7.randomUUIDString()), jobKey, ExecutionState.ENQUEUED,
-                occurrenceAt, null, List.of(), Execution.SCHEDULER_ACTOR, Priority.NORMAL, null);
+        return Execution.enqueued(ExecutionId.of(UUIDv7.randomUUIDString()), jobKey, occurrenceAt,
+                Execution.SCHEDULER_ACTOR, Priority.NORMAL);
     }
 
-    // ─── a escada de timeout/cancel/watchdog (ADR-0034/0051) ────────────────
-
     /**
-     * ADR-0034: o deadline de {@code JobDefinition.timeout} verificado de
-     * carona na varredura do tick — atraso de até um intervalo do loop
-     * (entre o piso e {@code min(max-poll-interval, node-lease-ttl/3)},
-     * conforme o backoff), zero thread nova, ativo também em
-     * PAUSED/DRAINING.
-     * Dispara flag + interrupt; o desfecho é passivo — gravado quando o
-     * handler parar ({@link Dispatcher}), nunca aqui. O relógio corre do
-     * início REAL do handler — fila de runner não conta.
+     * {@code JobDefinition.timeout}'s deadline, checked as a passenger on the tick's sweep — a delay of
+     * up to one loop interval (between the floor and {@code min(max-poll-interval, node-lease-ttl/3)},
+     * depending on the backoff), zero new threads, and active in PAUSED and DRAINING too.
+     *
+     * <p>It raises the flag and interrupts; the outcome is passive — recorded when the handler stops
+     * ({@link Dispatcher}), never here. The clock runs from the handler's REAL start: time queued in a
+     * runner does not count.
      */
     private void signalJobTimeouts() {
         inFlightAttempts.forEach((id, attempt) -> {
             if (attempt.needsTimeoutSignal()) {
                 log.warn("execution {} exceeded its job timeout {} — cancellation signalled and the handler interrupted; "
-                        + "the outcome follows when the handler stops (ADR-0034)", id, attempt.timeout);
+                        + "the outcome follows when the handler stops", id, attempt.timeout);
                 attempt.signal.requestCancellation(CancellationSignal.Reason.TIMEOUT, true);
             }
         });
     }
 
     /**
-     * ADR-0034: observa {@code POST /executions/{id}/cancel} — lê em lote
-     * (na posse, só quando há in-flight) a flag {@code cancel_requested} do
-     * próprio in-flight e levanta {@code MANUAL} como flag pura, sem
-     * interrupt: cancel é cooperativo por contrato. Staleness efetiva ≤ um
-     * intervalo do loop (teto {@code min(max-poll-interval,
-     * node-lease-ttl/3)}) + duração do tick. Ativo também em
-     * PAUSED/DRAINING.
+     * Observes {@code POST /executions/{id}/cancel} — it reads the {@code cancel_requested} flag of its
+     * own in-flight work in a batch (on the ownership, and only when there is in-flight work) and raises
+     * {@code MANUAL} as a pure flag, without an interrupt: cancellation is cooperative by contract.
+     *
+     * <p>Effective staleness is at most one loop interval (ceiling
+     * {@code min(max-poll-interval, node-lease-ttl/3)}) plus the tick's duration. Active in PAUSED and
+     * DRAINING too.
      */
     private void pollCancelRequests() {
         List<ExecutionId> unsignalled = inFlightAttempts.entrySet().stream()
@@ -1521,14 +1760,14 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * O Watchdog Bound (ADR-0051): execução cujo runtime monotônico passou
-     * de {@code mohs.engine.watchdog-timeout} tem a posse LIBERADA
-     * explicitamente ({@link Dispatcher#abandonOwnership} — attempt
-     * sintético pelo orçamento de retry, cercado pela posse desta
-     * encarnação). MARCA a encarnação em vez de removê-la (review
-     * ADR-0034): o zumbi continua no mapa pra escalada de drain e poll de
-     * cancel o alcançarem. Falha na liberação não marca — o próximo tick
-     * tenta de novo.
+     * The Watchdog Bound: an execution whose monotonic runtime passed
+     * {@code mohs.engine.watchdog-timeout} has its ownership explicitly RELEASED
+     * ({@link Dispatcher#abandonOwnership} — a synthetic attempt through the retry budget, fenced by
+     * this incarnation's ownership).
+     *
+     * <p>It MARKS the incarnation rather than removing it: the zombie stays in the map so the drain
+     * escalation and the cancel poll can still reach it. A failed release does not mark — the next tick
+     * tries again.
      */
     private void signalWatchdogOverruns() {
         inFlightAttempts.forEach((id, attempt) -> {
@@ -1538,7 +1777,7 @@ public final class Engine implements MohsLifecycle {
         });
     }
 
-    /** Um estouro do bound: libera a posse cercada; falha na liberação não marca — o próximo tick tenta de novo. */
+    /** One bound overrun: it releases the fenced ownership; a failed release does not mark — the next tick tries again. */
     private void releaseOverrunOwnership(ExecutionId id, InFlightAttempt attempt) {
         try {
             dispatcher.abandonOwnership(attempt.execution, attempt.definition, attempt.grant,
@@ -1554,35 +1793,34 @@ public final class Engine implements MohsLifecycle {
         }
     }
 
-    /** Runtime por tempo monotônico ({@code System.nanoTime}) — duração nunca vem do {@code Clock} injetado, que pode saltar no resync. */
+    /** Runtime by monotonic time ({@code System.nanoTime}) — a duration never comes from the injected {@code Clock}, which may jump on a resync. */
     private boolean watchdogBoundExceeded(long startedNanos) {
         Duration bound = settings.watchdogTimeout();
         return bound != null && System.nanoTime() - startedNanos >= bound.toNanos();
     }
 
     /**
-     * Uma encarnação de dispatch em voo neste node: o instante monotônico do
-     * submit (base do Watchdog Bound — fila conta de propósito), o
-     * {@code timeout} do job (ADR-0034; {@code null} = sem timeout), o
-     * {@link CancellationSignal} e a posse ({@link Dispatcher.Grant}).
-     * Classe, não record, e sem {@code equals} de propósito: a igualdade É
-     * a identidade — cada dispatch é uma encarnação distinta, e o
-     * {@code remove(id, attempt)} de dois argumentos só pode remover ESTA.
+     * One in-flight dispatch incarnation on this node: the submit's monotonic instant (the Watchdog
+     * Bound's basis — queue time counts on purpose), the job's {@code timeout} ({@code null} means no
+     * timeout), the {@link CancellationSignal} and the ownership ({@link Dispatcher.Grant}).
+     *
+     * <p>A class, not a record, and deliberately without {@code equals}: equality IS identity — each
+     * dispatch is a distinct incarnation, and the two-argument {@code remove(id, attempt)} may only
+     * remove THIS one.
      */
     private static final class InFlightAttempt {
 
         final long submittedNanos = System.nanoTime();
         final @Nullable Duration timeout;
         final CancellationSignal signal = new CancellationSignal();
-        /** A encarnação em si — o que o watchdog precisa pra liberar a posse sem consulta nova. */
+        /** The incarnation itself — what the watchdog needs in order to release ownership without a fresh query. */
         final Execution execution;
         final JobDefinition definition;
         final Dispatcher.Grant grant;
         /**
-         * Posse liberada pelo watchdog — escrito só pela thread do tick.
-         * A entrada continua no mapa até a conclusão: zumbi marcado ainda
-         * recebe o interrupt do shutdown e o sinal de cancel (review
-         * ADR-0034).
+         * Ownership released by the watchdog — written only by the tick's thread. The entry stays in the
+         * map until completion: a marked zombie still receives the shutdown's interrupt and the cancel
+         * signal.
          */
         volatile boolean ownershipReleased;
 
@@ -1593,17 +1831,16 @@ public final class Engine implements MohsLifecycle {
             this.grant = grant;
         }
 
-        /** O gatilho da varredura do tick (ADR-0034): tem timeout próprio, o handler roda há mais que ele e o sinal ainda não foi levantado. */
+        /** The tick sweep's trigger: it has a timeout of its own, the handler has been running longer than that, and the signal has not been raised yet. */
         boolean needsTimeoutSignal() {
             return timeout != null && !signal.cancellationRequested() && signal.handlerRunningLongerThan(timeout);
         }
     }
 
     /**
-     * Falha terminal decidida ainda na thread do tick — definição removida
-     * ou runner sem correspondente falha só esta execução, nunca o tick:
-     * se a própria gravação da falha lançar, o resto do lote ainda precisa
-     * ser despachado — loga e deixa a posse de pé pra um reaper.
+     * A terminal failure decided while still on the tick's thread — a removed definition or a runner with
+     * no match fails only this execution, never the tick: if the failure write itself throws, the rest of
+     * the batch still needs dispatching — log it and leave the ownership standing for a reaper.
      */
     private void failBeforeDispatchGuarded(Execution execution, @Nullable JobDefinition definition,
             IllegalStateException error, Dispatcher.Grant grant) {
@@ -1616,12 +1853,12 @@ public final class Engine implements MohsLifecycle {
     }
 
     /**
-     * Payload corrompido/classe sumida do classpath não trava o ciclo —
-     * falha só esta execução, direto, sem passar pelo handler. Desde a
-     * ADR-0047 só o veredito POR LINHA de {@code findPayloads} chega aqui:
-     * falha transiente da consulta em lote fica pro reaper, nunca vira
-     * terminal. {@link Dispatcher#failBeforeDispatch} sintetiza o attempt
-     * e publica {@code Failed} — mesmo caminho de qualquer falha terminal.
+     * A corrupt payload, or a class gone from the classpath, does not stall the cycle — it fails only
+     * this execution, directly, without going through the handler.
+     *
+     * <p>Only {@code findPayloads}'s PER-ROW verdict reaches here: a transient failure of the batched
+     * query is left to the reaper and never becomes terminal. {@link Dispatcher#failBeforeDispatch}
+     * synthesises the attempt and publishes {@code Failed} — the same path as any terminal failure.
      */
     private void failUnreadablePayload(Execution execution, JobDefinition definition, RuntimeException cause,
             Dispatcher.Grant grant) {
@@ -1629,7 +1866,7 @@ public final class Engine implements MohsLifecycle {
         failBeforeDispatchGuarded(execution, definition, new IllegalStateException(message, cause), grant);
     }
 
-    /** Package-private — só {@code EngineTest} usa isto pra confirmar a identidade do node por trás de heartbeat/claim. */
+    /** Package-private — only {@code EngineTest} uses this, to confirm the node identity behind the heartbeat and the claim. */
     String nodeId() {
         return nodeId;
     }

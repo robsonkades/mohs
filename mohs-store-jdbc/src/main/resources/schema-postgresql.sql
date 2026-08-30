@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
 
 CREATE TABLE IF NOT EXISTS mohs_batches (
     id         VARCHAR(255) PRIMARY KEY,
+    name       VARCHAR(255) NOT NULL,
     total      INT NOT NULL DEFAULT 0,
     succeeded  INT NOT NULL DEFAULT 0,
     failed     INT NOT NULL DEFAULT 0,
@@ -107,12 +108,14 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     idempotency_key VARCHAR(255),
     payload         TEXT         NOT NULL,
     payload_type    VARCHAR(500) NOT NULL,
-    -- created_at à frente é herança do particionamento (o Postgres exigia a
-    -- chave de partição na PK) e sobrevive à ADR-0058 por não valer o risco
-    -- de mexer no caminho quente sem medida; ver a pendência com gatilho lá
-    PRIMARY KEY (created_at, execution_id)
+    -- execution_id sozinho, como nos outros três dialetos: a coluna de tempo
+    -- à frente era exigência do particionamento, e sem ele a PK não servia
+    -- consulta nenhuma — o planner escolhia idx_mohs_execution_id e rebaixava
+    -- created_at a Filter. Era um índice de duas colunas mantido em toda
+    -- escrita só pela unicidade; agora a unicidade é a do id, que é o que o
+    -- domínio sempre disse.
+    PRIMARY KEY (execution_id)
 );
-CREATE INDEX IF NOT EXISTS idx_mohs_execution_id   ON mohs_execution (execution_id);
 -- (job_key, execution_id): serve o ORDER BY/cursor do findPage — ver o V3 do Postgres
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_job  ON mohs_execution (job_key, execution_id DESC);
 CREATE INDEX IF NOT EXISTS idx_mohs_execution_corr ON mohs_execution (correlation_id)
@@ -127,10 +130,10 @@ CREATE TABLE IF NOT EXISTS mohs_attempt (
     outcome      VARCHAR(20)  NOT NULL,
     error_type   VARCHAR(500),
     error        TEXT,
-    PRIMARY KEY (finished_at, execution_id, number)
+    PRIMARY KEY (execution_id, number)
 );
 CREATE INDEX IF NOT EXISTS idx_mohs_attempt_throughput ON mohs_attempt (finished_at, outcome);
-CREATE INDEX IF NOT EXISTS idx_mohs_attempt_exec ON mohs_attempt (execution_id);
+-- idx_mohs_attempt_exec saiu junto: (execution_id) é prefixo exato da PK acima
 
 CREATE TABLE IF NOT EXISTS mohs_idempotency (
     job_key         VARCHAR(255) NOT NULL,
@@ -139,4 +142,6 @@ CREATE TABLE IF NOT EXISTS mohs_idempotency (
     created_at      TIMESTAMPTZ  NOT NULL,
     PRIMARY KEY (job_key, idempotency_key)
 );
+
+CREATE INDEX IF NOT EXISTS idx_mohs_idempotency_created ON mohs_idempotency (created_at);
 

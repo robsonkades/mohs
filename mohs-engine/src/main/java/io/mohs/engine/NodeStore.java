@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Instant;
@@ -7,44 +22,42 @@ import io.mohs.core.EngineState;
 import io.mohs.core.execution.Execution;
 
 /**
- * Registro de heartbeat e lease de node (ADR-0012, promovida a
- * autoridade de liveness pela ADR-0051) — Repository (PoEAA), porta que
- * {@code io.mohs.store.jdbc} implementa. Deixou de ser só informativa: o
- * reaper decide "morto" pelo {@code expires_at} desta tabela (uma escrita
- * por node por tick), no lugar da renovação de lease POR EXECUÇÃO que
- * pagava ~5 updates/execução na tabela mais quente do sistema (Finding A
- * do redesign, medido na BASELINE da Phase 4).
+ * The node's heartbeat and lease registry — a Repository (PoEAA), the port
+ * {@code io.mohs.store.jdbc} implements.
+ *
+ * <p>It stopped being merely informative: the reaper decides "dead" from this table's
+ * {@code expires_at} (one write per node per tick), in place of the PER-EXECUTION lease renewal that
+ * cost roughly five updates per execution on the system's hottest table.
  */
 public interface NodeStore {
 
     /**
-     * Registra o heartbeat mais recente do node — upsert por
-     * {@code nodeId}. Desde a ADR-0051 o heartbeat carrega o lease do NÓ:
-     * {@code epoch} (encarnação) e {@code expiresAt} (a promessa "estou
-     * vivo até aqui" que o reaper consulta — a autoridade de liveness que
-     * substituiu a renovação por execução).
+     * Records the node's most recent heartbeat — an upsert by {@code nodeId}.
+     *
+     * <p>The heartbeat now carries the NODE's lease: {@code epoch} (its incarnation) and
+     * {@code expiresAt} (the "I am alive until here" promise the reaper consults — the liveness
+     * authority that replaced per-execution renewal).
      */
     void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt);
 
     /**
-     * Todos os nodes já registrados, sem filtro de "recente" — o limiar de
-     * staleness depende de configuração que ainda não existe
-     * ({@code mohs.engine.node-heartbeat-interval}, ADR-0012 deixa em
-     * aberto); {@code List}, não {@code Stream}: o tamanho desta tabela é
-     * limitado pelo tamanho do cluster, não cresce sem limite como {@link
-     * Execution}.
+     * Every node ever registered, with no "recent" filter — the staleness threshold depends on
+     * configuration that does not exist yet ({@code mohs.engine.node-heartbeat-interval}).
+     *
+     * <p>A {@code List}, not a {@code Stream}: this table's size is bounded by the cluster's size and
+     * does not grow without limit as {@link Execution} does.
      */
     List<StoredNode> findAll();
 
     /**
-     * Remove heartbeats estritamente mais velhos que {@code cutoff}
-     * (ADR-0041) — cada boot gera um {@code node_id} novo, então linha de
-     * instância morta/reiniciada só sai por aqui; morte NÃO é escrita por
-     * quem morreu (crash não avisa — ADR-0012 deriva "morto" da staleness
-     * na leitura), o purge apenas recolhe o que já ficou ilegível de tão
-     * velho.
+     * Removes heartbeats strictly older than {@code cutoff} — each boot generates a new
+     * {@code node_id}, so a dead or restarted instance's row only leaves through here.
      *
-     * @return quantas linhas saíram
+     * <p>Death is NOT written by whoever died (a crash gives no notice — "dead" is derived from
+     * staleness at read time); the purge merely collects what has already become unreadable through
+     * age.
+     *
+     * @return how many rows were removed
      */
     int deleteHeartbeatsBefore(Instant cutoff);
 }

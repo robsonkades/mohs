@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -19,40 +34,36 @@ import io.mohs.engine.LeaseStore.Completion;
 import io.mohs.engine.LeaseStore.CompletionResult;
 
 /**
- * Group commit da conclusão (ADR-0047; §7.6 do redesign, antecipado para o
- * schema atual): resultados de dispatch entram numa fila limitada e são
- * descarregados numa única transação de {@link LeaseStore#complete}
- * — {@code flushSize} resultados ou {@code flushInterval} decorrido desde
- * o primeiro pendente, o que vier primeiro. Era isto ou um commit síncrono
- * por execução no topo do perfil de waits ({@code LWLock:WALWrite},
- * BASELINE "Tuning fim a fim").
+ * Group commit for completions: dispatch results enter a bounded queue and are flushed in a single
+ * {@link LeaseStore#complete} transaction — {@code flushSize} results or {@code flushInterval}
+ * elapsed since the first pending one, whichever comes first. It was this or a synchronous commit
+ * per execution at the top of the measured wait profile ({@code LWLock:WALWrite}).
  *
- * <p><b>Custo semântico, declarado:</b> a janela entre "handler terminou" e
- * "resultado durável" cresce de ~1 ms para ≤ {@code flushInterval}; crash
- * nessa janela re-executa até {@code flushSize} resultados a mais que os em
- * voo. O contrato já era at-least-once — muda a exposição a duplicata, não
- * a garantia (medida na BASELINE, E5). Quem precisa do comportamento antigo
- * liga {@code mohs.engine.completion-flush-on-every-result}.
+ * <p><b>The semantic cost, declared:</b> the window between "the handler finished" and "the result
+ * is durable" grows from about 1 ms to at most {@code flushInterval}; a crash in that window
+ * re-executes up to {@code flushSize} results more than those in flight. The contract was already
+ * at-least-once — this changes the exposure to duplicates, not the guarantee. Anyone needing the old
+ * behaviour turns on {@code mohs.engine.completion-flush-on-every-result}.
  *
- * <p>Backpressure estrutural (§3.2 do redesign): fila cheia bloqueia o
- * {@code submit} na thread do handler — o dispatch segue em voo, o claim
- * enxerga a folga menor (ADR-0039) e o node para de reivindicar além do que
- * consegue persistir. Falha do flush em lote recai em conclusão individual
- * por resultado (mesma transação de sempre); falha individual deixa a
- * execução {@code RUNNING} para o reaper — nunca mata a thread do flusher
- * nem os vizinhos de lote (ADR-0031: sem back-off interno; o caminho de
- * recuperação é o de sempre).
+ * <p>Structural backpressure: a full queue blocks the {@code submit} on the handler's thread — the
+ * dispatch stays in flight, the claim sees the reduced headroom, and the node stops claiming beyond
+ * what it can persist.
  *
- * <p>Thread única de flush, virtual e nomeada; {@code close()} (Spring,
- * depois do stop do engine — {@code SmartLifecycle} para primeiro) drena o
- * que restou; {@code submit} depois do close conclui síncrono pelo caminho
- * antigo — zumbi que termina depois do shutdown não perde o resultado.
+ * <p>A batch flush failure falls back to individual completion per result (the same transaction as
+ * ever); an individual failure leaves the execution {@code RUNNING} for the reaper — it never kills
+ * the flusher thread nor the batch's neighbours (no internal back-off; the recovery path is the
+ * usual one).
+ *
+ * <p>A single flush thread, virtual and named; {@code close()} (Spring, after the engine's stop —
+ * the {@code SmartLifecycle} stops first) drains what is left; a {@code submit} after the close
+ * completes synchronously through the old path — a zombie finishing after shutdown does not lose its
+ * result.
  */
 public final class CompletionBatcher implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(CompletionBatcher.class);
 
-    /** Espera do poll ocioso — só define a latência de percepção do close, não o gatilho de flush. */
+    /** The idle poll's wait — it only sets how quickly a close is noticed, not the flush trigger. */
     private static final Duration IDLE_POLL = Duration.ofMillis(50);
 
     private record Pending(CompletionResult result, Consumer<Completion> onOutcome) {
@@ -64,17 +75,20 @@ public final class CompletionBatcher implements AutoCloseable {
     private final Duration flushInterval;
     private final LinkedBlockingQueue<Pending> queue;
     /**
-     * Ids com conclusão EM TRÂNSITO (entre o {@code submit} e o veredito) —
-     * o guard por ESTADO que o reconcile de stray leases do Engine consulta
-     * (review S5.5): a heurística temporal do grace não cobre job que roda
-     * mais que o grace, e a lease dele existiria sem entrada em nenhum mapa
-     * na janela do flush. Entrada removida em TODO desfecho, inclusive na
-     * falha da conclusão individual (deixá-la seria esconder a lease do
-     * reconcile para sempre — o oposto do propósito).
+     * Ids whose completion is IN TRANSIT (between the {@code submit} and the verdict) — the
+     * state-based guard the Engine's stray-lease reconcile consults: the grace's temporal heuristic
+     * does not cover a job running longer than the grace, and its lease would exist with no entry in
+     * any map during the flush window.
+     *
+     * <p>The entry is removed on EVERY outcome, including a failed individual completion — leaving it
+     * would hide the lease from the reconcile forever, the opposite of the purpose.
      */
     private final Set<ExecutionId> inTransit = ConcurrentHashMap.newKeySet();
     private final Thread flusher;
     private volatile boolean closed;
+
+    /** The drain already happened — Spring's {@code close}, after the {@code stop}, does not pay for the join twice. */
+    private volatile boolean drained;
 
     public CompletionBatcher(LeaseStore leaseStore, JobStore jobStore, int flushSize, Duration flushInterval) {
         this.leaseStore = Objects.requireNonNull(leaseStore, "leaseStore");
@@ -87,13 +101,13 @@ public final class CompletionBatcher implements AutoCloseable {
         }
         this.flushSize = flushSize;
         this.flushInterval = flushInterval;
-        // 4× o lote: espaço pra fila absorver rajada sem bloquear à toa, teto
-        // baixo o bastante pro backpressure chegar às threads de handler
+        // 4x the batch: room for the queue to absorb a burst without blocking needlessly, and a
+        // ceiling low enough for backpressure to reach the handler threads
         this.queue = new LinkedBlockingQueue<>(flushSize * 4);
         this.flusher = Thread.ofVirtual().name("mohs-completion-flusher").unstarted(this::flushLoop);
     }
 
-    /** Idempotente — thread fora do construtor (JCIP §3.2: {@code this} não escapa antes de construído). */
+    /** Idempotent — the thread starts outside the constructor (JCIP §3.2: {@code this} must not escape before it is built). */
     public void start() {
         if (flusher.getState() == Thread.State.NEW) {
             flusher.start();
@@ -101,10 +115,9 @@ public final class CompletionBatcher implements AutoCloseable {
     }
 
     /**
-     * Enfileira o resultado; {@code onOutcome} roda na thread do flusher com
-     * o veredito do CAS, DEPOIS do commit do lote — mesma garantia
-     * "publica só o que ficou durável" do caminho síncrono. Depois do
-     * {@code close()}, conclui síncrono na própria thread chamadora.
+     * Enqueues the result; {@code onOutcome} runs on the flusher's thread with the CAS verdict, AFTER
+     * the batch commits — the same "publish only what became durable" guarantee as the synchronous
+     * path. After {@code close()}, it completes synchronously on the calling thread.
      */
     public void submit(CompletionResult result, Consumer<Completion> onOutcome) {
         Objects.requireNonNull(result, "result");
@@ -117,30 +130,27 @@ public final class CompletionBatcher implements AutoCloseable {
         try {
             queue.put(new Pending(result, onOutcome));
         } catch (InterruptedException e) {
-            // put interrompido NÃO inseriu — o trânsito não começou
+            // An interrupted put did NOT insert — the transit never began
             inTransit.remove(result.executionId());
-            // completa ANTES de re-armar a flag: com ela de pé o acquire do
-            // JDBC lançaria (mesmo racional do flushLoop) e o fallback se
-            // derrotaria; o status restaurado é para o CHAMADOR observar
-            // depois (JCIP §7.1.3)
+            // Complete BEFORE re-arming the flag: with it raised, the JDBC acquire would throw (the
+            // same rationale as flushLoop) and the fallback would defeat itself; the restored status
+            // is for the CALLER to observe afterwards (JCIP §7.1.3)
             onOutcome.accept(completeOne(result));
             Thread.currentThread().interrupt();
         }
     }
 
-    /** O guard por estado do reconcile (review S5.5): a conclusão deste id está entre o submit e o veredito? */
+    /** The reconcile's state-based guard: is this id's completion between the submit and the verdict? */
     boolean completionInTransit(ExecutionId id) {
         return inTransit.contains(id);
     }
 
     /**
-     * A guarda de {@code Throwable} em volta do {@code flush} e o
-     * {@code finally} que degrada para o caminho síncrono são a política de
-     * falha da thread de serviço (JCIP §7.3): sem eles, um {@code Error}
-     * (OOME, listener com initializer quebrado) mataria o flusher em
-     * silêncio com {@code closed} falso — a fila encheria, todo submit
-     * bloquearia para sempre e as execuções em voo ficariam presas com a
-     * lease sendo renovada, fora do alcance do reaper.
+     * The {@code Throwable} guard around the {@code flush} and the {@code finally} that degrades to
+     * the synchronous path are this service thread's failure policy (JCIP §7.3): without them an
+     * {@code Error} (an OOME, a listener with a broken initialiser) would silently kill the flusher
+     * with {@code closed} false — the queue would fill, every submit would block forever, and the
+     * in-flight executions would be stuck with their lease being renewed, out of the reaper's reach.
      */
     private void flushLoop() {
         List<Pending> buffer = new ArrayList<>(flushSize);
@@ -152,10 +162,9 @@ public final class CompletionBatcher implements AutoCloseable {
                         continue;
                     }
                     buffer.add(first);
-                    // acumula em fatias de no máximo IDLE_POLL, não numa espera
-                    // única de flushInterval: o close precisa ser observado no
-                    // meio da janela — um intervalo longo (teste, configuração
-                    // futura) travaria o dreno do shutdown pela janela inteira
+                    // Accumulate in slices of at most IDLE_POLL rather than one wait of flushInterval:
+                    // the close has to be observed mid-window — a long interval (a test, a future
+                    // configuration) would stall the shutdown's drain for the whole window
                     long deadlineNanos = System.nanoTime() + flushInterval.toNanos();
                     while (buffer.size() < flushSize && !closed) {
                         long remainingNanos = deadlineNanos - System.nanoTime();
@@ -168,11 +177,10 @@ public final class CompletionBatcher implements AutoCloseable {
                         }
                     }
                 } catch (InterruptedException e) {
-                    // thread própria e dedicada: interrupt aqui só pode significar
-                    // "encerre" — vira o protocolo de close (flush do buffer +
-                    // dreno + saída). NÃO re-arma a flag: ela envenenaria o JDBC
-                    // do flush (Hikari acquire lança com a flag de pé) e a
-                    // retomada do poll viraria busy-spin.
+                    // A dedicated thread of its own: an interrupt here can only mean "shut down", so it
+                    // becomes the close protocol (flush the buffer, drain, exit). It does NOT re-arm
+                    // the flag: that would poison the flush's JDBC (Hikari's acquire throws with the
+                    // flag raised) and resuming the poll would become a busy-spin.
                     closed = true;
                 }
                 try {
@@ -181,25 +189,24 @@ public final class CompletionBatcher implements AutoCloseable {
                     log.error("completion flush cycle failed unexpectedly — {} result(s) fall to this node's "
                             + "stray-lease reconcile (or a peer's reaper if this node dies)", buffer.size(), t);
                 } finally {
-                    // idempotente com os removes de deliverOutcome/completeIndividually:
-                    // NENHUM desfecho — Error incluído — deixa marcador vivo, senão a
-                    // lease ficaria escondida do reconcile para sempre (review S5.5)
+                    // Idempotent with the removes in deliverOutcome/completeIndividually: NO outcome —
+                    // an Error included — leaves a live marker, otherwise the lease would stay hidden
+                    // from the reconcile forever
                     buffer.forEach(pending -> inTransit.remove(pending.result().executionId()));
                     buffer.clear();
                 }
             }
         } finally {
-            // se esta thread sair por QUALQUER via, submit degrada pro
-            // caminho síncrono em vez de bloquear numa fila morta
+            // If this thread exits by ANY route, submit degrades to the synchronous path rather than
+            // blocking on a dead queue
             closed = true;
         }
     }
 
     /**
-     * Uma transação para o lote inteiro; se ELA falhar, recai na conclusão
-     * individual — resultado nunca é descartado por culpa dos vizinhos.
-     * {@code onOutcome} guardado por resultado: um listener que lança não
-     * derruba o flusher nem cala os irmãos de lote.
+     * One transaction for the whole batch; if THAT fails, it falls back to individual completion — a
+     * result is never discarded because of its neighbours. {@code onOutcome} is guarded per result: a
+     * listener that throws takes down neither the flusher nor its batch siblings.
      */
     private void flush(List<Pending> buffer) {
         if (buffer.isEmpty()) {
@@ -224,8 +231,8 @@ public final class CompletionBatcher implements AutoCloseable {
         try {
             deliverOutcome(pending, completeOne(pending.result()));
         } catch (RuntimeException e) {
-            // trânsito acabou mesmo sem veredito — a lease fica visível pro
-            // reconcile/reaper em vez de escondida atrás de um marcador morto
+            // The transit ended even without a verdict — the lease becomes visible to the
+            // reconcile/reaper instead of hiding behind a dead marker
             inTransit.remove(pending.result().executionId());
             log.error("could not record the completion of execution {} — its lease stands until a reaper reclaims it",
                     pending.result().executionId(), e);
@@ -248,22 +255,38 @@ public final class CompletionBatcher implements AutoCloseable {
     }
 
     /**
-     * Drena e para: espera o flusher (até 10s) e então varre a fila
-     * sincronamente. A varredura final não é redundância — um {@code put}
-     * que passou pelo check de {@code closed} no {@code submit} pode
-     * aterrissar DEPOIS da saída do flusher (check-then-act não é atômico,
-     * JCIP §2.2), e ela é quem apanha esse retardatário; também cobre
-     * flusher nunca iniciado e o estouro do join. Chamado pelo Spring
-     * depois do stop do engine.
+     * Drains and stops: it waits for the flusher (up to 10s) and then sweeps the queue synchronously.
+     *
+     * <p>The final sweep is not redundancy — a {@code put} that passed the {@code closed} check in
+     * {@code submit} may land AFTER the flusher exits (check-then-act is not atomic, JCIP §2.2), and
+     * the sweep is what catches that straggler; it also covers a flusher that never started and a
+     * join that timed out. Called by Spring after the engine's stop.
      */
     @Override
     public void close() {
+        close(Duration.ofSeconds(10));
+    }
+
+    /**
+     * A drain with the caller's deadline. The engine's {@code stop} passes whatever is left of the
+     * {@code grace}: without it, the drain added a FIXED 10s after the {@code DrainDeadline} had
+     * already been spent, overrunning the Boot shutdown phase that {@code stop}'s Javadoc promises to
+     * respect.
+     */
+    public void close(Duration drainBudget) {
         closed = true;
-        if (flusher.getState() != Thread.State.NEW) {
+        // The JOIN is what is not paid for twice: the engine's stop already waited with its own
+        // deadline, and a second join would land after the final heartbeat, with the cluster already
+        // considering us dead. The SWEEP is different — it is what catches the put that landed after
+        // the flusher exited (check-then-act is not atomic, JCIP §2.2), and that straggler can arrive
+        // BETWEEN the stop's drain and Spring's bean destruction. Guarding the sweep together with
+        // the join lost that result silently
+        if (!drained && flusher.getState() != Thread.State.NEW) {
             try {
-                if (!flusher.join(Duration.ofSeconds(10))) {
-                    log.warn("completion flusher did not drain within 10s — draining the remaining {} result(s) synchronously",
-                            queue.size());
+                if (!flusher.join(drainBudget)) {
+                    log.warn("completion flusher did not drain within {} — draining the remaining {} result(s)"
+                            + " synchronously; result(s) already inside the flusher buffer stay at the mercy of"
+                            + " the reaper", drainBudget, queue.size());
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -272,5 +295,6 @@ public final class CompletionBatcher implements AutoCloseable {
         for (Pending pending; (pending = queue.poll()) != null; ) {
             completeIndividually(pending);
         }
+        drained = true;
     }
 }

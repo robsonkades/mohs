@@ -1,6 +1,23 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.cron;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
@@ -9,10 +26,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Verifica a adaptação (Assert/StringUtils reescritos, resto copiado do
- * Spring) contra casos conhecidos — incluindo as extensões Quartz L/W/#,
- * já que são exatamente o tipo de borda onde uma adaptação erra por
- * descuido.
+ * Verifies the adaptation (Assert/StringUtils rewritten, the rest copied from Spring) against
+ * known cases — including the Quartz L/W/# extensions, since those are exactly the kind of edge an
+ * adaptation gets wrong by accident.
  */
 class CronExpressionTest {
 
@@ -51,7 +67,7 @@ class CronExpressionTest {
     @Test
     void weekdayRangeSkipsWeekend() {
         CronExpression cron = CronExpression.parse("0 0 9 * * MON-FRI");
-        // 2026-08-14 é sexta-feira; após as 9h de sexta, o próximo é segunda 2026-08-17
+        // 2026-08-14 is a Friday; after 9am on Friday, the next one is Monday 2026-08-17
         ZonedDateTime seed = ZonedDateTime.of(2026, 8, 14, 10, 0, 0, 0, ZoneOffset.UTC);
 
         assertThat(cron.next(seed)).isEqualTo(ZonedDateTime.of(2026, 8, 17, 9, 0, 0, 0, ZoneOffset.UTC));
@@ -70,7 +86,7 @@ class CronExpressionTest {
     @Test
     void lastDayOfMonth() {
         CronExpression cron = CronExpression.parse("0 0 0 L * *");
-        // agosto/2026 tem 31 dias, e o dia 31 é uma segunda-feira
+        // August 2026 has 31 days, and the 31st is a Monday
         ZonedDateTime seed = ZonedDateTime.of(2026, 8, 1, 0, 0, 0, 0, ZoneOffset.UTC);
 
         assertThat(cron.next(seed)).isEqualTo(ZonedDateTime.of(2026, 8, 31, 0, 0, 0, 0, ZoneOffset.UTC));
@@ -86,8 +102,8 @@ class CronExpressionTest {
 
     @Test
     void nearestWeekdayToFirstWhenFirstIsSaturdayRollsForwardWithinMonth() {
-        // 2026-08-01 é sábado; "1W" deve resolver para segunda 2026-08-03,
-        // não para sexta 2026-07-31 (regra especial documentada para dia 1).
+        // 2026-08-01 is a Saturday; "1W" must resolve to Monday 2026-08-03, not to
+        // Friday 2026-07-31 (the documented special rule for day 1).
         CronExpression cron = CronExpression.parse("0 0 0 1W * *");
         ZonedDateTime seed = ZonedDateTime.of(2026, 7, 25, 0, 0, 0, 0, ZoneOffset.UTC);
 
@@ -96,7 +112,7 @@ class CronExpressionTest {
 
     @Test
     void nearestWeekdayToFirstWhenFirstIsSundayRollsForward() {
-        // 2026-11-01 é domingo; "1W" deve resolver para segunda 2026-11-02.
+        // 2026-11-01 is a Sunday; "1W" must resolve to Monday 2026-11-02.
         CronExpression cron = CronExpression.parse("0 0 0 1W * *");
         ZonedDateTime seed = ZonedDateTime.of(2026, 10, 25, 0, 0, 0, 0, ZoneOffset.UTC);
 
@@ -105,7 +121,7 @@ class CronExpressionTest {
 
     @Test
     void lastWeekdayOfMonth() {
-        // 2026-08-31 (segunda-feira) já é dia útil, então LW cai nele mesmo.
+        // 2026-08-31 (a Monday) is already a weekday, so LW lands on it.
         CronExpression cron = CronExpression.parse("0 0 0 LW * *");
         ZonedDateTime seed = ZonedDateTime.of(2026, 8, 1, 0, 0, 0, 0, ZoneOffset.UTC);
 
@@ -114,7 +130,7 @@ class CronExpressionTest {
 
     @Test
     void lastFridayOfMonth() {
-        // última sexta-feira de agosto/2026 é dia 28.
+        // The last Friday of August 2026 is the 28th.
         CronExpression cron = CronExpression.parse("0 0 0 * * 5L");
         ZonedDateTime seed = ZonedDateTime.of(2026, 8, 1, 0, 0, 0, 0, ZoneOffset.UTC);
 
@@ -123,7 +139,7 @@ class CronExpressionTest {
 
     @Test
     void secondFridayOfMonth() {
-        // segunda sexta-feira de setembro/2026 é dia 11 (a primeira é dia 4).
+        // The second Friday of September 2026 is the 11th (the first is the 4th).
         CronExpression cron = CronExpression.parse("0 0 0 ? * 5#2");
         ZonedDateTime seed = ZonedDateTime.of(2026, 9, 1, 0, 0, 0, 0, ZoneOffset.UTC);
 
@@ -159,5 +175,30 @@ class CronExpressionTest {
         assertThat(CronExpression.isValidExpression("0 0 2 * * *")).isTrue();
         assertThat(CronExpression.isValidExpression("garbage")).isFalse();
         assertThat(CronExpression.isValidExpression(null)).isFalse();
+    }
+
+    /**
+     * The regression guard for strict progress. {@code next()} promises an instant strictly after
+     * the seed, and its consumer ({@code FiringPlanner.planSeries}) ITERATES over the result — so a
+     * fixed point becomes 1,440 materialisations of the same occurrence per tick, forever. The
+     * defect only surfaced in day-of-month {@code L-n} ({@code L-28} stuck on the 3rd step,
+     * {@code L-30} on the 2nd), so this list covers the whole family of Quartz extensions and
+     * iterates deep enough to cross month ends, year ends and a leap February.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"*/10 * * * * *", "0 0 2 * * *", "0 0 0 L * *", "0 0 0 L-3 * *",
+            "0 0 0 L-28 * *", "0 0 0 L-30 * *", "0 0 0 LW * *", "0 0 0 1W * *",
+            "0 0 0 * * 5L", "0 0 0 ? * 5#2", "0 0 0 29 2 *"})
+    void nextIsAlwaysStrictlyAfterTheSeed(String expression) {
+        CronExpression cron = CronExpression.parse(expression);
+        ZonedDateTime seed = ZonedDateTime.of(2026, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
+
+        for (int i = 0; i < 200; i++) {
+            ZonedDateTime next = cron.next(seed);
+            assertThat(next).as("iteration %d of '%s' from %s", i, expression, seed)
+                    .isNotNull()
+                    .isAfter(seed);
+            seed = next;
+        }
     }
 }

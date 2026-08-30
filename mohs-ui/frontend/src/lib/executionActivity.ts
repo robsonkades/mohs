@@ -1,8 +1,15 @@
 import { useSyncExternalStore } from "react";
 import { LIVE_STATES, type ExecutionState } from "../types/api";
 
-/** One reading of the live-work counts, as the server saw them at `asOf`. */
+/**
+ * One reading, as the server saw it at `asOf`: the three live gauges plus the RATE.
+ *
+ * <p>The rate is why this panel exists at all — ADR-0063 carries the measurement, and it is the one
+ * place that number should be written down.
+ */
 export interface ActivitySample {
+  /** Terminal executions per second over the server's short window — "is anything happening". */
+  ratePerSecond: number;
   /** Epoch millis of the server's `asOf` — the instant it read, not the instant it sent. */
   at: number;
   ENQUEUED: number;
@@ -36,7 +43,11 @@ const listeners = new Set<() => void>();
  * EventSources on the same tab (React StrictMode double-mounts effects in dev) would otherwise
  * record every tick twice and double every value on screen.
  */
-export function recordActivitySample(asOf: string, counts: Partial<Record<ExecutionState, number>>): void {
+export function recordActivitySample(
+  asOf: string,
+  counts: Partial<Record<ExecutionState, number>>,
+  ratePerSecond: number,
+): void {
   if (asOf === lastAsOf) {
     return;
   }
@@ -47,13 +58,17 @@ export function recordActivitySample(asOf: string, counts: Partial<Record<Execut
   // (NaN) or one that moved backwards (the server's Clock may step back on an NTP resync — see
   // REST-API-DESIGN on `asOf` informing freshness, not ordering) would either blank the series
   // through the cutoff or draw the line zig-zagging into the past.
+  // The rate joins the same guard rather than falling back to 0: a zero in this series is not
+  // "unknown", it is the claim "nothing is happening" — the exact false reading the panel exists
+  // to kill. A reading we cannot trust is dropped, never coerced.
   const newest = samples.at(-1);
-  if (!Number.isFinite(at) || (newest !== undefined && at <= newest.at)) {
+  if (!Number.isFinite(at) || !Number.isFinite(ratePerSecond) || (newest !== undefined && at <= newest.at)) {
     return;
   }
 
   const sample: ActivitySample = {
     at,
+    ratePerSecond,
     ENQUEUED: counts.ENQUEUED ?? 0,
     RUNNING: counts.RUNNING ?? 0,
     RETRY_WAITING: counts.RETRY_WAITING ?? 0,

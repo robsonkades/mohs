@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -20,23 +35,19 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
 
 /**
- * O primeiro instante de todo deploy em Kubernetes: N réplicas sobem ao
- * MESMO tempo contra um banco vazio, e cada uma chama
- * {@link MohsFlyway#migrate()} no boot (ADR-0048 — as migrações são da
- * biblioteca, não do host). Ninguém coordena a ordem; o orquestrador sobe
- * os pods em paralelo de propósito.
+ * The first instant of every Kubernetes deploy: N replicas start at the SAME time against an empty
+ * database, and each one calls {@link MohsFlyway#migrate()} on boot, because the migrations belong
+ * to the library rather than to the host. Nobody coordinates the order; the orchestrator starts
+ * the pods in parallel on purpose.
  *
- * <p>O que se afirma: exatamente UMA réplica aplica cada versão, nenhuma
- * falha o boot, e o schema resultante é o mesmo de uma migração solitária.
- * O contrário — duas réplicas aplicando o mesmo DDL — é `CrashLoopBackOff`
- * no melhor caso e schema meio-aplicado no pior.
+ * <p>What is asserted: exactly ONE replica applies each version, none fails to boot, and the
+ * resulting schema matches that of a lone migration. The opposite — two replicas applying the same
+ * DDL — is a {@code CrashLoopBackOff} at best and a half-applied schema at worst.
  *
- * <p>A largada é um {@link CountDownLatch}, não um {@code sleep}: o valor
- * do cenário está em todas as réplicas chegarem ao {@code migrate()} na
- * mesma janela de microssegundos.
+ * <p>The start is a {@link CountDownLatch}, not a {@code sleep}: the whole value of the scenario is
+ * that every replica reaches {@code migrate()} within the same window of microseconds.
  *
- * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
- * -Dtest=ConcurrentMigrationScenario}.
+ * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=ConcurrentMigrationScenario}.
  */
 class ConcurrentMigrationScenario {
 
@@ -50,8 +61,8 @@ class ConcurrentMigrationScenario {
         CountDownLatch startLine = new CountDownLatch(1);
         List<ReplicaOutcome> outcomes = new ArrayList<>();
 
-        // I/O-bound (espera no lock de migração do Postgres) → virtual threads,
-        // nomeadas, como manda o CLAUDE.md
+        // I/O-bound (waiting on Postgres's migration lock), so virtual threads, named as the
+        // project requires
         try (ExecutorService replicas = Executors.newThreadPerTaskExecutor(
                 Thread.ofVirtual().name("mohs-migration-replica-", 0).factory())) {
             List<Future<ReplicaOutcome>> futures = new ArrayList<>();
@@ -74,8 +85,8 @@ class ConcurrentMigrationScenario {
                     }
                 }
             } finally {
-                // sem isto, uma réplica travada no lock faria o close() do
-                // try-with-resources esperar UM DIA em vez de falhar o build
+                // Without this, a replica stuck on the lock would make the try-with-resources
+                // close() wait A DAY instead of failing the build
                 futures.forEach(future -> future.cancel(true));
             }
         }
@@ -100,9 +111,8 @@ class ConcurrentMigrationScenario {
 
         assertThat(broken).as("no replica may fail its boot because a peer was migrating at the same time").isEmpty();
         assertThat(failedMigrations).as("a half-applied migration leaves the schema in an unknown state").isZero();
-        // isNotEmpty ANTES de doesNotHaveDuplicates: "nenhum duplicado" sobre
-        // lista vazia é verdade e não significa nada — seria exatamente o
-        // veredito verde que um migrate() virado no-op produziria
+        // isNotEmpty BEFORE doesNotHaveDuplicates: "no duplicates" over an empty list is true and
+        // means nothing — it is exactly the green verdict a migrate() turned no-op would produce
         assertThat(versions)
                 .as("the whole migration chain must have been applied — an empty history means migrate() did nothing")
                 .isNotEmpty()

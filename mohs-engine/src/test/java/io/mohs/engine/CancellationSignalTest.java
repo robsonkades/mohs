@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -11,7 +26,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class CancellationSignalTest {
 
-    /** A primeira razão vence — TIMEOUT que chega depois de MANUAL não reclassifica o desfecho. */
+    /** The first reason wins — a TIMEOUT arriving after a MANUAL does not reclassify the outcome. */
     @Test
     void firstReasonWins() {
         CancellationSignal signal = new CancellationSignal();
@@ -23,7 +38,7 @@ class CancellationSignalTest {
         assertThat(signal.reason()).isEqualTo(CancellationSignal.Reason.MANUAL);
     }
 
-    /** O interrupt alcança a thread registrada mesmo bloqueada em I/O/espera — o caso do timeout de verdade. */
+    /** The interrupt reaches the registered thread even while it blocks on I/O or a wait — the real timeout case. */
     @Test
     void interruptIsDeliveredToTheRegisteredThread() throws Exception {
         CancellationSignal signal = new CancellationSignal();
@@ -50,9 +65,9 @@ class CancellationSignalTest {
     }
 
     /**
-     * Depois do desregistro nenhum interrupt é entregue E o status pendente
-     * foi limpo — a thread de plataforma de um runner CPU volta limpa ao
-     * pool, e a escrita de conclusão (JDBC) nunca roda interrompida.
+     * After deregistration no interrupt is delivered AND the pending status has been cleared — a CPU
+     * runner's platform thread returns clean to the pool, and the completion write (JDBC) never runs
+     * interrupted.
      */
     @Test
     void unregisterStopsDeliveryAndClearsAPendingInterrupt() {
@@ -64,9 +79,9 @@ class CancellationSignalTest {
         signal.unregisterHandlerThreadAndClearInterrupt();
 
         assertThat(Thread.currentThread().isInterrupted()).isFalse();
-        // sinal NOVO: no mesmo objeto, a segunda requestCancellation pararia no
-        // first-reason-wins antes de chegar ao interrupt — provaria o
-        // short-circuit, não a janela fechada
+        // A NEW signal, to isolate the window: reusing the same object would prove interrupt
+        // redelivery (which is another test's business), not the fact that outside the registration an
+        // interrupt is delivered to nobody
         CancellationSignal reopened = new CancellationSignal();
         reopened.registerHandlerThread();
         reopened.unregisterHandlerThreadAndClearInterrupt();
@@ -74,7 +89,7 @@ class CancellationSignalTest {
         assertThat(Thread.currentThread().isInterrupted()).isFalse();
     }
 
-    /** Sinal levantado antes do handler começar (task ainda na fila do executor) é só flag — não há thread pra interromper. */
+    /** A signal raised before the handler starts (the task still queued in the executor) is only a flag — there is no thread to interrupt. */
     @Test
     void cancellationBeforeTheHandlerStartsIsFlagOnly() {
         CancellationSignal signal = new CancellationSignal();
@@ -85,7 +100,7 @@ class CancellationSignalTest {
         assertThat(Thread.currentThread().isInterrupted()).isFalse();
     }
 
-    /** O relógio do timeout só corre entre registro e desregistro — fila de runner não conta, handler terminado não dispara. */
+    /** The timeout clock only runs between registration and deregistration — a runner's queue does not count, and a finished handler does not fire. */
     @Test
     void handlerRunningLongerThanTracksOnlyTheRegisteredWindow() throws Exception {
         CancellationSignal signal = new CancellationSignal();
@@ -98,5 +113,31 @@ class CancellationSignalTest {
 
         signal.unregisterHandlerThreadAndClearInterrupt();
         assertThat(signal.handlerRunningLongerThan(Duration.ofMillis(5))).isFalse();
+    }
+
+    /**
+     * The regression guard: the reason is first-wins, interrupt DELIVERY is not. A handler that caught
+     * the timeout's interrupt, cleaned up and blocked again was immune to the shutdown's interrupt —
+     * while the drain's log promised the opposite. Here the timeout arrives first, the handler
+     * "consumes" the interrupt, and the shutdown must still be able to interrupt again.
+     */
+    @Test
+    void shutdownStillInterruptsAHandlerThatSwallowedTheTimeoutInterrupt() {
+        CancellationSignal signal = new CancellationSignal();
+        signal.registerHandlerThread();
+
+        signal.requestCancellation(CancellationSignal.Reason.TIMEOUT, true);
+        assertThat(Thread.interrupted()).isTrue(); // o handler consome e limpa
+
+        signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
+
+        assertThat(Thread.currentThread().isInterrupted())
+                .as("the shutdown lever must not depend on who signalled first")
+                .isTrue();
+        assertThat(signal.reason())
+                .as("the REASON stays first-wins: it decides the outcome mapping")
+                .isEqualTo(CancellationSignal.Reason.TIMEOUT);
+        Thread.interrupted();
+        signal.unregisterHandlerThreadAndClearInterrupt();
     }
 }

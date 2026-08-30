@@ -10,6 +10,41 @@
 
     <name>Mohs</name>
     <description>Job scheduling for Java/Spring Boot</description>
+    <url>https://mohs.io</url>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <scm>
+        <connection>scm:git:https://github.com/robsonkades/mohs.git</connection>
+        <developerConnection>scm:git:git@github.com:robsonkades/mohs.git</developerConnection>
+        <url>https://github.com/robsonkades/mohs</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <developers>
+        <developer>
+            <name>Robson Kades</name>
+            <email>robsonkades@outlook.com</email>
+        </developer>
+    </developers>
+
+    <issueManagement>
+        <system>GitHub Issues</system>
+        <url>https://github.com/robsonkades/mohs/issues</url>
+    </issueManagement>
+
+    <distributionManagement>
+        <snapshotRepository>
+            <id>central</id>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+        </snapshotRepository>
+    </distributionManagement>
 
     <modules>
         <module>mohs-cron</module>
@@ -29,18 +64,13 @@
         <java.version>25</java.version>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <spring-boot.version>4.1.0</spring-boot.version>
+        <spring-boot.version>4.1.1</spring-boot.version>
+        <project.build.outputTimestamp>2026-08-29T00:00:00Z</project.build.outputTimestamp>
+        <gpg.skip>true</gpg.skip>
         <uuidv7.version>1.1.0</uuidv7.version>
         <archunit.version>1.4.1</archunit.version>
     </properties>
 
-    <!--
-        Sem <parent> spring-boot-starter-parent: este reator é um conjunto de bibliotecas, não
-        uma aplicação. Importar a BOM alinha as versões gerenciadas pelo Spring Boot sem herdar
-        os defaults de aplicação do starter-parent (repackage do spring-boot-maven-plugin,
-        filtering de application.yaml). O único módulo que é aplicação — mohs-demo — declara o
-        plugin de repackage por conta própria.
-    -->
     <dependencyManagement>
         <dependencies>
             <dependency>
@@ -50,7 +80,6 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-
             <dependency>
                 <groupId>io.mohs</groupId>
                 <artifactId>mohs-cron</artifactId>
@@ -91,7 +120,6 @@
                 <artifactId>mohs-spring-boot-starter</artifactId>
                 <version>${project.version}</version>
             </dependency>
-
             <dependency>
                 <groupId>io.github.robsonkades</groupId>
                 <artifactId>uuidv7</artifactId>
@@ -106,16 +134,10 @@
     </dependencyManagement>
 
     <dependencies>
-        <!-- JSpecify em todo módulo: cada package-info de produção carrega @NullMarked
-             (CLAUDE.md). Chegava de graça via spring-core no módulo único; agora que
-             mohs-cron não depende de Spring nenhum, é declarado aqui uma vez só. -->
         <dependency>
             <groupId>org.jspecify</groupId>
             <artifactId>jspecify</artifactId>
         </dependency>
-        <!-- JUnit + AssertJ + Mockito para todo módulo, escopo test. Antes vinham
-             transitivamente do único spring-boot-starter-webmvc-test do módulo único; os
-             módulos que precisam da fatia MVC continuam declarando aquele por cima. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -124,16 +146,36 @@
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <resource>
+                <directory>${maven.multiModuleProjectDirectory}</directory>
+                <targetPath>META-INF</targetPath>
+                <includes>
+                    <include>LICENSE</include>
+                    <include>NOTICE</include>
+                </includes>
+            </resource>
+        </resources>
         <pluginManagement>
             <plugins>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
-                    <version>3.14.0</version>
+                    <!--
+                        3.15.0, not 3.14.0: the older plugin's ASM cannot read a Java 25 class file
+                        (major version 69), and it has to — mohs-engine carries a module-info, so the
+                        plugin parses its dependencies' module descriptors. Under `test` that reads
+                        target/classes and happens to work; under `verify` it reads the packaged jars
+                        and fails with "Unsupported class file major version 69". `./mvnw clean
+                        verify` is the project's build command, so this was a build that could not
+                        complete.
+                    -->
+                    <version>3.15.0</version>
                     <configuration>
                         <release>${maven.compiler.release}</release>
-                        <!-- Spring MVC resolve nome de @RequestParam/@PathVariable por reflexão;
-                             o starter-parent ligava isso por default e este reator não o herda. -->
                         <parameters>true</parameters>
                     </configuration>
                 </plugin>
@@ -143,12 +185,89 @@
                     <version>3.5.2</version>
                 </plugin>
                 <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>3.4.2</version>
+                </plugin>
+                <plugin>
                     <groupId>org.springframework.boot</groupId>
                     <artifactId>spring-boot-maven-plugin</artifactId>
                     <version>${spring-boot.version}</version>
                 </plugin>
             </plugins>
         </pluginManagement>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.4.0</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.12.0</version>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-gpg-plugin</artifactId>
+                <version>3.2.8</version>
+                <executions>
+                    <execution>
+                        <id>sign-artifacts</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>sign</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <version>0.7.0</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <publishingServerId>central</publishingServerId>
+                    <autoPublish>false</autoPublish>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.14</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
     </build>
 
 </project>

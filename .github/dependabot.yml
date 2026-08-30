@@ -1,0 +1,17 @@
+# Weekly dependency-update PRs, grouped per ecosystem. Maven versions are mostly governed by the
+# Spring Boot BOM import in the root pom, so the Maven updates that matter here are the BOM itself
+# and the few directly-pinned plugin/library versions.
+version: 2
+updates:
+  - package-ecosystem: "maven"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/mohs-ui/frontend"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

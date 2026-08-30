@@ -54,10 +54,10 @@ final class Assert {
     }
 
     /**
-     * Só a referência do array é nullable, não os elementos — todo call
-     * site real deste pacote já popula elementos non-null (upstream usa
-     * {@code @Nullable Object @Nullable []}, mas anotar por garantia é
-     * ruído que este projeto evita).
+     * Only the array reference is nullable, not its elements: every real call site in this package
+     * already populates non-null elements. Upstream annotates
+     * {@code @Nullable Object @Nullable []}, but annotating for safety's sake is the kind of noise
+     * this project avoids.
      */
     static void notEmpty(@Nullable Object[] array, String message) {
         if (array == null || array.length == 0) {

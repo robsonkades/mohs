@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -46,10 +61,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
 /**
- * O terminal de {@code ScheduleCommand} contra as portas JDBC reais (H2) —
- * o contrato do Idempotent Receiver (EIP) depende do conflito de PK de
- * {@code mohs_idempotency} do schema, então mock de store não provaria
- * nada aqui.
+ * {@code ScheduleCommand}'s terminal against the real JDBC ports (H2) — the Idempotent Receiver (EIP)
+ * contract depends on {@code mohs_idempotency}'s primary-key conflict in the schema, so a mocked store
+ * would prove nothing here.
  */
 class ScheduleCommandImplTest {
 
@@ -92,7 +106,7 @@ class ScheduleCommandImplTest {
         return count == null ? 0 : count;
     }
 
-    /** Tier 1 do wake-up (§5.5): terminal já devido dispara o sinal local; agendamento futuro não — acordar o loop pra uma linha ainda invisível seria um lap perdido. */
+    /** The local wake-up tier: an already-due terminal fires the local signal; a future schedule does not — waking the loop for a row that is still invisible would be a wasted lap. */
     @Test
     void aDueTerminalFiresTheLocalWakeSignalAndAFutureOneDoesNot() {
         mohs.schedule("welcome-email", "hello").now();
@@ -110,12 +124,12 @@ class ScheduleCommandImplTest {
     }
 
     /**
-     * ADR-0035: o actor do scheduler é load-bearing (rearme fixed-delay, cura
-     * do upsert) — agendamento manual jamais pode se passar pelo motor. A
-     * rejeição é case/espaço-insensível porque a cura compara actor no BANCO,
-     * cuja collation default (MySQL/SQL Server) é case-insensitive: "Scheduler"
-     * passaria por um guard exato e ainda contaria como ocorrência do scheduler
-     * no predicado SQL.
+     * The scheduler actor is load-bearing (the fixed-delay rearm, the upsert's cure) — a manual schedule
+     * may never pass itself off as the engine.
+     *
+     * <p>The rejection is case- and whitespace-insensitive because the cure compares the actor in the
+     * DATABASE, whose default collation (MySQL, SQL Server) is case-insensitive: "Scheduler" would slip
+     * past an exact guard and still count as a scheduler occurrence in the SQL predicate.
      */
     @Test
     void reservedSchedulerActorIsRejectedInAnyCaseWithAnErrorThatTeaches() {
@@ -126,7 +140,7 @@ class ScheduleCommandImplTest {
         }
     }
 
-    /** O caso de uso do header: cliente reenvia o POST após timeout de rede — mesmo recibo, zero duplicação. */
+    /** The header's use case: a client resends the POST after a network timeout — the same receipt, zero duplication. */
     @Test
     void sameIdempotencyKeyReturnsTheOriginalReceiptWithoutDuplicating() {
         Enqueued first = mohs.schedule("welcome-email", "hello").idempotencyKey("req-1").now();
@@ -156,13 +170,12 @@ class ScheduleCommandImplTest {
     }
 
     /**
-     * ADR-0003 §4, o cenário-vitrine: dedup DENTRO da transação do host. O
-     * conflito de PK do Idempotent Receiver não pode condenar a transação
-     * de quem chamou — o savepoint (NESTED em {@code JdbcStoreTransactions})
-     * desfaz só a unidade de enqueue, a conexão continua sã (no Postgres,
-     * sem savepoint ela estaria abortada — 25P02) e o commit do host segue
-     * possível. Com REQUIRED isto estourava {@code UnexpectedRollbackException}
-     * DEPOIS de devolvermos um recibo de sucesso.
+     * The showcase scenario: deduplication INSIDE the host's transaction. The Idempotent Receiver's
+     * primary-key conflict must not doom the caller's transaction — the savepoint (NESTED in
+     * {@code JdbcStoreTransactions}) undoes only the enqueue unit, the connection stays healthy (on
+     * Postgres, without a savepoint it would be aborted — 25P02) and the host's commit remains possible.
+     * With REQUIRED this blew up with an {@code UnexpectedRollbackException} AFTER we had returned a
+     * successful receipt.
      */
     @Test
     void duplicateIdempotencyKeyInsideAHostTransactionLeavesItCommittable() {
@@ -180,7 +193,7 @@ class ScheduleCommandImplTest {
         assertThat(executionCount()).isEqualTo(1);
     }
 
-    /** A corrida real do retry: dois POSTs simultâneos com a mesma chave — o banco decide, os dois recebem o mesmo recibo. */
+    /** The real retry race: two simultaneous POSTs with the same key — the database decides, and both receive the same receipt. */
     @Test
     void concurrentSchedulesWithTheSameKeyConvergeOnASingleExecution() throws Exception {
         CyclicBarrier barrier = new CyclicBarrier(2);

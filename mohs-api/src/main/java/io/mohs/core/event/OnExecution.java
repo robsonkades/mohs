@@ -1,5 +1,21 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.event;
 
+import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -8,21 +24,27 @@ import java.lang.annotation.Target;
 import io.mohs.core.job.JobKey;
 
 /**
- * Açúcar por método para {@link ExecutionListener}, filtrado por job e tipo
- * de evento — estilo {@code @EventListener} do Spring.
+ * Per-method sugar for {@link ExecutionListener}, filtered by job and event type — in the style of
+ * Spring's {@code @EventListener}.
  *
- * <p><b>Ainda não processada nesta versão</b>: o motor não entrega eventos
- * filtrados a métodos anotados — o scanner falha o boot ao encontrar a
- * anotação, em vez de aceitá-la em silêncio. Registre um
- * {@link ExecutionListener} como bean até o processamento existir.
+ * <p>Delivery has the same contract as {@link ExecutionListener}, because that is literally what an
+ * annotated method becomes: asynchronous, best-effort, unordered, and with its exception caught and
+ * logged rather than reaching the job. A reaction that must not be lost is not a listener — the
+ * handler enqueues its continuation inside its own transaction.
+ *
+ * <p>The method takes either no parameters or exactly one, of the event type it declares (or
+ * {@link ExecutionEvent} itself). A signature that cannot receive the event fails the boot, and so
+ * does a filter that cannot match — {@code BATCH_COMPLETED} scoped to a job, since a batch belongs
+ * to no single job.
  */
 @Target(ElementType.METHOD)
+@Documented
 @Retention(RetentionPolicy.RUNTIME)
 public @interface OnExecution {
 
-    /** {@link JobKey#value()} do job a observar. */
-    String job();
+    /** The {@link JobKey#value()} to observe; empty (the default) observes every job. */
+    String job() default "";
 
-    /** Qual variante de {@link ExecutionEvent} dispara este método. */
+    /** Which {@link ExecutionEvent} variant triggers this method. */
     ExecutionEventType event();
 }

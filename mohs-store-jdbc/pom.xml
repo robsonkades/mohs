@@ -24,7 +24,6 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
-        <!-- Mapper de payload persistido, isolado do ObjectMapper do host (ADR-0029). -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jackson</artifactId>
@@ -33,9 +32,6 @@
             <groupId>io.github.robsonkades</groupId>
             <artifactId>uuidv7</artifactId>
         </dependency>
-        <!-- ADR-0048: as migrações de schema do Mohs, com instância e histórico
-             (mohs_schema_history) próprios — nunca o Flyway do host. Os módulos
-             por banco acompanham os dialetos suportados (ADR-0023). -->
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>
@@ -56,16 +52,11 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
         </dependency>
-
-        <!-- Os testes de motor-sobre-JDBC (EngineTest, DispatcherTest, ScheduleCommandImplTest)
-             moram aqui, não em mohs-engine: montam o motor sobre os stores JDBC reais, e uma
-             dependência de teste de mohs-engine para cá fecharia ciclo no reator. -->
         <dependency>
             <groupId>io.mohs</groupId>
             <artifactId>mohs-test</artifactId>
             <scope>test</scope>
         </dependency>
-
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
@@ -107,14 +98,18 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-
-    <!-- test-jar: os *TestSupport (containers por dialeto) são compartilhados com os
-         harnesses de mohs-benchmark — uma cópia só, consumida via type=test-jar. -->
     <build>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <Automatic-Module-Name>io.mohs.store.jdbc</Automatic-Module-Name>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
                 <executions>
                     <execution>
                         <goals>

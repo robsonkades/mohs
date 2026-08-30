@@ -12,29 +12,19 @@
     <artifactId>mohs-benchmark</artifactId>
 
     <name>Mohs :: Benchmark</name>
-    <!--
-      Bancada de performance (ARCHITECTURE_REDESIGN_PLAN.md, Phase 0): scripts de
-      medição macro (write amplification, drains fim a fim) e, futuramente, os
-      harnesses JMH/EXPLAIN hoje espalhados nos test sources de mohs-jdbc.
-      Nunca publicado — mesmo estatuto do mohs-demo.
-    -->
     <description>Load, JMH and EXPLAIN harnesses; never published</description>
 
     <properties>
         <maven.deploy.skip>true</maven.deploy.skip>
+        <skipPublishing>true</skipPublishing>
     </properties>
 
     <dependencies>
-        <!-- Tudo escopo test: o módulo não tem código de produção — os harnesses moram
-             em src/test e rodam só por -Dtest= explícito (padrão surefire não casa
-             *Harness), como já era em mohs-jdbc. -->
         <dependency>
             <groupId>io.mohs</groupId>
             <artifactId>mohs-store-jdbc</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- Os *TestSupport (containers por dialeto) de mohs-jdbc — type=test-jar não é
-             coberto pelo dependencyManagement do jar, daí a versão explícita. -->
         <dependency>
             <groupId>io.mohs</groupId>
             <artifactId>mohs-store-jdbc</artifactId>

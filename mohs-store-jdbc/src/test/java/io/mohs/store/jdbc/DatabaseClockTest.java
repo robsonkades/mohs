@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.sql.SQLException;
@@ -24,12 +39,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 /**
- * Contra um H2 real (embarcado, mesma JVM) em vez de mockar a cadeia
- * interna do {@link org.springframework.jdbc.core.JdbcTemplate} — mockar
- * até {@code ResultSet} seria frágil (depende de detalhe de implementação
- * do Spring, não de contrato estável). Os cenários controlados (offset
- * positivo, clamp, skew) são construídos manipulando o {@link MutableClock}
- * do lado do app, não fingindo a hora do banco.
+ * Against a real H2 (embedded, same JVM) rather than mocking
+ * {@link org.springframework.jdbc.core.JdbcTemplate}'s internal chain — mocking down to the
+ * {@code ResultSet} would be fragile (it would depend on a Spring implementation detail, not on a stable
+ * contract). The controlled scenarios (a positive offset, the clamp, skew) are built by manipulating the
+ * application-side {@link MutableClock}, not by faking the database's time.
  */
 class DatabaseClockTest {
 
@@ -82,15 +96,14 @@ class DatabaseClockTest {
     }
 
     /**
-     * TEST-2 do code review: a versão anterior deste teste afirmava sobre
-     * {@code clock.instant()} (= {@code appClock.instant() + offset}) — como
-     * o {@code appClock.advance(1h)} já embute o salto de +1h na leitura do
-     * app, um clamp quebrado que aplicasse cegamente o offset negativo
-     * incorreto (~-1h) cancelaria o salto e produziria um {@code second}
-     * quase igual a {@code first} de qualquer forma — a asserção passava
-     * até no contrafactual quebrado. Afirmar sobre {@link DatabaseClock#currentOffset()}
-     * direto (antes/depois do segundo {@code sync()}) é o que realmente
-     * distingue "clamp aplicado" de "clamp ausente".
+     * The previous version of this test asserted on {@code clock.instant()} (= {@code appClock.instant()}
+     * plus the offset) — and since {@code appClock.advance(1h)} already embeds the +1h jump in the
+     * application's read, a broken clamp that blindly applied the incorrect negative offset (~-1h) would
+     * cancel the jump and produce a {@code second} nearly equal to {@code first} anyway — the assertion
+     * passed even in the broken counterfactual.
+     *
+     * <p>Asserting directly on {@link DatabaseClock#currentOffset()} (before and after the second
+     * {@code sync()}) is what actually distinguishes "clamp applied" from "clamp missing".
      */
     @Test
     void offsetNeverDecreasesAcrossAResampleThatWouldMoveItBackward() {
@@ -100,10 +113,9 @@ class DatabaseClockTest {
         clock.sync();
         Duration offsetAfterFirstSync = clock.currentOffset();
 
-        // App clock corre uma hora à frente; o banco continua no tempo real —
-        // a próxima amostra tentaria aplicar um offset negativo grande o
-        // bastante pra voltar no tempo. O clamp deve descartar essa amostra
-        // e manter o offset anterior intocado.
+        // The app clock runs an hour ahead while the database stays in real time — the next sample would try
+        // to apply a negative offset large enough to go back in time. The clamp must discard that sample and
+        // leave the previous offset untouched.
         appClock.advance(Duration.ofHours(1));
         clock.sync();
 
@@ -111,14 +123,11 @@ class DatabaseClockTest {
     }
 
     /**
-     * TEST-3 do code review: a versão anterior construía um
-     * {@link DatabaseClock} NOVO diretamente contra um {@link DataSource}
-     * quebrado — {@code currentOffset() == Duration.ZERO} só provava que o
-     * valor default do campo sobrevive a uma falha, nunca que um offset
-     * não-zero **já aprendido** sobrevive a uma resincronização que falha
-     * depois (a propriedade que de fato importa). Aqui a mesma instância
-     * sincroniza com sucesso uma vez (aprendendo um offset não-zero) e só
-     * então passa a falhar.
+     * The previous version built a NEW {@link DatabaseClock} directly against a broken {@link DataSource} —
+     * {@code currentOffset() == Duration.ZERO} only proved that the field's default value survives a
+     * failure, never that a non-zero offset **already learned** survives a resync that fails afterwards
+     * (the property that actually matters). Here the same instance syncs successfully once (learning a
+     * non-zero offset) and only then starts failing.
      */
     @Test
     void keepsThePreviouslyLearnedOffsetWhenAResyncFails() throws SQLException {

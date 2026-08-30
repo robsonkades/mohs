@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Clock;
@@ -21,12 +36,11 @@ import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * O claim do §5.4 na forma que só o Tier 1 tem — statement ÚNICO
- * ({@code WITH picked … DELETE … RETURNING → INSERT}) — mais a travessia
- * {@code TIMESTAMPTZ}/{@code OffsetDateTime} das tabelas do split
- * (PLAN.md, decisão 6). Os cenários de semântica compartilhada moram em
- * {@code JdbcWorkQueueTest} (H2, forma portátil); aqui ficam os que
- * provam a FORMA do Postgres.
+ * The claim in the form only Tier 1 has — a SINGLE statement
+ * ({@code WITH picked … DELETE … RETURNING → INSERT}) — plus the split tables'
+ * {@code TIMESTAMPTZ}/{@code OffsetDateTime} crossing. The shared-semantics scenarios live in
+ * {@code JdbcWorkQueueTest} (H2, portable form); what stays here are the ones that prove Postgres's
+ * FORM.
  */
 class JdbcWorkQueuePostgresTest {
 
@@ -48,11 +62,10 @@ class JdbcWorkQueuePostgresTest {
     }
 
     /**
-     * S6.5: a sonda do gate ocioso ({@code hasVisibleWork}) atravessa o
-     * driver com a LISTA de shards do nó — 64 parâmetros num nó único. O
-     * binding de coleção é do driver, não do dialeto, então cada um paga o
-     * seu teste; o resto do cenário prova o predicado: shard alheio não
-     * conta, entrada ainda invisível não conta.
+     * The idle gate's probe ({@code hasVisibleWork}) crosses the driver with the node's LIST of shards —
+     * 64 parameters on a single node. Collection binding belongs to the driver, not the dialect, so each
+     * one pays for its own test; the rest of the scenario proves the predicate: another node's shard does
+     * not count, and an entry that is still invisible does not count.
      */
     @Test
     void hasVisibleWorkSeesOnlyVisibleEntriesInTheOwnedShards() {
@@ -60,10 +73,10 @@ class JdbcWorkQueuePostgresTest {
         assertThat(queue.hasVisibleWork(owned, NOW)).isFalse();
 
         queue.offer(List.of(shardedEntry("exec-alheio", 7, NOW.minusSeconds(1))));
-        assertThat(queue.hasVisibleWork(owned, NOW)).as("shard de outro nó").isFalse();
+        assertThat(queue.hasVisibleWork(owned, NOW)).as("another node's shard").isFalse();
 
         queue.offer(List.of(shardedEntry("exec-futuro", 8, NOW.plusSeconds(60))));
-        assertThat(queue.hasVisibleWork(owned, NOW)).as("ainda não visível").isFalse();
+        assertThat(queue.hasVisibleWork(owned, NOW)).as("not visible yet").isFalse();
 
         queue.offer(List.of(shardedEntry("exec-devido", 8, NOW.minusSeconds(1))));
         assertThat(queue.hasVisibleWork(owned, NOW)).isTrue();
@@ -82,9 +95,9 @@ class JdbcWorkQueuePostgresTest {
 
         List<WorkQueue.ClaimedWork> claimed = queue.claim(0, "node-pg", 3, 10, List.of(), NOW);
 
-        // ORDEM pinada de propósito (review S5.2): o RETURNING de INSERT não
-        // garante ordem, então o statement devolve do SELECT ordenado sobre
-        // picked — o contrato da porta é o mesmo nos 4 dialetos
+        // The ORDER is pinned on purpose: an INSERT's RETURNING guarantees no order, so the statement
+        // returns from the ordered SELECT over picked — the port's contract is the same in all four
+        // dialects
         assertThat(claimed).extracting(w -> w.executionId().value())
                 .containsExactly("exec-high", "exec-normal");
         assertThat(claimed).filteredOn(w -> w.executionId().value().equals("exec-normal"))
@@ -109,7 +122,7 @@ class JdbcWorkQueuePostgresTest {
                 .containsExactly("exec-closed");
     }
 
-    /** A travessia OffsetDateTime UTC (decisão 6 do PLAN.md): o instante atravessa a coluna TIMESTAMPTZ verbatim, independente do fuso da sessão. */
+    /** The UTC OffsetDateTime crossing: the instant crosses the TIMESTAMPTZ column verbatim, regardless of the session's zone. */
     @Test
     void visibleAtRoundTripsThroughTimestamptzVerbatim() {
         Instant visibleAt = Instant.parse("2026-11-01T05:30:00.123456Z");
@@ -123,10 +136,9 @@ class JdbcWorkQueuePostgresTest {
     }
 
     /**
-     * O coração do claim multi-nó (JCIP cap. 12 — interleaving controlado,
-     * não corrida): outra transação segura o lock de uma entrada; o claim
-     * PULA a linha lockada sem bloquear — é o {@code SKIP LOCKED} da CTE
-     * fazendo o trabalho que o E2 mediu por carga.
+     * The heart of a multi-node claim (JCIP ch. 12 — controlled interleaving, not a race): another
+     * transaction holds an entry's lock; the claim SKIPS the locked row without blocking — the CTE's
+     * {@code SKIP LOCKED} doing the work that was measured under load.
      */
     @Test
     void claimSkipsRowsLockedByAConcurrentClaimant() throws Exception {

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.autoconfigure;
 
 import java.lang.reflect.Method;
@@ -35,29 +50,25 @@ import io.mohs.engine.JobStore;
 import io.mohs.engine.StoredJob;
 
 /**
- * Escaneia métodos {@link MohsJob} em beans singleton e os traduz em
- * {@link JobDefinition}/{@link JobHandler} — mesmo padrão de duas fases de
- * {@code ScheduledAnnotationBeanPostProcessor} (Spring, para
- * {@code @Scheduled}): acumula durante a inicialização de cada bean
- * ({@link BeanPostProcessor}), só efetiva depois que todos os singletons
- * existem ({@link SmartInitializingSingleton}) — sem isso, a ordem de
- * criação de bean decidiria arbitrariamente qual {@code @MohsJob} "ganha"
- * um conflito de id.
+ * Scans singleton beans for {@link MohsJob} methods and translates them into
+ * {@link JobDefinition}/{@link JobHandler} pairs.
  *
- * <p>Roda antes do {@code Engine} iniciar (ADR-0006: "nenhum claim antes
- * de todas as definições anotadas estarem registradas") porque
- * {@code afterSingletonsInstantiated} acontece durante
- * {@code finishBeanFactoryInitialization}, sempre antes de
- * {@code finishRefresh} — onde {@code SmartLifecycle.start()} dispara
- * ({@link MohsEngineLifecycle}, fase {@link Integer#MAX_VALUE}).
+ * <p>It uses the same two-phase pattern as Spring's {@code ScheduledAnnotationBeanPostProcessor}
+ * for {@code @Scheduled}: accumulate while each bean initialises ({@link BeanPostProcessor}), and
+ * only commit once every singleton exists ({@link SmartInitializingSingleton}). Without that, bean
+ * creation order would arbitrarily decide which {@code @MohsJob} "wins" an id conflict.
  *
- * <p>Dependências via {@link ObjectProvider}, não injeção direta: um
- * {@link BeanPostProcessor} com dependência de construtor comum força o
- * Spring a criar essa dependência cedo demais, antes de todos os outros
- * {@code BeanPostProcessor}s estarem registrados — o próprio Spring avisa
- * disso em runtime ("not eligible for getting processed by all
- * BeanPostProcessors"). {@code ObjectProvider} adia a resolução pra
- * {@link #afterSingletonsInstantiated}, onde já não há mais problema.
+ * <p>It runs before the {@code Engine} starts — no claim may happen before every annotated
+ * definition is registered — because {@code afterSingletonsInstantiated} happens during
+ * {@code finishBeanFactoryInitialization}, always ahead of {@code finishRefresh}, where
+ * {@code SmartLifecycle.start()} fires ({@link MohsEngineLifecycle}).
+ *
+ * <p>Dependencies arrive through {@link ObjectProvider} rather than direct injection: a
+ * {@link BeanPostProcessor} with an ordinary constructor dependency forces Spring to create that
+ * dependency too early, before all the other {@code BeanPostProcessor}s are registered — Spring
+ * itself warns about this at runtime ("not eligible for getting processed by all
+ * BeanPostProcessors"). {@code ObjectProvider} defers resolution to
+ * {@link #afterSingletonsInstantiated}, where the problem no longer exists.
  */
 final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, SmartInitializingSingleton {
 
@@ -66,23 +77,28 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     private final ObjectProvider<HandlerRegistry> handlerRegistry;
     private final ObjectProvider<JobStore> jobStore;
     private final ObjectProvider<MohsProperties> properties;
+    private final ObjectProvider<OnExecutionRegistry> onExecutionRegistry;
 
     /**
-     * Guardado por {@code synchronized} — mesmo motivo de
-     * {@code ScheduledAnnotationBeanPostProcessor} guardar suas coleções:
-     * com o bootstrap em background do Spring Framework 6.2+
-     * ({@code bootstrapExecutor}), {@link #postProcessAfterInitialization}
-     * pode rodar em threads concorrentes na aplicação hospedeira —
-     * biblioteca embarcada não controla isso.
+     * Guarded by {@code synchronized} for the same reason
+     * {@code ScheduledAnnotationBeanPostProcessor} guards its own collections: with Spring
+     * Framework 6.2+ background bootstrap ({@code bootstrapExecutor}),
+     * {@link #postProcessAfterInitialization} can run on concurrent threads in the host
+     * application, and an embedded library does not control that.
      */
     private final Map<JobKey, ScannedJob> scanned = new LinkedHashMap<>();
 
+    /** {@code @OnExecution} methods, accumulated by the same two-phase rule and under the same lock. */
+    private final List<ScannedObserver> observers = new ArrayList<>();
+
     private @Nullable ConfigurableListableBeanFactory beanFactory;
 
-    MohsJobScanner(ObjectProvider<HandlerRegistry> handlerRegistry, ObjectProvider<JobStore> jobStore, ObjectProvider<MohsProperties> properties) {
+    MohsJobScanner(ObjectProvider<HandlerRegistry> handlerRegistry, ObjectProvider<JobStore> jobStore,
+            ObjectProvider<MohsProperties> properties, ObjectProvider<OnExecutionRegistry> onExecutionRegistry) {
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.properties = Objects.requireNonNull(properties, "properties");
+        this.onExecutionRegistry = Objects.requireNonNull(onExecutionRegistry, "onExecutionRegistry");
     }
 
     @Override
@@ -93,18 +109,19 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     }
 
     /**
-     * Pula bean não-singleton — mesma guarda do
-     * {@code ScheduledAnnotationBeanPostProcessor}: sem ela, um bean
-     * {@code prototype} reprocessaria o mesmo método a cada criação.
+     * Skips non-singleton beans — the same guard as
+     * {@code ScheduledAnnotationBeanPostProcessor}: without it, a {@code prototype} bean would
+     * reprocess the same method on every creation.
      *
-     * <p>{@code containsBean} antes de {@code isSingleton} porque nem todo objeto que passa por
-     * aqui é bean do contexto: o Spring inicializa {@code View} pelo NOME DA VIEW
-     * ({@code UrlBasedViewResolver.applyLifecycleMethods} → {@code initializeBean(view, viewName)}),
-     * e um {@code setViewName("forward:/x")} chega aqui como {@code "forward:"}. Sem a guarda,
-     * {@code isSingleton} estoura {@code NoSuchBeanDefinitionException} e derruba a requisição —
-     * ou seja, qualquer hospedeiro com view {@code forward:}/{@code redirect:} quebrava só por ter
-     * o Mohs no classpath. Nome desconhecido é escaneado normalmente: não é singleton reprocessado,
-     * é objeto que passou pelo pós-processamento e simplesmente não tem {@code @MohsJob}.
+     * <p>{@code containsBean} comes before {@code isSingleton} because not every object passing
+     * through here is a context bean: Spring initialises a {@code View} by the VIEW NAME
+     * ({@code UrlBasedViewResolver.applyLifecycleMethods} then {@code initializeBean(view,
+     * viewName)}), so a {@code setViewName("forward:/x")} arrives here as {@code "forward:"}.
+     * Without the guard, {@code isSingleton} throws {@code NoSuchBeanDefinitionException} and fails
+     * the request — meaning any host with a {@code forward:}/{@code redirect:} view broke merely by
+     * having Mohs on the classpath. An unknown name is scanned normally: it is not a reprocessed
+     * singleton, it is an object that went through post-processing and simply has no
+     * {@code @MohsJob}.
      */
     @Override
     public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
@@ -117,17 +134,21 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     }
 
     private void scanMethod(Object bean, Class<?> targetClass, Method targetMethod) {
-        // fail-fast até o processamento existir — anotação aceita em silêncio
-        // seria falha silenciosa (o método nunca receberia evento nenhum);
-        // mesma filosofia de "conflito de identidade falha sempre" do reconcile.
-        if (targetMethod.isAnnotationPresent(OnExecution.class)) {
-            throw new IllegalStateException("@OnExecution on " + describe(targetMethod)
-                    + " is not supported yet — the engine does not deliver filtered events to annotated"
-                    + " methods in this milestone; register an ExecutionListener bean instead");
+        OnExecution observer = targetMethod.getAnnotation(OnExecution.class);
+        if (observer != null) {
+            String declaring = describe(targetMethod);
+            // The signature and the filter are checked HERE rather than at delivery: both failures
+            // are silent at runtime — a method that never fires looks exactly like one whose event
+            // never happened
+            OnExecutionRegistry.validate(observer, targetMethod, declaring);
+            synchronized (scanned) {
+                observers.add(new ScannedObserver(observer, bean,
+                        AopUtils.selectInvocableMethod(targetMethod, bean.getClass()), declaring));
+            }
         }
-        // merged, não getAnnotation cru: os estereótipos da ADR-0038 (@RecurringJob/
-        // @OnDemandJob — e composições do consumidor sobre eles) carregam @MohsJob como
-        // meta-anotação com @AliasFor, que só a resolução de merged annotations honra.
+        // Merged, not a raw getAnnotation: the stereotypes (@RecurringJob/@OnDemandJob, and consumer
+        // compositions over them) carry @MohsJob as a meta-annotation with @AliasFor, which only
+        // merged-annotation resolution honours.
         MohsJob annotation = AnnotatedElementUtils.findMergedAnnotation(targetMethod, MohsJob.class);
         if (annotation == null) {
             return;
@@ -135,12 +156,12 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         String declaringMethod = describe(targetMethod);
         requireSingleJobForm(targetMethod, declaringMethod);
         if (annotation.id().isBlank()) {
-            // só alcançável pelos estereótipos (o id da forma geral é obrigatório em compilação)
+            // Only reachable through the stereotypes (the general form's id is mandatory at compile time)
             throw new IllegalStateException("job annotation on " + declaringMethod
                     + " has a blank id — set value/id (e.g. @OnDemandJob(\"my-job\"))");
         }
-        // getTargetClass, não bean.getClass(): o proxy CGLIB não deveria virar handlerType
-        // persistido (nome sintético, não resolve de forma estável entre restarts).
+        // getTargetClass, not bean.getClass(): a CGLIB proxy must not become the persisted
+        // handlerType (a synthetic name does not resolve stably across restarts).
         Method invocable = AopUtils.selectInvocableMethod(targetMethod, bean.getClass());
         JobKey key = JobKey.of(annotation.id());
 
@@ -164,15 +185,14 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     }
 
     /**
-     * Um método é exatamente um job — colisão de formas é da mesma família
-     * do "duplicate id": falha sempre, incondicional. Conta aparições de
-     * {@code @MohsJob} no grafo de merged annotations (cada forma direta —
-     * geral, estereótipo ou composição do consumidor — contribui exatamente
-     * uma), porque contar só as três formas diretas deixava "composto +
-     * direto" passar e resolver em silêncio pela ORDEM DE DECLARAÇÃO no
-     * fonte (comportamento verificado do Spring — não é a forma direta que
-     * vence), a arbitrariedade que este scanner existe pra impedir (review
-     * ADR-0038).
+     * One method is exactly one job — a clash of forms belongs to the same family as a duplicate
+     * id: it always fails, unconditionally.
+     *
+     * <p>It counts appearances of {@code @MohsJob} across the merged-annotation graph (each direct
+     * form — general, stereotype, or a consumer's composition — contributes exactly one), because
+     * counting only the three direct forms let "composed + direct" through, to be resolved silently
+     * by DECLARATION ORDER in the source (verified Spring behaviour — the direct form is not the
+     * one that wins), which is exactly the arbitrariness this scanner exists to prevent.
      */
     private static void requireSingleJobForm(Method method, String declaringMethod) {
         long declaredForms = MergedAnnotations.from(method).stream(MohsJob.class).count();
@@ -193,21 +213,26 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         HandlerRegistry registry = handlerRegistry.getObject();
         MohsProperties.Registration.OnConflict onConflict = properties.getObject().registration().onConflict();
 
+        OnExecutionRegistry observerRegistry = onExecutionRegistry.getObject();
+
         synchronized (scanned) {
             for (ScannedJob job : scanned.values()) {
                 reconcile(store, onConflict, job);
                 registry.register(job.definition().key(), job.handler().handler(), job.handler().payloadType());
+            }
+            for (ScannedObserver observer : observers) {
+                observerRegistry.register(observer.annotation(), observer.bean(), observer.method(), observer.declaringMethod());
             }
             reconcileOrphans(store);
         }
     }
 
     /**
-     * {@code annotation × programmatic} falha sempre, incondicional —
-     * não é isso que {@code on-conflict} governa (é uma colisão de
-     * identidade, não drift definicional). {@code annotation × annotation}
-     * já falhou antes, em {@link #scanMethod}. Drift real na mesma
-     * linhagem {@code ANNOTATION} segue {@link MohsProperties.Registration.OnConflict}.
+     * {@code annotation x programmatic} always fails, unconditionally — that is not what
+     * {@code on-conflict} governs, being an identity collision rather than definitional drift.
+     * {@code annotation x annotation} already failed earlier, in {@link #scanMethod}. Real drift
+     * within the same {@code ANNOTATION} lineage follows
+     * {@link MohsProperties.Registration.OnConflict}.
      */
     private void reconcile(JobStore jobStore, MohsProperties.Registration.OnConflict onConflict, ScannedJob job) {
         JobDefinition incoming = job.definition();
@@ -243,12 +268,12 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     }
 
     /**
-     * ANNOTATION presente no store, ausente do scan de agora — vira ORPHANED
-     * (ADR-0006). {@code markOrphaned} roda depois que o
-     * try-with-resources fecha o cursor de {@link JobStore#findAllAnnotationSourced()}
-     * — nunca dentro do {@code forEach}, mesmo motivo de
-     * {@code JdbcJobStore#markOrphanedForUnresolvedHandlers} (DUP-3): não
-     * escrever com um cursor de leitura ainda aberto na mesma conexão.
+     * An ANNOTATION job present in the store but absent from this scan becomes ORPHANED.
+     *
+     * <p>{@code markOrphaned} runs after the try-with-resources closes the
+     * {@link JobStore#findAllAnnotationSourced()} cursor — never inside the {@code forEach}, for
+     * the same reason as {@code JdbcJobStore#markOrphanedForUnresolvedHandlers}: never write with a
+     * read cursor still open on the same connection.
      */
     private void reconcileOrphans(JobStore jobStore) {
         List<JobKey> toOrphan = new ArrayList<>();
@@ -264,5 +289,8 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     }
 
     private record ScannedJob(JobDefinition definition, MohsJobs.AdaptedHandler handler, String declaringMethod) {
+    }
+
+    private record ScannedObserver(OnExecution annotation, Object bean, Method method, String declaringMethod) {
     }
 }

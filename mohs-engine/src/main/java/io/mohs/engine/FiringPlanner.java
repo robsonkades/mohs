@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -15,34 +30,29 @@ import io.mohs.core.schedule.OnDemandSpec;
 import io.mohs.core.schedule.Schedule;
 
 /**
- * Decide o que um trigger devido dispara (ADR-0035) — função pura sobre
- * ({@code schedule}, {@code misfire}, {@code next_fire_at}, {@code now}):
- * nenhum I/O, nenhuma leitura de relógio; quem chama fornece o "agora" do
- * {@code Clock} injetado, mesma regra de {@link NextFireCalculator}.
+ * Decides what a due trigger fires — a pure function over ({@code schedule}, {@code misfire},
+ * {@code next_fire_at}, {@code now}): no I/O and no clock read; the caller supplies the "now" from
+ * the injected {@code Clock}, the same rule as {@link NextFireCalculator}.
  *
- * <p>Ocorrência <b>perdida</b> é a mais velha que {@code misfireThreshold}
- * — devida dentro do threshold dispara atrasada em qualquer política
- * (atraso de até um poll-interval é operação normal, não falha). Só o
- * lote de perdidas responde à política: {@link Misfire#IGNORE} descarta,
- * {@link Misfire#FIRE_NOW} compensa com um único disparo imediato,
- * {@link Misfire#FIRE_ALL_MISSED} reproduz cada uma. O salto sobre
- * perdidas nunca as percorre uma a uma (cron recalcula do limiar;
- * fixed-rate salta por aritmética preservando a âncora da série).
+ * <p>A <b>missed</b> occurrence is one older than {@code misfireThreshold} — one due within the
+ * threshold fires late under any policy (a delay of up to one poll interval is normal operation, not
+ * a failure). Only the batch of missed ones answers to the policy: {@link Misfire#IGNORE} discards,
+ * {@link Misfire#FIRE_NOW} compensates with a single immediate firing, and
+ * {@link Misfire#FIRE_ALL_MISSED} replays each. Skipping over missed occurrences never walks them one
+ * by one (cron recomputes from the threshold; fixed-rate jumps by arithmetic, preserving the series'
+ * anchor).
  *
- * <p>Fixed-delay ({@code afterFinish}) é uma corrente de ocorrência
- * única: materializou, o próximo disparo é desconhecido até a execução
- * terminar ({@code nextFireAt} do plano sai {@code null} — a conclusão
- * rearma, ver {@code LeaseStore.CompletionResult#rearmNextFireAt}).
+ * <p>Fixed-delay ({@code afterFinish}) is a chain of single occurrences: once materialised, the next
+ * firing is unknown until the execution finishes (the plan's {@code nextFireAt} comes out
+ * {@code null} — the completion rearms it, see {@code LeaseStore.CompletionResult#rearmNextFireAt}).
  */
 public final class FiringPlanner {
 
     /**
-     * Teto de ocorrências materializadas por job por ciclo — §3 do
-     * documento mestre ("replay com cap 1.440 por ciclo, drenado, nunca
-     * descartado"); aplicado a toda materialização, não só replay:
-     * agenda patológica (intervalo de milissegundos) não transforma um
-     * tick em inserção sem teto. Capado, {@code nextFireAt} do plano
-     * fica devido e o excedente drena nos próximos ticks.
+     * The ceiling on occurrences materialised per job per cycle — "replay capped at 1,440 per cycle,
+     * drained, never discarded"; applied to every materialisation, not only replay: a pathological
+     * schedule (a millisecond interval) must not turn one tick into an unbounded insert. When capped,
+     * the plan's {@code nextFireAt} stays due and the surplus drains over the following ticks.
      */
     static final int MAX_OCCURRENCES_PER_CYCLE = 1440;
 
@@ -58,17 +68,28 @@ public final class FiringPlanner {
     }
 
     /**
-     * @param nextFireAt o {@code next_fire_at} observado — devido
-     * ({@code <= now}) por contrato de quem chama
-     * ({@code JobStore#findDueRecurring})
-     * @throws IllegalArgumentException para {@link OnDemandSpec} (nunca é
-     * devida — bug do chamador) ou cron irrealizável (nunca dispara)
+     * @param nextFireAt the observed {@code next_fire_at} — due ({@code <= now}) by the caller's
+     *        contract ({@code JobStore#findDueRecurring})
+     * @throws IllegalArgumentException for an {@link OnDemandSpec} (never due — a caller bug) or an
+     *         unrealisable cron (one that never fires)
      */
     public Plan plan(Schedule schedule, Misfire misfire, Instant nextFireAt, Instant now) {
         Objects.requireNonNull(schedule, "schedule");
         Objects.requireNonNull(misfire, "misfire");
         Objects.requireNonNull(nextFireAt, "nextFireAt");
         Objects.requireNonNull(now, "now");
+        // The 1ms slack is the COLUMN's resolution, not clock tolerance: DATETIME2 (100ns) and
+        // DATETIME(6) (microseconds) round the next_fire_at the calculation produced with nanoseconds,
+        // and the SELECT may return a row whose read value comes back marginally after the raw now.
+        // Without the slack, a non-event becomes a log.error — and a benign ERROR is what erodes trust
+        // in the log at 3 a.m.
+        // (The database-synced clock does NOT reach this guard: fireDueTriggers reads the clock once
+        // and passes the SAME now to findDueRecurring and to plan. The real violation would be a
+        // custom JobStore ignoring the now it was given.)
+        if (nextFireAt.isAfter(now.plusMillis(1))) {
+            throw new IllegalArgumentException("trigger is not due yet: next_fire_at=" + nextFireAt + " is after now="
+                    + now + " — the caller must only plan triggers already due (" + schedule + ")");
+        }
         return switch (schedule) {
             case OnDemandSpec _ -> throw new IllegalArgumentException("on-demand schedules are never due");
             case IntervalSpec interval when interval.afterFinish() -> planAfterFinish(interval, misfire, nextFireAt, now);
@@ -82,7 +103,7 @@ public final class FiringPlanner {
         }
         return switch (misfire) {
             case IGNORE -> new Plan(List.of(), now.plus(schedule.interval()), true);
-            // só uma ocorrência pode estar perdida numa corrente de fim-a-início — as duas políticas coincidem
+            // Only one occurrence can be missed in an end-to-start chain — both policies coincide
             case FIRE_NOW, FIRE_ALL_MISSED -> new Plan(List.of(now), null, true);
         };
     }
@@ -90,12 +111,12 @@ public final class FiringPlanner {
     private Plan planSeries(Schedule schedule, Misfire misfire, Instant nextFireAt, Instant now) {
         boolean misfired = missed(nextFireAt, now);
         boolean compensate = misfired && misfire == Misfire.FIRE_NOW;
-        // FIRE_ALL_MISSED reproduz da própria next_fire_at — nada a saltar
+        // FIRE_ALL_MISSED replays from next_fire_at itself — nothing to skip
         Instant cursor = misfired && misfire != Misfire.FIRE_ALL_MISSED
                 ? firstNotMissed(schedule, nextFireAt, now)
                 : nextFireAt;
-        // a compensação reserva a própria vaga no teto — "o cap vale para toda
-        // materialização" (ADR-0035); a ocorrência deslocada continua devida e drena
+        // The compensation reserves its own slot in the cap — "the cap applies to every
+        // materialisation"; the displaced occurrence stays due and drains
         int walkCap = compensate ? MAX_OCCURRENCES_PER_CYCLE - 1 : MAX_OCCURRENCES_PER_CYCLE;
         List<Instant> occurrences = new ArrayList<>();
         while (!cursor.isAfter(now) && occurrences.size() < walkCap) {
@@ -103,10 +124,15 @@ public final class FiringPlanner {
             cursor = calculator.nextFireAfter(schedule, cursor)
                     .orElseThrow(() -> new IllegalStateException("recurring schedule stopped producing occurrences: " + schedule));
         }
-        if (compensate) {
-            occurrences.add(now); // a compensação do lote perdido — a mais recente, fecha a ordem cronológica
+        // The compensation belongs to the MISSED BATCH; when the series already placed an occurrence
+        // exactly at now (a schedule aligned to the tick's instant), THAT one is already the immediate
+        // firing — adding another writes two executions with the same scheduled_at, and nothing in the
+        // schema stops both from running
+        if (compensate && (occurrences.isEmpty() || !occurrences.getLast().equals(now))) {
+            occurrences.add(now); // the missed batch's compensation — the most recent one, closing the chronological order
         }
-        return new Plan(List.copyOf(occurrences), cursor, misfired);
+        // The defensive copy belongs to Plan's canonical constructor — here it would be the second
+        return new Plan(occurrences, cursor, misfired);
     }
 
     private boolean missed(Instant occurrence, Instant now) {
@@ -114,16 +140,15 @@ public final class FiringPlanner {
     }
 
     /**
-     * Primeira ocorrência não perdida (≥ {@code now - threshold}), sem
-     * percorrer as perdidas: cron recalcula direto do limiar (a série é
-     * absoluta); fixed-rate salta por divisão inteira preservando a
-     * âncora — a próxima ocorrência regular continua na série original,
-     * nunca reancorada no instante do tick.
+     * The first non-missed occurrence ({@code >= now - threshold}), without walking the missed ones:
+     * cron recomputes straight from the threshold (the series is absolute); fixed-rate jumps by
+     * integer division, preserving the anchor — the next regular occurrence stays on the original
+     * series, never re-anchored to the tick's instant.
      */
     private Instant firstNotMissed(Schedule schedule, Instant seriesAnchor, Instant now) {
         Instant boundary = now.minus(misfireThreshold);
         return switch (schedule) {
-            // minusNanos(1): nextFireAfter é estritamente-depois, e ocorrência exatamente no limiar não é perdida
+            // minusNanos(1): nextFireAfter is strictly-after, and an occurrence exactly at the threshold is not missed
             case CronSpec cron -> calculator.nextFireAfter(cron, boundary.minusNanos(1))
                     .orElseThrow(() -> new IllegalStateException("cron schedule stopped producing occurrences: " + cron));
             case IntervalSpec interval -> {
@@ -137,12 +162,10 @@ public final class FiringPlanner {
     }
 
     /**
-     * O veredito do planner para um trigger devido: os instantes a
-     * materializar (ordem cronológica; {@code scheduled_at} de cada
-     * ocorrência), o novo {@code next_fire_at} ({@code null} =
-     * fixed-delay aguardando o fim; {@code <= now} = lote capado, ainda
-     * devido) e se alguma ocorrência foi perdida ({@code misfired} — o
-     * gatilho do WARN de quem chama).
+     * The planner's verdict for a due trigger: the instants to materialise (in chronological order;
+     * each occurrence's {@code scheduled_at}), the new {@code next_fire_at} ({@code null} means
+     * fixed-delay awaiting the end; {@code <= now} means a capped batch, still due) and whether any
+     * occurrence was missed ({@code misfired} — the trigger for the caller's WARN).
      */
     public record Plan(List<Instant> occurrences, @Nullable Instant nextFireAt, boolean misfired) {
 

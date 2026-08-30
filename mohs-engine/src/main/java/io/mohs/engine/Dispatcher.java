@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Clock;
@@ -32,22 +47,20 @@ import io.mohs.core.job.JobKey;
 import io.mohs.core.schedule.IntervalSpec;
 
 /**
- * Invoca o handler de uma execução reivindicada — a metade "dispatch" do
- * fluxo de job, agora sobre as portas da Phase 5: a conclusão é um
- * {@link LeaseStore.CompletionResult} cercado pela posse
- * {@code (node_id, epoch)} do {@link Grant} (§6.3 — o fencing token que
- * sucedeu o {@code (node_id, fired_at)} da ADR-0051), entregue direto ou
- * via {@link CompletionBatcher} (group commit, ADR-0047/§7.6).
+ * Invokes a claimed execution's handler — the "dispatch" half of the job flow.
  *
- * <p>Falha de attempt com orçamento ({@code JobDefinition.retries})
- * renasce na fila com backoff ({@link RetrySchedule}, ADR-0033) — a
- * entrada de retry viaja DENTRO do resultado e aterrissa na mesma
- * transação da conclusão (ver {@code CompletionResult.retry}); orçamento
- * esgotado é {@code FAILED} terminal. {@code retryPolicy} (bean
- * customizado) segue sem efeito — SPI futura.
+ * <p>Completion is a {@link LeaseStore.CompletionResult} fenced by the {@link Grant}'s ownership
+ * {@code (node_id, epoch)} — the fencing token — delivered either directly or through the
+ * {@link CompletionBatcher} (group commit).
  *
- * <p>Síncrono e sem pool próprio: quem decide quantos {@code dispatch}
- * ficam em voo, e em que tipo de thread, é o poll loop do {@link Engine}.
+ * <p>An attempt failure with budget left ({@code JobDefinition.retries}) is reborn in the queue with
+ * backoff ({@link RetrySchedule}) — the retry entry travels INSIDE the result and lands in the same
+ * transaction as the completion (see {@code CompletionResult.retry}); an exhausted budget is a
+ * terminal {@code FAILED} — or, when the definition names one, whatever its {@code retryPolicy}
+ * decides ({@link RetryPolicyRegistry}).
+ *
+ * <p>Synchronous and with no pool of its own: what decides how many {@code dispatch} calls stay in
+ * flight, and on what kind of thread, is the {@link Engine}'s poll loop.
  */
 public final class Dispatcher {
 
@@ -62,18 +75,20 @@ public final class Dispatcher {
     private final List<ExecutionInterceptor> interceptors;
     private final ExecutionEventPublisher events;
     private final EngineMetrics metrics;
+    private final RetryPolicyRegistry retryPolicies;
     private final @Nullable CompletionBatcher completionBatcher;
 
     /**
-     * A posse que o claim entregou (§6.2): {@code (nodeId, epoch)} é o
-     * fence de toda conclusão; {@code attemptNumber} veio da entrada de
-     * fila (§5.3 — nada conta attempts no hot path); {@code claimedAt}
-     * ancora o attempt sintético do watchdog; {@code executionCreatedAt}
-     * casa a linha do UPDATE terminal ({@code null} = casa só por id, o
-     * caminho degradado de linha ilegível).
+     * The ownership the claim handed over: {@code (nodeId, epoch)} is the fence on every completion;
+     * {@code attemptNumber} came from the queue entry (nothing counts attempts on the hot path); and
+     * {@code claimedAt} anchors the watchdog's synthetic attempt.
+     *
+     * <p>It used to carry the execution's {@code created_at} as well, all the way from the payload
+     * read to the completion, for no reason other than matching a primary key that led with time.
+     * With the key normalised to {@code execution_id}, the completion matches by id and the value
+     * has nowhere left to be used.
      */
-    public record Grant(String nodeId, long epoch, int attemptNumber, Instant claimedAt,
-            @Nullable Instant executionCreatedAt) {
+    public record Grant(String nodeId, long epoch, int attemptNumber, Instant claimedAt) {
         public Grant {
             Objects.requireNonNull(nodeId, "nodeId");
             Objects.requireNonNull(claimedAt, "claimedAt");
@@ -83,16 +98,26 @@ public final class Dispatcher {
         }
     }
 
-    /** Conclusão síncrona por resultado (pré-ADR-0047) — a forma dos testes e de {@code completion-flush-on-every-result}. */
+    /** Synchronous completion per result — the shape used by the tests and by {@code completion-flush-on-every-result}. */
+    /** No custom retry policy and no group commit — the convenience for tests and one-off callers. */
     public Dispatcher(LeaseStore leaseStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
             List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
             EngineMetrics metrics) {
-        this(leaseStore, jobStore, handlerRegistry, clock, interceptors, listeners, eventExecutor, metrics, null);
+        this(leaseStore, jobStore, handlerRegistry, clock, interceptors, listeners, eventExecutor, metrics, null,
+                RetryPolicyRegistry.empty());
     }
 
     public Dispatcher(LeaseStore leaseStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
             List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
             EngineMetrics metrics, @Nullable CompletionBatcher completionBatcher) {
+        this(leaseStore, jobStore, handlerRegistry, clock, interceptors, listeners, eventExecutor, metrics,
+                completionBatcher, RetryPolicyRegistry.empty());
+    }
+
+    public Dispatcher(LeaseStore leaseStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
+            List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
+            EngineMetrics metrics, @Nullable CompletionBatcher completionBatcher, RetryPolicyRegistry retryPolicies) {
+        this.retryPolicies = Objects.requireNonNull(retryPolicies, "retryPolicies");
         this.leaseStore = Objects.requireNonNull(leaseStore, "leaseStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
@@ -103,7 +128,7 @@ public final class Dispatcher {
         this.completionBatcher = completionBatcher;
     }
 
-    /** Forma sem fonte externa de cancelamento — sinal próprio, nada o levanta. Conveniência de teste e de chamador avulso. */
+    /** The form with no external cancellation source — its own signal, which nothing raises. A convenience for tests and one-off callers. */
     public void dispatch(Execution execution, JobDefinition definition, Object payload, Grant grant) {
         dispatch(execution, definition, payload, new CancellationSignal(), grant);
     }
@@ -125,8 +150,8 @@ public final class Dispatcher {
 
         Optional<JobHandler> handler = handlerRegistry.find(execution.jobKey());
         if (handler.isEmpty()) {
-            // passa pelo orçamento de retry de propósito: em rolling update, outro
-            // nó (com a versão que ainda registra o handler) pode reivindicar o retry
+            // Goes through the retry budget on purpose: during a rolling update another node (running
+            // the version that still registers the handler) may claim the retry
             fail(execution, definition, firedAt, new IllegalStateException(NO_HANDLER_ERROR + execution.jobKey().value()), grant);
             return;
         }
@@ -137,11 +162,10 @@ public final class Dispatcher {
             return;
         }
 
-        // succeed() fora do try de propósito (review ADR-0034): o catch mapeia
-        // por razão do sinal, e a precondição dele é "o HANDLER saiu anormal" —
-        // falha da escrita de sucesso não é falha do handler; propaga (o Engine
-        // loga, a lease fica de pé e o reaper decide — indistinguível de
-        // crash pré-conclusão, que é o caminho honesto)
+        // succeed() sits outside the try on purpose: the catch maps by the signal's reason, and its
+        // precondition is "the HANDLER exited abnormally" — a failure of the success write is not a
+        // handler failure, so it propagates (the Engine logs it, the lease stays up and the reaper
+        // decides — indistinguishable from a crash before completion, which is the honest path)
         try {
             invokeWithinInterruptWindow(handler.orElseThrow(), payload, ctx, signal);
         } catch (Exception e) {
@@ -152,13 +176,14 @@ public final class Dispatcher {
     }
 
     /**
-     * Checagem pré-start (review ADR-0034): sinal levantado com a task ainda
-     * na fila do runner é honrado ANTES de invocar o handler — não iniciar
-     * trabalho novo é o primeiro passo de shutdown gracioso (Burns).
-     * {@code MANUAL} → {@code CANCELLED} sem rodar; {@code SHUTDOWN} →
-     * falha NodeShutdown sem rodar (trabalho não feito → retry limpo em
-     * outro node). {@code TIMEOUT} pré-start é inalcançável — mapeado pelo
-     * mesmo caminho por exaustividade, nunca ignorado.
+     * A pre-start check: a signal raised while the task is still queued in the runner is honoured
+     * BEFORE invoking the handler — not starting new work is the first step of a graceful shutdown
+     * (Burns).
+     *
+     * <p>{@code MANUAL} becomes {@code CANCELLED} without running; {@code SHUTDOWN} becomes a
+     * NodeShutdown failure without running (work not done, so a clean retry on another node). A
+     * pre-start {@code TIMEOUT} is unreachable — mapped through the same path for exhaustiveness,
+     * never ignored.
      */
     private void failBeforeStart(Execution execution, JobDefinition definition, Instant firedAt,
             CancellationSignal.Reason reason, Grant grant) {
@@ -169,17 +194,16 @@ public final class Dispatcher {
                     "node shutdown: drain grace elapsed before attempt " + grant.attemptNumber() + " started"), grant);
             case TIMEOUT -> fail(execution, definition, firedAt, timeoutError(definition, grant.attemptNumber(),
                     new IllegalStateException("timeout signalled before the handler started — should be unreachable")), grant);
-            // statement switch sobre enum não impõe exaustividade — razão nova
-            // sem case cai aqui, nunca no silêncio (a promessa do Javadoc)
+            // A statement switch over an enum does not enforce exhaustiveness — a new reason with no
+            // case lands here, never in silence (the Javadoc's promise)
             default -> throw new IllegalStateException("unmapped cancellation reason: " + reason);
         }
     }
 
     /**
-     * A janela de interrupt (ADR-0034): abre imediatamente antes da cadeia e
-     * fecha em {@code finally}, ANTES de qualquer escrita de conclusão —
-     * JDBC nunca roda interrompido e a thread de um runner CPU volta limpa
-     * ao pool.
+     * The interrupt window: it opens immediately before the chain and closes in a {@code finally},
+     * BEFORE any completion write — JDBC never runs interrupted and a CPU runner's thread returns
+     * clean to the pool.
      */
     private void invokeWithinInterruptWindow(JobHandler handler, Object payload, JobContext ctx, CancellationSignal signal) throws Exception {
         signal.registerHandlerThread();
@@ -191,12 +215,12 @@ public final class Dispatcher {
     }
 
     /**
-     * ADR-0034: sinal disparado reclassifica SÓ a saída anormal — retorno
-     * normal é {@code SUCCEEDED} mesmo com sinal (o trabalho terminou;
-     * registrar outra coisa mentiria e agendaria uma duplicata).
-     * {@code TIMEOUT}/{@code SHUTDOWN} seguem o orçamento de retry como
-     * qualquer falha; {@code MANUAL} é {@code CANCELLED} terminal — cancel
-     * vence orçamento.
+     * A raised signal reclassifies ONLY an abnormal exit — a normal return is {@code SUCCEEDED} even
+     * with the signal up (the work finished; recording anything else would lie and would schedule a
+     * duplicate).
+     *
+     * <p>{@code TIMEOUT}/{@code SHUTDOWN} follow the retry budget like any failure; {@code MANUAL} is
+     * a terminal {@code CANCELLED} — a cancel beats the budget.
      */
     private void failSignalAware(Execution execution, JobDefinition definition, Instant firedAt,
             Exception error, CancellationSignal signal, Grant grant) {
@@ -220,10 +244,9 @@ public final class Dispatcher {
     }
 
     /**
-     * INFO, não WARN, e sem stack trace: cancelamento honrado é o sistema
-     * fazendo o que o operador pediu, não uma falha. O attempt
-     * {@code CANCELLED} carrega {@code error} nulo (invariante de
-     * {@code Attempt}) — a exceção com que o handler saiu vai no log.
+     * INFO, not WARN, and without a stack trace: an honoured cancellation is the system doing what
+     * the operator asked, not a failure. The {@code CANCELLED} attempt carries a null {@code error}
+     * ({@code Attempt}'s invariant) — the exception the handler exited with goes to the log.
      */
     private void cancelled(Execution execution, JobDefinition definition, Instant firedAt, Exception error, Grant grant) {
         log.info("execution {} of job '{}' cancelled on attempt {} — cooperative cancellation honoured (handler exited with: {})",
@@ -231,33 +254,46 @@ public final class Dispatcher {
         Instant finishedAt = clock.instant();
         completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
                 grant.attemptNumber(), firedAt, finishedAt, ExecutionState.CANCELLED, null, null,
-                ExecutionState.CANCELLED, grant.executionCreatedAt(), null, execution.batchId(),
+                ExecutionState.CANCELLED, null, execution.batchId(),
                 rearmNextFireAt(execution, definition, finishedAt)),
                 () -> events.publish(new Cancelled(execution.id(), execution.jobKey(), grant.attemptNumber())));
     }
 
     /**
-     * O pipeline de eventos, para o {@link Engine} publicar os desfechos do
-     * reaper pelo mesmo caminho do dispatch — package-private: o publisher
-     * continua interno ao pacote, só muda quem pode falar por ele.
+     * The event pipeline, so the {@link Engine} can publish the reaper's outcomes through the same
+     * path as a dispatch — package-private: the publisher stays internal to the package, only who may
+     * speak through it changes.
      */
     ExecutionEventPublisher events() {
         return events;
     }
 
     /**
-     * O guard por estado do reconcile de stray leases (review S5.5): a
-     * conclusão deste id está em trânsito no {@link CompletionBatcher}?
-     * Sem batcher (conclusão síncrona) não existe trânsito — {@code false}.
+     * The stray-lease reconcile's state-based guard: is this id's completion in transit inside the
+     * {@link CompletionBatcher}? With no batcher (synchronous completion) there is no transit —
+     * {@code false}.
      */
     boolean completionInTransit(ExecutionId executionId) {
         return completionBatcher != null && completionBatcher.completionInTransit(executionId);
     }
 
     /**
-     * Chain of Responsibility clássica (GoF): cada interceptor embrulha o
-     * próximo, o mais interno chama o handler de verdade. Roda na própria
-     * thread do dispatch; exceção de interceptor É falha de attempt.
+     * Drains the group commit. It exists for {@code stop}: with the batcher on, a dispatch future
+     * completes at the SUBMIT rather than at the commit, so {@code awaitInFlight} returns with results
+     * still in the queue. Announcing the lease free before that lets a peer reclaim an execution that
+     * ALREADY SUCCEEDED — and with {@code retries=0} the recorded outcome is a terminal FAILED, not a
+     * duplicate. Idempotent: Spring's {@code close} runs afterwards and finds nothing.
+     */
+    void drainCompletions(Duration drainBudget) {
+        if (completionBatcher != null) {
+            completionBatcher.close(drainBudget);
+        }
+    }
+
+    /**
+     * A classic Chain of Responsibility (GoF): each interceptor wraps the next, and the innermost
+     * calls the real handler. It runs on the dispatch's own thread; an interceptor's exception IS an
+     * attempt failure.
      */
     private void runInterceptorChain(JobHandler handler, Object payload, JobContext ctx) throws Exception {
         ExecutionInterceptor.Chain chain = () -> handler.invoke(payload, ctx);
@@ -273,18 +309,18 @@ public final class Dispatcher {
         Instant finishedAt = clock.instant();
         completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
                 grant.attemptNumber(), firedAt, finishedAt, ExecutionState.SUCCEEDED, null, null,
-                ExecutionState.SUCCEEDED, grant.executionCreatedAt(), null, execution.batchId(),
+                ExecutionState.SUCCEEDED, null, execution.batchId(),
                 rearmNextFireAt(execution, definition, finishedAt)),
                 () -> events.publish(new Succeeded(execution.id(), execution.jobKey(), grant.attemptNumber())));
     }
 
     /**
-     * ADR-0035: conclusão terminal de ocorrência do scheduler em agenda
-     * fixed-delay rearma a corrente — {@code fim + interval}, "ancorado no
-     * fim da execução anterior" ao pé da letra. {@code null} nas demais
-     * agendas, em execução manual e sem definição em mãos
-     * ({@link #failBeforeDispatch} com definição removida — job retired
-     * não dispara, a ressurreição via upsert cura).
+     * The terminal completion of a scheduler occurrence on a fixed-delay schedule rearms the chain —
+     * {@code end + interval}, "anchored to the end of the previous execution" taken literally.
+     *
+     * <p>{@code null} on the other schedules, on a manual execution, and when no definition is at hand
+     * ({@link #failBeforeDispatch} with the definition removed — a retired job does not fire, and the
+     * resurrection through an upsert cures it).
      */
     private static @Nullable Instant rearmNextFireAt(Execution execution, @Nullable JobDefinition definition, Instant finishedAt) {
         return Execution.SCHEDULER_ACTOR.equals(execution.actor())
@@ -293,7 +329,7 @@ public final class Dispatcher {
                 : null;
     }
 
-    /** Orçamento restante ({@link RetrySchedule}) decide: renasce na fila com backoff (na MESMA transação da conclusão) ou falha terminal ({@link #failTerminally}). */
+    /** The remaining budget ({@link RetrySchedule}) decides: reborn in the queue with backoff (in the SAME transaction as the completion) or a terminal failure ({@link #failTerminally}). */
     private void fail(Execution execution, JobDefinition definition, Instant firedAt, Exception error, Grant grant) {
         fail(execution, definition, firedAt, error, grant, true);
     }
@@ -301,7 +337,7 @@ public final class Dispatcher {
     private void fail(Execution execution, JobDefinition definition, Instant firedAt, Exception error, Grant grant,
             boolean throughBatcher) {
         int attemptNumber = grant.attemptNumber();
-        Optional<Instant> nextRetry = RetrySchedule.nextRetryAt(attemptNumber, definition.retries(), clock.instant());
+        Optional<Instant> nextRetry = retryPolicies.nextRetryAt(definition, attemptNumber, error, clock.instant());
         if (nextRetry.isEmpty()) {
             failTerminally(execution, definition, firedAt, error, true, grant, throughBatcher);
             return;
@@ -311,7 +347,7 @@ public final class Dispatcher {
                 execution.jobKey().value(), attemptNumber, attemptNumber + 1, retryAt, error);
         completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
                 attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, error.getClass().getName(), errorMessage(error),
-                null, grant.executionCreatedAt(),
+                null,
                 new WorkQueue.ReadyEntry(execution.id(), execution.jobKey(), Shards.of(execution.id()),
                         execution.priority().value(), attemptNumber + 1, retryAt),
                 execution.batchId(), null),
@@ -323,16 +359,14 @@ public final class Dispatcher {
     }
 
     /**
-     * O WARN com a exceção completa é o único lugar onde o stack trace da
-     * falha aparece por padrão — {@code Attempt.error} guarda só a mensagem
-     * e o evento {@code Failed} depende de um {@code ExecutionListener}
-     * registrado; sem este log, a causa de um job quebrado às 3h da manhã
-     * não estaria em lugar nenhum.
+     * The WARN carrying the full exception is the only place a failure's stack trace appears by
+     * default — {@code Attempt.error} keeps only the message, and the {@code Failed} event depends on
+     * a registered {@code ExecutionListener}; without this log, the cause of a job broken at 3 a.m.
+     * would be nowhere.
      *
-     * <p>{@code attemptsExhausted} responde a pergunta que o Javadoc de
-     * {@link Failed} faz: {@code true} só quando {@link RetrySchedule}
-     * disse "sem saldo"; falha terminal por natureza (pré-dispatch) publica
-     * {@code false} — orçamento intacto não é orçamento esgotado.
+     * <p>{@code attemptsExhausted} answers the question {@link Failed}'s Javadoc asks: {@code true}
+     * only when {@link RetrySchedule} said "no budget left"; a failure terminal by nature
+     * (pre-dispatch) publishes {@code false} — an intact budget is not an exhausted one.
      */
     private void failTerminally(Execution execution, @Nullable JobDefinition definition, Instant firedAt,
             Exception error, boolean attemptsExhausted, Grant grant) {
@@ -346,33 +380,32 @@ public final class Dispatcher {
         Instant finishedAt = clock.instant();
         completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
                 grant.attemptNumber(), firedAt, finishedAt, ExecutionState.FAILED, error.getClass().getName(), errorMessage(error),
-                ExecutionState.FAILED, grant.executionCreatedAt(), null, execution.batchId(),
+                ExecutionState.FAILED, null, execution.batchId(),
                 rearmNextFireAt(execution, definition, finishedAt)),
                 () -> events.publish(new Failed(execution.id(), execution.jobKey(), grant.attemptNumber(), error, attemptsExhausted)),
                 throughBatcher);
     }
 
     /**
-     * Publica os eventos só se o fence de conclusão passou — uma encarnação
-     * perdida (reaper/requeue passou antes) descarta o resultado com WARN,
-     * nunca publica evento de uma transição que não ocorreu. Com o
-     * {@link CompletionBatcher} (ADR-0047) a escrita vira group commit e o
-     * desfecho (métrica/eventos) roda na thread do flusher, DEPOIS do
-     * commit do lote — mesma garantia, janela de durabilidade ≤ o
-     * intervalo de flush.
+     * Publishes the events only if the completion's fence held — a lost incarnation (the reaper or a
+     * requeue got there first) discards the result with a WARN, and never publishes an event for a
+     * transition that did not happen.
+     *
+     * <p>With the {@link CompletionBatcher} the write becomes a group commit and the outcome (metrics
+     * and events) runs on the flusher's thread, AFTER the batch commits — the same guarantee, with a
+     * durability window of at most the flush interval.
      */
     private void completeOrDiscard(LeaseStore.CompletionResult result, Runnable publishEvents) {
         completeOrDiscard(result, publishEvents, true);
     }
 
     /**
-     * {@code throughBatcher = false} força a conclusão síncrona mesmo com o
-     * batcher ligado — os caminhos frios ({@link #failBeforeDispatch},
-     * {@link #abandonOwnership}) dependem do contrato "lançou = não
-     * aconteceu" dos chamadores (o retry do watchdog no tick seguinte, a
-     * guarda do Engine): roteá-los pela fila trocaria a exceção síncrona
-     * por um log no flusher que ninguém re-tenta (JCIP §6.3.2 — assíncrono
-     * muda o contrato de erro do chamador junto).
+     * {@code throughBatcher = false} forces synchronous completion even with the batcher on: the cold
+     * paths ({@link #failBeforeDispatch}, {@link #abandonOwnership}) depend on their callers'
+     * "it threw, so it did not happen" contract (the watchdog's retry on the next tick, the Engine's
+     * guard). Routing them through the queue would trade the synchronous exception for a log line in
+     * the flusher that nobody retries (JCIP §6.3.2 — going asynchronous changes the caller's error
+     * contract along with it).
      */
     private void completeOrDiscard(LeaseStore.CompletionResult result, Runnable publishEvents, boolean throughBatcher) {
         if (completionBatcher == null || !throughBatcher) {
@@ -397,15 +430,14 @@ public final class Dispatcher {
     }
 
     /**
-     * ADR-0043: quem fechou o lote foi eleito pelo banco, dentro da
-     * transação de conclusão; a publicação acontece DEPOIS dela, junto dos
-     * demais eventos da conclusão, porque evento não volta atrás se a
-     * transação abortar.
+     * Who closed the batch was elected by the database, inside the completion's transaction; the
+     * publication happens AFTER it, alongside the completion's other events, because an event does
+     * not roll back if the transaction aborts.
      */
     private void publishBatchCompletedIfClosed(LeaseStore.Completion completion) {
         BatchCounters closed = completion.closedBatch();
         if (closed != null) {
-            events.publish(new BatchCompleted(closed.batchId(), closed.total(), closed.succeeded(), closed.failed()));
+            events.publish(new BatchCompleted(closed.batchId(), closed.name(), closed.total(), closed.succeeded(), closed.failed()));
         }
     }
 
@@ -414,49 +446,47 @@ public final class Dispatcher {
     }
 
     /**
-     * Falha uma execução terminalmente sem ter passado por {@link #dispatch}
-     * — pra quando o chamador ({@link Engine}) já sabe que a execução
-     * falhou antes do handler sequer poder rodar (payload ilegível,
-     * definição removida entre claim e dispatch). Sempre terminal, sem
-     * consultar orçamento: payload ilegível não sara repetindo a leitura, e
-     * definição removida não tem {@code retries} confiável.
-     * {@code Failed.attemptsExhausted} sai {@code false} — terminal por
-     * natureza, não por orçamento.
+     * Fails an execution terminally without having gone through {@link #dispatch} — for when the
+     * caller ({@link Engine}) already knows the execution failed before the handler could even run
+     * (an unreadable payload, a definition removed between claim and dispatch).
+     *
+     * <p>Always terminal, without consulting the budget: an unreadable payload does not heal by
+     * repeating the read, and a removed definition has no trustworthy {@code retries}.
+     * {@code Failed.attemptsExhausted} comes out {@code false} — terminal by nature, not by budget.
      */
     void failBeforeDispatch(Execution execution, @Nullable JobDefinition definition, Exception cause, Grant grant) {
         Objects.requireNonNull(execution, "execution");
         Objects.requireNonNull(cause, "cause");
-        // síncrono de propósito: a guarda do Engine trata a exceção desta
-        // gravação ("loga e deixa a posse pro reconcile") — pela fila do
-        // batcher, a falha do flush nunca chegaria a ela
+        // Synchronous on purpose: the Engine's guard handles this write's exception ("log it and leave
+        // ownership to the reconcile") — through the batcher's queue, a flush failure would never
+        // reach it
         failTerminally(execution, definition, clock.instant(), cause, false, grant, false);
     }
 
     /**
-     * O Watchdog Bound (ADR-0051 sobre a posse nova): o node LIBERA a posse
-     * de uma encarnação cujo runtime estourou o bound — attempt sintético
-     * FAILED pelo orçamento de retry, cercado pela posse liberada. O zumbi
-     * local continua rodando até terminar sozinho; a conclusão dele carrega
-     * esta MESMA posse, mas a lease já caiu (e um re-claim grava dono/epoch
-     * próprios), então o fence dele perde por construção.
+     * The Watchdog Bound over the new ownership: the node RELEASES ownership of an incarnation whose
+     * runtime exceeded the bound — a synthetic attempt FAILED through the retry budget, fenced by the
+     * released ownership.
+     *
+     * <p>The local zombie keeps running until it finishes on its own; its completion carries this SAME
+     * ownership, but the lease has already dropped (and a re-claim writes its own owner and epoch), so
+     * its fence loses by construction.
      */
     void abandonOwnership(Execution execution, JobDefinition definition, Grant grant, String reason) {
         Objects.requireNonNull(execution, "execution");
         Objects.requireNonNull(definition, "definition");
         Objects.requireNonNull(grant, "grant");
-        // síncrono de propósito: o watchdog só marca a posse como liberada se
-        // esta chamada retornar — "falha na liberação não marca, o próximo
-        // tick re-tenta" exige exceção síncrona, não um enfileirar que
-        // sempre retorna (JCIP §6.3.2)
+        // Synchronous on purpose: the watchdog only marks ownership as released if this call returns —
+        // "a failed release does not mark, and the next tick retries" requires a synchronous exception,
+        // not an enqueue that always returns (JCIP §6.3.2)
         fail(execution, definition, grant.claimedAt(), new IllegalStateException(reason), grant, false);
     }
 
     /**
-     * {@link #cancellationRequested()} lê o {@link CancellationSignal} da
-     * encarnação (ADR-0034) — as fontes são o timeout do job, o estouro do
-     * grace de drain e o {@code POST /executions/{id}/cancel} observado
-     * pelo tick. {@link #progress} é no-op — já é o contrato documentado
-     * quando nada observa.
+     * {@link #cancellationRequested()} reads the incarnation's {@link CancellationSignal} — the sources
+     * are the job's timeout, the drain grace expiring, and a {@code POST /executions/{id}/cancel}
+     * observed by the tick. {@link #progress} is a no-op — which is already the documented contract
+     * when nothing observes it.
      */
     private record DefaultJobContext(JobKey jobKey, ExecutionId executionId, int attempt, Instant scheduledAt, Instant firedAt,
             CancellationSignal signal) implements JobContext {

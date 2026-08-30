@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Instant;
@@ -8,70 +23,67 @@ import io.mohs.core.RateLimitSnapshot;
 import io.mohs.core.resource.RateLimit;
 
 /**
- * Persistência de {@link RateLimit} — Repository (PoEAA), porta que
- * {@code io.mohs.store.jdbc} implementa. Guarda também o estado operacional do
- * enforcement: o balde de tokens da ADR-0042 (saldo + instante até o qual
- * o tempo já virou token), lido por {@link #available} e cobrado por
- * {@link #charge} nas duas fases do claim.
+ * Persistence of a {@link RateLimit} — a Repository (PoEAA), the port {@code io.mohs.store.jdbc}
+ * implements.
+ *
+ * <p>It also holds the enforcement's operational state: the token bucket (its balance plus the
+ * instant up to which time has already become tokens), read by {@link #available} and charged by
+ * {@link #charge} across the claim's two phases.
  */
 public interface RateLimitStore {
 
     /**
-     * Grava a spec — e só a spec. O balde é estado operacional e sobrevive
-     * ao upsert (tokens clampados ao novo {@code max}): resetar aqui faria
-     * cada nó que sobe num rolling deploy devolver um balde cheio,
-     * transformando deploy em burst. Mesmo raciocínio de {@code paused} em
-     * {@link JobStore#upsert} (ADR-0006/0037): configuração de boot manda
-     * na spec, nunca no estado corrente.
+     * Writes the spec — and only the spec. The bucket is operational state and survives the upsert
+     * (its tokens clamped to the new {@code max}): resetting here would make every node coming up in
+     * a rolling deploy hand back a full bucket, turning a deploy into a burst. The same reasoning as
+     * {@code paused} in {@link JobStore#upsert}: boot configuration governs the spec, never the
+     * current state.
      */
     RateLimit upsert(RateLimit rateLimit);
 
     /**
-     * FASE 1 do consumo em duas fases (ADR-0042 rev. 2026-08-18): quantos
-     * tokens o balde concederia agora. Leitura pura — sem lock, sem escrita,
-     * e por isso sem custo de serialização: é o que permite decidir a
-     * admissão do lote sem segurar a linha durante o claim inteiro.
+     * PHASE 1 of the two-phase consumption: how many tokens the bucket would grant right now. A pure
+     * read — no lock, no write, and therefore no serialisation cost: it is what allows deciding the
+     * batch's admission without holding the row for the whole claim.
      *
-     * <p>Limite inexistente devolve 0 (fail-safe): job que aponta um nome
-     * que não existe para de rodar em vez de rodar sem o limite que alguém
-     * pediu — mesma postura de {@link ExecutionWindowRegistry#excludes}
-     * para janela desconhecida.
+     * <p>A nonexistent limit returns 0 (fail-safe): a job pointing at a name that does not exist stops
+     * running rather than running without the limit somebody asked for — the same stance as
+     * {@link ExecutionWindowRegistry#excludes} for an unknown window.
      *
-     * @param now instante do {@code Clock} injetado do chamador; o refill é calculado contra ele, nunca contra o relógio do banco
+     * @param now the instant from the caller's injected {@code Clock}; the refill is computed against
+     *        it, never against the database's clock
      */
     int available(String name, Instant now);
 
     /**
-     * FASE 2: cobra exatamente {@code permits} do balde, tudo ou nada.
-     * Chamada no FIM da transação de claim, depois do CAS — cobra o que foi
-     * REIVINDICADO, não o que foi admitido, então token não queima em
-     * candidato que perdeu o mutex do job. O lock de linha nasce aqui e
-     * morre no commit: a janela de serialização vira a cauda da transação
-     * em vez da transação inteira (medido: 2,3× a 4 clientes, 3,5× a 8).
+     * PHASE 2: charges exactly {@code permits} from the bucket, all or nothing.
      *
-     * <p>A atomicidade vem de {@code UPDATE} guardado, não de lock
-     * especializado — mesma disciplina da ADR-0018. Exige isolamento
-     * READ COMMITTED: a implementação relê a linha entre tentativas do CAS, e
-     * sob REPEATABLE READ a releitura devolveria o mesmo snapshot — as
-     * tentativas falhariam idênticas, o retry viraria no-op caro.
-     * {@code JdbcWorkQueue} garante isso explicitamente (DBTUNE-4); outro
-     * chamador que herde uma transação {@code @Transactional} do host precisa
-     * garantir o mesmo. {@code false} significa
-     * que outro nó alterou o balde entre as duas fases e não há saldo:
-     * o chamador DEVE desfazer a rodada, porque as execuções já foram
-     * reivindicadas e entregá-las sem token seria sobre-entrega, a única
-     * violação inaceitável do contrato.
+     * <p>Called at the END of the claim transaction, after the CAS — it charges what was CLAIMED, not
+     * what was admitted, so a token does not burn on a candidate that lost the job's mutex. The row
+     * lock is born here and dies at the commit: the serialisation window becomes the transaction's
+     * tail rather than the whole transaction (measured: 2.3x at 4 clients, 3.5x at 8).
+     *
+     * <p>Atomicity comes from a guarded {@code UPDATE}, not a specialised lock. It requires READ
+     * COMMITTED isolation: the implementation re-reads the row between CAS attempts, and under
+     * REPEATABLE READ the re-read would return the same snapshot — the attempts would fail
+     * identically and the retry would become an expensive no-op. {@code JdbcWorkQueue} guarantees
+     * this explicitly; another caller inheriting a {@code @Transactional} transaction from the host
+     * must guarantee the same.
+     *
+     * <p>{@code false} means another node changed the bucket between the two phases and there is no
+     * balance left: the caller MUST undo the round, because the executions have already been claimed
+     * and delivering them without a token would be over-delivery, the one unacceptable violation of
+     * the contract.
      */
     boolean charge(String name, int permits, Instant now);
 
-    /** A spec mais o saldo corrente do balde, refill aplicado em memória — leitura pura, não escreve nem consome. */
+    /** The spec plus the bucket's current balance, with the refill applied in memory — a pure read that neither writes nor consumes. */
     Optional<RateLimitSnapshot> find(String name);
 
     /**
-     * Stream sobre um cursor aberto — quem chama é dono do ciclo de vida
-     * (try-with-resources). DBTUNE-7: no Postgres, isso só é verdade dentro
-     * de uma transação (autocommit desligado) — fora dela, o driver
-     * materializa o resultado inteiro antes de devolver o primeiro item.
+     * A stream over an open cursor — the caller owns the lifecycle (try-with-resources). On Postgres
+     * this only holds inside a transaction (autocommit off) — outside one, the driver materialises
+     * the entire result before returning the first item.
      */
     Stream<RateLimitSnapshot> findAll();
 }

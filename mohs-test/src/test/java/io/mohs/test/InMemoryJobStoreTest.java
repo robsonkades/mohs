@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.test;
 
 import java.time.Duration;
@@ -32,7 +47,7 @@ class InMemoryJobStoreTest {
         return JobDefinition.of(id, Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(max));
     }
 
-    /** JobDefinition.of (builder público) hardcoda PROGRAMMATIC — só o construtor canônico produz ANNOTATION. */
+    /** The public builder always stamps PROGRAMMATIC; only the canonical constructor yields ANNOTATION. */
     private static JobDefinition annotationSourcedDefinition(String id) {
         return new JobDefinition(JobKey.of(id), null, Handler.class, new OnDemandSpec(),
                 null, null, Misfire.IGNORE, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
@@ -53,7 +68,11 @@ class InMemoryJobStoreTest {
         assertThat(stored.get().paused()).isFalse();
     }
 
-    /** ADR-0035 no test kit: upsert arma o trigger com o relógio determinístico; agenda inalterada preserva, alterada recalcula. */
+    /**
+     * The trigger rule, exercised end to end: an upsert arms {@code nextFireAt} from the injected
+     * clock, an unchanged schedule preserves it — so a redeploy does not shift the next firing —
+     * and a changed one recomputes it.
+     */
     @Test
     void upsertArmsPreservesAndRecomputesTheTrigger() {
         MutableClock clock = MutableClock.startingAt(Instant.parse("2026-08-15T12:00:00Z"));
@@ -73,7 +92,11 @@ class InMemoryJobStoreTest {
                 .isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
     }
 
-    /** ADR-0037 no test kit: nasce pausado no primeiro registro; depois disso, paused é do operador — redeploy nunca re-pausa. */
+    /**
+     * {@code startPaused} is a birth property, not a standing instruction: it applies on first
+     * registration, and after that {@code paused} belongs to the operator — a redeploy must never
+     * re-pause a job somebody deliberately resumed.
+     */
     @Test
     void startPausedAppliesOnlyAtBirth() {
         JobDefinition dormant = JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused());
@@ -106,7 +129,10 @@ class InMemoryJobStoreTest {
                 .containsExactly("due-late");
     }
 
-    /** ADR-0036 no test kit: mesma semântica do adapter JDBC — agenda trocada, trigger recomputado, políticas e estado operacional intactos. */
+    /**
+     * Same semantics as the JDBC adapter: the schedule is swapped and the trigger recomputed,
+     * while policies and operational state are left untouched.
+     */
     @Test
     void rescheduleSwapsTheScheduleAndRearmsTheTrigger() {
         MutableClock clock = MutableClock.startingAt(Instant.parse("2026-08-15T12:00:00Z"));
@@ -120,14 +146,14 @@ class InMemoryJobStoreTest {
         StoredJob stored = clocked.find(JobKey.of("poll")).orElseThrow();
         assertThat(stored.definition().schedule()).isEqualTo(new CronSpec("0 0 2 * * *", ZoneId.of("UTC")));
         assertThat(stored.definition().retries()).isEqualTo(3);
-        assertThat(stored.paused()).isTrue(); // estado operacional não é agenda
+        assertThat(stored.paused()).isTrue(); // operational state is not part of the schedule
         assertThat(stored.nextFireAt()).isEqualTo(Instant.parse("2026-08-16T02:00:00Z"));
         assertThat(clocked.reschedule(JobKey.of("ghost"), new OnDemandSpec())).isFalse();
     }
 
     @Test
     void armNextFireOnlyArmsAnUnarmedTrigger() {
-        store.upsert(definition("import-file")); // on-demand: nasce desarmado
+        store.upsert(definition("import-file")); // on-demand jobs are born with no trigger armed
         Instant armAt = Instant.parse("2026-08-15T12:00:00Z");
 
         store.armNextFire(JobKey.of("import-file"), armAt);
@@ -177,7 +203,7 @@ class InMemoryJobStoreTest {
         }
     }
 
-    /** Mesmo contrato de JdbcJobStore#findAllAnnotationSourced — PROGRAMMATIC nunca sai do cursor. */
+    /** Same contract as {@code JdbcJobStore#findAllAnnotationSourced}: PROGRAMMATIC never leaves the cursor. */
     @Test
     void findAllAnnotationSourcedExcludesProgrammaticJobs() {
         store.upsert(definition("programmatic-job"));
@@ -199,7 +225,7 @@ class InMemoryJobStoreTest {
         assertThat(store.find(key)).map(StoredJob::orphaned).contains(true);
     }
 
-    /** orphaned é dedução do sistema, não decisão de operador como paused — reupsert (a anotação reapareceu) limpa. */
+    /** orphaned is inferred by the system, unlike paused, which an operator chose: a re-upsert means the annotation is back, so it clears. */
     @Test
     void upsertClearsOrphanedOnReupsert() {
         JobKey key = JobKey.of("welcome-email");

@@ -14,8 +14,15 @@ conflicts with real code, the code wins.
 - **Chat responses: Brazilian Portuguese (pt-BR)** by default — mirror the
   user's language. Keep established technical terms in English when clearer.
 - Prose written in the code (Javadoc, comments, `package-info.java`) is in
-  **Portuguese** — project convention, overrides the global English default.
-  Migration to English is deferred, date undefined.
+  **English** — migrated on 2026-08-29, when the whole codebase was translated
+  in one pass (297 files; the vendored `mohs-cron` Javadoc was already English).
+  New prose is written in English from the start; there is no mixed subtree
+  left, and reintroducing Portuguese in code would recreate exactly the
+  bilingual split that ADR-0045 §6 argues against.
+- **No ADR references in code.** Decisions are cited by their ARGUMENT, never
+  by number: a comment says *why*, and a reader must not have to open
+  `docs/adr/` to understand the line in front of them. The ADRs remain the
+  record of the decision — they are just not load-bearing for reading the code.
 - Identifiers (classes, methods, fields, packages) are in English — the
   vocabulary locked in `docs/API-DESIGN.md`/`docs/MOHS-DOCUMENTO-MESTRE.md`
   (`JobKey`, `Schedule`, `MohsRunner` etc.). The language convention applies
@@ -129,10 +136,14 @@ For any task that changes code:
   trigger asks for, is the endpoint under load with an SSE subscriber attached.
 - `docs/CLAIM-GRANULARITY.md` — open exploration: should the claim stay global,
   or split per runner? Not a decision; carries the number that would settle it.
-- `PLAN.md` — current refactor steps; one step per commit/PR.
+- `docs/old/PLAN.md` — current refactor steps; one step per commit/PR.
 
 ## Identity and naming
-- GitHub org: mohs-io · Maven groupId: `io.mohs` · domains: mohs.io / mohs.dev
+- Repository: github.com/robsonkades/mohs · Maven groupId: `io.mohs` ·
+  domains: mohs.io / mohs.dev. The `mohs-io` org was the plan in
+  `docs/old/MOHS-DOCUMENTO-MESTRE.md`; the repository actually lives under the
+  personal account, and every URL in the POMs, the workflows and the community
+  files points there.
 - Multi-module reactor under `io.mohs:mohs-parent`, full Spring Boot
   (ADR-0044, which revokes ADR-0001's single artifact): `mohs-cron`,
   `mohs-api`, `mohs-engine`, `mohs-store-jdbc`, `mohs-rest`, `mohs-test`,

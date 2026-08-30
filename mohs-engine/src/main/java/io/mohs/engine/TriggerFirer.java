@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Instant;
@@ -9,34 +24,33 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.job.JobKey;
 
 /**
- * Dispara um trigger devido (ADR-0035) — a etapa "trigger devido →
- * aquisição" do fluxo de job. Não é Repository de uma entidade só: avança
- * {@code mohs_job_definitions.next_fire_at} e insere história
- * ({@code mohs_execution}) + fila ({@code mohs_ready}) numa única
- * transação — porta própria, mesmo padrão de {@link WorkQueue}
- * ({@code io.mohs.store.jdbc} implementa).
+ * Fires a due trigger — the "due trigger to acquisition" step of the job flow.
  *
- * <p>A exclusão mútua cluster-wide é o CAS do avanço: {@code UPDATE ...
- * WHERE next_fire_at = :observado} — só o nó que vence insere as
- * ocorrências, e avanço + inserção atômicos garantem que crash entre os
- * dois não perde nem duplica ocorrência. Por isso as ocorrências não
- * carregam Idempotency-Key (que ficaria sujeita à janela de retenção,
- * ADR-0030).
+ * <p>It is not a Repository for one entity: it advances
+ * {@code mohs_job_definitions.next_fire_at} and inserts history ({@code mohs_execution}) plus queue
+ * ({@code mohs_ready}) in a single transaction — a port of its own, the same pattern as
+ * {@link WorkQueue} ({@code io.mohs.store.jdbc} implements it).
+ *
+ * <p>The cluster-wide mutual exclusion is the advance's CAS:
+ * {@code UPDATE ... WHERE next_fire_at = :observed} — only the node that wins inserts the
+ * occurrences, and making the advance and the insert atomic guarantees a crash between them neither
+ * loses nor duplicates an occurrence. That is why occurrences carry no Idempotency-Key, which would
+ * be subject to the retention window.
  */
 public interface TriggerFirer {
 
     /**
-     * CAS-avança {@code next_fire_at} de {@code observedNextFireAt} para
-     * {@code newNextFireAt} ({@code null} = desarma — fixed-delay
-     * aguardando o fim) e, vencendo, insere {@code occurrences} com
-     * {@code payload} na mesma transação — desde a Phase 5, história
-     * ({@code mohs_execution}) + fila ({@code mohs_ready}), a unidade de
-     * enqueue do §7.5-1 com o CAS como guarda. {@code now} é o instante do
-     * disparo (lidera a PK da história); {@code scheduledAt} de cada
-     * ocorrência vira o {@code visible_at} da fila.
+     * CAS-advances {@code next_fire_at} from {@code observedNextFireAt} to {@code newNextFireAt}
+     * ({@code null} disarms — fixed-delay awaiting the end) and, on winning, inserts
+     * {@code occurrences} with {@code payload} in the same transaction: history
+     * ({@code mohs_execution}) plus queue ({@code mohs_ready}), the enqueue unit with the CAS as its
+     * guard.
      *
-     * @return {@code true} se ESTA chamada avançou o trigger (e inseriu);
-     *         {@code false} se outro nó venceu a corrida — nada inserido.
+     * <p>{@code now} is the firing instant (and leads history's primary key); each occurrence's
+     * {@code scheduledAt} becomes the queue's {@code visible_at}.
+     *
+     * @return {@code true} if THIS call advanced the trigger (and inserted); {@code false} if another
+     *         node won the race — nothing was inserted.
      */
     boolean fire(JobKey key, Instant observedNextFireAt, @Nullable Instant newNextFireAt,
             List<Execution> occurrences, Object payload, Instant now);

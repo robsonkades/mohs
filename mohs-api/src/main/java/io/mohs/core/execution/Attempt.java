@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.execution;
 
 import java.time.Instant;
@@ -6,11 +21,12 @@ import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Uma única tentativa de uma {@link Execution}. Retry incrementa
- * {@link #number()}; o {@link ExecutionId} da execução dona nunca muda
- * entre tentativas. {@code finishedAt} é {@code null} enquanto a tentativa
- * ainda está em execução. {@code error} é a mensagem da falha, presente só
- * quando {@code outcome} é {@link ExecutionState#FAILED}.
+ * A single attempt of an {@link Execution}.
+ *
+ * <p>A retry increments {@link #number()}; the owning execution's {@link ExecutionId} never changes
+ * between attempts. {@code finishedAt} is {@code null} while the attempt is still running, and
+ * {@code error} is the failure message, present only when {@code outcome} is
+ * {@link ExecutionState#FAILED}.
  */
 public record Attempt(int number, Instant startedAt, @Nullable Instant finishedAt, ExecutionState outcome, @Nullable String error) {
 

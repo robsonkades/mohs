@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.autoconfigure;
 
 import java.time.Duration;
@@ -11,22 +26,17 @@ import io.mohs.core.resource.RunnerMode;
 import io.mohs.rest.ApiPaths;
 
 /**
- * Propriedades {@code mohs.*} — só o que {@link MohsAutoConfiguration}/
- * {@link MohsJobScanner}/{@link MohsRestAutoConfiguration} de fato
- * consomem até aqui (bean wiring do motor M3 + escaneamento de
- * {@code @MohsJob} + runners nomeados + REST v1 de jobs/executions).
- * Validações de boot e enforcement de rate limit ainda não existem — as
- * propriedades correspondentes ({@code mohs.rate-limits.*}) entram
- * junto delas, não antes.
+ * The {@code mohs.*} properties — only what {@link MohsAutoConfiguration}, {@link MohsJobScanner}
+ * and {@link MohsRestAutoConfiguration} actually consume so far (engine bean wiring, scanning for
+ * {@code @MohsJob}, named runners and the v1 REST surface for jobs and executions).
  *
- * <p>Records com constructor binding: propriedade é snapshot imutável do
- * boot, não estado mutável — Javadoc de componente fica nas tags
- * {@code @param} (é o que o configuration-processor lê pra gerar o
- * metadata de record).
+ * <p>Records with constructor binding: a property is an immutable snapshot of the boot, not mutable
+ * state. Component documentation goes in the {@code @param} tags, since that is what the
+ * configuration processor reads to generate record metadata.
  *
- * @param enabled gate mestre — desligar remove todos os beans do Mohs do contexto
- * @param runners runners nomeados adicionais aos built-in — ver {@link Runner}
- * @param rateLimits limites de vazão cluster-wide por nome ({@code mohs.rate-limits.smtp.max=100}) — ver {@link RateLimitSpec}
+ * @param enabled master gate — turning it off removes every Mohs bean from the context
+ * @param runners named runners in addition to the built-in ones — see {@link Runner}
+ * @param rateLimits cluster-wide throughput limits by name ({@code mohs.rate-limits.smtp.max=100}) — see {@link RateLimitSpec}
  */
 @ConfigurationProperties("mohs")
 public record MohsProperties(
@@ -41,8 +51,8 @@ public record MohsProperties(
         @DefaultValue Map<String, RateLimitSpec> rateLimits) {
 
     /**
-     * @param dialect ADR-0023: escolha explícita, nunca auto-detecção via {@code DataSource}. Sem default — obrigatório.
-     * @param migrate ADR-0048: o Mohs roda as próprias migrações Flyway no boot ({@code mohs_schema_history}); {@code false} para quem gerencia o schema por fora (DBA) — as migrações continuam no jar como fonte
+     * @param dialect an explicit choice, never auto-detected from the {@code DataSource}. No default — mandatory.
+     * @param migrate Mohs runs its own Flyway migrations at boot ({@code mohs_schema_history}); {@code false} for anyone managing the schema externally (a DBA) — the migrations stay in the jar as the source
      */
     public record Jdbc(@Nullable Dialect dialect, @DefaultValue("true") boolean migrate) {
 
@@ -52,17 +62,18 @@ public record MohsProperties(
     }
 
     /**
-     * @param pollInterval PISO do intervalo entre ticks do loop do engine (ADR-G/§5.5 do redesign): o loop poll neste ritmo enquanto acha trabalho e dobra o intervalo a cada tick vazio até {@code max-poll-interval}; default 25ms — a latência de dispatch é ~poll/2 no pior caso sem wake-up, e o custo idle é controlado pelo backoff, não pelo piso
-     * @param maxPollInterval TETO do backoff adaptativo (ADR-G): intervalo máximo entre ticks de um engine sem trabalho; deve ser ≥ {@code poll-interval}; o sono real nunca passa de {@code node-lease-ttl/3} — o heartbeat tem cadência própria e um teto alto não pode fazer o nó idle ser declarado morto
-     * @param batchSize máximo de execuções reclamadas por claim
-     * @param claimRounds ADR-0040: quantos claims um mesmo tick encadeia enquanto o lote voltar cheio e houver folga de dispatch — relaxa o acoplamento da vazão com o {@code poll-interval} sob backlog (medição na ADR); 1 (default) = formato clássico de um claim por tick
-     * @param leaseTtl ADR-0012: alimenta {@code lease_expires_at} no claim; desde a ADR-0051 é também o corte de staleness para linha de node legado sem {@code expires_at}
-     * @param nodeLeaseTtl ADR-0051: lease do NÓ — o heartbeat de cada tick promete "vivo até agora+TTL" em {@code mohs_nodes.expires_at}; o reaper só reclama execuções de node cuja promessa venceu
-     * @param watchdogTimeout Watchdog Bound (ADR-0012, revisto na ADR-0051): teto de runtime — atingido, o node LIBERA a posse (falha cercada, retry normal); {@code null} (default) = sem teto; quando presente, deve ser maior que {@code node-lease-ttl} (validado na montagem do engine)
-     * @param misfireThreshold ADR-0035: separa disparo atrasado de perdido — ocorrência devida dentro do threshold dispara atrasada em qualquer política; mais velha responde ao {@code Misfire} do job
-     * @param dispatchConcurrency teto real de concorrência do executor de dispatch (nunca por tamanho de pool — CLAUDE.md); também limita o claim (ADR-0039)
-     * @param eventConcurrency teto real de concorrência do executor de publicação de eventos
-     * @param completionFlushOnEveryResult ADR-0047: desliga o group commit da conclusão e volta ao commit síncrono por resultado — troca a janela de durabilidade (~5ms) pela latência por execução de antes; o único knob que a decisão adiciona
+     * @param pollInterval the FLOOR of the interval between engine loop ticks: the loop polls at this rate while it keeps finding work and doubles the interval on every empty tick up to {@code max-poll-interval}; default 25ms — dispatch latency is about poll/2 in the worst case without a wake-up, and idle cost is controlled by the backoff, not by the floor
+     * @param maxPollInterval the CEILING of the adaptive backoff: the longest interval between ticks of an idle engine; must be >= {@code poll-interval}; the actual sleep never exceeds {@code node-lease-ttl/3} — the heartbeat has its own cadence, and a high ceiling must not let an idle node be declared dead
+     * @param batchSize the maximum number of executions claimed per claim
+     * @param claimRounds how many claims one tick chains while the batch keeps coming back full and dispatch has headroom — it loosens the coupling between throughput and {@code poll-interval} under backlog; 1 (the default) is the classic one-claim-per-tick shape
+     * @param leaseTtl feeds {@code lease_expires_at} at claim time; it is also the staleness cutoff for a legacy node row with no {@code expires_at}
+     * @param nodeLeaseTtl the NODE's lease — each tick's heartbeat promises "alive until now+TTL" in {@code mohs_nodes.expires_at}; the reaper only reclaims executions from a node whose promise has expired
+     * @param watchdogTimeout the Watchdog Bound: a runtime ceiling — on reaching it the node RELEASES ownership (a fenced failure, with normal retry); {@code null} (the default) means no ceiling; when present it must be greater than {@code node-lease-ttl} (validated while assembling the engine)
+     * @param misfireThreshold separates a late firing from a lost one — an occurrence due within the threshold fires late under any policy; anything older answers to the job's {@code Misfire}
+     * @param idempotencyRetention how long an {@code Idempotency-Key} keeps deduplicating — it IS the window, because the key deduplicates for exactly as long as its row lives in {@code mohs_idempotency}; the engine prunes older rows hourly, and {@code 0s} turns pruning off and keeps every key forever (an unbounded table)
+     * @param dispatchConcurrency the real concurrency ceiling of the dispatch executor (never through pool size); it also bounds the claim
+     * @param eventConcurrency the real concurrency ceiling of the event-publication executor
+     * @param completionFlushOnEveryResult turns off group commit for completions and returns to a synchronous commit per result — it trades the durability window (~5ms) for the earlier per-execution latency; the only knob the decision adds
      */
     public record Engine(
             @DefaultValue("25ms") Duration pollInterval,
@@ -73,13 +84,14 @@ public record MohsProperties(
             @DefaultValue("15s") Duration nodeLeaseTtl,
             @Nullable Duration watchdogTimeout,
             @DefaultValue("60s") Duration misfireThreshold,
+            @DefaultValue("7d") Duration idempotencyRetention,
             @DefaultValue("64") int dispatchConcurrency,
             @DefaultValue("16") int eventConcurrency,
             @DefaultValue("false") boolean completionFlushOnEveryResult) {
     }
 
     /**
-     * @param startMode ADR-0007: {@code auto} chama {@link io.mohs.core.MohsLifecycle#start()} sozinho no boot; {@code manual} espera o consumidor chamar
+     * @param startMode {@code auto} calls {@link io.mohs.core.MohsLifecycle#start()} by itself at boot; {@code manual} waits for the consumer to call it
      */
     public record Lifecycle(
             @DefaultValue("auto") StartMode startMode,
@@ -90,16 +102,16 @@ public record MohsProperties(
         }
 
         /**
-         * @param gracePeriod quanto tempo o shutdown espera execuções em voo antes de interromper
+         * @param gracePeriod how long shutdown waits for in-flight executions before interrupting them
          */
         public record Shutdown(@DefaultValue("30s") Duration gracePeriod) {
         }
     }
 
     /**
-     * @param mode ADR-0008: {@code application} usa o relógio do sistema; {@code database} usa {@link io.mohs.store.jdbc.DatabaseClock} (banco é a autoridade de tempo do cluster)
-     * @param skewWarnThreshold só lido quando {@code mode} é {@code database} — limiar de WARN de {@link io.mohs.store.jdbc.DatabaseClock#sync()}
-     * @param syncInterval só lido quando {@code mode} é {@code database} — a cada quanto tempo reamostrar (ver Javadoc de {@link io.mohs.engine.SyncableClock}, que já nomeia esta propriedade)
+     * @param mode {@code application} uses the system clock; {@code database} uses {@link io.mohs.store.jdbc.DatabaseClock} (the database is the cluster's time authority)
+     * @param skewWarnThreshold only read when {@code mode} is {@code database} — the WARN threshold of {@link io.mohs.store.jdbc.DatabaseClock#sync()}
+     * @param syncInterval only read when {@code mode} is {@code database} — how often to resample (see {@link io.mohs.engine.SyncableClock}'s Javadoc, which already names this property)
      */
     public record Time(
             @DefaultValue("application") Mode mode,
@@ -112,27 +124,26 @@ public record MohsProperties(
     }
 
     /**
-     * @param onConflict ADR-0006: como {@link MohsJobScanner} resolve divergência definicional entre o código e o que já está no store
+     * @param onConflict how {@link MohsJobScanner} resolves definitional drift between the code and what is already in the store
      */
     public record Registration(@DefaultValue("override") OnConflict onConflict) {
 
         public enum OnConflict {
-            /** Código vence; toda mudança logada com diff (default). */
+            /** Code wins; every change is logged with a diff (the default). */
             OVERRIDE,
-            /** Store vence; versão do código ignorada com WARN. */
+            /** The store wins; the code's version is ignored with a WARN. */
             PRESERVE,
-            /** Divergência derruba o boot exibindo o diff. */
+            /** Drift brings the boot down, showing the diff. */
             FAIL
         }
     }
 
     /**
-     * ADR-0010: fechada por padrão ({@code enabled=false}) — ligar é ato
-     * consciente, sinalizado por WARN no boot em
-     * {@link MohsRestAutoConfiguration}.
+     * Closed by default ({@code enabled=false}) — turning it on is a conscious act, signalled by a
+     * WARN at boot in {@link MohsRestAutoConfiguration}.
      *
-     * @param enabled liga a API REST operacional
-     * @param basePath prefixo de toda rota de {@code io.mohs.rest}; default é a mesma constante {@link ApiPaths#V1} usada como fallback dos placeholders {@code ${mohs.api.base-path:...}} nos {@code @RequestMapping} (anotação não lê o binding — lá o placeholder é o único mecanismo; leitura em código usa este componente)
+     * @param enabled turns the operational REST API on
+     * @param basePath the prefix of every {@code io.mohs.rest} route; the default is the same {@link ApiPaths#V1} constant used as the fallback of the {@code ${mohs.api.base-path:...}} placeholders in the {@code @RequestMapping}s (an annotation cannot read the binding — there the placeholder is the only mechanism; code reads this component)
      */
     public record Api(
             @DefaultValue("false") boolean enabled,
@@ -140,28 +151,26 @@ public record MohsProperties(
     }
 
     /**
-     * Runner nomeado adicional aos built-in ({@code io}/{@code cpu},
-     * montados por {@link MohsAutoConfiguration} com os defaults do
-     * documento mestre) — um valor de {@link MohsProperties#runners()}
-     * (o próprio {@code Map}, sem embrulho: {@code mohs.runners.<nome>.mode}
-     * mais os campos do modo declarado, mesma forma de
-     * {@code docs/API-DESIGN.md} "Runners — especificação, nunca
-     * Executor"). Campo do modo errado é erro de boot na conversão pra
-     * {@code MohsRunner} ({@link MohsAutoConfiguration}) — mesma postura do
-     * próprio {@code MohsRunner}, que lança pra campo do modo errado.
+     * A named runner in addition to the built-in {@code io}/{@code cpu} (assembled by
+     * {@link MohsAutoConfiguration} with the documented defaults) — one value of
+     * {@link MohsProperties#runners()}, the {@code Map} itself with no wrapper:
+     * {@code mohs.runners.<name>.mode} plus the fields of the declared mode, the same shape as
+     * the rule "Runners — a specification, never an Executor". A field
+     * belonging to the wrong mode is a boot error during conversion to {@code MohsRunner}
+     * ({@link MohsAutoConfiguration}) — the same stance as {@code MohsRunner} itself, which throws
+     * for a wrong-mode field.
      *
-     * <p>O binder do Spring canonicaliza chave de mapa não-bracketed pra
-     * minúsculas: {@code mohs.runners.myUpload.*} registra o runner como
-     * {@code myupload}, e {@code JobDefinition.runner()} é case-sensitive.
-     * Prefira nomes minúsculos; pra preservar a caixa exata, use a forma
-     * bracketed ({@code mohs.runners.[myUpload].max=8}).
+     * <p>Spring's binder canonicalises a non-bracketed map key to lower case:
+     * {@code mohs.runners.myUpload.*} registers the runner as {@code myupload}, and
+     * {@code JobDefinition.runner()} is case-sensitive. Prefer lower-case names; to preserve exact
+     * case, use the bracketed form ({@code mohs.runners.[myUpload].max=8}).
      *
-     * @param mode {@code io} (default) ou {@code cpu} — decide quais dos demais campos se aplicam
-     * @param max {@link RunnerMode#IO} — default 64 se omitido (mesmo default de {@code MohsRunner.IoBuilder})
-     * @param coreSize {@link RunnerMode#CPU} — default núcleos disponíveis se omitido
-     * @param maxSize {@link RunnerMode#CPU} — teto de threads do pool
-     * @param queueCapacity {@link RunnerMode#CPU} — capacidade da fila do pool
-     * @param keepAlive {@link RunnerMode#CPU} — keep-alive das threads acima do core
+     * @param mode {@code io} (the default) or {@code cpu} — decides which of the other fields apply
+     * @param max {@link RunnerMode#IO} — defaults to 64 when omitted (the same default as {@code MohsRunner.IoBuilder})
+     * @param coreSize {@link RunnerMode#CPU} — defaults to the available processors when omitted
+     * @param maxSize {@link RunnerMode#CPU} — the pool's thread ceiling
+     * @param queueCapacity {@link RunnerMode#CPU} — the pool's queue capacity
+     * @param keepAlive {@link RunnerMode#CPU} — keep-alive for threads above the core size
      */
     public record Runner(
             @DefaultValue("io") RunnerMode mode,
@@ -173,13 +182,12 @@ public record MohsProperties(
     }
 
     /**
-     * Um valor de {@code mohs.rate-limits.<nome>} — ADR-0042. O nome é a
-     * chave do mapa (como em {@link #runners()}), então não se repete aqui.
-     * Ambos obrigatórios: um limite pela metade não tem valor default
-     * defensável — {@code max} sem {@code window} não é vazão.
+     * One value of {@code mohs.rate-limits.<name>}. The name is the map key (as in
+     * {@link #runners()}), so it is not repeated here. Both fields are mandatory: a half-specified
+     * limit has no defensible default — {@code max} without {@code window} is not a rate.
      *
-     * @param max disparos permitidos por janela, cluster-wide
-     * @param window janela sobre a qual {@code max} vale ({@code 1m}, {@code PT30S})
+     * @param max firings allowed per window, cluster-wide
+     * @param window the window {@code max} applies over ({@code 1m}, {@code PT30S})
      */
     public record RateLimitSpec(@Nullable Integer max, @Nullable Duration window) {
     }

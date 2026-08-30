@@ -8,16 +8,29 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { ACTIVITY_SERIES, useExecutionActivity, type ActivitySample } from "../lib/executionActivity";
+import { rateFormatter } from "../lib/format";
 import type { ExecutionState } from "../types/api";
 
 /**
- * Live work by state, in the same colors the badges use — a chart is a second encoding of the
- * same domain, so a RUNNING that is blue in the table and green here would be two vocabularies.
+ * The gauges keep the colors the badges use — a chart is a second encoding of the same domain, so
+ * a RUNNING that is blue in the table and green here would be two vocabularies.
+ *
+ * <p>The gauges say `· cluster` because the Overview tile beside this chart says `· this node`, and
+ * they are different numbers: measured under load, 59/64/61 cluster-wide against 55/57/59 on the
+ * node (ADR-0063 §6). Labelling only one of the two leaves the operator reading a divergence as a
+ * bug.
+ *
+ * <p>The rate takes a color of its OWN, outside the state palette, because it is not a state —
+ * there is no "Executions/s" badge to agree with. Borrowing one is a category error either way:
+ * the SUCCEEDED green would promise success from a series that counts failures as work, and the
+ * RUNNING blue would put two indistinguishable blues in one legend exactly under load, when both
+ * series are drawn.
  */
 const chartConfig = {
-  ENQUEUED: { label: "Enqueued", color: "var(--status-neutral)" },
-  RUNNING: { label: "Running", color: "var(--status-info)" },
-  RETRY_WAITING: { label: "Retry scheduled", color: "var(--status-warning)" },
+  ratePerSecond: { label: "Executions/s", color: "var(--metric-rate)" },
+  ENQUEUED: { label: "Enqueued · cluster", color: "var(--status-neutral)" },
+  RUNNING: { label: "Running · cluster", color: "var(--status-info)" },
+  RETRY_WAITING: { label: "Retry scheduled · cluster", color: "var(--status-warning)" },
 } satisfies ChartConfig;
 
 const timeFormatter = new Intl.DateTimeFormat("en", {
@@ -30,6 +43,10 @@ const timeFormatter = new Intl.DateTimeFormat("en", {
 /** Below two readings there is no line to draw — one point is a dot, not a trend. */
 const MIN_SAMPLES = 2;
 
+/** Two scales: a backlog runs to tens of thousands, a runner's concurrency is capped at 64. */
+const RATE_AXIS = "rate";
+const GAUGE_AXIS = "gauge";
+
 /**
  * Only the series that actually carry work in this window.
  *
@@ -38,17 +55,22 @@ const MIN_SAMPLES = 2;
  * rendered wins the color. On an idle backlog that reads as "retry scheduled: 410". Dropping the
  * empty series is what keeps each band's color meaning what the badges say it means.
  *
- * <p>All zero (idle engine) keeps all three: the lines overlap harmlessly on the baseline, and the
- * legend still says what this chart tracks instead of going blank.
+ * <p>No all-zero fallback: the rate series is always drawn, so the chart and its legend cannot go
+ * blank — and keeping the three empty gauges to avoid that would produce exactly the overlapping
+ * baseline this function exists to prevent.
  */
 function seriesWithWork(samples: ActivitySample[]): readonly ExecutionState[] {
-  const active = ACTIVITY_SERIES.filter((state) => samples.some((sample) => sample[state] > 0));
-  return active.length > 0 ? active : ACTIVITY_SERIES;
+  return ACTIVITY_SERIES.filter((state) => samples.some((sample) => sample[state] > 0));
 }
 
 /**
- * The live-work series pushed by `GET /overview/stream`, stacked so the top edge reads as total
- * work in flight while each band keeps its own magnitude.
+ * Activity over the last five minutes: the RATE on the left axis, the live gauges stacked on the
+ * right one.
+ *
+ * <p>The rate is the series that answers the question the panel is asked — "is anything
+ * happening"; the gauges alone could not, and ADR-0063 carries the measurement that says why. They
+ * stay because "how deep is the queue" is a real second question — on its own axis, because a
+ * backlog of 13k and a concurrency of 64 share no scale.
  *
  * <p>Deliberately NOT built from the stream's `executions` frame: that frame carries the 50 most
  * recent rows (`ORDER BY id DESC`, capped by the page size), not a time window — the span those
@@ -78,6 +100,10 @@ export function ExecutionActivityChart() {
     <ChartContainer config={chartConfig} className="aspect-auto h-[220px] w-full">
       <AreaChart accessibilityLayer data={samples} margin={{ left: 4, right: 12, top: 4 }}>
         <defs>
+          <linearGradient id="fill-ratePerSecond" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor="var(--color-ratePerSecond)" stopOpacity={0.5} />
+            <stop offset="95%" stopColor="var(--color-ratePerSecond)" stopOpacity={0.03} />
+          </linearGradient>
           {series.map((state) => (
             <linearGradient key={state} id={`fill-${state}`} x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor={`var(--color-${state})`} stopOpacity={0.7} />
@@ -85,7 +111,10 @@ export function ExecutionActivityChart() {
             </linearGradient>
           ))}
         </defs>
-        <CartesianGrid vertical={false} />
+        {/* Bound to the RATE axis: every cartesian child carries an implicit `yAxisId` of 0, so the
+            moment the two axes were named there was no axis 0 left for the grid to measure, and the
+            horizontal lines vanish without an error. */}
+        <CartesianGrid vertical={false} yAxisId={RATE_AXIS} />
         {/* Eixo de TEMPO, não de categoria: sem `type="number"` o recharts espaça os pontos
             igualmente por índice, e um stall do stream some: as leituras antes e depois do buraco
             ficariam lado a lado, com a mesma largura de dois pontos consecutivos, escondendo
@@ -102,10 +131,26 @@ export function ExecutionActivityChart() {
           tick={{ fill: "var(--muted-foreground)", fontSize: 11, fontFamily: "var(--font-mono)" }}
           tickFormatter={(at: number) => timeFormatter.format(at)}
         />
+        {/* Left axis: the rate. Decimals ON — a job every second is 1.0/s, and rounding that to an
+            integer is how a working system reads as idle. */}
         <YAxis
+          yAxisId={RATE_AXIS}
+          orientation="left"
           tickLine={false}
           axisLine={false}
-          width={32}
+          width={40}
+          domain={[0, (dataMax: number) => Math.max(dataMax * 1.2, 1)]}
+          tickFormatter={(value: number) => rateFormatter.format(value)}
+          tick={{ fill: "var(--muted-foreground)", fontSize: 11, fontFamily: "var(--font-mono)" }}
+        />
+        {/* Right axis: the gauges, on their OWN scale. A backlog of 13k and a concurrency of 64 on
+            one axis makes the second invisible; that is what the old single-axis stack did. */}
+        <YAxis
+          yAxisId={GAUGE_AXIS}
+          orientation="right"
+          tickLine={false}
+          axisLine={false}
+          width={36}
           allowDecimals={false}
           // An idle engine is the common case, and a [0,0] domain renders an axis with no ticks at
           // all — that reads as broken, not as at rest. The floor gives the baseline a scale to sit on.
@@ -117,9 +162,22 @@ export function ExecutionActivityChart() {
           content={<ChartTooltipContent indicator="dot" labelFormatter={(_, payload) =>
             timeFormatter.format(Number(payload?.[0]?.payload?.at))} />}
         />
+        {/* The rate first so it draws UNDER nothing — it is the headline series, and it must stay
+            readable when a backlog spike dwarfs it on the other axis. */}
+        <Area
+          yAxisId={RATE_AXIS}
+          dataKey="ratePerSecond"
+          type="monotone"
+          fill="url(#fill-ratePerSecond)"
+          stroke="var(--color-ratePerSecond)"
+          strokeWidth={2}
+          dot={false}
+          isAnimationActive={false}
+        />
         {series.map((state) => (
           <Area
             key={state}
+            yAxisId={GAUGE_AXIS}
             dataKey={state}
             type="monotone"
             stackId="live"

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import javax.sql.DataSource;
@@ -10,12 +25,10 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.testcontainers.mssqlserver.MSSQLServerContainer;
 
 /**
- * Container SQL Server compartilhado — mesmo desenho de {@link
- * PostgresTestSupport} (ADR-0023): singleton container, schema aplicado
- * uma vez só quando o container sobe. Isolamento por {@code DELETE}
- * (T-SQL proíbe {@code TRUNCATE} numa tabela referenciada por FK, mesmo
- * vazia na tabela filha — não é só uma checagem contornável como no
- * MySQL).
+ * A shared SQL Server container — the same design as {@link PostgresTestSupport}: a singleton container,
+ * with the schema applied only once when the container starts. Isolation through {@code DELETE} (T-SQL
+ * forbids {@code TRUNCATE} on a table referenced by a foreign key, even when the child table is empty —
+ * it is not merely a bypassable check as in MySQL).
  */
 final class SqlServerTestSupport {
 
@@ -38,7 +51,7 @@ final class SqlServerTestSupport {
         return dataSource;
     }
 
-    /** Limpa todas as tabelas — o schema já foi aplicado uma vez quando o container subiu. */
+    /** Clears every table — the schema was applied once, when the container started. */
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);

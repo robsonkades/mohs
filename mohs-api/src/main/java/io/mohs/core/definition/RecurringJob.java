@@ -1,5 +1,21 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.definition;
 
+import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -13,72 +29,72 @@ import io.mohs.core.resource.RateLimit;
 import io.mohs.core.schedule.Misfire;
 
 /**
- * Estereótipo de {@link MohsJob} para o job <b>automático</b> (ADR-0038):
- * agenda declarada, dispara sozinho, ocorrência sem payload — o handler
- * não pode exigir payload tipado (validação de boot; parâmetro
- * {@code Map}/{@code Object} é permitido: disparo automático entrega mapa
- * vazio, invocação manual avulsa pode entregar dados). Exige exatamente um
- * gatilho ({@link #cron()}+{@link #zone()}, {@link #every()} ou
- * {@link #everyAfterFinish()}) — job sem agenda é {@link OnDemandJob}.
+ * A {@link MohsJob} stereotype for the <b>automatic</b> job: a declared schedule, firing by itself,
+ * with an occurrence that carries no payload.
  *
- * <p>Meta-anotada com {@code @MohsJob} (o padrão
- * {@code @Service}/{@code @Component} do Spring): cada atributo é
- * {@link AliasFor} do correspondente na anotação geral, e o scanner
- * enxerga através do estereótipo — uma única tradução, nenhuma mecânica
- * própria. Invocação manual avulsa continua valendo
- * ({@code POST /schedule}, {@code Mohs.schedule}) — o estereótipo nomeia o
- * papel primário, não uma exclusividade.
+ * <p>The handler therefore cannot demand a typed payload (validated at boot); a {@code Map} or
+ * {@code Object} parameter is allowed, because an automatic firing delivers an empty map while a
+ * one-off manual invocation may carry data. Exactly one trigger is required
+ * ({@link #cron()} plus {@link #zone()}, {@link #every()}, or {@link #everyAfterFinish()}) — a job
+ * with no schedule is an {@link OnDemandJob}.
+ *
+ * <p>Meta-annotated with {@code @MohsJob} (Spring's {@code @Service}/{@code @Component} pattern):
+ * each attribute is an {@link AliasFor} of its counterpart on the general annotation, and the
+ * scanner sees through the stereotype — one translation, no mechanics of its own. One-off manual
+ * invocation still applies ({@code POST /schedule}, {@code Mohs.schedule}): the stereotype names
+ * the primary role, not an exclusivity.
  */
 @Target({ElementType.METHOD, ElementType.ANNOTATION_TYPE})
+@Documented
 @Retention(RetentionPolicy.RUNTIME)
 @MohsJob(id = "")
 public @interface RecurringJob {
 
-    /** Alias de {@link #id()} — a forma concisa {@code @RecurringJob("sync")} com os demais atributos nomeados. */
+    /** An alias of {@link #id()} — the concise form {@code @RecurringJob("sync")} with the remaining attributes named. */
     @AliasFor(annotation = MohsJob.class, attribute = "id")
     String value() default "";
 
-    /** Identidade estável — vira o {@code JobKey}; alias de {@link #value()}. Obrigatório (em branco falha o boot), upsert no boot. */
+    /** The stable identity — it becomes the {@code JobKey}; an alias of {@link #value()}. Mandatory (blank fails the boot), upserted at boot. */
     @AliasFor(annotation = MohsJob.class, attribute = "id")
     String id() default "";
 
-    /** Rótulo de exibição mutável. Default para o id quando deixado vazio. */
+    /** A mutable display label. Defaults to the id when left empty. */
     @AliasFor(annotation = MohsJob.class, attribute = "name")
     String name() default "";
 
-    /** Expressão cron estilo Quartz, seconds-first. Exige {@link #zone()}. */
+    /** A Quartz-style, seconds-first cron expression. Requires {@link #zone()}. */
     @AliasFor(annotation = MohsJob.class, attribute = "cron")
     String cron() default "";
 
-    /** Zone em que a expressão cron é avaliada. Obrigatório quando {@link #cron()} está definido. */
+    /** The zone the cron expression is evaluated in. Mandatory when {@link #cron()} is set. */
     @AliasFor(annotation = MohsJob.class, attribute = "zone")
     String zone() default "";
 
-    /** Intervalo fixed-rate (duração ISO-8601, ex. {@code "PT30S"}), ancorado no horário de disparo agendado. */
+    /** A fixed-rate interval (an ISO-8601 duration, e.g. {@code "PT30S"}), anchored to the scheduled firing time. */
     @AliasFor(annotation = MohsJob.class, attribute = "every")
     String every() default "";
 
-    /** Intervalo fixed-delay (duração ISO-8601), ancorado no fim da execução anterior. */
+    /** A fixed-delay interval (an ISO-8601 duration), anchored to the end of the previous execution. */
     @AliasFor(annotation = MohsJob.class, attribute = "everyAfterFinish")
     String everyAfterFinish() default "";
 
-    /** {@link MohsRunner} nomeado em que este job executa. */
+    /** The named {@link MohsRunner} this job runs on. */
     @AliasFor(annotation = MohsJob.class, attribute = "runner")
     String runner() default "";
 
-    /** {@link ExecutionWindow} nomeada que exclui horários de disparo. */
+    /** The named {@link ExecutionWindow} that excludes firing times. */
     @AliasFor(annotation = MohsJob.class, attribute = "window")
     String window() default "";
 
-    /** {@link RateLimit} nomeado que limita a vazão de disparos deste job, cluster-wide (ADR-0042). */
+    /** The named {@link RateLimit} bounding this job's firing rate, cluster-wide. */
     @AliasFor(annotation = MohsJob.class, attribute = "rateLimit")
     String rateLimit() default "";
 
-    /** Política de misfire. Default {@link Misfire#IGNORE}. */
+    /** The misfire policy. Defaults to {@link Misfire#IGNORE}. */
     @AliasFor(annotation = MohsJob.class, attribute = "misfire")
     Misfire misfire() default Misfire.IGNORE;
 
-    /** Nasce pausado no PRIMEIRO registro (ADR-0037) — ver {@link MohsJob#startPaused()}. */
+    /** Born paused on the FIRST registration — see {@link MohsJob#startPaused()}. */
     @AliasFor(annotation = MohsJob.class, attribute = "startPaused")
     boolean startPaused() default false;
 
@@ -90,15 +106,15 @@ public @interface RecurringJob {
     @AliasFor(annotation = MohsJob.class, attribute = "maxConcurrentExecutions")
     int maxConcurrentExecutions() default 0;
 
-    /** Ver {@link MohsJob#retries()} — o default 1 é o que torna a entrega at-least-once sob falha de nó. */
+    /** See {@link MohsJob#retries()} — the default of 1 is what makes delivery at-least-once under node failure. */
     @AliasFor(annotation = MohsJob.class, attribute = "retries")
     int retries() default 1;
 
-    /** Timeout da tentativa (duração ISO-8601, ex. {@code "PT5M"}). */
+    /** The attempt's timeout (an ISO-8601 duration, e.g. {@code "PT5M"}). */
     @AliasFor(annotation = MohsJob.class, attribute = "timeout")
     String timeout() default "";
 
-    /** Nome do bean de uma política de retry customizada, para casos que {@link #retries()} não expressa. */
+    /** The bean name of a custom retry policy, for cases {@link #retries()} cannot express. */
     @AliasFor(annotation = MohsJob.class, attribute = "retryPolicy")
     String retryPolicy() default "";
 }

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Instant;
@@ -8,17 +23,13 @@ import org.jspecify.annotations.Nullable;
 import io.mohs.core.EngineState;
 
 /**
- * Um node do cluster com o heartbeat mais recente conhecido (ADR-0012,
- * promovido a autoridade de liveness pela ADR-0051) — representação
- * interna de {@link NodeStore}; a forma pública é
- * {@code io.mohs.core.NodeSnapshot}, mapeada por {@code MohsImpl#nodes}
- * (e dela o REST deriva {@code io.mohs.rest.node.NodeResponse}).
+ * A cluster node with the most recent known heartbeat — the internal representation of
+ * {@link NodeStore}; the public form is {@code io.mohs.core.NodeSnapshot}, mapped by
+ * {@code MohsImpl#nodes} (from which REST derives {@code io.mohs.rest.node.NodeResponse}).
  *
- * <p>{@code epoch} é a encarnação do node (bump no próprio node quando ele
- * percebe o lease expirado — §11.2 do redesign); {@code expiresAt} é o
- * lease do NÓ, renovado pelo heartbeat — {@code null} só em linha gravada
- * por jar pré-Phase-4 (o reaper trata pela staleness do heartbeat,
- * ADR-0012).
+ * <p>{@code epoch} is the node's incarnation (bumped on the node itself when it notices its lease
+ * expired); {@code expiresAt} is the NODE's lease, renewed by the heartbeat — {@code null} only on
+ * a row written by an older jar (the reaper then falls back to the heartbeat's staleness).
  */
 public record StoredNode(String nodeId, EngineState state, Instant lastHeartbeatAt, long epoch,
         @Nullable Instant expiresAt) {

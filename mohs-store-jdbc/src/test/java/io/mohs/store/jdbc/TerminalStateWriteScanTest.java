@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.io.IOException;
@@ -13,46 +28,40 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Varredura de fonte que guarda um invariante da ADR-0043; mora neste módulo, e não no
- * {@code ArchitectureTest} de mohs-demo, porque varre {@code src/main/java} do módulo em
- * que roda — e todo SQL de escrita terminal no advisory {@code mohs_execution} está aqui
+ * A source scan guarding a batch invariant; it lives in this module, rather than in mohs-demo's
+ * {@code ArchitectureTest}, because it scans the {@code src/main/java} of the module it runs in — and all
+ * the SQL that writes a terminal state into the {@code mohs_execution} advisory is here
  * ({@code JdbcLeaseStore}, {@code JdbcWorkQueue}, {@code JdbcJobStore}).
  */
 class TerminalStateWriteScanTest {
 
-    /** Estados que encerram uma execução — escrevê-los é o gatilho da contagem de lote. O alvo é o advisory {@code mohs_execution} (a mesa antiga caiu no S5.4). */
+    /** The states that end an execution — writing one is the trigger for the batch count. The target is the {@code mohs_execution} advisory. */
     private static final Pattern TERMINAL_STATE_WRITE = Pattern.compile(
             "UPDATE\\s+mohs_execution\\s+SET\\s+state\\s*=\\s*(:state|'SUCCEEDED'|'FAILED'|'CANCELLED')");
 
-    /** O marcador que cada ponto de escrita terminal precisa carregar, com o porquê ao lado. */
+    /** The marker every terminal write site must carry, with the reason beside it. */
     private static final String BATCH_COUNTED_MARKER = "batch-counted:";
 
     /**
-     * A regra que a ADR-0043 precisava e não tinha: <b>quem escreve estado
-     * terminal em {@code mohs_execution} conta no lote</b>. Quatro caminhos
-     * violaram isso na implementação — reaper, cancelamento, aposentadoria de
-     * job e retry manual — e os três primeiros deixavam o lote aberto para
-     * sempre, sem erro e sem varredura de reconciliação que curasse (a ADR
-     * dispensou a varredura justamente sob a premissa de que todo caminho
-     * conta). Ver a errata da ADR-0043 e {@code docs/BATCH-ARCHITECTURE-REVIEW.md}.
+     * The rule the batch design needed and did not have: <b>whoever writes a terminal state into
+     * {@code mohs_execution} counts towards the batch</b>. Four paths violated that in the implementation
+     * — the reaper, cancellation, job retirement and manual retry — and the first three left the batch
+     * open forever, with no error and no reconciliation sweep to cure it (the design dispensed with the
+     * sweep precisely on the premise that every path counts).
      *
-     * <p>O erro que a produziu foi de fronteira: procurou-se "quem chama
-     * {@code complete()}" quando o que importa é "quem escreve estado
-     * terminal". Esta regra protege a classe inteira, não os quatro casos
-     * conhecidos — é o próximo caminho que nascer que ela existe para pegar.
+     * <p>The error that produced it was one of boundaries: the search was for "who calls
+     * {@code complete()}" when what matters is "who writes a terminal state". This rule protects the whole
+     * class, not the four known cases — it exists for the next path that gets written.
      *
-     * <p>Varredura de FONTE, não ArchUnit, e não por preguiça: o estado
-     * terminal vive em literal de SQL, e {@code ArchUnit não lê SQL} — a mesma
-     * lacuna que a regra {@code ids_are_generated_as_uuidv7_never_v4} do
-     * {@code ArchitectureTest} registra ao deixar metade daquele invariante em
-     * prosa. Aqui a metade que importa é justamente a do SQL, então a varredura
-     * é o único instrumento que enxerga o invariante.
+     * <p>A SOURCE scan, not ArchUnit, and not out of laziness: the terminal state lives in a SQL literal,
+     * and ArchUnit does not read SQL — the same gap {@code ArchitectureTest}'s
+     * {@code ids_are_generated_as_uuidv7_never_v4} rule records by leaving half of that invariant in
+     * prose. Here the half that matters is precisely the SQL one, so the scan is the only instrument that
+     * can see the invariant.
      *
-     * <p>Marcador em vez de allowlist de propósito: uma lista de caminhos
-     * aprovados envelhece em silêncio e não diz nada a quem lê o código. O
-     * comentário obrigatório fica ao lado da escrita, nomeia quem conta, e
-     * quem for adicionar um ponto novo é obrigado a responder a pergunta
-     * antes de o teste passar.
+     * <p>A marker rather than an allowlist, on purpose: a list of approved paths ages in silence and tells
+     * a reader nothing. The mandatory comment sits beside the write, names who counts, and anyone adding a
+     * new site is forced to answer the question before the test passes.
      */
     @Test
     void every_terminal_state_write_declares_how_the_batch_is_counted() throws IOException {
@@ -70,15 +79,15 @@ class TerminalStateWriteScanTest {
         }
 
         assertThat(unmarked)
-                .as("escritas de estado terminal em mohs_execution sem declarar a contagem de lote — "
-                        + "acrescente '// " + BATCH_COUNTED_MARKER + " <quem conta>' acima, na MESMA transação, "
-                        + "ou o lote desses membros nunca fecha (ADR-0043)")
+                .as("terminal-state writes to mohs_execution that do not declare the batch count — "
+                        + "add '// " + BATCH_COUNTED_MARKER + " <who counts>' above, in the SAME transaction, "
+                        + "or those members' batch never closes")
                 .isEmpty();
     }
 
     /**
-     * Janela curta e para trás: o marcador tem que estar colado na escrita para
-     * ser lido junto com ela. Longe demais, viraria carimbo que ninguém confere.
+     * A short window, looking backwards: the marker has to sit next to the write to be read along with it.
+     * Too far away and it becomes a stamp nobody checks.
      */
     private static boolean markedWithin(List<String> lines, int writeLine) {
         int firstLineToInspect = Math.max(0, writeLine - MARKER_LOOKBEHIND);

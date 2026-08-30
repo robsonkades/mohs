@@ -1,14 +1,30 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.resource;
 
 import java.time.Duration;
 import java.util.Objects;
 
 /**
- * Vazão máxima permitida sobre um recurso compartilhado numa janela de
- * tempo — cap cluster-wide, mas limitando taxa em vez de concorrência
- * simultânea. Bean define a estrutura, property ajusta os números
- * ({@code mohs.rate-limits.<nome>.max}/{@code .window}). Spec, nunca
- * limitador de fato — quem aplica é o motor (ADR-0042).
+ * The maximum throughput allowed over a shared resource within a time window — a cluster-wide cap,
+ * but bounding rate rather than simultaneous concurrency.
+ *
+ * <p>A bean defines the structure and a property adjusts the numbers
+ * ({@code mohs.rate-limits.<name>.max}/{@code .window}). This is a spec, never an actual limiter —
+ * the engine is what enforces it.
  */
 public record RateLimit(String name, int max, Duration window) {
 
@@ -18,16 +34,15 @@ public record RateLimit(String name, int max, Duration window) {
     }
 
     /**
-     * A regra de vazão isolada do nome, para quem valida antes de ter um
-     * ({@code PATCH /rate-limits/{name}} recebe o nome pelo path, não pelo
-     * corpo). Fonte única: o wire e o record aplicam ISTO, nunca duas
-     * cópias que divergem na terceira edição.
+     * The throughput rule isolated from the name, for callers that validate before having one
+     * ({@code PATCH /rate-limits/{name}} takes the name from the path, not the body). A single
+     * source: the wire and the record both enforce THIS, never two copies that diverge by the third
+     * edit.
      *
-     * <p>O teto de {@code max} pela janela em nanos é o que impede
-     * {@code window.dividedBy(max)} de truncar para zero: o intervalo de
-     * refill do balde (ADR-0042) precisa ser representável, e uma divisão
-     * por {@code Duration.ZERO} lá dentro derrubaria a rodada de claim
-     * INTEIRA — inclusive os jobs sem limite nenhum.
+     * <p>The ceiling on {@code max} relative to the window in nanoseconds is what stops
+     * {@code window.dividedBy(max)} from truncating to zero: the bucket's refill interval must be
+     * representable, and a division by {@code Duration.ZERO} in there would bring down the ENTIRE
+     * claim round — including jobs with no limit at all.
      */
     public static void requireRefillable(int max, Duration window) {
         if (max < 1) {

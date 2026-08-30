@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.lang.reflect.InvocationHandler;
@@ -89,7 +104,7 @@ class JdbcJobStoreTest {
         return JobDefinition.of(id, Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(max));
     }
 
-    /** JobDefinition.of (builder público) hardcoda PROGRAMMATIC — só o construtor canônico produz ANNOTATION. */
+    /** The public builder always stamps PROGRAMMATIC; only the canonical constructor yields ANNOTATION. */
     private static JobDefinition annotationSourcedDefinition(String id) {
         return new JobDefinition(JobKey.of(id), null, Handler.class, new OnDemandSpec(),
                 null, null, Misfire.IGNORE, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
@@ -108,7 +123,7 @@ class JdbcJobStoreTest {
         assertThat(stored.get().paused()).isFalse();
     }
 
-    /** ADR-0037: startPaused arma só o nascimento — o job nasce pausado e o trigger não é varrido até o resume. */
+    /** startPaused only arms at birth — the job is born paused and its trigger is not swept until the resume. */
     @Test
     void upsertCreatesAStartPausedJobBornPaused() {
         store.upsert(JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused()));
@@ -118,7 +133,7 @@ class JdbcJobStoreTest {
         assertThat(store.findDueRecurring(clock.instant(), 10)).isEmpty();
     }
 
-    /** Depois do nascimento, paused é do operador (ADR-0006) — redeploy com startPaused=true nunca re-pausa um job que o operador ligou. */
+    /** After birth, paused belongs to the operator — a redeploy with startPaused=true never re-pauses a job the operator turned on. */
     @Test
     void redeployNeverReappliesStartPaused() {
         JobDefinition definition = JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused());
@@ -130,7 +145,7 @@ class JdbcJobStoreTest {
         assertThat(store.find(JobKey.of("dormant")).orElseThrow().paused()).isFalse();
     }
 
-    /** O happy path completo da feature: nasce pausado → resume → o trigger armado no nascimento (agora envelhecido) fica devido — a política de misfire decide dali (ADR-0035). */
+    /** The feature's complete happy path: born paused, then resumed, and the trigger armed at birth (now aged) becomes due — the misfire policy decides from there. */
     @Test
     void resumedDormantJobBecomesDueWithItsBirthTrigger() {
         store.upsert(JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused()));
@@ -144,7 +159,7 @@ class JdbcJobStoreTest {
                 .containsExactly("dormant");
     }
 
-    /** "A linha é a memória" (review ADR-0037): soft-retire preserva a linha, então ressurreição via upsert NÃO re-aplica startPaused — paused volta como o operador o deixou. */
+    /** "The row is the memory": a soft retire preserves the row, so a resurrection through an upsert does NOT re-apply startPaused — paused comes back as the operator left it. */
     @Test
     void resurrectionAfterRetireKeepsTheOperatorPauseState() {
         JobDefinition definition = JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused());
@@ -220,7 +235,7 @@ class JdbcJobStoreTest {
         store.upsert(definition("welcome-email", new OnDemandSpec()));
         store.pause(key);
 
-        // redeploy: o código reaplica a mesma definição
+        // A redeploy: the code reapplies the same definition
         store.upsert(definition("welcome-email", new OnDemandSpec()));
 
         assertThat(store.find(key)).map(StoredJob::paused).contains(true);
@@ -241,7 +256,7 @@ class JdbcJobStoreTest {
         }
     }
 
-    /** Filtro por source aplicado no WHERE, não em memória — PROGRAMMATIC nunca sai do cursor. */
+    /** The source filter is applied in the WHERE, not in memory — PROGRAMMATIC never leaves the cursor. */
     @Test
     void findAllAnnotationSourcedExcludesProgrammaticJobs() {
         store.upsert(definition("programmatic-job", new OnDemandSpec()));
@@ -262,7 +277,7 @@ class JdbcJobStoreTest {
         assertThat(store.find(key)).map(StoredJob::orphaned).contains(true);
     }
 
-    /** orphaned é dedução do sistema, não decisão de operador como paused — reupsert (a anotação reapareceu) limpa. */
+    /** orphaned is inferred by the system, unlike paused, which an operator chose: a re-upsert means the annotation is back, so it clears. */
     @Test
     void upsertClearsOrphanedOnReupsert() {
         JobKey key = JobKey.of("welcome-email");
@@ -286,7 +301,7 @@ class JdbcJobStoreTest {
         assertThat(store.find(key)).map(StoredJob::paused).contains(false);
     }
 
-    /** História advisory (+ entrada de fila quando ainda pendente) — o caso normal de um job aposentado é ter execuções. */
+    /** Advisory history (plus a queue entry while still pending) — a retired job normally does have executions. */
     private void seedExecution(String id, String jobKey, String state, boolean queued) {
         JdbcTemplate raw = new JdbcTemplate(dataSource);
         raw.update("""
@@ -303,11 +318,10 @@ class JdbcJobStoreTest {
     }
 
     /**
-     * Soft-retire ({@code Mohs.remove}: "cancela fires futuros, preserva
-     * histórico"): a definição some das leituras, mas a linha fica — a
-     * história em {@code mohs_execution} continua apontando pra ela — e a
-     * FILA é drenada: o enfileirado vira {@code CANCELLED} no advisory e
-     * sai de {@code mohs_ready}; o terminal fica intacto.
+     * A soft retire ({@code Mohs.remove}: "cancels future firings, preserves history"): the definition
+     * disappears from the reads but the row remains — history in {@code mohs_execution} keeps pointing at
+     * it — and the QUEUE is drained: what was queued becomes {@code CANCELLED} in the advisory state and
+     * leaves {@code mohs_ready}; what was terminal stays intact.
      */
     @Test
     void removeRetiresTheJobDrainingTheQueueAndPreservingHistory() {
@@ -328,7 +342,7 @@ class JdbcJobStoreTest {
         assertThat(raw.queryForObject("SELECT COUNT(*) FROM mohs_ready", Integer.class)).isZero();
     }
 
-    /** Mesmo racional de {@link #upsertClearsOrphanedOnReupsert}: o upsert acontecer prova que uma fonte real quer o job de novo. */
+    /** The same rationale as {@link #upsertClearsOrphanedOnReupsert}: the upsert happening at all proves a real source wants the job again. */
     @Test
     void upsertAfterRemoveResurrectsTheDefinitionWithItsHistory() {
         JobKey key = JobKey.of("welcome-email");
@@ -343,7 +357,7 @@ class JdbcJobStoreTest {
         assertThat(raw.queryForObject("SELECT COUNT(*) FROM mohs_execution WHERE job_key = ?", Integer.class, "welcome-email")).isEqualTo(1);
     }
 
-    /** CONC-2 — dois nós vendo 0 linhas no UPDATE e disputando o INSERT de primeira vez. */
+    /** Two nodes seeing 0 rows from the UPDATE and racing for the first-time INSERT. */
     @Test
     void upsertHandlesConcurrentFirstTimeInsertWithoutThrowing() throws Exception {
         JobDefinition definitionToRegister = definition("welcome-email", new OnDemandSpec());
@@ -364,7 +378,7 @@ class JdbcJobStoreTest {
         assertThat(store.find(JobKey.of("welcome-email"))).map(StoredJob::definition).contains(definitionToRegister);
     }
 
-    /** ADR-D: o teto persiste na definição; a contagem de vagas ocupadas deriva de {@code mohs_lease} — nenhum contador na linha do job. */
+    /** The ceiling persists on the definition; the count of occupied slots derives from {@code mohs_lease} — no counter on the job's row. */
     @Test
     void upsertRoundTripsMaxConcurrentExecutions() {
         store.upsert(definitionWithCap("report-summary", 10));
@@ -376,8 +390,8 @@ class JdbcJobStoreTest {
 
     @Test
     void findSkipsRowsWhoseHandlerTypeNoLongerResolves() {
-        // simula um handler removido do código: insere a linha direto,
-        // sem passar pela store (que exige um Class<?> de verdade).
+        // Simulates a handler removed from the code: it inserts the row directly, without going through
+        // the store (which demands a real Class<?>).
         LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         rawJdbcTemplate.update("""
@@ -392,7 +406,7 @@ class JdbcJobStoreTest {
         }
     }
 
-    /** JAVA-4: schedule_type corrompido não pode virar ON_DEMAND em silêncio — mesmo espírito do DUP-3, um valor de lixo tem que ser barulhento, não uma variante válida por acidente. */
+    /** A corrupt schedule_type must not silently become ON_DEMAND — the same spirit as the unresolved-handler case: a garbage value has to be loud, not a valid variant by accident. */
     @Test
     void findFailsFastOnUnknownScheduleType() {
         LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
@@ -409,7 +423,7 @@ class JdbcJobStoreTest {
                 .hasMessageContaining("corrupt-schedule");
     }
 
-    /** DUP-3: uma linha com handler não resolvido se torna visível como ORPHANED em vez de simplesmente sumir dos dois lados (find/findAll). */
+    /** A row with an unresolved handler becomes visible as ORPHANED rather than simply vanishing from both sides (find and findAll). */
     @Test
     void findAllMarksRowsWithUnresolvedHandlerAsOrphaned() {
         LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
@@ -446,7 +460,7 @@ class JdbcJobStoreTest {
         assertThat(orphaned).isTrue();
     }
 
-    /** O estado do trigger (ADR-0035): quem arma/preserva/recalcula/cura o {@code next_fire_at} é o upsert; a leitura devida é {@code findDueRecurring}. */
+    /** The trigger's state: what arms, preserves, recomputes and cures {@code next_fire_at} is the upsert; the due read is {@code findDueRecurring}. */
     @Nested
     class TriggerState {
 
@@ -468,7 +482,7 @@ class JdbcJobStoreTest {
         void upsertArmsTheTriggerOfACronDefinition() {
             store.upsert(definition("welcome-email", new CronSpec("0 0 2 * * *", ZoneId.of("America/Sao_Paulo"))));
 
-            // base 2026-08-13T00:00Z = 12/08 21:00 em São Paulo → próximas 02:00 SP = 05:00Z de 13/08
+            // Base 2026-08-13T00:00Z is 12 August 21:00 in Sao Paulo, so the next 02:00 SP is 05:00Z on 13 August
             assertThat(nextFireAtOf("welcome-email")).isEqualTo(Instant.parse("2026-08-13T05:00:00Z"));
         }
 
@@ -486,7 +500,7 @@ class JdbcJobStoreTest {
             assertThat(nextFireAtOf("import-file")).isNull();
         }
 
-        /** Sem isto, todo redeploy de um job every-30min empurraria o disparo para sempre. */
+        /** Without this, every redeploy of an every-30-minutes job would push the firing forward forever. */
         @Test
         void upsertPreservesTheTriggerWhenTheScheduleIsUnchanged() {
             JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), false));
@@ -509,7 +523,7 @@ class JdbcJobStoreTest {
             assertThat(nextFireAtOf("poll")).isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
         }
 
-        /** Cura de coluna nova em base velha (pré-ADR-0035): agenda recorrente com next_fire_at NULL rearma no boot. */
+        /** Curing a new column on an old database: a recurring schedule with a NULL next_fire_at rearms at boot. */
         @Test
         void upsertHealsAnUnarmedRecurringTrigger() {
             JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), false));
@@ -521,13 +535,13 @@ class JdbcJobStoreTest {
             assertThat(nextFireAtOf("poll")).isEqualTo(clock.instant().plus(Duration.ofMinutes(5)));
         }
 
-        /** afterFinish com ocorrência viva do scheduler NÃO cura — armar criaria a sobreposição que fixed-delay promete não ter. */
+        /** afterFinish with a live scheduler occurrence does NOT cure — arming would create the overlap fixed-delay promises not to have. */
         @Test
         void upsertDoesNotHealAnAfterFinishChainWithALiveSchedulerOccurrence() {
             JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), true));
             store.upsert(definition);
             disarm("poll");
-            // §4.3: "viva" = advisory ainda PENDING (na fila, rodando ou em backoff)
+            // "Live" means the advisory is still PENDING (queued, running, or in backoff)
             seedExecution("occ-1", "poll", "scheduler", "PENDING");
 
             store.upsert(definition);
@@ -541,7 +555,7 @@ class JdbcJobStoreTest {
             store.upsert(definition);
             disarm("poll");
             seedExecution("occ-1", "poll", "scheduler", "SUCCEEDED");
-            seedExecution("man-1", "poll", "api:user", "PENDING"); // execução manual não é a corrente
+            seedExecution("man-1", "poll", "api:user", "PENDING"); // a manual execution is not the chain
 
             store.upsert(definition);
 
@@ -582,12 +596,10 @@ class JdbcJobStoreTest {
         }
 
         /**
-         * Review ADR-0035 (lost update): preservar é NÃO escrever a coluna.
-         * A corrida real (CAS de disparo/rearme entre o snapshot e o UPDATE
-         * do upsert) não é reproduzível em teste unitário — o que se pina é
-         * o mecanismo que a elimina: com agenda inalterada, {@code
-         * next_fire_at} fica FORA do statement, então não existe escrita
-         * capaz de regredir um avanço concorrente.
+         * Preserving means NOT writing the column. The real race (a firing or rearm CAS between the
+         * snapshot and the upsert's UPDATE) is not reproducible in a unit test — what is pinned is the
+         * mechanism that eliminates it: with an unchanged schedule, {@code next_fire_at} stays OUT of the
+         * statement, so no write exists that could regress a concurrent advance.
          */
         @Test
         void upsertOmitsTheTriggerColumnWhenPreserving() {
@@ -604,7 +616,7 @@ class JdbcJobStoreTest {
                     .noneMatch(sql -> sql.contains("next_fire_at"));
         }
 
-        /** O contraponto: mudança de agenda escreve a coluna — reconfiguração explícita vence disparo concorrente (ADR-0035). */
+        /** The counterpoint: a schedule change writes the column — an explicit reconfiguration beats a concurrent firing. */
         @Test
         void upsertWritesTheTriggerColumnWhenTheScheduleChanges() {
             store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
@@ -613,13 +625,13 @@ class JdbcJobStoreTest {
 
             spying.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(1), false)));
 
-            // o template já substituiu os parâmetros nomeados por ? quando o SQL chega no prepareStatement
+            // The template has already replaced the named parameters with ? by the time the SQL reaches prepareStatement
             assertThat(statements)
                     .filteredOn(sql -> sql.contains("UPDATE mohs_job_definitions"))
                     .anyMatch(sql -> sql.contains("next_fire_at = ?"));
         }
 
-        /** DataSource que grava o SQL de todo prepareStatement — pass-through no resto (mesma técnica de proxy de JdbcExecutionStoreTest). */
+        /** A DataSource that records the SQL of every prepareStatement — pass-through otherwise (the same proxy technique as JdbcExecutionStoreTest's). */
         private DataSource sqlRecordingDataSource(List<String> statements) {
             InvocationHandler onDataSource = (_, method, args) -> {
                 Object result = method.invoke(dataSource, args);
@@ -639,7 +651,7 @@ class JdbcJobStoreTest {
             return (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class}, onDataSource);
         }
 
-        /** ADR-0036: agenda nova e trigger recomputado aterrissam no MESMO UPDATE; políticas (retries etc.) intactas. */
+        /** The new schedule and the recomputed trigger land in the SAME UPDATE; policies (retries and so on) stay intact. */
         @Test
         void rescheduleSwapsTheScheduleAndRearmsTheTrigger() {
             store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
@@ -649,11 +661,11 @@ class JdbcJobStoreTest {
             assertThat(rescheduled).isTrue();
             StoredJob stored = store.find(JobKey.of("poll")).orElseThrow();
             assertThat(stored.definition().schedule()).isEqualTo(new IntervalSpec(Duration.ofMinutes(1), false));
-            assertThat(stored.definition().retries()).isEqualTo(3); // política não é agenda — intacta
+            assertThat(stored.definition().retries()).isEqualTo(3); // policy is not schedule — untouched
             assertThat(stored.nextFireAt()).isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
         }
 
-        /** Desligar a recorrência em runtime é um caso válido do mesmo endpoint (ADR-0036). */
+        /** Turning recurrence off at runtime is a valid case of the same endpoint. */
         @Test
         void rescheduleToOnDemandDisarmsTheTrigger() {
             store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
@@ -673,19 +685,19 @@ class JdbcJobStoreTest {
             assertThat(store.reschedule(JobKey.of("poll"), new OnDemandSpec())).isFalse();
         }
 
-        /** ADR-0036 × ADR-0035: corrente fixed-delay em voo (trigger desarmado) reagendada — a série nova vence; o rearme atrasado da conclusão no-opa no guard IS NULL. */
+        /** A fixed-delay chain in flight (its trigger disarmed) rescheduled — the new series wins; the completion's late rearm no-ops on the IS NULL guard. */
         @Test
         void rescheduleArmsTheNewSeriesAndTheLateCompletionRearmLoses() {
             store.upsert(definition("chain", new IntervalSpec(Duration.ofMinutes(5), true)));
-            disarm("chain"); // ocorrência em voo: next_fire_at = NULL, como o fire deixa
+            disarm("chain"); // An occurrence in flight: next_fire_at = NULL, as the firing leaves it
 
             store.reschedule(JobKey.of("chain"), new IntervalSpec(Duration.ofMinutes(1), true));
-            store.armNextFire(JobKey.of("chain"), clock.instant().plus(Duration.ofMinutes(5))); // conclusão chega atrasada
+            store.armNextFire(JobKey.of("chain"), clock.instant().plus(Duration.ofMinutes(5))); // the completion arrives late
 
             assertThat(nextFireAtOf("chain")).isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
         }
 
-        /** Cron irrealizável falha ANTES de qualquer escrita — a agenda antiga fica intacta. */
+        /** An unrealisable cron fails BEFORE any write — the old schedule stays intact. */
         @Test
         void rescheduleWithAnImpossibleCronFailsWithoutWriting() {
             store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
@@ -703,7 +715,7 @@ class JdbcJobStoreTest {
             Instant armedAt = nextFireAtOf("poll");
 
             store.armNextFire(JobKey.of("poll"), clock.instant().plus(Duration.ofHours(1)));
-            assertThat(nextFireAtOf("poll")).isEqualTo(armedAt); // já armado — guard IS NULL protege
+            assertThat(nextFireAtOf("poll")).isEqualTo(armedAt); // already armed — the IS NULL guard protects it
 
             disarm("poll");
             Instant rearmAt = clock.instant().plus(Duration.ofHours(1));
@@ -721,16 +733,15 @@ class JdbcJobStoreTest {
     }
 
     /**
-     * Aposentar o job cancela os pendentes, e cancelar é terminal: sem contar,
-     * o membro some do lote, pending nunca zera e o lote fica aberto para
-     * sempre — não há reconciliação que cure (ADR-0043). Em bloco por lote,
-     * não uma chamada por membro.
+     * Retiring the job cancels the pending ones, and cancelling is terminal: without counting, the member
+     * disappears from the batch, pending never reaches zero and the batch stays open forever — there is
+     * no reconciliation to cure it. Done in bulk per batch, not one call per member.
      */
     @Test
     void removeCountsCancelledBatchMembersIntoTheirBatch() {
         JdbcTemplate raw = new JdbcTemplate(dataSource);
         store.upsert(definition("welcome-email", new OnDemandSpec()));
-        new JdbcBatchStore(dataSource, clock).insert("b6", 3);
+        new JdbcBatchStore(dataSource, clock).insert("b6", "nightly", 3);
         seedExecution("m1", "welcome-email", "PENDING", true);
         seedExecution("m2", "welcome-email", "PENDING", true);
         seedExecution("m3", "welcome-email", "SUCCEEDED", false);
@@ -738,7 +749,7 @@ class JdbcJobStoreTest {
 
         store.remove(JobKey.of("welcome-email"));
 
-        // só os dois na fila foram cancelados agora; o SUCCEEDED já era terminal
+        // Only the two in the queue were cancelled now; the SUCCEEDED one was already terminal
         assertThat(raw.queryForObject("SELECT failed FROM mohs_batches WHERE id = ?", Integer.class, "b6"))
                 .isEqualTo(2);
     }

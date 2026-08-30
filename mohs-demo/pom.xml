@@ -16,8 +16,8 @@
     <description>Aplicativo de desenvolvimento: sobe o Mohs pelo mesmo caminho de auto-configuration que um consumidor real usa.</description>
 
     <properties>
-        <!-- Aplicativo de referência, não biblioteca: nunca publicado. -->
         <maven.deploy.skip>true</maven.deploy.skip>
+        <skipPublishing>true</skipPublishing>
     </properties>
 
     <dependencies>
@@ -29,8 +29,6 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
-        <!-- O dashboard: um jar só de recurso. MohsUiAutoConfiguration liga por
-             @ConditionalOnResource sobre o bundle, então declarar aqui é o que o faz existir. -->
         <dependency>
             <groupId>io.mohs</groupId>
             <artifactId>mohs-ui</artifactId>
@@ -65,10 +63,6 @@
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
         </dependency>
-
-        <!-- ArchitectureTest mora aqui: este é o único módulo que tem core, engine, jdbc,
-             rest, test kit e autoconfigure num classpath só — é onde as regras de fronteira
-             conseguem enxergar o que estão guardando. -->
         <dependency>
             <groupId>io.mohs</groupId>
             <artifactId>mohs-test</artifactId>

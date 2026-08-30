@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs;
 
 import java.io.IOException;
@@ -17,17 +32,19 @@ import org.springframework.boot.test.context.SpringBootTest;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * O caminho feliz do dashboard, servido de verdade. Mora aqui e não no starter porque este é o
- * único módulo que declara {@code mohs-ui} — sem o jar, o {@code @ConditionalOnResource} de
- * {@code MohsUiAutoConfiguration} não liga, e lá só dá para provar a ausência.
+ * The dashboard's happy path, actually served.
  *
- * <p>Cobre o que a verificação manual cobria e o CI não: que o bundle construído pelo Vite chega
- * ao classpath com o nome que o resource handler procura. Mover {@code /mohs-ui-webapp} de lugar,
- * ou o mount de path, deixa de ser algo que só quebra em produção.
+ * <p>It lives here rather than in the starter because this is the only module that declares
+ * {@code mohs-ui}: without the jar, {@code MohsUiAutoConfiguration}'s {@code @ConditionalOnResource}
+ * never activates, and over there only its ABSENCE can be proven.
  *
- * <p>{@code HttpClient} do JDK em vez de {@code TestRestTemplate}: aquele exige
- * {@code spring-boot-restclient} no classpath de teste, e uma dependência a mais não se paga para
- * três GETs sem corpo.
+ * <p>It covers what manual verification covered and CI did not: that the bundle Vite builds reaches
+ * the classpath under the name the resource handler looks for. Moving {@code /mohs-ui-webapp}, or
+ * the path it is mounted at, stops being something that only breaks in production.
+ *
+ * <p>The JDK's {@code HttpClient} rather than {@code TestRestTemplate}: the latter needs
+ * {@code spring-boot-restclient} on the test classpath, and one more dependency does not pay for
+ * three body-less GETs.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "mohs.jdbc.dialect=h2",
@@ -36,10 +53,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 class MohsUiIntegrationTest {
 
-    /** O marcador que o {@code index.html} do Vite sempre carrega — é a raiz onde o React monta. */
+    /** The marker every Vite {@code index.html} carries — the root React mounts into. */
     private static final String INDEX_MARKER = "<div id=\"root\"></div>";
 
-    /** O hash muda a cada build, então o asset é descoberto a partir do próprio index. */
+    /** The hash changes on every build, so the asset is discovered from the index itself. */
     private static final Pattern ASSET = Pattern.compile("/mohs-ui/assets/[A-Za-z0-9._-]+\\.(?:js|css)");
 
     @Value("${local.server.port}")
@@ -60,23 +77,23 @@ class MohsUiIntegrationTest {
     }
 
     /**
-     * O mount pelado, que depende do {@code forward:} — exatamente o caminho que quebrava com 500
-     * antes da correção em {@code MohsJobScanner} (ver errata da ADR-0045).
+     * The bare mount, which depends on the {@code forward:} — exactly the path that used to fail
+     * with a 500 before the fix in {@code MohsJobScanner}.
      */
     @Test
     void dashboardIndexIsServedAtTheBareMount() throws Exception {
         assertIndexServedAt("/mohs-ui");
     }
 
-    /** Rota de cliente: não é asset, então o fallback do resolver tem que devolver o index. */
+    /** A client-side route is not an asset, so the resolver's fallback has to return the index. */
     @Test
     void clientSideRouteFallsBackToTheIndex() throws Exception {
         assertIndexServedAt("/mohs-ui/jobs");
     }
 
     /**
-     * Os assets que o próprio index referencia — é o que prova que o bundle inteiro chegou ao
-     * classpath, não só o {@code index.html}.
+     * The assets the index itself references — which is what proves the whole bundle reached the
+     * classpath, not just {@code index.html}.
      */
     @Test
     void hashedAssetsReferencedByTheIndexAreServed() throws Exception {

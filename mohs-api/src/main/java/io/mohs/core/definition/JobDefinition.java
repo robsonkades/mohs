@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.definition;
 
 import java.time.Duration;
@@ -12,32 +27,29 @@ import io.mohs.core.schedule.Schedule;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Um job, definido uma vez: handler, agenda e políticas. Invocado de N
- * formas (cron, {@link Mohs#schedule}, {@link Mohs#batch}, o dashboard) —
- * nenhuma delas redefine política (ver
- * {@code docs/adr/0002-definition-vs-invocation.md}).
+ * A job, defined once: handler, schedule and policies. It is invoked in N ways (cron,
+ * {@link Mohs#schedule}, {@link Mohs#batch}, the dashboard) — and none of them redefines policy.
  *
- * <p>Use {@link #of(String, Class, Consumer)} para montar uma
- * programaticamente (agendas dinâmicas, orientadas a dados — ex.: registro
- * por tenant). Num app Spring típico você não chama isso diretamente: o
- * starter traduz cada método anotado com {@link MohsJob @MohsJob} em
- * exatamente uma destas no boot.
+ * <p>Use {@link #of(String, Class, Consumer)} to build one programmatically (dynamic, data-driven
+ * schedules — per-tenant registration, for instance). In a typical Spring application you do not
+ * call that directly: the starter translates each method annotated with {@link MohsJob @MohsJob}
+ * into exactly one of these at boot.
  *
- * @param key identidade estável do job — chave de upsert, nunca muda entre redeploys do mesmo job
- * @param name rótulo legível opcional, sem papel na identidade nem na agenda
- * @param handlerType classe que processa cada execução deste job
- * @param schedule quando o job dispara — {@code CronSpec}/{@code IntervalSpec}/{@code OnDemandSpec}
- * @param runner nome do {@code MohsRunner} que executa as invocações; {@code null} usa o runner default
- * @param window nome da {@code ExecutionWindow} que restringe quando o job pode rodar; {@code null} = sem restrição
- * @param rateLimit nome do {@code RateLimit} que limita a vazão de disparos deste job, cluster-wide (ADR-0042); {@code null} = sem limite
- * @param misfire política aplicada quando um disparo é perdido
- * @param startPaused nasce pausado no PRIMEIRO registro da definição (ADR-0037) — a agenda fica declarada e desarmada até um {@code resume}; depois do nascimento, {@code paused} é decisão de operador e redeploy nunca re-pausa
- * @param allowConcurrentExecutions se {@code true}, sem teto de execuções concorrentes deste job — {@code maxConcurrentExecutions} deve ser {@code 0}
- * @param maxConcurrentExecutions teto de execuções concorrentes quando {@code allowConcurrentExecutions} é {@code false} — pelo menos {@code 1}
- * @param retries número de tentativas adicionais após a primeira falha
- * @param timeout prazo máximo por tentativa; {@code null} = sem timeout próprio (o Watchdog Bound cluster-wide, se configurado, ainda se aplica)
- * @param retryPolicy nome do bean Spring de uma política de retry customizada, para casos que {@code retries} não expressa; {@code null} usa a política default
- * @param source {@code ANNOTATION} (via {@link MohsJob}) ou {@code PROGRAMMATIC} (via {@link #of})
+ * @param key the job's stable identity — the upsert key, which never changes across redeploys of the same job
+ * @param name an optional human-readable label, with no role in identity or scheduling
+ * @param handlerType the class that processes each execution of this job
+ * @param schedule when the job fires — {@code CronSpec}/{@code IntervalSpec}/{@code OnDemandSpec}
+ * @param runner the name of the {@code MohsRunner} that runs the invocations; {@code null} uses the default runner
+ * @param window the name of the {@code ExecutionWindow} restricting when the job may run; {@code null} means unrestricted
+ * @param rateLimit the name of the {@code RateLimit} bounding this job's firing rate cluster-wide; {@code null} means no limit
+ * @param misfire the policy applied when a firing is missed
+ * @param startPaused born paused on the FIRST registration of the definition — the schedule is declared but disarmed until a {@code resume}; after birth, {@code paused} is an operator decision and a redeploy never re-pauses
+ * @param allowConcurrentExecutions when {@code true}, there is no ceiling on concurrent executions of this job — {@code maxConcurrentExecutions} must then be {@code 0}
+ * @param maxConcurrentExecutions the ceiling on concurrent executions when {@code allowConcurrentExecutions} is {@code false} — at least {@code 1}
+ * @param retries the number of attempts beyond the first failure
+ * @param timeout the maximum time per attempt; {@code null} means no timeout of its own (the cluster-wide Watchdog Bound, if configured, still applies)
+ * @param retryPolicy the name of a Spring bean holding a custom retry policy, for cases {@code retries} cannot express; {@code null} uses the default policy
+ * @param source {@code ANNOTATION} (through {@link MohsJob}) or {@code PROGRAMMATIC} (through {@link #of})
  */
 public record JobDefinition(
         JobKey key,
@@ -56,7 +68,8 @@ public record JobDefinition(
         @Nullable String retryPolicy,
         DefinitionSource source) {
 
-    /** Assinatura pré-ADR-0037 — {@code startPaused = false} (job nasce armado) e {@code rateLimit = null} (sem limite de vazão). */
+    /** The earlier signature — {@code startPaused = false} (the job is born armed) and {@code rateLimit = null} (no rate limit). */
+    @Deprecated(since = "0.1", forRemoval = true)
     public JobDefinition(JobKey key, @Nullable String name, Class<?> handlerType, Schedule schedule,
             @Nullable String runner, @Nullable String window, Misfire misfire, boolean allowConcurrentExecutions,
             int maxConcurrentExecutions, int retries, @Nullable Duration timeout, @Nullable String retryPolicy,
@@ -97,9 +110,8 @@ public record JobDefinition(
     }
 
     /**
-     * Monta uma definição {@code PROGRAMMATIC} via o builder staged
-     * {@link JobSpec}, ex. {@code JobDefinition.of("id", Handler.class, spec ->
-     * spec.cron(expr, zone).runner("io"))}.
+     * Builds a {@code PROGRAMMATIC} definition through the staged {@link JobSpec} builder, e.g.
+     * {@code JobDefinition.of("id", Handler.class, spec -> spec.cron(expr, zone).runner("io"))}.
      */
     public static JobDefinition of(String id, Class<?> handlerType, Consumer<JobSpec> configurer) {
         Objects.requireNonNull(id, "id");

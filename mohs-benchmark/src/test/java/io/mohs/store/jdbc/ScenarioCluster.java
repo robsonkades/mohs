@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Clock;
@@ -19,6 +34,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import tools.jackson.databind.json.JsonMapper;
 
 import io.github.robsonkades.uuidv7.UUIDv7;
+import io.mohs.store.jdbc.dialect.JdbcDialect;
 import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.mohs.core.definition.JobDefinition;
@@ -44,54 +60,55 @@ import io.mohs.engine.Shards;
 import io.mohs.engine.WorkQueue;
 
 /**
- * Um cluster de N nós dentro de UMA JVM, contra o Postgres real do
- * container: cada {@link Engine} tem seu próprio {@code nodeId}, epoch,
- * lease e loop de tick — do ponto de vista do banco são N nós, e é o banco
- * que arbitra claim, posse e sharding. É a fidelidade que os cenários de
- * corretude precisam, e a que os scripts de bancada
- * ({@code chaos-recovery.ps1}) não dão de graça: aqui o teste observa o
- * que cada handler viu, em memória, sem inferir do log.
+ * A cluster of N nodes inside ONE JVM, against a real database in a container — PostgreSQL by
+ * default, or whatever {@link ScenarioBackend} the run selected.
  *
- * <p>A fiação é a de {@code MohsAutoConfiguration} — group commit ligado
- * nos mesmos 256/5ms, executor de eventos no mesmo teto de 16, ordem de
- * shutdown igual (engine para, batcher drena depois). Isso não é zelo: um
- * veredito de perda de trabalho tirado numa fiação que ninguém roda em
- * produção não vale como evidência de release.
+ * <p>Each {@link Engine} has its own {@code nodeId}, epoch, lease and tick loop — from the
+ * database's point of view they are N nodes, and it is the database that arbitrates claim,
+ * ownership and sharding. That is the fidelity correctness scenarios need, and the one the bench
+ * scripts ({@code chaos-recovery.ps1}) do not give for free: here the test observes what each
+ * handler saw, in memory, without inferring it from logs.
  *
- * <p>As DUAS divergências que restam, declaradas:
+ * <p>The wiring matches {@code MohsAutoConfiguration} — group commit on with the same 256/5ms,
+ * event executor at the same ceiling of 16, the same shutdown order (engine stops, batcher drains
+ * afterwards). That is not fussiness: a verdict about lost work drawn from a wiring nobody runs in
+ * production is not admissible as release evidence.
+ *
+ * <p>The TWO remaining divergences, declared:
  * <ul>
- *   <li><b>Morte de processo</b> (kill −9, freeze) não é expressável — um
- *       nó aqui morre com {@code stop()}, não com o carrier arrancado
- *       debaixo dele. Fica com {@code chaos-recovery.ps1}, que existe
- *       justamente por isso.</li>
- *   <li><b>Sem pool de conexões</b>: {@code PostgresTestSupport} entrega
- *       um {@code PGSimpleDataSource}, então cada statement paga TCP +
- *       auth. Toda latência e vazão que estes cenários imprimem é de
- *       diagnóstico, NUNCA número de release — produção usa HikariCP com
- *       {@code maximumPoolSize} 100+, e é o BASELINE.md que fala de
- *       desempenho.</li>
+ *   <li><b>Process death</b> (kill -9, freeze) is not expressible — a node here dies through
+ *       {@code stop()}, not with the carrier ripped out from under it. That stays with
+ *       {@code chaos-recovery.ps1}, which exists for exactly this reason.</li>
+ *   <li><b>No connection pool</b>: {@code PostgresTestSupport} hands out a
+ *       {@code PGSimpleDataSource}, so every statement pays TCP + auth. Every latency and
+ *       throughput figure these scenarios print is diagnostic, NEVER a release number — production
+ *       uses HikariCP with {@code maximumPoolSize} 100+, and the recorded baseline is what speaks
+ *       about performance.</li>
  * </ul>
  */
 final class ScenarioCluster implements AutoCloseable {
 
-    /** Um único offer de 100k estouraria o limite de parâmetros do driver. */
+    /** A single offer of 100k would blow past the driver's parameter limit. */
     private static final int OFFER_BATCH_SIZE = 1_000;
 
+    /** How often {@link #awaitUntil} re-reads the database while waiting. */
+    private static final Duration POLL_INTERVAL = Duration.ofMillis(50);
+
     /**
-     * A razão entre dispatch e publicação de eventos que os defaults de
-     * produção codificam (64 de dispatch para 16 de eventos). Segurar o
-     * LITERAL 16 com um dispatch maior seria rodar a fiação que
-     * PERFORMANCE.md desaconselha — e {@code ExecutionEventPublisher}
-     * DESCARTA o evento quando satura (entrega é best-effort por contrato),
-     * então a bancada ficaria vermelha por tuning dela, não por defeito do
-     * produto.
+     * The dispatch-to-event-publication ratio the production defaults encode (64 dispatch to 16
+     * events).
+     *
+     * <p>Holding the LITERAL 16 with a larger dispatch would mean running the wiring PERFORMANCE.md
+     * advises against — and {@code ExecutionEventPublisher} DROPS the event when it saturates,
+     * delivery being best-effort by contract, so the bench would go red because of its own tuning
+     * rather than a defect in the product.
      */
     private static final int DISPATCH_TO_EVENT_RATIO = 4;
 
     /**
-     * Um nó: o engine, o registro de handlers que só ele enxerga (é o que
-     * faz rolling update com handler ausente ser expressável) e os recursos
-     * que o nó é dono e precisa devolver no {@code close}.
+     * One node: the engine, the handler registry only it can see (which is what makes a rolling
+     * update with a missing handler expressible) and the resources the node owns and must return
+     * on {@code close}.
      */
     record Node(Engine engine, HandlerRegistry handlers, RunnerRegistry runners, CompletionBatcher batcher,
             SimpleAsyncTaskExecutor events, List<ExecutionListener> listeners) {
@@ -100,6 +117,7 @@ final class ScenarioCluster implements AutoCloseable {
     private final DataSource dataSource;
     private final Clock clock;
     private final JdbcTemplate jdbcTemplate;
+    private final JdbcDialect dialect;
     private final JdbcJobStore jobStore;
     private final JdbcHistoryStore historyStore;
     private final JdbcWorkQueue workQueue;
@@ -109,11 +127,16 @@ final class ScenarioCluster implements AutoCloseable {
     private final JdbcBatchStore batchStore;
     private final List<Node> nodes = new ArrayList<>();
 
+    /** The reference dialect — the shape every scenario had hardcoded before there was a choice. */
     ScenarioCluster(DataSource dataSource, Clock clock) {
+        this(dataSource, clock, new PostgresJdbcDialect());
+    }
+
+    ScenarioCluster(DataSource dataSource, Clock clock, JdbcDialect dialect) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.jdbcTemplate = new JdbcTemplate(dataSource);
-        PostgresJdbcDialect dialect = new PostgresJdbcDialect();
+        this.dialect = Objects.requireNonNull(dialect, "dialect");
         this.batchStore = new JdbcBatchStore(dataSource, clock);
         this.jobStore = new JdbcJobStore(dataSource, clock);
         this.historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), dialect);
@@ -143,46 +166,43 @@ final class ScenarioCluster implements AutoCloseable {
         return List.copyOf(nodes);
     }
 
-    /** Registra a definição de um job on-demand; {@code policy} recebe a spec para apontar runner, limite ou cap. */
+    /** Registers an on-demand job definition; {@code policy} receives the spec to point at a runner, a limit or a cap. */
     void defineJob(String jobKey, Consumer<PolicySpec> policy) {
         jobStore.upsert(JobDefinition.of(jobKey, ScenarioCluster.class, spec -> policy.accept(spec.onDemand())));
     }
 
     /**
-     * Um job RECORRENTE — o que faz a materialização de trigger (§5.2) entrar
-     * no cenário, e com ela a corrida entre nós pela mesma ocorrência.
-     * {@code retries(0)} declarado pela mesma disciplina dos demais: o
-     * orçamento não é variável deste experimento (o retry reencarna a MESMA
-     * linha de {@code mohs_execution}, então nem mudaria as contagens), e
-     * declarar impede que a próxima revisão de default mexa no que a bancada
-     * mede sem ninguém decidir.
+     * A RECURRING job — what brings trigger materialisation into the scenario, and with it the race
+     * between nodes over the same occurrence.
+     *
+     * <p>{@code retries(0)} is declared out of the same discipline as elsewhere: the budget is not
+     * this experiment's variable (a retry reincarnates the SAME {@code mohs_execution} row, so it
+     * would not even change the counts), and declaring it stops a future revision of the default
+     * from moving what the bench measures without anyone deciding to.
      */
     void defineRecurring(String jobKey, Duration every) {
         jobStore.upsert(JobDefinition.of(jobKey, ScenarioCluster.class, spec -> spec.every(every).retries(0)));
     }
 
     /**
-     * Um nó novo, ainda parado. O {@code handlers} nasce vazio: quem chama
-     * registra só o que ESTE nó sabe fazer — dois nós com registros
-     * diferentes é literalmente o rolling update do S9.
+     * A new node, still stopped. {@code handlers} starts empty: the caller registers only what THIS
+     * node knows how to do — two nodes with different registries is literally the rolling update.
      */
     Node addNode(EngineSettings settings, List<ExecutionListener> listeners) {
         HandlerRegistry handlers = new HandlerRegistry();
         EngineMetrics metrics = new EngineMetrics(new SimpleMeterRegistry());
         RunnerRegistry runners = new RunnerRegistry(
                 List.of(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(settings.dispatchConcurrency()).build()));
-        // group commit LIGADO, com os mesmos N/T de MohsAutoConfiguration: sem
-        // ele a conclusão vira síncrona, `Dispatcher#completionInTransit`
-        // devolve false constante (uma das TRÊS guardas de
-        // `Engine#reconcileOwnStrayLeases`) e a janela "conclusão commitada ×
-        // lease liberada" — a do incidente do S5.5 — deixa de existir. Um
-        // veredito de perda no shutdown tirado sem isto seria sobre uma
-        // fiação que nenhum cliente roda.
+        // Group commit ON, with the same N/T as MohsAutoConfiguration: without it completion becomes
+        // synchronous, `Dispatcher#completionInTransit` returns a constant false (one of the THREE
+        // guards in `Engine#reconcileOwnStrayLeases`) and the "completion committed x lease
+        // released" window — the one from the incident — ceases to exist. A shutdown-loss verdict
+        // drawn without this would be about a wiring no client runs.
         CompletionBatcher batcher = new CompletionBatcher(leaseStore, jobStore, 256, Duration.ofMillis(5));
         batcher.start();
-        // eventos escalam COM o dispatch (PERFORMANCE.md: "sob vazão alta, 16 vira
-        // fila; suba junto com o dispatch") — o default de produção é a razão
-        // 4:1 de 64/16, não o literal 16
+        // Events scale WITH dispatch (PERFORMANCE.md: "under high throughput, 16 becomes a queue;
+        // raise it along with dispatch") — the production default is the 4:1 ratio of 64/16, not
+        // the literal 16
         SimpleAsyncTaskExecutor events = MohsExecutors.ioBoundExecutor("mohs-events-scenario",
                 Math.max(1, settings.dispatchConcurrency() / DISPATCH_TO_EVENT_RATIO));
         Dispatcher dispatcher = new Dispatcher(leaseStore, jobStore, handlers, clock, List.of(), listeners,
@@ -196,17 +216,16 @@ final class ScenarioCluster implements AutoCloseable {
     }
 
     /**
-     * A fachada pública ligada a ESTE nó — o caminho de escrita que uma
-     * aplicação real usa ({@code Mohs.batch}, {@code Mohs.schedule}), com o
-     * hand-off local apontando para o loop dele. Cenário que semeia por
-     * {@link #seedReady} mede o motor; este mede o motor MAIS o caminho de
-     * entrada, que é onde o lote nasce.
+     * The public facade bound to THIS node — the write path a real application uses
+     * ({@code Mohs.batch}, {@code Mohs.schedule}), with the local hand-off pointing at its loop.
+     *
+     * <p>A scenario seeding through {@link #seedReady} measures the engine; this one measures the
+     * engine PLUS the entry path, which is where a batch is born.
      */
     MohsImpl facadeFor(Node node, BatchCompletionCallbacks callbacks) {
-        // BatchCompletionCallbacks É um ExecutionListener: fora da lista de
-        // listeners do nó ele nunca é notificado, e um onCompletion que
-        // silenciosamente nunca dispara faria a bancada reportar um defeito
-        // que não existe. Falhar aqui é mais barato que a investigação.
+        // BatchCompletionCallbacks IS an ExecutionListener: left out of the node's listener list it
+        // is never notified, and an onCompletion that silently never fires would make the bench
+        // report a defect that does not exist. Failing here is cheaper than the investigation.
         if (!node.listeners().contains(callbacks)) {
             throw new IllegalArgumentException("callbacks must have been passed to addNode(...) as a listener — "
                     + "BatchCompletionCallbacks is an ExecutionListener, and outside the node's listener list "
@@ -217,7 +236,7 @@ final class ScenarioCluster implements AutoCloseable {
                 callbacks, node.runners(), node.engine()::signalWorkScheduled);
     }
 
-    /** Registra o mesmo handler em todos os nós já criados. */
+    /** Registers the same handler on every node created so far. */
     void registerEverywhere(String jobKey, JobHandler handler) {
         nodes.forEach(node -> node.handlers().register(JobKey.of(jobKey), handler));
     }
@@ -227,10 +246,9 @@ final class ScenarioCluster implements AutoCloseable {
     }
 
     /**
-     * Semeia {@code count} execuções prontas do job — a unidade de enqueue
-     * do §7.5-1 (linha de história + entrada na fila), com o shard DERIVADO
-     * do id como todo escritor real faz: semear tudo no shard 0 mediria um
-     * cluster que não existe.
+     * Seeds {@code count} ready executions of the job — the enqueue unit (a history row plus a
+     * queue entry), with the shard DERIVED from the id as every real writer does: seeding
+     * everything into shard 0 would measure a cluster that does not exist.
      */
     List<ExecutionId> seedReady(String jobKey, int count, int priority) {
         JobKey key = JobKey.of(jobKey);
@@ -253,7 +271,7 @@ final class ScenarioCluster implements AutoCloseable {
         return ids;
     }
 
-    /** Espera até a condição valer ou o teto estourar; devolve se valeu (o cenário decide se isso é falha). */
+    /** Waits until the condition holds or the ceiling expires; returns whether it held (the scenario decides whether that is a failure). */
     static boolean awaitUntil(Duration timeout, BooleanSupplier condition) {
         long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
@@ -261,7 +279,7 @@ final class ScenarioCluster implements AutoCloseable {
                 return true;
             }
             try {
-                Thread.sleep(50);
+                Thread.sleep(POLL_INTERVAL);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("scenario interrupted while waiting", e);
@@ -270,9 +288,38 @@ final class ScenarioCluster implements AutoCloseable {
         return condition.getAsBoolean();
     }
 
-    /** A fila e a posse vazias ao mesmo tempo: o critério de "drenou" de todo cenário de backlog. */
+    /** Queue and ownership empty at the same time: every backlog scenario's definition of "drained". */
     boolean isDrained() {
         return countReady() == 0 && countLease() == 0;
+    }
+
+    /**
+     * How far behind the queue's head is — the number a burst criterion is written in, and the one
+     * the size of the backlog cannot give: 10k entries one second old and 10k entries a minute old
+     * are the same count and a different incident.
+     *
+     * <p>Read through the dialect rather than as a raw {@code Timestamp}: PostgreSQL stores
+     * {@code TIMESTAMPTZ} and the other two a zoneless column, and reading the second as the first
+     * shifts the answer by the JVM's offset — a bench that reports a lag of three hours because of
+     * a time zone is worse than no bench.
+     */
+    Duration oldestQueuedAge() {
+        Instant oldest = jdbcTemplate.query("SELECT MIN(visible_at) AS oldest FROM mohs_ready",
+                rs -> rs.next() ? dialect.readSplitTimestamp(rs, "oldest") : null);
+        return oldest == null ? Duration.ZERO : Duration.between(oldest, clock.instant());
+    }
+
+    /**
+     * How many DISTINCT jobs under a prefix have an execution — one per trigger materialised, never
+     * one per firing. A recurring trigger on a short interval re-fires inside any observation window
+     * worth measuring, and counting rows would let half the triggers satisfy a criterion written
+     * about all of them.
+     */
+    int countMaterialisedJobs(String jobKeyPrefix) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(DISTINCT job_key) FROM mohs_execution WHERE job_key LIKE ?", Integer.class,
+                jobKeyPrefix + "%");
+        return count == null ? 0 : count;
     }
 
     int countReady() {
@@ -296,20 +343,23 @@ final class ScenarioCluster implements AutoCloseable {
     }
 
     /**
-     * Como o motor classificou cada tentativa que falhou — é onde
-     * {@code NO_HANDLER} e a reclamação de posse aparecem com nome, em vez
-     * de virarem um número de FAILED sem explicação.
+     * How the engine classified each failed attempt — where {@code NO_HANDLER} and an ownership
+     * reclaim appear by name, instead of collapsing into an unexplained FAILED count.
      */
     Map<String, Integer> failureKinds() {
-        // por tipo E mensagem: o motor usa IllegalStateException para TRÊS
-        // causas distintas — handler ausente, cancelamento por shutdown e
-        // lease de nó morto. Agrupar só por tipo colapsa as três e esvazia
-        // qualquer asserção de atribuição de causa.
+        // By type AND message: the engine uses IllegalStateException for THREE distinct causes —
+        // missing handler, cancellation by shutdown, and a dead node's lease. Grouping by type alone
+        // collapses all three and empties any assertion about cause attribution.
+        //
+        // CONCAT, and the same expression repeated in GROUP BY, because this is the one query in the
+        // harness that formats rather than counts and so has to hold on every backend a run can
+        // select: `||` is logical OR in MySQL, and MySQL's only_full_group_by rejects a selected
+        // expression that is not itself grouped.
         return jdbcTemplate.query("""
-                SELECT error_type || ': ' || left(error, 60) AS kind, count(*) AS total
+                SELECT CONCAT(error_type, ': ', LEFT(error, 60)) AS kind, count(*) AS total
                   FROM mohs_attempt
                  WHERE error_type IS NOT NULL
-                 GROUP BY error_type, left(error, 60)
+                 GROUP BY CONCAT(error_type, ': ', LEFT(error, 60))
                  ORDER BY count(*) DESC
                 """, rs -> {
             Map<String, Integer> kinds = new LinkedHashMap<>();
@@ -326,10 +376,9 @@ final class ScenarioCluster implements AutoCloseable {
     }
 
     /**
-     * Ordem de produção ({@code MohsAutoConfiguration}): o engine para
-     * primeiro, e só então o batcher drena o que os últimos handlers
-     * submeteram — fechar o batcher antes descartaria conclusões que ainda
-     * estavam em trânsito.
+     * Production order ({@code MohsAutoConfiguration}): the engine stops first, and only then does
+     * the batcher drain what the last handlers submitted — closing the batcher first would discard
+     * completions still in transit.
      */
     @Override
     public void close() {
@@ -337,7 +386,7 @@ final class ScenarioCluster implements AutoCloseable {
             try {
                 node.engine().stop(Duration.ofSeconds(10));
             } catch (IllegalStateException _) {
-                // já parado — cenário que derruba um nó de propósito passa por aqui
+                // Already stopped — a scenario that kills a node on purpose comes through here
             }
         });
         nodes.forEach(node -> {

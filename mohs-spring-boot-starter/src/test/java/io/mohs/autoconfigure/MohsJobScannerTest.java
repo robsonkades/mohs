@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.autoconfigure;
 
 import java.lang.annotation.ElementType;
@@ -92,7 +107,7 @@ class MohsJobScannerTest {
         }
     }
 
-    /** Estereótipo composto pelo CONSUMIDOR sobre o nosso — o "de brinde" da ADR-0038: alias transita NightlySync.value → RecurringJob.id → MohsJob.id. */
+    /** A stereotype composed by the CONSUMER on top of ours: the alias travels NightlySync.value to RecurringJob.id to MohsJob.id. */
     @Target(ElementType.METHOD)
     @Retention(RetentionPolicy.RUNTIME)
     @RecurringJob(every = "PT1M")
@@ -123,27 +138,30 @@ class MohsJobScannerTest {
     private DefaultListableBeanFactory beanFactory;
     private InMemoryJobStore jobStore;
     private HandlerRegistry handlerRegistry;
+    private OnExecutionRegistry onExecutionRegistry;
 
     @BeforeEach
     void setUp() {
         beanFactory = new DefaultListableBeanFactory();
         jobStore = new InMemoryJobStore();
         handlerRegistry = new HandlerRegistry();
+        onExecutionRegistry = new OnExecutionRegistry();
     }
 
     private MohsJobScanner newScanner(MohsProperties.Registration.OnConflict onConflict) {
-        // construção direta do record, com os mesmos defaults do binding — o scanner só lê registration()
+        // The record built directly, with the same defaults as the binding — the scanner only reads registration()
         MohsProperties properties = new MohsProperties(
                 true,
                 new MohsProperties.Jdbc(null, true),
-                new MohsProperties.Engine(Duration.ofSeconds(5), Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60), 64, 16, false),
+                new MohsProperties.Engine(Duration.ofSeconds(5), Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60), Duration.ofDays(7), 64, 16, false),
                 new MohsProperties.Lifecycle(MohsProperties.Lifecycle.StartMode.AUTO,
                         new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30))),
                 new MohsProperties.Time(MohsProperties.Time.Mode.APPLICATION, Duration.ofSeconds(1), Duration.ofSeconds(30)),
                 new MohsProperties.Registration(onConflict),
                 new MohsProperties.Api(false, "/api/mohs/v1"),
                 Map.of(), Map.of());
-        MohsJobScanner scanner = new MohsJobScanner(providerOf(handlerRegistry), providerOf(jobStore), providerOf(properties));
+        MohsJobScanner scanner = new MohsJobScanner(providerOf(handlerRegistry), providerOf(jobStore),
+                providerOf(properties), providerOf(onExecutionRegistry));
         scanner.setBeanFactory(beanFactory);
         return scanner;
     }
@@ -171,7 +189,7 @@ class MohsJobScannerTest {
         beanFactory.registerBeanDefinition(beanName, definition);
     }
 
-    /** ANNOTATION-sourced, mesma key de WelcomeEmailJob, gatilho diferente — simula drift definicional pros testes de on-conflict/órfã. */
+    /** ANNOTATION-sourced, the same key as WelcomeEmailJob with a different trigger — it simulates definitional drift for the on-conflict and orphan tests. */
     private void seedDivergedStoredDefinition() {
         JobDefinition existing = new JobDefinition(JobKey.of("welcome-email"), null, WelcomeEmailJob.class,
                 new IntervalSpec(Duration.ofMinutes(5), false),
@@ -221,7 +239,7 @@ class MohsJobScannerTest {
                 .hasMessageContaining("duplicate job id 'duplicate'");
     }
 
-    /** ADR-0038: os estereótipos carregam @MohsJob como meta-anotação — o scanner enxerga através deles, com @AliasFor (value = id) honrado. */
+    /** The stereotypes carry @MohsJob as a meta-annotation, so the scanner sees through them, with @AliasFor (value = id) honoured. */
     @Test
     void stereotypesAreScannedThroughTheMergedMetaAnnotation() {
         MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.OVERRIDE);
@@ -236,16 +254,16 @@ class MohsJobScannerTest {
         assertThat(recurring.definition().source()).isEqualTo(DefinitionSource.ANNOTATION);
         StoredJob onDemand = jobStore.find(JobKey.of("import-file")).orElseThrow(); // id veio do value() conciso
         assertThat(onDemand.definition().schedule()).isEqualTo(new OnDemandSpec());
-        // ADR-0042: o limite de vazão atravessa os DOIS estereótipos — sem o
-        // alias, quem declara pelo estereótipo (a forma recomendada da
-        // ADR-0038) não teria como pedir rate limit nenhum.
+        // The rate limit travels through BOTH stereotypes — without the alias, anyone declaring a
+        // job through a stereotype (the recommended form) would have no way to ask for a rate
+        // limit at all.
         assertThat(recurring.definition().rateLimit()).isEqualTo("sync-api");
         assertThat(onDemand.definition().rateLimit()).isEqualTo("smtp");
         assertThat(handlerRegistry.find(JobKey.of("auto-sync"))).isPresent();
         assertThat(handlerRegistry.find(JobKey.of("import-file"))).isPresent();
     }
 
-    /** @RecurringJob sem gatilho não vira on-demand em silêncio — a meta-anotação não expressa "pelo menos um", o scanner expressa. */
+    /** @RecurringJob without a trigger does not silently become on-demand — the meta-annotation cannot express "at least one", so the scanner does. */
     @Test
     void recurringStereotypeWithoutTriggerFailsBoot() {
         MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.OVERRIDE);
@@ -268,7 +286,7 @@ class MohsJobScannerTest {
                 .hasMessageContaining("more than one job annotation");
     }
 
-    /** id dos estereótipos é obrigatório em boot (o alias value/id exige default no atributo — a obrigatoriedade de compilação ficou na forma geral). */
+    /** The stereotypes' id is mandatory at boot (the value/id alias requires a default on the attribute — compile-time mandatoriness stayed with the general form). */
     @Test
     void blankStereotypeIdFailsBoot() {
         MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.OVERRIDE);
@@ -280,7 +298,7 @@ class MohsJobScannerTest {
                 .hasMessageContaining("blank id");
     }
 
-    /** §5.13 (ADR-0038): agenda recorrente + handler exigindo payload tipado falharia TODA ocorrência em runtime — falha o boot com erro que ensina. */
+    /** A recurring schedule plus a handler demanding a typed payload would fail EVERY occurrence at runtime — the boot fails with an error that teaches. */
     @Test
     void recurringJobWhoseHandlerDemandsTypedPayloadFailsBoot() {
         MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.OVERRIDE);
@@ -293,9 +311,9 @@ class MohsJobScannerTest {
     }
 
     /**
-     * Review ADR-0038 (verificação empírica): composto + direto no mesmo
-     * método resolveria pela ORDEM DE DECLARAÇÃO no fonte, não pela forma
-     * direta — colisão de identidade nunca resolve por ordem; falha sempre.
+     * Verified empirically: a composed and a direct annotation on the same method would resolve by
+     * DECLARATION ORDER in the source rather than by the direct form. An identity collision never
+     * resolves by order; it always fails.
      */
     @Test
     void composedStereotypePlusDirectFormFailsBoot() {
@@ -308,14 +326,13 @@ class MohsJobScannerTest {
                 .hasMessageContaining("more than one job annotation");
     }
 
-    // Deliberadamente SEM fixture pra value≠id no par de aliases: bytecode com mirror
-    // inválido sob io.mohs.** envenena o component scan de TODO teste de contexto
-    // (@WebMvcTest lê os metadados de cada classe do classpath de teste e a validação
-    // do Spring explode na leitura). O comportamento é contrato do Spring, verificado
-    // empiricamente no review da ADR-0038: AnnotationConfigurationException nomeando
-    // anotação, atributos e método — registrado na ADR, não re-testado aqui.
+    // Deliberately NO fixture for value != id in the alias pair: bytecode with an invalid mirror
+    // under io.mohs.** poisons the component scan of EVERY context test (@WebMvcTest reads the
+    // metadata of each class on the test classpath, and Spring's validation blows up while reading).
+    // The behaviour is Spring's contract, verified empirically: an AnnotationConfigurationException
+    // naming the annotation, the attributes and the method — recorded rather than re-tested here.
 
-    /** A promessa da ADR-0038: o §5.13 decide pela DEFINIÇÃO, então cobre a forma geral com gatilho igualmente. */
+    /** The rule decides from the DEFINITION, so it covers the general form with a trigger just the same. */
     @Test
     void recurringGeneralFormWithTypedPayloadAlsoFailsBoot() {
         MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.OVERRIDE);
@@ -340,7 +357,7 @@ class MohsJobScannerTest {
         assertThat(stored.definition().schedule()).isEqualTo(new IntervalSpec(Duration.ofMinutes(1), false));
     }
 
-    /** Map passa de propósito: disparo automático entrega mapa vazio; invocação manual avulsa do mesmo job pode entregar dados. */
+    /** Map passes on purpose: an automatic firing delivers an empty map, while a one-off manual invocation of the same job may carry data. */
     @Test
     void recurringHandlerAcceptingAMapIsAllowed() {
         MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.OVERRIDE);
@@ -408,7 +425,7 @@ class MohsJobScannerTest {
 
     @Test
     void definitionMissingFromScanIsMarkedOrphaned() {
-        seedDivergedStoredDefinition(); // ANNOTATION, mas nada escaneado nesta rodada
+        seedDivergedStoredDefinition(); // ANNOTATION, but nothing scanned in this round
 
         newScanner(MohsProperties.Registration.OnConflict.OVERRIDE).afterSingletonsInstantiated();
 
@@ -430,16 +447,17 @@ class MohsJobScannerTest {
     }
 
     /**
-     * O Spring inicializa objetos que NÃO são beans declarados pelo nome que os identifica no
-     * contexto em que nasceram — {@code UrlBasedViewResolver.applyLifecycleMethods} chama
-     * {@code initializeBean(view, viewName)}, e para um {@code addViewController(...)
-     * .setViewName("forward:/algo")} esse nome é {@code "forward:"}. Nome sem bean definition:
-     * {@code isSingleton} estoura {@link org.springframework.beans.factory.NoSuchBeanDefinitionException}
-     * e derruba a requisição com 500.
+     * Spring initialises objects that are NOT declared beans, under the name that identifies them
+     * in the context where they were created — {@code UrlBasedViewResolver.applyLifecycleMethods}
+     * calls {@code initializeBean(view, viewName)}, and for an
+     * {@code addViewController(...).setViewName("forward:/something")} that name is
+     * {@code "forward:"}. A name with no bean definition makes {@code isSingleton} throw
+     * {@link org.springframework.beans.factory.NoSuchBeanDefinitionException} and fails the request
+     * with a 500.
      *
-     * <p>Não é hipótese: o dashboard do mohs-ui serve o mount pelado por forward, e quebrou assim.
-     * Qualquer aplicativo hospedeiro com view {@code forward:}/{@code redirect:} quebrava igual,
-     * só por ter o Mohs no classpath.
+     * <p>This is not hypothetical: the mohs-ui dashboard serves its bare mount through a forward,
+     * and broke exactly this way. Any host application with a {@code forward:}/{@code redirect:}
+     * view broke the same, merely by having Mohs on the classpath.
      */
     @Test
     void aBeanNameWithoutADefinitionIsProcessedInsteadOfBlowingUp() {

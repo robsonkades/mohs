@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.util.ArrayList;
@@ -17,27 +32,26 @@ import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * O critério de validação da Phase 2 no Tier 1: migração aplicada a um
- * banco EXISTENTE — o container compartilhado já tem o schema aplicado
- * pelo {@code schema-postgresql.sql} (o caminho pré-Flyway), e a adoção
- * grava o {@code mohs_schema_history} com a V1 idempotente passando em
- * cima sem tocar nada.
+ * The Tier 1 validation criterion: a migration applied to an EXISTING database — the shared container
+ * already has the schema applied by {@code schema-postgresql.sql} (the pre-Flyway path), and the
+ * adoption writes {@code mohs_schema_history} with the idempotent V1 passing over it without touching
+ * anything.
  */
 class MohsFlywayPostgresTest {
 
     /**
-     * A V5 é a ÚNICA migração do projeto que MOVE LINHAS, e o caminho de
-     * cópia dela só era exercitado com tabelas vazias: os outros testes ou
-     * partem do schema já plano (onde a V5 é no-op) ou não passam por
-     * Flyway. O guardião estrutural não cobre esta classe de defeito —
-     * um par trocado entre colunas do MESMO tipo ({@code job_key}/
-     * {@code actor}, {@code correlation_id}/{@code idempotency_key},
-     * {@code error_type}/{@code error}) deixa a estrutura idêntica e
-     * embaralha o banco do cliente em silêncio. Daí a concatenação
-     * ordenada: ela pega a troca que a comparação de schema não vê.
+     * V5 is the project's ONLY migration that MOVES ROWS, and its copy path was only ever exercised with
+     * empty tables: the other tests either start from the already flat schema (where V5 is a no-op) or do
+     * not go through Flyway at all.
      *
-     * <p>É também o único ponto onde o laço de {@code RENAME CONSTRAINT} e
-     * o ramo "estava particionada" rodam sobre dados.
+     * <p>The structural guardian does not cover this class of defect — a pair swapped between columns of
+     * the SAME type ({@code job_key}/{@code actor}, {@code correlation_id}/{@code idempotency_key},
+     * {@code error_type}/{@code error}) leaves the structure identical and scrambles the customer's
+     * database in silence. Hence the ordered concatenation: it catches the swap a schema comparison
+     * cannot see.
+     *
+     * <p>It is also the only place where the {@code RENAME CONSTRAINT} loop and the "it was partitioned"
+     * branch run over data.
      */
     @Test
     void v5CarriesEveryHistoryColumnAcrossTheDepartitioning() {
@@ -48,7 +62,7 @@ class MohsFlywayPostgresTest {
                 .locations(new PostgresJdbcDialect().migrationLocation())
                 .baselineOnMigrate(true)
                 .baselineVersion("0")
-                .target(MigrationVersion.fromVersion("3")) // para NA era particionada
+                .target(MigrationVersion.fromVersion("3")) // stops IN the partitioned era
                 .load()
                 .migrate();
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
@@ -69,7 +83,7 @@ class MohsFlywayPostgresTest {
                        || '|' || shard || '|' || priority
                   FROM mohs_execution WHERE execution_id = 'exec-1'
                 """, String.class))
-                .as("cada coluna tem de chegar na SUA coluna — troca entre colunas do mesmo tipo é invisível ao guardião estrutural")
+                .as("every column has to land in ITS column — a swap between columns of the same type is invisible to the structural guardian")
                 .isEqualTo("job-a|alice|corr-1|idem-1|7|5");
         assertThat(jdbc.queryForObject("""
                 SELECT node_id || '|' || number || '|' || outcome || '|' || error_type || '|' || error
@@ -77,7 +91,7 @@ class MohsFlywayPostgresTest {
                 """, String.class)).isEqualTo("node-a|3|FAILED|java.io.IOException|boom");
         assertThat(jdbc.queryForList(
                 "SELECT 1 FROM pg_partitioned_table WHERE partrelid = 'mohs_execution'::regclass"))
-                .as("a conversão tem de ter acontecido de fato — senão o teste acima passaria sem a V5 fazer nada")
+                .as("the conversion has to have actually happened — otherwise the test above would pass with V5 doing nothing")
                 .isEmpty();
     }
 
@@ -92,20 +106,18 @@ class MohsFlywayPostgresTest {
         assertThat(jdbc.queryForObject(
                 "SELECT count(*) FROM \"" + MohsFlyway.HISTORY_TABLE + "\" WHERE \"success\"", Integer.class))
                 .isGreaterThanOrEqualTo(1);
-        // as tabelas pré-existentes seguem lá e utilizáveis (e a V4 dropou a era da tabela única)
+        // The pre-existing tables are still there and usable (and V4 dropped the single-table era)
         assertThat(jdbc.queryForObject("SELECT count(*) FROM mohs_execution", Integer.class)).isNotNull();
         assertThat(jdbc.queryForList("SELECT 1 FROM information_schema.tables WHERE table_name = 'mohs_executions'")).isEmpty();
     }
 
     /**
-     * O guardião das duas cópias da verdade NO dialeto onde elas mais
-     * divergem: {@code TIMESTAMPTZ}, storage options (V3/ADR-A) e a
-     * DES-partição da ADR-0058 (a V5 recria as duas tabelas de história) só
-     * existem em
-     * Postgres — o guardião H2 de {@code MohsFlywayTest} não sabe
-     * expressá-los. {@code pg_indexes.indexdef} carrega a forma completa —
-     * um typo no {@code schema-postgresql.sql} ou uma V-script cujas
-     * guardas comem a diferença falham AQUI, não viram no-op silencioso.
+     * The guardian of the two copies of the truth IN the dialect where they diverge most:
+     * {@code TIMESTAMPTZ}, storage options and the de-partitioning (V5 recreates both history tables)
+     * exist only on Postgres — {@code MohsFlywayTest}'s H2 guardian cannot express them.
+     *
+     * <p>{@code pg_indexes.indexdef} carries the complete form — a typo in {@code schema-postgresql.sql},
+     * or a V-script whose guards eat the difference, fails HERE rather than becoming a silent no-op.
      */
     @Test
     void flywayChainMatchesTheSchemaFileStructurally() {
@@ -117,7 +129,7 @@ class MohsFlywayPostgresTest {
         assertThat(mohsStructure(fromFlyway)).isEqualTo(mohsStructure(fromSchemaFile));
     }
 
-    /** Colunas + {@code indexdef} completo (inclui o predicado parcial) das tabelas {@code mohs_*}, fora o histórico do Flyway. */
+    /** Columns plus the complete {@code indexdef} (including the partial predicate) of the {@code mohs_*} tables, excluding Flyway's history. */
     private static List<String> mohsStructure(DataSource dataSource) {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         List<String> structure = new ArrayList<>(jdbc.query("""

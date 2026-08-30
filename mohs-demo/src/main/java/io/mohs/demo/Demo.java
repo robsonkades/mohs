@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.demo;
 
 import io.mohs.core.definition.OnDemandJob;
@@ -31,10 +46,10 @@ public class Demo {
     }
 
     /**
-     * Bancada da Phase 4 (renovação de lease é carga-dependente — Finding A
-     * da Phase 0 só aparece com in-flight sustentado): handler lento de
-     * propósito, mantém ~dispatch-concurrency execuções em voo durante o
-     * drain. O sleep é espera deliberada de bancada, não sincronização.
+     * Load-bench handler: lease renewal is load-dependent and only misbehaves under sustained
+     * in-flight work, so this handler is slow on purpose and keeps roughly dispatch-concurrency
+     * executions in flight during a drain. The sleep is a deliberate bench wait, not
+     * synchronisation.
      */
     @OnDemandJob(id = "slow-job", retries = 10)
     void slowMethod() throws InterruptedException {

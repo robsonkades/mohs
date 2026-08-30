@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.execution;
 
 import java.time.Instant;
@@ -29,7 +44,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-/** Ver Javadoc de {@link io.mohs.rest.job.JobsControllerContractTest} — mesmo padrão de teste. */
+/** See {@link io.mohs.rest.job.JobsControllerContractTest}'s Javadoc — the same test pattern. */
 @WebMvcTest(properties = "mohs.enabled=false")
 class ExecutionsControllerContractTest {
 
@@ -67,12 +82,12 @@ class ExecutionsControllerContractTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items.length()").value(1))
                 .andExpect(jsonPath("$.items[0].executionId").value("exec-2"))
-                // lista é sumário (v0.9): attempts moram no detalhe GET /executions/{id}
+                // The list is a summary: attempts live in the detail view, GET /executions/{id}
                 .andExpect(jsonPath("$.items[0].attempts").doesNotExist())
                 .andExpect(jsonPath("$.nextCursor").value("exec-2"));
     }
 
-    /** size=0/-1 saturam em 1 (CursorPage.clampSize) — antes, 0 estourava IndexOutOfBounds e negativo estourava IAE, ambos 500. */
+    /** size=0 and size=-1 saturate at 1 (CursorPage.clampSize) — previously 0 threw IndexOutOfBounds and a negative threw IAE, both 500s. */
     @Test
     void searchSaturatesANonPositiveSizeInsteadOfFailing() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -109,7 +124,7 @@ class ExecutionsControllerContractTest {
                 .andExpect(status().isNotFound());
     }
 
-    /** ADR-0034: 202 com o estado corrente (não necessariamente terminal) e Location apontando pro detalhe — cancel é aceito, nunca garantido. */
+    /** A 202 with the current state (not necessarily terminal) and a Location pointing at the detail — a cancel is accepted, never guaranteed. */
     @Test
     void cancelReturns202WithTheCurrentStateAndALocationHeader() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -131,7 +146,7 @@ class ExecutionsControllerContractTest {
                 .andExpect(status().isNotFound());
     }
 
-    /** ADR-0033/M3: retry manual — 202 com o recibo da MESMA execução rearmada (actor original) e Location pro detalhe. */
+    /** A manual retry: a 202 with the receipt of the SAME rearmed execution (the original actor) and a Location pointing at the detail. */
     @Test
     void retryReturns202WithTheRearmedExecutionAndALocationHeader() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -154,7 +169,7 @@ class ExecutionsControllerContractTest {
                 .andExpect(status().isNotFound());
     }
 
-    /** Estado ≠ FAILED vira 409 que ensina — a ISE do guard de estado da fachada nunca escapa como 500. */
+    /** A state other than FAILED becomes a 409 that teaches — the facade's state-guard ISE never escapes as a 500. */
     @Test
     void retryOfANonFailedExecutionReturns409NamingTheState() throws Exception {
         when(mohs.retry(ExecutionId.of("exec-1")))

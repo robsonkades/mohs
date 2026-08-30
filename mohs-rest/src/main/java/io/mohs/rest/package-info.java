@@ -1,37 +1,46 @@
-/**
- * API REST operacional (M2 — contrato; ver
- * {@code docs/adr/0010-rest-api-v1.md}). Depende só da API pública em
- * {@code io.mohs.core} — nunca diretamente de {@code io.mohs.engine} ou
- * {@code io.mohs.store.jdbc} (regra ArchUnit).
+/*
+ * Copyright 2026 The Mohs Authors
  *
- * <p>Este pacote carrega só o que é transversal — usado por mais de um
- * subpacote de recurso, então não pertence a nenhum em particular:
- * {@link io.mohs.rest.ActorResolver} (SPI) e sua implementação padrão
- * {@link io.mohs.rest.HeaderActorResolver}, o envelope de paginação
- * {@link io.mohs.rest.CursorPage}, o recibo de invocação
- * {@link io.mohs.rest.AcceptedExecutionResponse}, o envelope de ajuste
- * runtime {@link io.mohs.rest.RuntimePatchResponse} e o prefixo
- * compartilhado {@link io.mohs.rest.ApiPaths#V1}. Não tem controller
- * próprio — cada área de recurso da tabela de
- * {@code docs/REST-API-DESIGN.md} tem um subpacote 1:1 com seu controller:
- * {@code io.mohs.rest.error} (tradução de exceção pra
- * {@code ProblemDetail}, usada por todos, também sem controller),
- * {@code io.mohs.rest.overview}, {@code io.mohs.rest.job},
- * {@code io.mohs.rest.execution}, {@code io.mohs.rest.batch},
- * {@code io.mohs.rest.ratelimit}, {@code io.mohs.rest.runner},
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/**
+ * The operational REST API. It depends only on the public API in {@code io.mohs.core} — never
+ * directly on {@code io.mohs.engine} or {@code io.mohs.store.jdbc} (an ArchUnit rule).
+ *
+ * <p>This package carries only what is cross-cutting — used by more than one resource subpackage and
+ * therefore belonging to none in particular: {@link io.mohs.rest.ActorResolver} (the SPI) and its
+ * default implementation {@link io.mohs.rest.HeaderActorResolver}, the pagination envelope
+ * {@link io.mohs.rest.CursorPage}, the invocation receipt
+ * {@link io.mohs.rest.AcceptedExecutionResponse}, the runtime-adjustment envelope
+ * {@link io.mohs.rest.RuntimePatchResponse} and the shared prefix {@link io.mohs.rest.ApiPaths#V1}.
+ *
+ * <p>It has no controller of its own — each resource area has a subpackage 1:1 with its controller: {@code io.mohs.rest.error} (exception translation into
+ * {@code ProblemDetail}, used by all, likewise without a controller),
+ * {@code io.mohs.rest.overview}, {@code io.mohs.rest.job}, {@code io.mohs.rest.execution},
+ * {@code io.mohs.rest.batch}, {@code io.mohs.rest.ratelimit}, {@code io.mohs.rest.runner} and
  * {@code io.mohs.rest.node}.
  *
- * <p>Convenção de sufixo de DTO — {@code *Response} é o default, usado tanto
- * para o corpo direto de um endpoint quanto para um DTO aninhado dentro de
- * outro (ex. {@link io.mohs.rest.execution.AttemptResponse}, aninhado em
- * {@code ExecutionResponse.attempts()} — aninhamento não é o critério que
- * decide o sufixo). {@code *View} fica reservado para dois casos: a
- * wire-adaptação de um tipo {@code sealed} do domínio, espelhando suas
- * variantes 1:1 (ex. {@link io.mohs.rest.job.ScheduleView}, que espelha
- * {@link io.mohs.core.schedule.Schedule}), ou uma projeção computada sem
- * entidade correspondente em {@code io.mohs.core} (ex.
- * {@link io.mohs.rest.overview.ThroughputView} — não existe um tipo
- * {@code Throughput} no domínio). Fora desses dois casos, todo DTO novo usa
+ * <h2>DTO suffix convention</h2>
+ *
+ * <p>{@code *Response} is the default, used both for an endpoint's direct body and for a DTO nested
+ * inside another (for example {@link io.mohs.rest.execution.AttemptResponse}, nested in
+ * {@code ExecutionResponse.attempts()} — nesting is not the criterion that decides the suffix).
+ *
+ * <p>{@code *View} is reserved for two cases: the wire adaptation of a {@code sealed} domain type,
+ * mirroring its variants 1:1 (for example {@link io.mohs.rest.job.ScheduleView}, mirroring
+ * {@link io.mohs.core.schedule.Schedule}), or a computed projection with no corresponding entity in
+ * {@code io.mohs.core} (for example {@link io.mohs.rest.overview.ThroughputView} — there is no
+ * {@code Throughput} type in the domain). Outside those two cases, every new DTO uses
  * {@code *Response}.
  */
 @NullMarked

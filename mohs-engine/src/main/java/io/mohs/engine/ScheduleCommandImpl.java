@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Clock;
@@ -19,16 +34,15 @@ import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
 
 /**
- * {@link ScheduleCommand} sobre as portas da Phase 5 — acumula
- * {@code priority}/{@code actor}/{@code idempotencyKey} até um terminal
- * ({@code now}/{@code at}/{@code after}) gravar a execução; uma cadeia
- * abandonada antes do terminal nunca toca o banco.
+ * {@link ScheduleCommand} over the persistence ports — it accumulates
+ * {@code priority}/{@code actor}/{@code idempotencyKey} until a terminal
+ * ({@code now}/{@code at}/{@code after}) writes the execution; a chain abandoned before the terminal
+ * never touches the database.
  *
- * <p>O terminal é a unidade de enqueue do §7.5-1 — história + fila (+
- * idempotência) numa ÚNICA transação via {@link StoreTransactions}, que se
- * junta à transação do host quando existe (ADR-0003 §4). É o que torna
- * estruturalmente impossível a chave órfã e a execução sem fila que o
- * modo autocommit permitiria (review S5.2).
+ * <p>The terminal is the enqueue unit — history plus queue (plus idempotency) in a SINGLE
+ * transaction through {@link StoreTransactions}, which joins the host's transaction when there is
+ * one. That is what makes the orphan key and the queueless execution that autocommit mode would
+ * allow structurally impossible.
  */
 final class ScheduleCommandImpl implements ScheduleCommand {
 
@@ -70,14 +84,14 @@ final class ScheduleCommandImpl implements ScheduleCommand {
         if (actor.isBlank()) {
             throw new IllegalArgumentException("actor must not be blank");
         }
-        // o actor do scheduler é load-bearing (rearme fixed-delay, cura do upsert —
-        // ADR-0035): forjá-lo faria um agendamento manual dirigir a corrente do trigger.
-        // Case/espaço-insensível porque o predicado da cura roda no banco, e a collation
-        // default de MySQL/SQL Server é case-insensitive — os dois avaliadores do mesmo
-        // predicado precisam de uma única semântica, normalizada na borda de entrada
+        // The scheduler actor is load-bearing (the fixed-delay rearm, the upsert's cure): forging it
+        // would let a manual schedule drive the trigger's chain. Case- and whitespace-insensitive
+        // because the cure's predicate runs in the database, and MySQL's and SQL Server's default
+        // collation is case-insensitive — both evaluators of the same predicate need one semantics,
+        // normalised at the entry boundary
         if (Execution.SCHEDULER_ACTOR.equalsIgnoreCase(actor.strip())) {
             throw new IllegalArgumentException("actor '" + Execution.SCHEDULER_ACTOR
-                    + "' is reserved for engine-fired occurrences (ADR-0035) — identify the real caller");
+                    + "' is reserved for engine-fired occurrences — identify the real caller");
         }
         this.actor = actor;
         return this;
@@ -97,9 +111,8 @@ final class ScheduleCommandImpl implements ScheduleCommand {
     @Override
     public Enqueued at(Instant when) {
         Objects.requireNonNull(when, "when");
-        // job precisa existir antes do disparo, não só no boot — sem esta
-        // checagem, o erro que o chamador veria seria cru, não uma mensagem
-        // que ensina.
+        // The job has to exist at firing time, not only at boot — without this check the caller would
+        // see a raw error rather than a message that teaches.
         jobStore.find(jobKey).orElseThrow(() -> new IllegalArgumentException(
                 "no job registered for id '" + jobKey.value() + "' — call Mohs.define first"));
 
@@ -112,8 +125,8 @@ final class ScheduleCommandImpl implements ScheduleCommand {
                         when, createdAt, actor, null, idempotencyKey, payload)));
                 workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, jobKey, shard, priority.value(), 1, when)));
             });
-            // já devido → tier 1 (§5.5) acorda o loop local; futuro fica pro
-            // poll — acordar agora seria um lap que ainda não o vê
+            // Already due, so wake the local loop; a future one is left to the poll — waking now would
+            // be a lap that still does not see it
             if (!when.isAfter(clock.instant())) {
                 localWakeSignal.run();
             }
@@ -122,10 +135,9 @@ final class ScheduleCommandImpl implements ScheduleCommand {
             if (idempotencyKey == null) {
                 throw e;
             }
-            // Idempotent Receiver (EIP): o conflito de PK de mohs_idempotency
-            // resolveu a corrida — devolve o recibo da execução original, mesma
-            // resposta pro retry do cliente, zero duplicação. Corrida decidida
-            // pelo banco, nunca por SELECT prévio (mesmo espírito do CONC-2).
+            // Idempotent Receiver (EIP): mohs_idempotency's primary-key conflict resolved the race —
+            // return the original execution's receipt, the same answer for the client's retry, with
+            // zero duplication. The race is decided by the database, never by a prior SELECT.
             ExecutionId winner = historyStore.findByIdempotencyKey(jobKey, idempotencyKey).orElseThrow(() -> e);
             Execution existing = historyStore.find(winner, clock.instant()).orElseThrow(() -> e);
             return new Enqueued(existing.id(), existing.jobKey(), existing.scheduledAt(), existing.actor());

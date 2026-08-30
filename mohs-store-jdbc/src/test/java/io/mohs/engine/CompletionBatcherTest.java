@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -40,12 +55,11 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
 /**
- * O group commit da conclusão (ADR-0047, agora sobre {@link LeaseStore} —
- * Phase 5) contra o store real (H2) — cada gatilho de flush, o fallback e
- * o dreno do close são comportamento observável; sincronização por
- * latch/timeout, nunca sleep. A posse nasce pelo caminho real
- * (fila → claim), então o fence {@code (node_id, epoch)} dos resultados é
- * o de verdade.
+ * The completion's group commit against the real store (H2) — each flush trigger, the fallback and the
+ * close's drain are observable behaviour; synchronised through latches and timeouts, never sleeps.
+ *
+ * <p>The ownership is born through the real path (queue, then claim), so the results'
+ * {@code (node_id, epoch)} fence is the real one.
  */
 class CompletionBatcherTest {
 
@@ -87,13 +101,13 @@ class CompletionBatcherTest {
         }
     }
 
-    /** Cria e inicia o batcher no campo — {@code tearDown} fecha o que o teste não fechou. */
+    /** Creates and starts the batcher in the field — {@code tearDown} closes whatever the test did not. */
     private void startBatcher(LeaseStore store, int flushSize, Duration flushInterval) {
         batcher = new CompletionBatcher(store, jobStore, flushSize, flushInterval);
         batcher.start();
     }
 
-    /** História + fila + claim — a posse nasce pelo caminho real, com o fence (NODE, EPOCH). */
+    /** History, queue and claim — the ownership is born through the real path, with the (NODE, EPOCH) fence. */
     private void seedLeasedExecution(String id) {
         new JdbcTemplate(dataSource).update("""
                 INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
@@ -105,7 +119,7 @@ class CompletionBatcherTest {
 
     private LeaseStore.CompletionResult successResult(String id) {
         return new LeaseStore.CompletionResult(ExecutionId.of(id), JobKey.of("welcome-email"), NODE, EPOCH, 1,
-                NOW, NOW, ExecutionState.SUCCEEDED, null, null, ExecutionState.SUCCEEDED, NOW, null);
+                NOW, NOW, ExecutionState.SUCCEEDED, null, null, ExecutionState.SUCCEEDED, null);
     }
 
     private ExecutionState stateOf(String id) {
@@ -113,7 +127,7 @@ class CompletionBatcherTest {
                 "SELECT state FROM mohs_execution WHERE execution_id = ?", String.class, id));
     }
 
-    /** Gatilho de N: o intervalo é longo de propósito — se o flush dependesse dele, o await estouraria. */
+    /** The N trigger: the interval is deliberately long — if the flush depended on it, the await would time out. */
     @Test
     void flushesWhenTheBatchFillsBeforeTheInterval() throws Exception {
         seedLeasedExecution("exec-1");
@@ -129,7 +143,7 @@ class CompletionBatcherTest {
         assertThat(stateOf("exec-2")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
-    /** Gatilho de T: lote longe de encher — o resultado fica durável no intervalo, não espera vizinhos. */
+    /** The T trigger: a batch far from full — the result becomes durable within the interval rather than waiting for neighbours. */
     @Test
     void flushesOnTheIntervalWhenTheBatchDoesNotFill() throws Exception {
         seedLeasedExecution("exec-1");
@@ -142,11 +156,11 @@ class CompletionBatcherTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
-    /** O veredito do fence atravessa o lote: quem já perdeu a posse (reaper/requeue passou antes) recebe FENCED_OUT, nunca silêncio. */
+    /** The fence's verdict crosses the batch: whoever already lost ownership (a reaper or requeue got there first) receives FENCED_OUT, never silence. */
     @Test
     void deliversFencedOutWhenTheIncarnationWasLost() throws Exception {
         seedLeasedExecution("exec-1");
-        // a posse trocou de mãos: um reaper derrubou a lease e outro nó re-reivindicou
+        // Ownership changed hands: a reaper dropped the lease and another node re-claimed it
         new JdbcTemplate(dataSource).update("UPDATE mohs_lease SET node_id = 'node-b', epoch = 9 WHERE execution_id = 'exec-1'");
         startBatcher(leaseStore, 1, LONG_INTERVAL);
         ConcurrentLinkedQueue<LeaseStore.Completion> outcomes = new ConcurrentLinkedQueue<>();
@@ -159,14 +173,14 @@ class CompletionBatcherTest {
 
         assertThat(delivered.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(outcomes).containsExactly(LeaseStore.Completion.FENCED_OUT);
-        // nada foi gravado pelo perdedor: advisory intacto, a lease da encarnação nova de pé
+        // The loser wrote nothing: the advisory intact, the new incarnation's lease standing
         assertThat(new JdbcTemplate(dataSource).queryForObject(
                 "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
         assertThat(new JdbcTemplate(dataSource).queryForObject(
                 "SELECT node_id FROM mohs_lease WHERE execution_id = 'exec-1'", String.class)).isEqualTo("node-b");
     }
 
-    /** Falha do flush em lote não descarta resultado nenhum: recai na conclusão individual, mesma transação de sempre. */
+    /** A batch flush failure discards no result: it falls back to individual completion, in the same transaction as ever. */
     @Test
     void fallsBackToPerResultCompletionWhenTheBatchFlushFails() throws Exception {
         seedLeasedExecution("exec-1");
@@ -189,11 +203,11 @@ class CompletionBatcherTest {
         return org.mockito.ArgumentMatchers.argThat(list -> list != null && list.size() == 2);
     }
 
-    /** O guard por estado do reconcile (S5.5): id fica em trânsito entre o submit e o veredito, e some em TODO desfecho. */
+    /** The reconcile's state-based guard: an id stays in transit between the submit and the verdict, and disappears on EVERY outcome. */
     @Test
     void completionInTransitTracksSubmitToOutcome() throws Exception {
         seedLeasedExecution("exec-1");
-        startBatcher(leaseStore, 100, LONG_INTERVAL); // lote longe de encher: só o close flusha
+        startBatcher(leaseStore, 100, LONG_INTERVAL); // a batch far from full: only the close flushes
         CountDownLatch delivered = new CountDownLatch(1);
 
         batcher.submit(successResult("exec-1"), completion -> delivered.countDown());
@@ -204,7 +218,7 @@ class CompletionBatcherTest {
         assertThat(batcher.completionInTransit(ExecutionId.of("exec-1"))).isFalse();
     }
 
-    /** O close é o dreno do shutdown: o que estava na fila fica durável antes de ele retornar. */
+    /** The close is the shutdown's drain: whatever was in the queue becomes durable before it returns. */
     @Test
     void closeDrainsWhatIsStillQueued() {
         seedLeasedExecution("exec-1");
@@ -218,7 +232,7 @@ class CompletionBatcherTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
-    /** Zumbi que termina depois do shutdown não perde o resultado: submit pós-close conclui síncrono, na thread chamadora. */
+    /** A zombie finishing after the shutdown does not lose its result: a submit after the close completes synchronously, on the calling thread. */
     @Test
     void submitAfterCloseCompletesSynchronously() {
         seedLeasedExecution("exec-1");

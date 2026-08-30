@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.definition;
 
 import java.time.Duration;
@@ -5,10 +20,9 @@ import java.time.Duration;
 import io.mohs.core.schedule.Misfire;
 
 /**
- * O estágio de {@link JobSpec} alcançado depois que um gatilho foi
- * escolhido. Carrega toda política do job que não é o gatilho em si —
- * runner, window, misfire, retries, timeout — cada uma opcional e
- * ajustável em qualquer ordem.
+ * The stage of {@link JobSpec} reached once a trigger has been chosen. It carries every job policy
+ * that is not the trigger itself — runner, window, misfire, retries, timeout — each optional and
+ * settable in any order.
  */
 public sealed interface PolicySpec permits JobSpecImpl {
 
@@ -16,47 +30,45 @@ public sealed interface PolicySpec permits JobSpecImpl {
 
     PolicySpec window(String name);
 
-    /** Nome do {@code RateLimit} que limita a vazão de disparos deste job, cluster-wide (ADR-0042). */
+    /** The name of the {@code RateLimit} bounding this job's firing rate, cluster-wide. */
     PolicySpec rateLimit(String name);
 
     PolicySpec misfire(Misfire policy);
 
     /**
-     * Nasce pausado no PRIMEIRO registro da definição (ADR-0037): a agenda
-     * fica declarada e desarmada até um {@code resume}; execução manual
-     * sob demanda continua valendo mesmo pausado. Depois do nascimento,
-     * {@code paused} é decisão de operador — redeploy nunca re-pausa.
+     * Born paused on the FIRST registration of the definition: the schedule is declared but
+     * disarmed until a {@code resume}; manual on-demand execution still works while paused. After
+     * birth, {@code paused} is an operator decision — a redeploy never re-pauses.
      */
     PolicySpec startPaused();
 
     /**
-     * Impede que mais de uma execução deste job fique {@code RUNNING} ao
-     * mesmo tempo. Default: concorrência permitida — a maioria dos jobs é
-     * invocada várias vezes com payloads independentes (ex.: um job de
-     * e-mail, uma invocação por destinatário), e essas invocações não têm
-     * por que serializar entre si só por compartilhar o mesmo {@code
-     * job_key}. Use isto pro caso mais estreito: um job cron/interval cujo
-     * próprio disparo seguinte pode ocorrer antes do anterior terminar
-     * (ex.: sincronização que às vezes demora mais que o intervalo) — aí as
-     * duas "execuções" são a mesma tarefa se sobrepondo, não trabalho
-     * independente. Mesmo default do {@code @DisallowConcurrentExecution}
-     * do Quartz — lá também é opt-in, não opt-out.
+     * Prevents more than one execution of this job from being {@code RUNNING} at the same time.
+     *
+     * <p>The default is to allow concurrency: most jobs are invoked many times with independent
+     * payloads (an email job, one invocation per recipient), and those invocations have no reason
+     * to serialise against each other merely for sharing a {@code job_key}.
+     *
+     * <p>Use this for the narrower case: a cron or interval job whose own next firing may occur
+     * before the previous one finishes (a synchronisation that sometimes takes longer than its
+     * interval, say) — there the two "executions" are the same task overlapping, not independent
+     * work. This matches Quartz's {@code @DisallowConcurrentExecution} default, which is likewise
+     * opt-in rather than opt-out.
      */
     PolicySpec preventOverlap();
 
     /**
-     * Como {@link #preventOverlap()}, mas com um teto explícito maior que 1
-     * em vez de exclusão mútua total — ex.: um relatório cujo handler
-     * compartilha um recurso externo com capacidade própria por {@code
-     * job_key}, e pode rodar até N instâncias ao mesmo tempo, nunca N+1.
+     * Like {@link #preventOverlap()}, but with an explicit ceiling above 1 rather than full mutual
+     * exclusion — a report whose handler shares an external resource with its own per-{@code job_key}
+     * capacity, and may run up to N instances at once but never N+1.
      */
     PolicySpec maxConcurrentExecutions(int max);
 
-    /** Tentativas ALÉM da primeira. Default 1 — ver {@link MohsJob#retries()} pro porquê de não ser zero. */
+    /** Attempts BEYOND the first. Defaults to 1 — see {@link MohsJob#retries()} for why it is not zero. */
     PolicySpec retries(int max);
 
     PolicySpec timeout(Duration timeout);
 
-    /** Nome do bean de uma política de retry customizada, para casos que {@link #retries(int)} não expressa. */
+    /** The bean name of a custom retry policy, for cases {@link #retries(int)} cannot express. */
     PolicySpec retryPolicy(String beanName);
 }

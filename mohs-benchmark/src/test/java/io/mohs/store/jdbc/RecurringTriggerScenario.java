@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -15,36 +30,31 @@ import io.mohs.core.job.JobKey;
 import io.mohs.engine.EngineSettings;
 
 /**
- * O dia a dia do produto: um job recorrente, um cluster de 3 nós, e a
- * pergunta do CLAUDE.md — "e se dois nós dispararem o mesmo trigger?".
- * A materialização é CAS sobre a definição (§5.2, leader-free): a ocorrência
- * é materializada por quem ganhar o CAS, e os outros dois seguem em frente.
- * Duplicar aqui não é entregar duas vezes a mesma execução (isso o claim
- * cobre) — é criar DUAS execuções para a MESMA ocorrência, que nenhum
- * consumidor idempotente detecta, porque são ids diferentes.
+ * The product's everyday case: one recurring job, a three-node cluster, and the question "what if
+ * two nodes fire the same trigger?".
  *
- * <p>Mede também o que ninguém mediu: a PONTUALIDADE. O produto promete um
- * piso de latência de dispatch (ADR-0056) e a régua honesta é
- * {@code started_at − scheduled_at} sobre disparos reais, não sobre um
- * enqueue sintético.
+ * <p>Materialisation is a CAS on the definition (leader-free): the occurrence is materialised by
+ * whoever wins the CAS, and the other two move on. Duplicating here is not delivering the same
+ * execution twice — the claim covers that — it is creating TWO executions for the SAME occurrence,
+ * which no idempotent consumer detects, because they carry different ids.
  *
- * <p>E fecha com o pause do dia a dia (ADR-0037): pausado, nada de novo é
- * materializado; retomado, o {@code FiringPlanner} materializa TODAS as
- * ocorrências perdidas de uma vez. Não é misfire: pela ADR-0035, ocorrência
- * devida dentro do {@code misfireThreshold} (60s aqui) dispara atrasada em
- * QUALQUER política, {@code IGNORE} inclusive — o {@code Misfire} do job só
- * decide o que fazer com o que é mais velho que o threshold. A consequência
- * operacional é uma rajada no resume proporcional à pausa, e o cenário
- * afirma isso em vez de fingir que o resume só retoma a cadência.
+ * <p>It also measures something nobody measured: PUNCTUALITY. The product promises a dispatch
+ * latency floor, and the honest ruler is {@code started_at - scheduled_at} over real firings, not
+ * over a synthetic enqueue.
  *
- * <p>Escopo desta prova de unicidade: {@code duplicateOccurrences} agrupa
- * por {@code scheduled_at}, o que só enxerga dupla materialização no caminho
- * SEM misfire — na compensação {@code FIRE_NOW} o planner carimba
- * {@code now} e dois nós teriam instantes diferentes. Este cenário nunca
- * cruza o threshold, então a prova vale para o caminho pontual.
+ * <p>And it closes with everyday pause/resume: while paused, nothing new is materialised; once
+ * resumed, {@code FiringPlanner} materialises ALL missed occurrences at once. That is not misfire:
+ * an occurrence due within the {@code misfireThreshold} (60s here) fires late under ANY policy,
+ * {@code IGNORE} included — a job's {@code Misfire} only decides what to do with what is OLDER than
+ * the threshold. The operational consequence is a burst on resume proportional to the pause, and
+ * the scenario asserts that instead of pretending resume merely picks the cadence back up.
  *
- * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
- * -Dtest=RecurringTriggerScenario}.
+ * <p>Scope of this uniqueness proof: {@code duplicateOccurrences} groups by {@code scheduled_at},
+ * which only sees double materialisation on the path WITHOUT misfire — under {@code FIRE_NOW}
+ * compensation the planner stamps {@code now} and two nodes would have different instants. This
+ * scenario never crosses the threshold, so the proof holds for the punctual path.
+ *
+ * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=RecurringTriggerScenario}.
  */
 class RecurringTriggerScenario {
 
@@ -53,7 +63,7 @@ class RecurringTriggerScenario {
     private static final Duration RUN = Duration.ofSeconds(20);
     private static final Duration PAUSED = Duration.ofSeconds(6);
     private static final int NODES = 3;
-    /** Quantas ocorrências se espera observar depois do resume, além da janela pausada reproduzida. */
+    /** How many occurrences are expected after the resume, on top of the reproduced paused window. */
     private static final int RESUME_OBSERVATION_TICKS = 4;
 
     @Test
@@ -77,8 +87,8 @@ class RecurringTriggerScenario {
             Map<String, Object> lateness = lateness(cluster);
 
             cluster.jobs().pause(JobKey.of(JOB));
-            // uma ocorrência de folga: o pause vale para a MATERIALIZAÇÃO, e o
-            // que já foi materializado antes dele ainda dispara
+            // One occurrence of slack: the pause applies to MATERIALISATION, and whatever was
+            // materialised before it still fires
             Thread.sleep(EVERY.toMillis() * 2);
             int atPause = cluster.countExecutionsOf(JOB);
             Thread.sleep(PAUSED.toMillis());
@@ -92,16 +102,15 @@ class RecurringTriggerScenario {
             report(firedWhileRunning, expectedWhileRunning, duplicates, lateness, atPause, afterPause, afterResume);
 
             assertThat(duplicates)
-                    .as("two nodes materialised the same occurrence — the CAS advance of §5.2 did not hold")
+                    .as("two nodes materialised the same occurrence — the trigger's advance CAS did not hold")
                     .isEmpty();
             assertThat(firedWhileRunning)
                     .as("a %s job over %s should fire about %d times", EVERY, RUN, expectedWhileRunning)
                     .isBetween((int) expectedWhileRunning - 2, (int) expectedWhileRunning + 2);
             assertThat(afterPause - atPause).as("a paused job must not materialise new occurrences").isZero();
-            // o resume REPRODUZ a janela pausada (dentro do misfireThreshold,
-            // ADR-0035): a rajada esperada é a pausa inteira mais as
-            // ocorrências do intervalo de observação, e afirmar só "> 0"
-            // deixaria passar um resume que perdesse a janela em silêncio
+            // The resume REPRODUCES the paused window (it is within the misfireThreshold): the
+            // expected burst is the whole pause plus the occurrences of the observation interval,
+            // and asserting only "> 0" would let a resume that silently lost the window pass
             long expectedBurst = PAUSED.plus(EVERY.multipliedBy(RESUME_OBSERVATION_TICKS)).dividedBy(EVERY);
             assertThat(afterResume - afterPause)
                     .as("resume must bring the job back AND replay the paused window (%d occurrences within the "
@@ -110,7 +119,7 @@ class RecurringTriggerScenario {
         }
     }
 
-    /** Duas execuções para o MESMO {@code scheduled_at} é a assinatura exata de dupla materialização. */
+    /** Two executions for the SAME {@code scheduled_at} is the exact signature of double materialisation. */
     private static List<Map<String, Object>> duplicateOccurrences(ScenarioCluster cluster) {
         return cluster.jdbc().queryForList("""
                 SELECT scheduled_at, count(*) AS total
@@ -121,7 +130,7 @@ class RecurringTriggerScenario {
                 """, JOB);
     }
 
-    /** {@code started_at − scheduled_at} em milissegundos: o atraso real do disparo recorrente. */
+    /** {@code started_at − scheduled_at} in milliseconds: the recurring trigger's real delay. */
     private static Map<String, Object> lateness(ScenarioCluster cluster) {
         return cluster.jdbc().queryForMap("""
                 SELECT round(avg(delay_ms))                                            AS avg_ms,

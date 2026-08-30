@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Instant;
@@ -49,7 +64,7 @@ class JdbcBatchStoreTest {
 
     @Test
     void insertStartsAllCountersAtZeroExceptTotal() {
-        store.insert("batch-1", 10);
+        store.insert("batch-1", "nightly", 10);
 
         BatchCounters counters = store.find("batch-1").orElseThrow();
 
@@ -61,7 +76,7 @@ class JdbcBatchStoreTest {
 
     @Test
     void insertRejectsNegativeTotal() {
-        assertThatThrownBy(() -> store.insert("batch-1", -1)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> store.insert("batch-1", "nightly", -1)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -71,7 +86,7 @@ class JdbcBatchStoreTest {
 
     @Test
     void incrementSucceededAndFailedUpdateTheCounters() {
-        store.insert("batch-1", 10);
+        store.insert("batch-1", "nightly", 10);
 
         store.incrementSucceeded("batch-1");
         store.incrementSucceeded("batch-1");
@@ -85,7 +100,7 @@ class JdbcBatchStoreTest {
 
     @Test
     void incrementsAreAtomicUnderConcurrentCompletion() throws InterruptedException {
-        store.insert("batch-1", 100);
+        store.insert("batch-1", "nightly", 100);
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
             IntStream.range(0, 100).forEach(i -> executor.submit(() -> store.incrementSucceeded("batch-1")));
             executor.shutdown();
@@ -97,19 +112,18 @@ class JdbcBatchStoreTest {
     }
 
     /**
-     * A propriedade que a ADR-0043 compra, e a razão de o incremento devolver
-     * o saldo: com 100 membros concluindo ao mesmo tempo, UM chamador enxerga
-     * {@code pending() == 0} — é ele que dispara {@code BatchCompleted}.
+     * The property the batch design buys, and the reason the increment returns the balance: with 100
+     * members completing at once, ONE caller sees {@code pending() == 0} — and that is the one that fires
+     * {@code BatchCompleted}.
      *
-     * <p>Cada conclusão roda na própria transação porque é ela que torna a
-     * releitura estável (o row lock do UPDATE vale até o commit). Este teste
-     * falharia com DOIS fechadores se o incremento e a leitura ficassem fora
-     * de uma transação — que é exatamente o modo de falha que a ADR descreve
-     * para o desenho derivado, e que aqui não existe.
+     * <p>Each completion runs in its own transaction because that is what makes the re-read stable (the
+     * UPDATE's row lock holds until the commit). This test would fail with TWO closers if the increment
+     * and the read sat outside a transaction — exactly the failure mode described for the derived design,
+     * and which does not exist here.
      */
     @Test
     void exactlyOneConcurrentCompletionSeesTheBatchClose() throws InterruptedException {
-        store.insert("batch-1", 100);
+        store.insert("batch-1", "nightly", 100);
         TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         AtomicInteger closers = new AtomicInteger();
 

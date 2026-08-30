@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.execution;
 
 import java.time.Instant;
@@ -10,18 +25,17 @@ import io.mohs.core.definition.JobDefinition;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Um único disparo de um {@link JobDefinition}: identidade, estado atual,
- * o actor que causou o disparo e cada {@link Attempt} feita até agora. A
- * trilha de actor é inegociável em toda invocação (ver
- * {@code docs/API-DESIGN.md} §"Actor e regressão ergonômica assumida").
- * {@code firedAt} é o instante em que a execução foi reivindicada por um
- * node e fica {@code null} enquanto isso não ocorreu (ex.: estado
- * {@link ExecutionState#ENQUEUED}); desde a Phase 5 do redesign (posse em
- * {@code mohs_lease}) ele também volta a {@code null} DEPOIS do término —
- * a pergunta histórica "quando cada attempt começou" é de
- * {@link Attempt#startedAt}. {@code owner} (§16.3-2 do redesign) responde
- * "QUEM está executando isto agora": o {@code node_id} dono da posse
- * enquanto {@link ExecutionState#RUNNING}, {@code null} fora disso.
+ * A single firing of a {@link JobDefinition}: its identity, current state, the actor that caused
+ * the firing, and every {@link Attempt} made so far. The actor trail is non-negotiable on every
+ * invocation.
+ *
+ * <p>{@code firedAt} is the instant the execution was claimed by a node, and is {@code null} until
+ * that happens (in {@link ExecutionState#ENQUEUED}, for instance). Since ownership moved into
+ * {@code mohs_lease} it also returns to {@code null} AFTER completion — the historical question
+ * "when did each attempt start" belongs to {@link Attempt#startedAt}.
+ *
+ * <p>{@code owner} answers "WHO is running this right now": the {@code node_id} holding ownership
+ * while {@link ExecutionState#RUNNING}, and {@code null} otherwise.
  */
 public record Execution(
         ExecutionId id,
@@ -37,13 +51,12 @@ public record Execution(
         @Nullable String owner) {
 
     /**
-     * O actor das ocorrências materializadas pelo trigger recorrente
-     * (ADR-0035) — como se distingue um disparo do próprio motor de um
-     * agendamento manual/programático. Nome <b>reservado</b>: além de
-     * trilha de auditoria, ele carrega decisão de motor (o rearme da
-     * corrente fixed-delay só acontece em ocorrência do scheduler), então
-     * {@code ScheduleCommand.as} e a API REST o rejeitam — um agendamento
-     * manual jamais pode se passar pelo motor.
+     * The actor of occurrences materialised by a recurring trigger — how a firing by the engine
+     * itself is told apart from a manual or programmatic schedule.
+     *
+     * <p>The name is <b>reserved</b>: beyond the audit trail, it carries an engine decision (a
+     * fixed-delay chain is only rearmed on a scheduler occurrence), so {@code ScheduleCommand.as}
+     * and the REST API both reject it — a manual schedule may never pass itself off as the engine.
      */
     public static final String SCHEDULER_ACTOR = "scheduler";
 
@@ -57,31 +70,30 @@ public record Execution(
             throw new IllegalArgumentException("actor must not be blank");
         }
         Objects.requireNonNull(priority, "priority");
-        attempts = List.copyOf(attempts); // cópia defensiva (Effective Java, Item 50)
+        attempts = List.copyOf(attempts); // a defensive copy (Effective Java, Item 50)
     }
 
-    /** {@link Priority#NORMAL}, sem {@code idempotencyKey}, fora de lote e sem dono corrente — mesmo default do schema (`DEFAULT 20`). */
+    /** {@link Priority#NORMAL}, no {@code idempotencyKey}, outside any batch and with no current owner — the same defaults as the schema (`DEFAULT 20`). */
     public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
             @Nullable Instant firedAt, List<Attempt> attempts, String actor) {
         this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, Priority.NORMAL, null, null, null);
     }
 
     /**
-     * Fora de lote, que é o caso da esmagadora maioria das execuções: só o
-     * agendamento em lote preenche {@code batchId} (ADR-0043). Existe para o
-     * agendamento avulso não ter que dizer "não pertenço a lote nenhum" em
-     * toda chamada.
+     * A freshly enqueued occurrence: no attempts, no firing, no {@code idempotencyKey}, outside any
+     * batch and with no current owner.
+     *
+     * <p>A NAMED factory replacing the two overloads with an AMBIGUOUS tail that used to live here
+     * (the seven-argument one, which ends in {@code actor}, remains — nothing in it can be
+     * transposed). Effective Java, Item 1: the removed overloads ended in a row of
+     * {@code @Nullable String}, and {@code (priority, null, nodeId)} compiled while writing the
+     * {@code nodeId} into {@code batchId} — an execution declaring itself a member of a batch that
+     * does not exist, with nothing to flag it. This type is a READ model: the user never constructs
+     * it, and internal convenience did not justify publishing the trap.
      */
-    public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
-            @Nullable Instant firedAt, List<Attempt> attempts, String actor, Priority priority,
-            @Nullable String idempotencyKey) {
-        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, priority, idempotencyKey, null, null);
-    }
-
-    /** Sem dono corrente — a forma da era pré-split, preservada pra quem constrói leituras históricas (o dono só existe em {@code RUNNING}). */
-    public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
-            @Nullable Instant firedAt, List<Attempt> attempts, String actor, Priority priority,
-            @Nullable String idempotencyKey, @Nullable String batchId) {
-        this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, priority, idempotencyKey, batchId, null);
+    public static Execution enqueued(ExecutionId id, JobKey jobKey, Instant scheduledAt, String actor,
+            Priority priority) {
+        return new Execution(id, jobKey, ExecutionState.ENQUEUED, scheduledAt, null, List.of(), actor, priority,
+                null, null, null);
     }
 }

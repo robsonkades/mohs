@@ -115,3 +115,11 @@ export function formatDuration(iso: string): string {
   }
   return parts.join(" ");
 }
+
+/**
+ * One format for the rate, everywhere it is shown: mixing "7.2" and "11" on one axis reads as a
+ * rounding bug, and a tile saying "12" beside a tick saying "12.4" is the same defect spread over
+ * two components. Lives here rather than in the chart because the chart is lazy-loaded — importing
+ * it from there would pull the whole chart bundle into the Overview's first paint.
+ */
+export const rateFormatter = new Intl.NumberFormat("en", { maximumFractionDigits: 1 });

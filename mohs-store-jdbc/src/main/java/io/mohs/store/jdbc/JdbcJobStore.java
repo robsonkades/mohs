@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.sql.ResultSet;
@@ -12,6 +27,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 
 import javax.sql.DataSource;
@@ -19,6 +36,7 @@ import javax.sql.DataSource;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.util.ClassUtils;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -42,17 +60,15 @@ import io.mohs.engine.NextFireCalculator;
 import io.mohs.engine.StoredJob;
 
 /**
- * {@link JobStore} sobre {@code mohs_job_definitions} (Data Mapper, PoEAA).
- * {@code updated_at}/{@code created_at} vêm do {@link Clock} injetado —
- * nunca leitura direta (regra ArchUnit de {@code io.mohs.engine}/
- * {@code io.mohs.store.jdbc}).
+ * {@link JobStore} over {@code mohs_job_definitions} (a Data Mapper, PoEAA).
+ * {@code updated_at}/{@code created_at} come from the injected {@link Clock} — never a direct read
+ * (an ArchUnit rule for {@code io.mohs.engine}/{@code io.mohs.store.jdbc}).
  *
- * <p>{@link NamedParameterJdbcTemplate} em vez de {@code JdbcTemplate}
- * cru: o INSERT de {@link #upsert} sozinho tem mais de vinte colunas —
- * contar {@code ?} posicional contra uma lista de argumentos nessa largura
- * é risco real de bug silencioso (troca de posição não quebra a compilação
- * nem sempre falha em runtime); parâmetro nomeado (`:coluna`) elimina essa
- * classe de erro e deixa o SQL autodescritivo.
+ * <p>{@link NamedParameterJdbcTemplate} rather than a raw {@code JdbcTemplate}: {@link #upsert}'s
+ * INSERT alone has more than twenty columns — counting positional {@code ?} against an argument list
+ * at that width is a real risk of a silent bug (a swapped position neither breaks compilation nor
+ * always fails at runtime); a named parameter ({@code :column}) removes that class of error and
+ * leaves the SQL self-describing.
  */
 public final class JdbcJobStore implements JobStore {
 
@@ -66,8 +82,8 @@ public final class JdbcJobStore implements JobStore {
     public JdbcJobStore(DataSource dataSource, Clock clock) {
         this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        // mesmo raciocínio da DBTUNE-4 em JdbcWorkQueue: escrita guardada assume
-        // "última escrita vence" (READ COMMITTED), não herda o default do banco.
+        // The same reasoning as in JdbcWorkQueue: a guarded write assumes "last write wins"
+        // (READ COMMITTED), and does not inherit the database's default.
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.clock = Objects.requireNonNull(clock, "clock");
     }
@@ -103,32 +119,34 @@ public final class JdbcJobStore implements JobStore {
                 .addValue("orphaned", false)
                 .addValue("retired", false)
                 .addValue("updatedAt", now);
-        // record pattern Write(Instant v) não casaria componente null (type pattern) — bind do record inteiro
+        // A record pattern Write(Instant v) would not match a null component (a type pattern) — bind the whole record
         if (nextFire instanceof NextFireDecision.Write write) {
             params.addValue("nextFireAt", write.value() == null ? null : JdbcTimestamps.toUtcLocalDateTime(write.value()));
         }
-        // id é gerado aqui mas só entra no INSERT — se cair no UPDATE, o
-        // valor gerado fica sem uso; a linha existente mantém o id que já
-        // tinha (PK estável pro ciclo de vida do job_key, nunca reescrita).
-        // UUIDv7 (io.github.robsonkades:uuidv7) — mesma geração de mohs_execution.execution_id.
+        // The id is generated here but only enters the INSERT — if the UPDATE path is taken, the
+        // generated value goes unused; the existing row keeps the id it already had (a stable primary
+        // key for the job_key's lifetime, never rewritten).
+        // UUIDv7 (io.github.robsonkades:uuidv7) — the same generation as mohs_execution.execution_id.
         String id = UUIDv7.randomUUIDString();
 
-        // tenta UPDATE primeiro; 0 linhas afetadas = chave nova, faz INSERT.
-        // Evita o round-trip extra (e a corrida TOCTOU) de um SELECT COUNT
-        // prévio pra decidir qual dos dois caminhos tomar. Isso não fecha a
-        // corrida sozinho: dois nós registrando o mesmo job no boot podem os
-        // dois ver 0 linhas e os dois tentar INSERT — quem perde recebe
-        // DuplicateKeyException (job_key já existe, o outro venceu) e vira
-        // UPDATE, não erro propagado pro bootstrap (CONC-2).
-        // orphaned/retired = FALSE mesmo em UPDATE: diferente de paused (decisão de
-        // operador, upsert nunca toca), os dois são consequência de "a fonte sumiu"
-        // (anotação removida / Mohs.remove) — o próprio upsert acontecer já é prova
-        // de que uma fonte real (scan ou Mohs.define) quer este job de novo, então
-        // define() depois de remove() ressuscita a definição com o histórico intacto.
-        // Duas variantes por Preserve/Write (mesmo precedente do par COMPLETE_CAS/
-        // TERMINAL_UPDATE_UNPRUNED em JdbcLeaseStore): preservar next_fire_at é NÃO
-        // escrever a coluna — reescrever o valor lido seria lost update (DDIA cap. 7)
-        // contra o CAS do disparo e o rearme guardado da conclusão (review ADR-0035).
+        // Try the UPDATE first; 0 rows affected means a new key, so INSERT. That avoids the extra round
+        // trip (and the time-of-check/time-of-use race) of a prior SELECT COUNT to decide which of the
+        // two paths to take.
+        //
+        // That does not close the race on its own: two nodes registering the same job at boot may both
+        // see 0 rows and both attempt an INSERT — the loser receives a DuplicateKeyException (job_key
+        // already exists, the other won) and turns into an UPDATE, not an error propagated to the
+        // bootstrap.
+        //
+        // orphaned/retired = FALSE even on an UPDATE: unlike paused (an operator decision the upsert
+        // never touches), both are consequences of "the source is gone" (an annotation removed, or
+        // Mohs.remove) — the upsert happening at all is proof that a real source (a scan, or
+        // Mohs.define) wants this job again, so define() after remove() resurrects the definition with
+        // its history intact.
+        //
+        // Two variants through Preserve/Write: preserving next_fire_at means NOT writing
+        // the column — rewriting the value that was read would be a lost update (DDIA ch. 7) against
+        // the firing CAS and the completion's guarded rearm.
         String updateSql = """
                 UPDATE mohs_job_definitions SET
                     name = :name, handler_type = :handlerType, schedule_type = :scheduleType,
@@ -146,10 +164,10 @@ public final class JdbcJobStore implements JobStore {
         int updated = jdbcTemplate.update(updateSql, params);
 
         if (updated == 0) {
-            // linha nova: Preserve é impossível aqui por construção (o snapshot viu a
-            // linha existir, e linha nunca é apagada — remove é soft-retire); o guard
-            // recompõe o valor inicial pra falha desse invariante não virar erro de
-            // bind críptico num INSERT que, de todo jeito, cria a linha do zero.
+            // A new row: Preserve is impossible here by construction (the snapshot saw the row exist,
+            // and a row is never deleted — remove is a soft retire); the guard reconstructs the initial
+            // value so that a violation of that invariant does not become a cryptic bind error in an
+            // INSERT that creates the row from scratch anyway.
             if (!params.hasValue("nextFireAt")) {
                 Instant initial = initialNextFire(definition.schedule(), nowInstant);
                 params.addValue("nextFireAt", initial == null ? null : JdbcTimestamps.toUtcLocalDateTime(initial));
@@ -169,13 +187,13 @@ public final class JdbcJobStore implements JobStore {
                             :timeout, :retryPolicy, :source,
                             :orphaned, :retired, :paused, :nextFireAt, :createdAt, :updatedAt)
                         """, params.addValue("id", id).addValue("createdAt", now)
-                                // ADR-0037: startPaused só vale no nascimento — o UPDATE nunca toca paused
+                                // startPaused only applies at birth — the UPDATE never touches paused
                                 .addValue("paused", definition.startPaused()));
             } catch (DuplicateKeyException _) {
-                // o outro nó venceu o INSERT: re-decide contra a linha que agora existe —
-                // uma decisão tomada contra um snapshot morre com o snapshot (agenda igual
-                // vira Preserve, e o re-UPDATE não toca next_fire_at). Termina em um nível:
-                // a linha existe e o UPDATE da segunda passada sempre a encontra.
+                // The other node won the INSERT: re-decide against the row that now exists — a decision
+                // taken against a snapshot dies with the snapshot (an identical schedule becomes
+                // Preserve, and the re-UPDATE does not touch next_fire_at). It terminates in one level:
+                // the row exists, and the second pass's UPDATE always finds it.
                 return upsert(definition);
             }
         }
@@ -183,31 +201,25 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /**
-     * O estado inicial do trigger é do upsert (ADR-0035): agenda nova ou
-     * alterada recalcula ({@code cron.next(now)}; intervalo →
-     * {@code now + interval} — primeiro disparo de fixed-delay ancora na
-     * definição, não há "fim anterior"); agenda inalterada preserva —
-     * senão todo redeploy de um job {@code every PT30M} empurraria o
-     * disparo para sempre. Cron irrealizável falha AQUI
-     * ({@code IllegalArgumentException} do {@link NextFireCalculator}) —
-     * fail-fast na definição em vez de falhar todo tick.
+     * The trigger's initial state belongs to the upsert: a new or altered schedule recomputes it
+     * ({@code cron.next(now)}; an interval becomes {@code now + interval} — a fixed-delay job's first
+     * firing anchors on the definition, there being no "previous end"), while an unchanged schedule
+     * preserves it — otherwise every redeploy of an {@code every PT30M} job would push the firing
+     * forward forever. An unrealisable cron fails HERE (an {@code IllegalArgumentException} from
+     * {@link NextFireCalculator}) — fail fast at the definition rather than failing every tick.
      *
-     * <p>Preservar é {@link NextFireDecision.Preserve não escrever a
-     * coluna}, nunca reescrever o valor lido: entre o snapshot e o UPDATE,
-     * o CAS do disparo pode avançar o trigger e a conclusão pode rearmar a
-     * corrente — reescrever o valor observado regrediria a série (lost
-     * update, DDIA cap. 7) e re-dispararia lote já materializado. As
-     * escritas que restam são deliberadas: agenda alterada sobrescreve
-     * (reconfiguração explícita vence disparo concorrente) e a cura de
-     * {@code NULL} corre apenas contra o rearme da conclusão, com valores
-     * quase idênticos (trigger desarmado não é candidato do CAS de
-     * disparo).
+     * <p>Preserving means {@link NextFireDecision.Preserve not writing the column}, never rewriting the
+     * value that was read: between the snapshot and the UPDATE, the firing CAS may advance the trigger
+     * and a completion may rearm the chain — rewriting the observed value would regress the series (a
+     * lost update, DDIA ch. 7) and re-fire an already materialised batch. The writes that remain are
+     * deliberate: an altered schedule overwrites (an explicit reconfiguration beats a concurrent
+     * firing), and the {@code NULL} cure races only against the completion's rearm, with near-identical
+     * values (a disarmed trigger is not a candidate for the firing CAS).
      *
-     * <p>Cura de {@code NULL} em agenda recorrente inalterada (coluna nova
-     * em base velha; corrente fixed-delay cuja conclusão nunca rearmou):
-     * para {@code afterFinish}, só sem ocorrência viva do scheduler —
-     * armar com a corrente viva criaria a sobreposição que fixed-delay
-     * promete não ter.
+     * <p>The {@code NULL} cure on an unchanged recurring schedule (a new column on an old database; a
+     * fixed-delay chain whose completion never rearmed): for {@code afterFinish}, only when there is no
+     * live scheduler occurrence — arming with the chain alive would create the overlap fixed-delay
+     * promises not to have.
      */
     private NextFireDecision upsertNextFire(JobDefinition definition, ScheduleColumns incoming, Instant now) {
         Schedule schedule = definition.schedule();
@@ -225,7 +237,7 @@ public final class JdbcJobStore implements JobStore {
         return new NextFireDecision.Write(initialNextFire(schedule, now));
     }
 
-    /** O veredito de {@link #upsertNextFire}: {@code Write} entra no UPDATE/INSERT; {@code Preserve} deixa a coluna fora do statement (ver o comentário sobre lost update em {@link #upsert}). */
+    /** {@link #upsertNextFire}'s verdict: {@code Write} enters the UPDATE/INSERT; {@code Preserve} leaves the column out of the statement (see the lost-update comment in {@link #upsert}). */
     private sealed interface NextFireDecision {
         record Write(@Nullable Instant value) implements NextFireDecision {
         }
@@ -255,9 +267,9 @@ public final class JdbcJobStore implements JobStore {
     }
 
     private boolean hasLiveSchedulerOccurrence(JobKey key) {
-        // §4.3: no split, "vivo" é o advisory ainda PENDING — enfileirado
-        // (mohs_ready), rodando (mohs_lease) ou em backoff, todos PENDING até
-        // o desfecho terminal; caminho frio (upsert), a varredura por job serve
+        // In the split layout, "live" is the advisory still PENDING — queued (mohs_ready), running
+        // (mohs_lease) or in backoff, all PENDING until the terminal outcome; a cold path (the upsert),
+        // where the per-job sweep serves
         Integer live = jdbcTemplate.queryForObject("""
                 SELECT COUNT(*) FROM mohs_execution
                 WHERE job_key = :jobKey AND actor = :actor AND state = 'PENDING'
@@ -267,7 +279,7 @@ public final class JdbcJobStore implements JobStore {
         return live != null && live > 0;
     }
 
-    /** A agenda persistida + {@code next_fire_at} de uma linha existente — o que {@link #upsertNextFire} compara pra decidir preservar × recalcular. */
+    /** The persisted schedule plus {@code next_fire_at} of an existing row — what {@link #upsertNextFire} compares to decide preserve versus recompute. */
     private record TriggerSnapshot(String scheduleType, @Nullable String cronExpression, @Nullable String cronZone,
             @Nullable String intervalDuration, @Nullable Boolean intervalAfterFinish, @Nullable Instant nextFireAt) {
 
@@ -284,9 +296,9 @@ public final class JdbcJobStore implements JobStore {
     public Optional<StoredJob> find(JobKey key) {
         Objects.requireNonNull(key, "key");
         List<String> unresolvedHandlerJobKeys = new ArrayList<>();
-        // job_key é UNIQUE — no máximo uma linha. retired fora de toda leitura
-        // (parâmetro, não literal: BIT do SQL Server não aceita FALSE): job
-        // aposentado não existe pra fachada/claim, só a linha fica pela FK.
+        // job_key is UNIQUE — at most one row. retired stays out of every read (as a parameter, not a
+        // literal: SQL Server's BIT does not accept FALSE): a retired job does not exist for the facade
+        // or the claim, only the row remains for the foreign key.
         Optional<StoredJob> result = JdbcSupport.findOne(jdbcTemplate,
                 "SELECT * FROM mohs_job_definitions WHERE job_key = :jobKey AND retired = :retired",
                 new MapSqlParameterSource("jobKey", key.value()).addValue("retired", false),
@@ -308,12 +320,12 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /**
-     * Teto em Java sobre o cursor ({@code Stream.limit}), não
-     * {@code LIMIT} SQL — dispensa acoplar este store ao {@code JdbcDialect}
-     * por uma tabela pequena por natureza (definições, não execuções); o
-     * cursor lê no máximo um fetch batch além do teto. Sem índice em
-     * {@code next_fire_at} pelo mesmo motivo — DBTUNE com número próprio
-     * se um harness mostrar que importa (ADR-0035).
+     * A ceiling in Java over the cursor ({@code Stream.limit}), not a SQL {@code LIMIT} — which avoids
+     * coupling this store to {@code JdbcDialect} for a table that is small by nature (definitions, not
+     * executions); the cursor reads at most one fetch batch beyond the ceiling.
+     *
+     * <p>No index on {@code next_fire_at} for the same reason — a tuning task with a number of its own
+     * if a harness ever shows it matters.
      */
     @Override
     public List<StoredJob> findDueRecurring(Instant now, int limit) {
@@ -334,7 +346,7 @@ public final class JdbcJobStore implements JobStore {
     public void armNextFire(JobKey key, Instant nextFireAt) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(nextFireAt, "nextFireAt");
-        // guard IS NULL — Javadoc da porta: cura só arma trigger desarmado
+        // The IS NULL guard — the port's Javadoc: the cure only arms a disarmed trigger
         jdbcTemplate.update(
                 "UPDATE mohs_job_definitions SET next_fire_at = :nextFireAt WHERE job_key = :jobKey AND next_fire_at IS NULL",
                 new MapSqlParameterSource("jobKey", key.value())
@@ -342,11 +354,10 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /**
-     * ADR-0036: agenda e trigger recomputado aterrissam num único UPDATE —
-     * mesma disciplina do upsert de agenda alterada ("reconfiguração
-     * explícita vence disparo concorrente", ADR-0035). Cron irrealizável
-     * falha AQUI, antes de qualquer escrita ({@code IllegalArgumentException}
-     * do {@link NextFireCalculator}).
+     * The schedule and the recomputed trigger land in a single UPDATE — the same discipline as the
+     * upsert of an altered schedule ("an explicit reconfiguration beats a concurrent firing"). An
+     * unrealisable cron fails HERE, before any write (an {@code IllegalArgumentException} from
+     * {@link NextFireCalculator}).
      */
     @Override
     public boolean reschedule(JobKey key, Schedule schedule) {
@@ -380,20 +391,20 @@ public final class JdbcJobStore implements JobStore {
         return jdbcTemplate.queryForStream(sql, params,
                         (rs, rowNum) -> mapRowOrNull(rs, rowNum, unresolvedHandlerJobKeys))
                 .filter(Objects::nonNull)
-                // registrado depois do cursor interno do queryForStream — roda só
-                // depois que ele já fechou, então o UPDATE de baixo nunca disputa
-                // conexão com um ResultSet ainda aberto (DUP-3).
+                // Registered after queryForStream's internal cursor — it runs only once that cursor has
+                // closed, so the UPDATE below never contends for the connection with a ResultSet that is
+                // still open.
                 .onClose(() -> markOrphanedForUnresolvedHandlers(unresolvedHandlerJobKeys));
     }
 
     /**
-     * Rotina de auto-cura (DUP-3): antes, uma linha com {@code handler_type}
-     * não resolvido simplesmente sumia de {@link #find}/{@link #findAll} —
-     * mesmo modo de falha que a ADR-0006 já resolveu pra "annotation ausente
-     * do código" (vira ORPHANED, nunca some em silêncio), só que sem essa
-     * classe de falha, mais severa (a classe nem existe mais), acionar o
-     * mesmo mecanismo. Chamado depois que a leitura já terminou — nunca
-     * durante, pra não escrever com um cursor ainda aberto na mesma conexão.
+     * A self-healing routine: previously, a row with an unresolved {@code handler_type} simply vanished
+     * from {@link #find}/{@link #findAll} — the same failure mode already solved for "annotation absent
+     * from the code" (it becomes ORPHANED, never silently disappears), except that this more severe
+     * class of failure (the class no longer exists at all) did not trigger the same mechanism.
+     *
+     * <p>Called after the read has finished — never during it, so as not to write with a cursor still
+     * open on the same connection.
      */
     private void markOrphanedForUnresolvedHandlers(List<String> jobKeys) {
         jobKeys.forEach(jobKey -> markOrphaned(JobKey.of(jobKey)));
@@ -418,19 +429,18 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /**
-     * Soft-retire, nunca {@code DELETE}: "preservar histórico"
-     * ({@code Mohs#remove}) exige a linha do job viva de qualquer jeito —
-     * a história em {@code mohs_execution} continua apontando pra ela.
-     * Transação própria: drenar a FILA e marcar {@code retired} é um par
-     * indivisível (drenar sem marcar deixa o firer materializando
-     * ocorrências novas; marcar sem drenar deixaria entradas presas em
-     * {@code mohs_ready} pra sempre — a fila não filtra retired, quem
-     * filtra é este dreno). Lease em voo termina sozinha: o desfecho
-     * terminal grava normal, e um retry pós-retire morre no
-     * failBeforeDispatch — é o filtro {@code retired} de {@link #find} que
-     * o mata (o heal de snapshot do Engine consulta fresco, e um
-     * aposentado tem que continuar invisível ali; remover esse filtro
-     * ressuscitaria zumbis de fila).
+     * A soft retire, never a {@code DELETE}: "preserve history" ({@code Mohs#remove}) requires the job's
+     * row to stay alive anyway — history in {@code mohs_execution} keeps pointing at it.
+     *
+     * <p>Its own transaction: draining the QUEUE and marking {@code retired} are an indivisible pair
+     * (draining without marking leaves the firer materialising new occurrences; marking without
+     * draining would leave entries stuck in {@code mohs_ready} forever — the queue does not filter
+     * retired, this drain does).
+     *
+     * <p>A lease in flight ends on its own: the terminal outcome writes normally, and a post-retire
+     * retry dies in failBeforeDispatch — it is {@link #find}'s {@code retired} filter that kills it (the
+     * Engine's snapshot heal queries fresh, and a retired job must stay invisible there; removing that
+     * filter would resurrect queue zombies).
      */
     @Override
     public void remove(JobKey key) {
@@ -441,61 +451,78 @@ public final class JdbcJobStore implements JobStore {
                     "SELECT execution_id FROM mohs_ready WHERE job_key = :jobKey", jobParam, String.class);
             List<String> drained = new ArrayList<>(queued.size());
             for (String executionId : queued) {
-                // o DELETE decide a corrida contra um claim concorrente: 0 linhas
-                // = o claim levou a entrada e a lease termina sozinha — nunca
-                // CANCELLED sobre execução reivindicada (predicado por subquery
-                // avalia num snapshot e não serializa nada; o row lock do DELETE
-                // serializa — DDIA cap. 7; review S5.4). Caminho frio: N round
-                // trips por aposentadoria não importam
+                // The DELETE decides the race against a concurrent claim: 0 rows means the claim took the
+                // entry and its lease ends on its own — never CANCELLED over a claimed execution (a
+                // subquery predicate evaluates against a snapshot and serialises nothing; the DELETE's
+                // row lock serialises — DDIA ch. 7). A cold path: N round trips per retirement do not
+                // matter
                 if (jdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = :executionId",
                         new MapSqlParameterSource("executionId", executionId)) == 1) {
                     drained.add(executionId);
                 }
             }
+            // ONE clock read for the whole logical act: two calls to clock.instant() in the same
+            // transaction used to write two different instants
+            LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
             if (!drained.isEmpty()) {
-                // batch-counted: countCancelledMembers, sobre o conjunto REALMENTE drenado
-                jdbcTemplate.update("""
-                        UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :now
-                        WHERE execution_id IN (:ids)
-                        """, new MapSqlParameterSource("ids", drained)
-                                .addValue("now", JdbcTimestamps.toUtcLocalDateTime(clock.instant())));
-                countCancelledMembers(drainedBatchMembers(drained));
+                // Chunking is mandatory: `drained` is EVERYTHING that was in this job's queue, and an
+                // on-demand job with 3,000 queued executions (a burst, or a queue dammed by a pause)
+                // blew past SQL Server's ~2100 parameters. The whole transaction rolled back and the job
+                // was NOT retired — a permanent failure, not a transient one.
+                //
+                // The count ACCUMULATES per batch across the chunks and is only applied afterwards: a
+                // per-chunk increment would touch the same mohs_batches in an order dictated by the
+                // arrival order of entries in the queue, and two concurrent removes over overlapping
+                // batches would cross — the stable order the SortedMap returns is what keeps the pair of
+                // UPDATEs free of deadlock
+                SortedMap<String, Integer> cancelledPerBatch = new TreeMap<>();
+                for (List<String> chunk : JdbcSupport.chunksOf(drained)) {
+                    // batch-counted: countCancelledMembers, over the set that was ACTUALLY drained
+                    jdbcTemplate.update("""
+                            UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :now
+                            WHERE execution_id IN (:ids)
+                            """, new MapSqlParameterSource("ids", chunk).addValue("now", now));
+                    for (Map<String, Object> member : drainedBatchMembers(chunk)) {
+                        cancelledPerBatch.merge((String) member.get("batch_id"),
+                                ((Number) member.get("pending")).intValue(), Integer::sum);
+                    }
+                }
+                countCancelledMembers(cancelledPerBatch);
             }
             jdbcTemplate.update("UPDATE mohs_job_definitions SET retired = :retired, updated_at = :now WHERE job_key = :jobKey",
                     new MapSqlParameterSource("jobKey", key.value())
                             .addValue("retired", true)
-                            .addValue("now", JdbcTimestamps.toUtcLocalDateTime(clock.instant())));
+                            .addValue("now", now));
         });
     }
 
     /**
-     * Aposentar o job cancela o que estava NA FILA, e cancelar é terminal:
-     * sem contar, o membro some do lote e {@code pending} nunca zera — o
-     * lote fica aberto para sempre, sem varredura de reconciliação que
-     * cure (ADR-0043). Agrupado sobre o conjunto que o dreno REALMENTE
-     * levou (não sobre um snapshot pré-dreno): quem o claim concorrente
-     * arrancou da fila vai rodar e contar na própria conclusão — contá-lo
-     * aqui seria a dupla contagem que a era antiga aceitava como janela.
+     * Retiring a job cancels what was IN THE QUEUE, and cancelling is terminal: without counting, the
+     * member disappears from the batch and {@code pending} never reaches zero — the batch stays open
+     * forever, with no reconciliation sweep to cure it.
      *
-     * <p>SQL de {@code mohs_batches} aqui em vez de {@code BatchStore}: o
-     * incremento é em bloco ({@code + :n} por lote, não N chamadas), forma que
-     * a porta não tem. Se um terceiro caso aparecer, vira
-     * {@code incrementFailedBy} na porta.
+     * <p>Grouped over the set the drain ACTUALLY took (not over a pre-drain snapshot): whatever a
+     * concurrent claim tore out of the queue will run and count in its own completion — counting it here
+     * would be the double counting the old era accepted as a window.
+     *
+     * <p>{@code mohs_batches} SQL lives here rather than in {@code BatchStore} because the increment is
+     * done in bulk ({@code + :n} per batch, not N calls), a shape the port does not have. If a third
+     * case appears, it becomes {@code incrementFailedBy} on the port.
      */
     private List<Map<String, Object>> drainedBatchMembers(List<String> drained) {
         return jdbcTemplate.queryForList("""
                 SELECT correlation_id AS batch_id, COUNT(*) AS pending
                 FROM mohs_execution
                 WHERE execution_id IN (:ids) AND correlation_id IS NOT NULL
-                GROUP BY correlation_id ORDER BY correlation_id
+                GROUP BY correlation_id
                 """, new MapSqlParameterSource("ids", drained));
     }
 
-    /** Ordem estável por {@code batch_id} ({@code ORDER BY} acima): dois removes concorrentes tocando os mesmos lotes não se cruzam. */
-    private void countCancelledMembers(List<Map<String, Object>> membersPerBatch) {
-        for (Map<String, Object> row : membersPerBatch) {
+    /** A stable order by {@code batch_id} (the caller's {@link SortedMap} order): two concurrent removes touching the same batches do not cross. */
+    private void countCancelledMembers(SortedMap<String, Integer> cancelledPerBatch) {
+        for (Map.Entry<String, Integer> batch : cancelledPerBatch.entrySet()) {
             jdbcTemplate.update("UPDATE mohs_batches SET failed = failed + :pending WHERE id = :id",
-                    new MapSqlParameterSource("id", row.get("batch_id")).addValue("pending", row.get("pending")));
+                    new MapSqlParameterSource("id", batch.getKey()).addValue("pending", batch.getValue()));
         }
     }
 
@@ -508,11 +535,9 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /**
-     * As quatro colunas de agenda de {@code upsert} extraídas num switch
-     * exaustivo único (JAVA-7) em vez de quatro testes {@code instanceof}
-     * independentes — uma variante nova de {@link Schedule} quebra a
-     * compilação aqui, igual já acontecia em {@link #scheduleType}, em vez
-     * de virar quatro colunas {@code null} em silêncio.
+     * The upsert's four schedule columns extracted into a single exhaustive switch, rather than four
+     * independent {@code instanceof} tests — a new {@link Schedule} variant breaks compilation here, as
+     * it already did in {@link #scheduleType}, instead of silently becoming four {@code null} columns.
      */
     private record ScheduleColumns(@Nullable String cronExpression, @Nullable String cronZone,
                                     @Nullable String intervalDuration, @Nullable Boolean intervalAfterFinish) {
@@ -527,17 +552,17 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /**
-     * {@code null} se {@code handler_type} não resolve mais (handler
-     * removido do código) — linha pulada do resultado, WARN logado, e o
-     * {@code job_key} anotado em {@code unresolvedHandlerJobKeys} pra
-     * {@link #markOrphanedForUnresolvedHandlers} marcar depois.
+     * {@code null} if {@code handler_type} no longer resolves (the handler was removed from the code) —
+     * the row is skipped from the result, a WARN is logged, and the {@code job_key} is noted in
+     * {@code unresolvedHandlerJobKeys} for {@link #markOrphanedForUnresolvedHandlers} to mark
+     * afterwards.
      */
     private static @Nullable StoredJob mapRowOrNull(ResultSet rs, int rowNum, List<String> unresolvedHandlerJobKeys) throws SQLException {
         String jobKey = rs.getString("job_key");
         String handlerTypeName = rs.getString("handler_type");
         Class<?> handlerType;
         try {
-            handlerType = Class.forName(handlerTypeName);
+            handlerType = ClassUtils.forName(handlerTypeName, ClassUtils.getDefaultClassLoader());
         } catch (ClassNotFoundException e) {
             log.warn("handler type '{}' for job '{}' not found on classpath, marking orphaned", handlerTypeName, jobKey);
             unresolvedHandlerJobKeys.add(jobKey);

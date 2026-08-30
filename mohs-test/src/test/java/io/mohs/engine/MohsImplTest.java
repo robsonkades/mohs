@@ -1,5 +1,21 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -43,18 +59,19 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Métodos de leitura de {@link MohsImpl} — a costura entre {@link Mohs}
- * e as portas {@link JobStore}/{@link WorkQueue}/{@link HistoryStore}/
- * {@link LeaseStore} que {@code io.mohs.rest} consome. {@link
- * InMemoryJobStore} real (comportamento de verdade, sem mock); as portas
- * da Phase 5 mockadas — a lógica de fila/derivação delas já tem suíte
- * própria nos {@code Jdbc*Test} de {@code io.mohs.store.jdbc}.
+ * Read methods of {@link MohsImpl} — the seam between {@link Mohs} and the
+ * {@link JobStore}/{@link WorkQueue}/{@link HistoryStore}/{@link LeaseStore} ports that
+ * {@code io.mohs.rest} consumes.
+ *
+ * <p>{@link InMemoryJobStore} is real here, so the store's behaviour is exercised rather than
+ * stubbed; the remaining ports are mocked, because their queueing and derivation logic already has
+ * a suite of its own in the {@code Jdbc*Test} classes under {@code io.mohs.store.jdbc}.
  */
 class MohsImplTest {
 
@@ -100,7 +117,7 @@ class MohsImplTest {
         assertThat(mohs.findJob(JobKey.of("ghost"))).isEmpty();
     }
 
-    /** ADR-0034: pendente cancela por CAS direto — o caminho da flag nem é tentado. */
+    /** A pending execution is cancelled by a direct CAS; the cooperative-flag path is not even attempted. */
     @Test
     void cancelOfAPendingExecutionCancelsDirectly() {
         ExecutionId id = ExecutionId.of("exec-1");
@@ -112,7 +129,11 @@ class MohsImplTest {
         verify(leaseStore, never()).requestCancellation(any());
     }
 
-    /** ADR-0034: o CAS perdeu (execução já roda) → cai no caminho da flag; o retorno é o estado corrente, não necessariamente terminal — o contrato do 202. */
+    /**
+     * The CAS lost because the execution is already running, so cancellation falls back to raising
+     * the cooperative flag. The return value is the CURRENT state, not necessarily a terminal one —
+     * which is exactly what the 202 promises: the request was accepted, not that it finished.
+     */
     @Test
     void cancelOfARunningExecutionFallsThroughToTheFlag() {
         ExecutionId id = ExecutionId.of("exec-1");
@@ -125,7 +146,11 @@ class MohsImplTest {
         verify(leaseStore).requestCancellation(id);
     }
 
-    /** TOCTOU fechado (review do ciclo ADR-0034): RUNNING vira RETRY_WAITING entre o CAS e a flag — a segunda passada pega a transição e a ordem do operador não cai no vazio. */
+    /**
+     * Closes a time-of-check/time-of-use window: the execution moves from RUNNING to RETRY_WAITING
+     * between the CAS and the flag. The second pass catches that transition, so the operator's
+     * cancel does not fall into the gap and vanish.
+     */
     @Test
     void cancelRetriesThePairWhenAnAttemptCompletionRacesInBetween() {
         ExecutionId id = ExecutionId.of("exec-1");
@@ -148,7 +173,11 @@ class MohsImplTest {
         assertThat(mohs.cancel(id)).isEmpty();
     }
 
-    /** GET /nodes por baixo: heartbeat mais recente primeiro, empate por nodeId — ordem exposta em API é contrato, nunca a ordem física da tabela (ADR-0012). */
+    /**
+     * What backs {@code GET /nodes}: most recent heartbeat first, ties broken by nodeId. Order
+     * exposed through an API is part of the contract — never whatever physical order the table
+     * happens to return.
+     */
     @Test
     void nodesAreListedMostRecentHeartbeatFirstWithAStableTiebreak() {
         when(nodeStore.findAll()).thenReturn(List.of(
@@ -162,7 +191,10 @@ class MohsImplTest {
                 .containsExactly("node-fresh", "node-tie-a", "node-tie-b", "node-old");
     }
 
-    /** ADR-0033/M3: retry manual — o CAS da porta arma com o "agora" do Clock injetado e o retorno é a execução já RETRY_WAITING. */
+    /**
+     * Manual retry: the port's CAS arms the attempt from the injected clock's "now", and the call
+     * returns the execution already in RETRY_WAITING.
+     */
     @Test
     void retryOfAFailedExecutionRearmsThroughTheStore() {
         ExecutionId id = ExecutionId.of("exec-1");
@@ -182,7 +214,10 @@ class MohsImplTest {
         assertThat(mohs.retry(id)).isEmpty();
     }
 
-    /** CAS derrotado com a linha ainda FAILED = o guard de retired barrou — a mensagem aponta o job removido, não o estado. */
+    /**
+     * A defeated CAS with the row still FAILED means the retired-job guard blocked it, so the
+     * message must point at the removed job rather than at the state, which is a red herring here.
+     */
     @Test
     void retryOfARetiredJobsExecutionThrowsNamingTheRemovedJob() {
         ExecutionId id = ExecutionId.of("exec-1");
@@ -195,7 +230,10 @@ class MohsImplTest {
                 .hasMessageContaining("removed job");
     }
 
-    /** POST duplicado (202 perdido, script reenviou): a execução já está rearmada — o 409 ensina a causa provável, não a lição errada. */
+    /**
+     * A duplicate POST — the 202 was lost and a script resent it. The execution is already rearmed,
+     * so the 409 has to name the likely cause instead of teaching the wrong lesson.
+     */
     @Test
     void retryOfAnAlreadyRearmedExecutionThrowsNamingTheDuplicate() {
         ExecutionId id = ExecutionId.of("exec-1");
@@ -208,7 +246,7 @@ class MohsImplTest {
                 .hasMessageContaining("already queued to run again");
     }
 
-    /** Estado ≠ FAILED: a exceção nomeia o estado atual — às 3h ninguém deveria adivinhar por que o retry "não pegou". */
+    /** State other than FAILED: the exception names the current state, so nobody has to guess at 3 a.m. why the retry "did not take". */
     @Test
     void retryOfANonFailedExecutionThrowsNamingTheState() {
         ExecutionId id = ExecutionId.of("exec-1");
@@ -222,7 +260,10 @@ class MohsImplTest {
                 .hasMessageContaining("only FAILED");
     }
 
-    /** ADR-0035: ocorrência do scheduler cancelada ainda pendente não passa pelo caminho de conclusão que rearma — o cancel cura a corrente fixed-delay aqui. */
+    /**
+     * A cancelled scheduler occurrence that is still pending never reaches the completion path that
+     * rearms the trigger, so cancellation is what keeps a fixed-delay chain from stalling forever.
+     */
     @Test
     void cancelOfAPendingSchedulerOccurrenceRearmsTheAfterFinishChain() {
         JobStore jobStoreMock = mock(JobStore.class);
@@ -240,7 +281,7 @@ class MohsImplTest {
         verify(jobStoreMock).armNextFire(JobKey.of("poll"), NOW.plus(Duration.ofMinutes(5)));
     }
 
-    /** Execução manual cancelada não é a corrente — nada a rearmar. */
+    /** A cancelled manual execution is not part of the recurring chain, so there is nothing to rearm. */
     @Test
     void cancelOfAPendingManualExecutionDoesNotTouchTheChain() {
         JobStore jobStoreMock = mock(JobStore.class);
@@ -274,7 +315,7 @@ class MohsImplTest {
         assertThat(mohs.findJob(JobKey.of("welcome-email")).orElseThrow().nextFireAt()).isNull();
     }
 
-    /** ADR-0035: o snapshot lê o estado REAL do trigger (armado no upsert), não um recálculo por cima do relógio a cada leitura. */
+    /** The snapshot reads the trigger's REAL stored state, armed at upsert — not a fresh recomputation against the clock on every read. */
     @Test
     void intervalJobsExposeTheStoredNextFireAt() {
         jobStore.upsert(everyMinute("digest"));
@@ -301,7 +342,7 @@ class MohsImplTest {
                 .containsExactlyInAnyOrder("welcome-email", "digest");
     }
 
-    /** ADR-0036: reschedule delega pra porta e devolve o snapshot já com a agenda nova e o trigger recomputado. */
+    /** Reschedule delegates to the port and returns the snapshot already carrying the new schedule and the recomputed trigger. */
     @Test
     void rescheduleReturnsTheFreshSnapshot() {
         jobStore.upsert(everyMinute("digest"));
@@ -346,10 +387,13 @@ class MohsImplTest {
         assertThat(mohs.findJob(JobKey.of("welcome-email"))).isEmpty();
     }
 
-    /** Aposentadoria de job anotado é remover a anotação (scanner marca ORPHANED) — o erro precisa ensinar isso, não só recusar. */
+    /**
+     * Retiring an annotated job means removing the annotation, which the scanner then marks
+     * ORPHANED. The error has to teach that, not merely refuse.
+     */
     @Test
     void removeRejectsAnAnnotationSourcedDefinitionWithAnErrorThatTeaches() {
-        // JobDefinition.of hardcoda PROGRAMMATIC — só o construtor canônico produz ANNOTATION
+        // The public builder always stamps PROGRAMMATIC; only the canonical constructor yields ANNOTATION
         jobStore.upsert(new JobDefinition(JobKey.of("annotated"), null, Handler.class, new OnDemandSpec(),
                 null, null, Misfire.IGNORE, true, 0, 0, null, null, DefinitionSource.ANNOTATION));
 
@@ -359,7 +403,7 @@ class MohsImplTest {
         assertThat(mohs.findJob(JobKey.of("annotated"))).isPresent();
     }
 
-    /** Mesma postura de {@code pause}: job desconhecido é no-op, não erro. */
+    /** Same stance as {@code pause}: an unknown job is a no-op, not an error. */
     @Test
     void removeOfAnUnknownJobIsANoOp() {
         assertThatCode(() -> mohs.remove(JobKey.of("ghost"))).doesNotThrowAnyException();
@@ -403,7 +447,10 @@ class MohsImplTest {
         verify(historyStore).findPage(eq(null), eq(null), eq(null), eq(null), eq(null), eq(10), any());
     }
 
-    /** ?cursor= (em branco) na REST = primeira página — antes ExecutionId.of("") estourava IAE, que a borda respondia como 500. */
+    /**
+     * A blank {@code ?cursor=} from REST means the first page. Previously {@code ExecutionId.of("")}
+     * threw IllegalArgumentException, which the edge turned into a 500.
+     */
     @Test
     void executionsTreatsABlankCursorAsFirstPage() {
         when(historyStore.findPage(any(), any(), any(), any(), eq(null), eq(10), any())).thenReturn(List.of());
@@ -413,7 +460,7 @@ class MohsImplTest {
         verify(historyStore).findPage(eq(null), eq(null), eq(null), eq(null), eq(null), eq(10), any());
     }
 
-    /** Item 49: janela inválida falha ANTES das duas queries — é o comportamento que justifica duplicar o predicado do record na fachada. */
+    /** An invalid window fails BEFORE either query runs — the behaviour that justifies repeating the record's predicate in the facade. */
     @Test
     void aNonPositiveWindowFailsBeforeTouchingTheStore() {
         assertThatThrownBy(() -> mohs.overview(Duration.ZERO)).isInstanceOf(IllegalArgumentException.class);
@@ -421,12 +468,17 @@ class MohsImplTest {
         verifyNoInteractions(historyStore);
     }
 
-    /** GET /overview — composição pura: o `since` sai do Clock injetado (nunca do relógio da máquina) e a normalização (zeros dos estados vivos) é do OverviewSnapshot. */
+    /**
+     * {@code GET /overview} is pure composition: {@code since} comes from the injected clock, never
+     * from the machine's, and normalising the live states to zero belongs to {@code OverviewSnapshot}.
+     */
     @Test
     void overviewComposesActiveCountsAndTheWindowedThroughput() {
         when(historyStore.countActiveByState(NOW)).thenReturn(Map.of(ExecutionState.ENQUEUED, 7L));
         when(historyStore.countTerminalOutcomesSince(NOW.minusSeconds(60)))
                 .thenReturn(Map.of(ExecutionState.SUCCEEDED, 41L));
+        when(historyStore.countTerminalOutcomesSince(NOW.minusSeconds(10)))
+                .thenReturn(Map.of(ExecutionState.SUCCEEDED, 9L, ExecutionState.FAILED, 1L));
 
         OverviewSnapshot overview = mohs.overview(Duration.ofSeconds(60));
 
@@ -434,16 +486,71 @@ class MohsImplTest {
                 entry(ExecutionState.ENQUEUED, 7L),
                 entry(ExecutionState.RUNNING, 0L),
                 entry(ExecutionState.RETRY_WAITING, 0L));
-        assertThat(overview.throughputWindow()).isEqualTo(Duration.ofSeconds(60));
-        assertThat(overview.succeededInWindow()).isEqualTo(41L);
-        assertThat(overview.failedInWindow()).isZero();
+        assertThat(overview.throughput().window()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(overview.throughput().succeeded()).isEqualTo(41L);
+        assertThat(overview.throughput().failed()).isZero();
     }
 
     /**
-     * O total nasce fechado: os membros são coletados antes de a linha do lote
-     * existir, então o lote já sabe quantas conclusões o fecham (ADR-0043).
-     * Cada execução sai carregando o batchId — sem isso a conclusão não teria
-     * como contar o membro.
+     * All three readings are taken from the SAME instant.
+     *
+     * <p>If the clock were re-read between them, the short window would end after the long one and
+     * the rate would cover an interval other than the one it declares. A {@code Clock} that MOVES
+     * on every read is what makes the regression detectable: the neighbouring tests use a stopped
+     * clock, so a version that re-read {@code clock.instant()} would pass those without a single
+     * assertion changing.
+     */
+    @Test
+    void allThreeCountsDeriveFromASingleClockRead() {
+        Clock advancing = mock(Clock.class);
+        when(advancing.instant()).thenReturn(NOW, NOW.plusSeconds(5), NOW.plusSeconds(10));
+        MohsImpl mohsWithAdvancingClock = new MohsImpl(jobStore, workQueue, historyStore, leaseStore,
+                work -> work.run(), nodeStore, rateLimitStore, handlerRegistry, advancing,
+                mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(),
+                new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { });
+        when(historyStore.countActiveByState(NOW)).thenReturn(Map.of());
+        when(historyStore.countTerminalOutcomesSince(NOW.minusSeconds(60)))
+                .thenReturn(Map.of(ExecutionState.SUCCEEDED, 600L));
+        when(historyStore.countTerminalOutcomesSince(NOW.minusSeconds(10)))
+                .thenReturn(Map.of(ExecutionState.SUCCEEDED, 50L));
+
+        OverviewSnapshot overview = mohsWithAdvancingClock.overview(Duration.ofSeconds(60));
+
+        assertThat(overview.recent().perSecond())
+                .as("a re-read clock would make the short window's stub not match, and the rate would drop to zero")
+                .isEqualTo(5.0);
+        verify(advancing, times(1)).instant();
+    }
+
+    /**
+     * The short reading comes from a window of its OWN, never sliced out of the long one, because
+     * it is what yields the rate.
+     *
+     * <p>The live counts are instantaneous gauges, and by Little's Law they sit at zero for any
+     * fast job — so without this reading the dashboard cannot tell "idle" from "working quickly".
+     */
+    @Test
+    void overviewCarriesAShortReadingThatYieldsARate() {
+        when(historyStore.countActiveByState(NOW)).thenReturn(Map.of());
+        when(historyStore.countTerminalOutcomesSince(NOW.minusSeconds(60)))
+                .thenReturn(Map.of(ExecutionState.SUCCEEDED, 600L));
+        when(historyStore.countTerminalOutcomesSince(NOW.minusSeconds(10)))
+                .thenReturn(Map.of(ExecutionState.SUCCEEDED, 47L, ExecutionState.FAILED, 3L));
+
+        OverviewSnapshot overview = mohs.overview(Duration.ofSeconds(60));
+
+        assertThat(overview.recent().window()).isEqualTo(Duration.ofSeconds(10));
+        assertThat(overview.recent().perSecond())
+                .as("50 terminal executions in 10s is 5/s — the number the activity panel needs")
+                .isEqualTo(5.0);
+    }
+
+    /**
+     * The total is fixed at birth: members are collected before the batch row exists, so the
+     * batch already knows how many completions will close it.
+     *
+     * <p>Each execution carries the batchId out with it — without that, a completion would have no
+     * way to count itself against the batch.
      */
     @Test
     void batchFixesTheTotalUpFrontAndStampsEveryMemberWithTheBatchId() {
@@ -455,7 +562,7 @@ class MohsImplTest {
             members.add(ref, "bob");
         });
 
-        verify(batchStore).insert(batch.batchId(), 2);
+        verify(batchStore).insert(batch.batchId(), "nightly", 2);
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<HistoryStore.NewExecution>> recorded = ArgumentCaptor.forClass(List.class);
         verify(historyStore, times(2)).record(recorded.capture());
@@ -463,7 +570,7 @@ class MohsImplTest {
                 assertThat(execution.correlationId()).isEqualTo(batch.batchId())));
     }
 
-    /** Lote vazio nunca completaria — recusado na entrada, e nada é persistido. */
+    /** An empty batch could never complete, so it is refused at the door and nothing is persisted. */
     @Test
     void anEmptyBatchIsRefusedBeforeAnythingIsWritten() {
         assertThatThrownBy(() -> mohs.batch("nightly", members -> { }))
@@ -476,11 +583,12 @@ class MohsImplTest {
     }
 
     /**
-     * Caracterização do comportamento atual: a definição de cada membro só é
-     * checada DEPOIS de a linha do lote existir, então um membro sem job
-     * registrado derruba a chamada com o lote — e os membros anteriores — já
-     * persistidos. Fixado aqui como rede de proteção; mudar a ordem de
-     * validação é decisão do time, não do refactor.
+     * Characterisation of the CURRENT behaviour, not an endorsement of it: each member's
+     * definition is only checked AFTER the batch row exists, so a member with no registered job
+     * fails the call with the batch — and the members before it — already persisted.
+     *
+     * <p>Pinned here as a safety net. Changing the validation order is a team decision, not
+     * something a refactor should do on its way past.
      */
     @Test
     void aMemberWithoutARegisteredJobFailsBeforeAnythingIsWritten() {
@@ -500,12 +608,12 @@ class MohsImplTest {
         verifyNoInteractions(workQueue);
     }
 
-    /** A recusa tem que ensinar o que fazer, não só dizer não (ADR-0043, opção B). */
+    /** The refusal has to say what to do instead, not merely say no. */
     @Test
     void retryingABatchMemberExplainsWhyAndWhatToDoInstead() {
         jobStore.upsert(onDemand("welcome-email"));
         Execution member = new Execution(ExecutionId.of("019abc-m"), JobKey.of("welcome-email"),
-                ExecutionState.FAILED, NOW, null, List.of(), "application", Priority.NORMAL, null, "b9");
+                ExecutionState.FAILED, NOW, null, List.of(), "application", Priority.NORMAL, null, "b9", null);
         when(workQueue.rearmForManualRetry(any(), any())).thenReturn(false);
         when(historyStore.find(eq(ExecutionId.of("019abc-m")), any())).thenReturn(Optional.of(member));
 
@@ -513,5 +621,24 @@ class MohsImplTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("member of batch b9")
                 .hasMessageContaining("Schedule the job standalone");
+    }
+    /**
+     * A blank name used to cross the write barrier, become durable, and only blow up on READ.
+     *
+     * <p>{@code BatchCompleted}'s constructor threw inside the event channel, where exceptions are
+     * swallowed by design, so the user's {@code onCompletion} never ran and the batch turned into
+     * a permanent 500 on {@code GET /batches/&#123;id&#125;}. Validating in the producer is what
+     * closes that path.
+     */
+    @Test
+    void aBlankBatchNameIsRejectedBeforeAnythingIsWritten() {
+        jobStore.upsert(onDemand("welcome-email"));
+        JobRef<String> ref = JobRef.of("welcome-email", String.class);
+
+        assertThatThrownBy(() -> mohs.batch("  ", members -> members.add(ref, "ana")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not be blank");
+
+        verifyNoInteractions(batchStore);
     }
 }

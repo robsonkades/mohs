@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.sql.ResultSet;
@@ -14,7 +29,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import io.mohs.engine.BatchCounters;
 import io.mohs.engine.BatchStore;
 
-/** {@link BatchStore} sobre {@code mohs_batches} (Data Mapper, PoEAA). */
+/** {@link BatchStore} over {@code mohs_batches} (a Data Mapper, PoEAA). */
 public final class JdbcBatchStore implements BatchStore {
 
     private static final String INCREMENT_SUCCEEDED =
@@ -32,27 +47,29 @@ public final class JdbcBatchStore implements BatchStore {
     }
 
     @Override
-    public void insert(String batchId, int total) {
+    public void insert(String batchId, String name, int total) {
         Objects.requireNonNull(batchId, "batchId");
+        Objects.requireNonNull(name, "name");
         if (total < 0) {
             throw new IllegalArgumentException("total must not be negative");
         }
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("id", batchId)
+                .addValue("name", name)
                 .addValue("total", total)
                 .addValue("createdAt", JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
         jdbcTemplate.update("""
-                INSERT INTO mohs_batches (id, total, succeeded, failed, created_at)
-                VALUES (:id, :total, 0, 0, :createdAt)
+                INSERT INTO mohs_batches (id, name, total, succeeded, failed, created_at)
+                VALUES (:id, :name, :total, 0, 0, :createdAt)
                 """, params);
     }
 
-    /** DBTUNE-6: colunas explícitas em vez de {@code SELECT *} — {@code created_at} é forense de operador, nunca lido aqui, e esta releitura roda em TODA conclusão de membro. */
+    /** Explicit columns rather than {@code SELECT *} — {@code created_at} is operator forensics, never read here, and this re-read runs on EVERY member completion. */
     @Override
     public Optional<BatchCounters> find(String batchId) {
         Objects.requireNonNull(batchId, "batchId");
         return JdbcSupport.findOne(jdbcTemplate,
-                "SELECT id, total, succeeded, failed FROM mohs_batches WHERE id = :id",
+                "SELECT id, name, total, succeeded, failed FROM mohs_batches WHERE id = :id",
                 new MapSqlParameterSource("id", batchId),
                 JdbcBatchStore::mapRow);
     }
@@ -68,29 +85,26 @@ public final class JdbcBatchStore implements BatchStore {
     }
 
     /**
-     * {@code UPDATE} e depois {@code SELECT}, em vez do {@code UPDATE ...
-     * RETURNING} que a ADR-0043 nomeia: o H2 não suporta a cláusula (medido
-     * ao implementar) e o MySQL também não, então este é o único caminho que
-     * serve os quatro dialetos. Uma ida a mais no Postgres e no SQL Server é
-     * o preço, e a medição da ADR mostrou os candidatos separados por menos
-     * que um round trip — otimizar por dialeto antes de um número que
-     * justifique seria generalização prematura.
+     * An {@code UPDATE} followed by a {@code SELECT}, rather than the {@code UPDATE ... RETURNING} the
+     * design names: H2 does not support the clause (measured while implementing) and neither does MySQL,
+     * so this is the only path that serves all four dialects. One extra round trip on Postgres and SQL
+     * Server is the price, and the measurement showed the candidates separated by less than a round trip
+     * — optimising per dialect before having a number that justifies it would be premature
+     * generalisation.
      *
-     * <p>A releitura é estável porque o row lock do {@code UPDATE} é mantido
-     * até o commit: nenhuma outra transação consegue comitar sobre a linha
-     * entre os dois statements, então o que volta é exatamente o que ESTA
-     * transação escreveu. Isso depende dos dois viverem na MESMA transação —
-     * que é o que a conclusão garante (ADR-0003, cláusula 4). Fora de uma,
-     * duas conclusões concorrentes podem ler o mesmo saldo final e as duas se
-     * acharem a fechadora do lote.
+     * <p>The re-read is stable because the {@code UPDATE}'s row lock is held until the commit: no other
+     * transaction can commit over the row between the two statements, so what comes back is exactly what
+     * THIS transaction wrote. That depends on both living in the SAME transaction — which the completion
+     * guarantees. Outside one, two concurrent completions could read the same final balance and both
+     * believe they closed the batch.
      */
     private BatchCounters incrementAndRead(String batchId, String incrementSql) {
         Objects.requireNonNull(batchId, "batchId");
         MapSqlParameterSource params = new MapSqlParameterSource("id", batchId);
         if (jdbcTemplate.update(incrementSql, params) == 0) {
-            // Guard REAL desde o S5.4: mohs_execution.correlation_id não tem FK
-            // (a FK morreu com a mesa antiga) — um batchId órfão chega até aqui,
-            // e contar em silêncio perderia a conclusão do lote para sempre.
+            // A REAL guard: mohs_execution.correlation_id has no foreign key (that died with the old
+            // layout) — an orphan batchId reaches here, and counting it silently would lose the batch's
+            // completion forever.
             throw new IllegalStateException("no batch '" + batchId + "' to count a member into");
         }
         return find(batchId).orElseThrow(() ->
@@ -98,6 +112,7 @@ public final class JdbcBatchStore implements BatchStore {
     }
 
     private static BatchCounters mapRow(ResultSet rs) throws SQLException {
-        return new BatchCounters(rs.getString("id"), rs.getInt("total"), rs.getInt("succeeded"), rs.getInt("failed"));
+        return new BatchCounters(rs.getString("id"), rs.getString("name"), rs.getInt("total"), rs.getInt("succeeded"),
+                rs.getInt("failed"));
     }
 }

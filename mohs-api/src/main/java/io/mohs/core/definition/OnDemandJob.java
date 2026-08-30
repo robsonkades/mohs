@@ -1,5 +1,21 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.definition;
 
+import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -13,19 +29,20 @@ import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.resource.RateLimit;
 
 /**
- * Estereótipo de {@link MohsJob} para o job <b>sob demanda</b> (ADR-0038):
- * sem agenda — só roda quando invocado ({@link Mohs#schedule}, a API REST
- * ou o dashboard), com o payload fornecido na invocação. Por isso não
- * expõe atributos de gatilho, {@code misfire} (não há disparo a perder)
- * nem {@code startPaused} (pause não afeta invocação manual) — eles ficam
- * fixos nos defaults da meta-anotação.
+ * A {@link MohsJob} stereotype for the <b>on-demand</b> job: no schedule — it runs only when
+ * invoked ({@link Mohs#schedule}, the REST API or the dashboard), with the payload supplied at
+ * invocation.
  *
- * <p>Meta-anotada com {@code @MohsJob} (o padrão
- * {@code @Service}/{@code @Component} do Spring): açúcar exato para
- * {@code @MohsJob} sem {@code cron}/{@code every}, resolvida pelo scanner
- * via merged annotations — uma única tradução, nenhuma mecânica própria.
+ * <p>It therefore exposes no trigger attributes, no {@code misfire} (there is no firing to miss)
+ * and no {@code startPaused} (pausing does not affect manual invocation) — those stay fixed at the
+ * meta-annotation's defaults.
+ *
+ * <p>Meta-annotated with {@code @MohsJob} (Spring's {@code @Service}/{@code @Component} pattern):
+ * exact sugar for {@code @MohsJob} without {@code cron}/{@code every}, resolved by the scanner
+ * through merged annotations — one translation, no mechanics of its own.
  */
 @Target({ElementType.METHOD, ElementType.ANNOTATION_TYPE})
+@Documented
 @Retention(RetentionPolicy.RUNTIME)
 @MohsJob(id = "")
 public @interface OnDemandJob {
@@ -34,23 +51,23 @@ public @interface OnDemandJob {
     @AliasFor(annotation = MohsJob.class, attribute = "id")
     String value() default "";
 
-    /** Identidade estável — vira o {@code JobKey}; alias de {@link #value()}. Obrigatório (em branco falha o boot), upsert no boot. */
+    /** The stable identity — it becomes the {@code JobKey}; an alias of {@link #value()}. Mandatory (blank fails the boot), upserted at boot. */
     @AliasFor(annotation = MohsJob.class, attribute = "id")
     String id() default "";
 
-    /** Rótulo de exibição mutável. Default para o id quando deixado vazio. */
+    /** A mutable display label. Defaults to the id when left empty. */
     @AliasFor(annotation = MohsJob.class, attribute = "name")
     String name() default "";
 
-    /** {@link MohsRunner} nomeado em que este job executa. */
+    /** The named {@link MohsRunner} this job runs on. */
     @AliasFor(annotation = MohsJob.class, attribute = "runner")
     String runner() default "";
 
-    /** {@link ExecutionWindow} nomeada que exclui horários de disparo. */
+    /** The named {@link ExecutionWindow} that excludes firing times. */
     @AliasFor(annotation = MohsJob.class, attribute = "window")
     String window() default "";
 
-    /** {@link RateLimit} nomeado que limita a vazão de disparos deste job, cluster-wide (ADR-0042). */
+    /** The named {@link RateLimit} bounding this job's firing rate, cluster-wide. */
     @AliasFor(annotation = MohsJob.class, attribute = "rateLimit")
     String rateLimit() default "";
 
@@ -62,15 +79,15 @@ public @interface OnDemandJob {
     @AliasFor(annotation = MohsJob.class, attribute = "maxConcurrentExecutions")
     int maxConcurrentExecutions() default 0;
 
-    /** Ver {@link MohsJob#retries()} — o default 1 é o que torna a entrega at-least-once sob falha de nó. */
+    /** See {@link MohsJob#retries()} — the default of 1 is what makes delivery at-least-once under node failure. */
     @AliasFor(annotation = MohsJob.class, attribute = "retries")
     int retries() default 1;
 
-    /** Timeout da tentativa (duração ISO-8601, ex. {@code "PT5M"}). */
+    /** The attempt's timeout (an ISO-8601 duration, e.g. {@code "PT5M"}). */
     @AliasFor(annotation = MohsJob.class, attribute = "timeout")
     String timeout() default "";
 
-    /** Nome do bean de uma política de retry customizada, para casos que {@link #retries()} não expressa. */
+    /** The bean name of a custom retry policy, for cases {@link #retries()} cannot express. */
     @AliasFor(annotation = MohsJob.class, attribute = "retryPolicy")
     String retryPolicy() default "";
 }

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -15,21 +30,19 @@ import org.junit.jupiter.api.Test;
 import io.mohs.engine.EngineSettings;
 
 /**
- * O arranque do cluster com backlog na frente — o primeiro minuto de todo
- * deploy, e o cenário mais banal que existe: N nós sobem ao mesmo tempo e
- * encontram fila cheia. Nenhum caos, nenhum churn, nenhum nó morrendo.
+ * Cluster start-up with a backlog already waiting — the first minute of every deploy, and the most
+ * ordinary scenario there is: N nodes come up at once and find a full queue. No chaos, no churn,
+ * no node dying.
  *
- * <p>Existe para isolar uma suspeita levantada pelo {@link NodeChurnScenario}:
- * as execuções perdidas lá tinham carimbo de tempo do ARRANQUE, não da
- * saída do nó. A hipótese é a janela entre dois passos do tick de um par —
- * ele lê {@code mohs_nodes} e só depois roda o reaper; um nó que nasce
- * DENTRO dessa janela já reivindicou trabalho enquanto está ausente do
- * snapshot, e "ausente de {@code mohs_nodes} é morto por definição"
- * (ADR-0051). Se a hipótese vale, o par reclama trabalho vivo de um nó
- * saudável, e o fence — que cerca pela posse DO MORTO — não protege.
+ * <p>It exists to isolate a suspicion raised by {@link NodeChurnScenario}: the executions lost
+ * there were stamped at START-UP, not at the node's exit. The hypothesis is the window between two
+ * steps of a peer's tick — it reads {@code mohs_nodes} and only then runs the reaper, so a node
+ * born INSIDE that window has already claimed work while being absent from the snapshot, and
+ * absent from {@code mohs_nodes} means dead by definition. If the hypothesis holds, the peer
+ * reclaims live work from a healthy node, and the fence — which guards by the DEAD node's
+ * ownership — does not protect it.
  *
- * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
- * -Dtest=ColdStartScenario}.
+ * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=ColdStartScenario}.
  */
 class ColdStartScenario {
 
@@ -45,10 +58,10 @@ class ColdStartScenario {
         AtomicInteger invocations = new AtomicInteger();
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock)) {
-            // orçamento ZERO declarado: este cenário mede PERDA no arranque a
-            // frio, e herdar o default do produto (1) faria um reclaim ganhar
-            // segunda chance, terminar SUCCEEDED e a asserção `failed == 0`
-            // passar a tolerar exatamente o evento que ela existe pra pegar
+            // Budget declared as ZERO on purpose: this scenario measures LOSS on a cold start, and
+            // inheriting the product default (1) would give a reclaim a second chance, let it end
+            // SUCCEEDED, and make the `failed == 0` assertion tolerate exactly the event it exists
+            // to catch
             cluster.defineJob("cold", spec -> spec.retries(0));
             for (int i = 0; i < NODES; i++) {
                 cluster.addNode(settings(), List.of());

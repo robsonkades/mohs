@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import javax.sql.DataSource;
@@ -10,14 +25,11 @@ import io.mohs.store.jdbc.dialect.MySqlJdbcDialect;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * ADR-0048 no Tier 2 MySQL — o cenário que a bancada da Phase 2 pegou
- * quebrado: os {@code CREATE INDEX} do MySQL não tinham guarda ({@code IF
- * NOT EXISTS} não existe pra índice), a adoção de instalação pré-Flyway
- * falhava com 1061 no MEIO do script (DDL comita implicitamente), ficava
- * {@code success=false} no histórico e todo boot seguinte morria em
- * validação — loop permanente. A V1 guardada por {@code
- * information_schema} + SQL dinâmico é a correção; a adoção aqui é a
- * regressão.
+ * Flyway on Tier 2 MySQL — the scenario the bench caught broken: MySQL's {@code CREATE INDEX} had no
+ * guard ({@code IF NOT EXISTS} does not exist for an index), so adopting a pre-Flyway installation
+ * failed with 1061 in the MIDDLE of the script (DDL commits implicitly), left {@code success=false} in
+ * the history and made every subsequent boot die in validation — a permanent loop. A V1 guarded by
+ * {@code information_schema} plus dynamic SQL is the fix; the adoption here is the regression guard.
  */
 class MohsFlywayMySqlTest {
 
@@ -29,8 +41,8 @@ class MohsFlywayMySqlTest {
         MohsFlyway flyway = new MohsFlyway(dataSource, new MySqlJdbcDialect());
 
         flyway.migrate();
-        // re-execução: no-op pelo histórico — se a V1 tivesse falhado no meio,
-        // esta segunda chamada seria o loop de boot do achado
+        // Re-execution: a no-op through the history — if V1 had failed midway, this second call would be
+        // the boot loop of the finding
         flyway.migrate();
 
         assertThat(jdbc.queryForObject(

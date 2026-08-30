@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.job;
 
 import java.time.Duration;
@@ -48,16 +63,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * Comportamento real de {@link JobsController} sobre uma {@link Mohs}
- * mockada — {@code mohs.enabled=false} desliga {@code MohsAutoConfiguration}
- * (que exigiria {@code DataSource}) onde ela estiver no classpath. {@code
- * JobsController} entra via {@code @Bean} explícito, não via {@code
- * @WebMvcTest(controllers = ...)}: o slice herda o component-scan da
- * {@code @SpringBootConfiguration} mais próxima, e a deste módulo
- * ({@link io.mohs.rest.RestSliceConfiguration}) não escaneia
- * {@code io.mohs.rest} — dois bean definitions para o mesmo controller
- * seria o resultado, e a exclusão bloquearia a inclusão explícita de
- * {@code controllers = JobsController.class} também.
+ * The real behaviour of {@link JobsController} over a mocked {@link Mohs} — {@code mohs.enabled=false}
+ * turns off {@code MohsAutoConfiguration} (which would demand a {@code DataSource}) wherever it is
+ * on the classpath.
+ *
+ * <p>{@code JobsController} arrives through an explicit {@code @Bean} rather than
+ * {@code @WebMvcTest(controllers = ...)}: the slice inherits the component scan of the nearest
+ * {@code @SpringBootConfiguration}, and this module's ({@link io.mohs.rest.RestSliceConfiguration})
+ * does not scan {@code io.mohs.rest} — two bean definitions for the same controller would be the
+ * result, and the exclusion would block the explicit {@code controllers = JobsController.class}
+ * inclusion as well.
  */
 @WebMvcTest(properties = "mohs.enabled=false")
 class JobsControllerContractTest {
@@ -133,7 +148,7 @@ class JobsControllerContractTest {
                 .andExpect(jsonPath("$.executionId").value("exec-1"));
     }
 
-    /** Invocação completa: delay (computado no servidor) e priority chegam ao ScheduleCommand — os três terminais do core na borda REST. */
+    /** A complete invocation: delay (computed on the server) and priority reach the ScheduleCommand — the core's three terminals at the REST boundary. */
     @Test
     void scheduleAcceptsDelayAndPriority() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -153,7 +168,7 @@ class JobsControllerContractTest {
                 .andExpect(jsonPath("$.executionId").value("exec-2"));
     }
 
-    /** at × delay são exclusivos — a validação do record dispara na desserialização e vira 422 que ensina. */
+    /** at and delay are exclusive — the record's validation fires during deserialisation and becomes a 422 that teaches. */
     @Test
     void scheduleRejectsAtAndDelayTogether() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -166,7 +181,7 @@ class JobsControllerContractTest {
                 .andExpect(jsonPath("$.detail").value(containsString("mutually exclusive")));
     }
 
-    /** ADR-0036: PATCH da agenda devolve o envelope de emergência com o aviso de reversão no boot. */
+    /** A schedule PATCH returns the emergency envelope carrying the warning about reversion at boot. */
     @Test
     void reschedulePatchesTheScheduleUnderTheEmergencyContract() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -194,7 +209,7 @@ class JobsControllerContractTest {
                 .andExpect(status().isNotFound());
     }
 
-    /** O fix do 🔴 do review pinado: actor inválido rejeita ANTES de qualquer efeito — 4xx é contrato de "nada mudou". */
+    /** An invalid actor is rejected BEFORE any effect — a 4xx is a contract of "nothing changed". */
     @Test
     void rescheduleWithAnInvalidActorMutatesNothing() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -209,7 +224,7 @@ class JobsControllerContractTest {
         verify(mohs, never()).reschedule(any(), any());
     }
 
-    /** IAE do compact constructor do spec (interval não positivo) também é 422 com field "schedule" — nunca 500. */
+    /** An IAE from the spec's compact constructor (a non-positive interval) is also a 422 with field "schedule" — never a 500. */
     @Test
     void rescheduleRejectsANonPositiveInterval() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -224,7 +239,7 @@ class JobsControllerContractTest {
                 .andExpect(jsonPath("$.detail").value(containsString("positive")));
     }
 
-    /** Agenda irrealizável (cron que nunca dispara) é 422 que ensina — a IAE do cálculo do trigger nunca vira 500. */
+    /** An unrealisable schedule (a cron that never fires) is a 422 that teaches — the trigger calculation's IAE never becomes a 500. */
     @Test
     void rescheduleRejectsAnImpossibleCron() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -256,7 +271,7 @@ class JobsControllerContractTest {
     record CountPayload(int count) {
     }
 
-    /** O ramo do convertValue: no Jackson 3 a falha de databind NÃO é IllegalArgumentException — sem o catch certo isto era 500, não o 422 do contrato. */
+    /** The convertValue branch: in Jackson 3 a databind failure is NOT an IllegalArgumentException — without the right catch this was a 500, not the contract's 422. */
     @Test
     void scheduleRejectsAPayloadIncompatibleWithTheDeclaredTypeAs422() throws Exception {
         JobKey key = JobKey.of("welcome-email");
@@ -309,7 +324,7 @@ class JobsControllerContractTest {
                 .andExpect(jsonPath("$.nextCursor").value("exec-2"));
     }
 
-    /** size=0/-1 saturam em 1 (CursorPage.clampSize) — antes, 0 estourava IndexOutOfBounds e negativo estourava IAE, ambos 500. */
+    /** size=0 and size=-1 saturate at 1 (CursorPage.clampSize) — previously 0 threw IndexOutOfBounds and a negative threw IAE, both 500s. */
     @Test
     void executionsSaturatesANonPositiveSizeInsteadOfFailing() throws Exception {
         JobKey key = JobKey.of("welcome-email");

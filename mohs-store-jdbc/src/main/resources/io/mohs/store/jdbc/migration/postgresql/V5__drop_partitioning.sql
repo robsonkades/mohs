@@ -36,14 +36,34 @@
 -- do LOCK até o COMMIT. Numa base grande isto é janela de manutenção, não
 -- deploy de rotina — ver as consequências na ADR-0058.
 --
--- As PKs continuam com a coluna de tempo à frente. É herança do
--- particionamento (o Postgres exigia a chave de partição na PK) e sobrevive
--- de propósito: normalizá-las mexeria no caminho quente do UPDATE terminal
--- sem medida que justifique. Pendência com gatilho na ADR-0058.
+-- As PKs são normalizadas AQUI, na mesma janela. A coluna de tempo à frente
+-- era exigência do particionamento, e sem ele a medição diz que a PK não
+-- serve consulta nenhuma: o planner escolhe idx_mohs_execution_id e rebaixa
+-- created_at a Filter, e os dois UPDATEs terminais (com e sem created_at) dão
+-- o mesmo plano — 4 buffers, 0,047 ms. Era um índice de duas colunas mantido
+-- em toda escrita só pela unicidade.
+--
+-- O momento não é escolha: a parte cara — recriar a tabela e copiar a
+-- história — esta migração já está pagando. Normalizar junto custa ~zero;
+-- normalizar depois custa uma V6 que copia tudo de novo, com a mesma janela
+-- de indisponibilidade, e aí numa base de produção.
+--
+-- MUDA UMA GARANTIA, e é a única parte que não é neutra: antes o schema
+-- permitia dois mohs_execution com o mesmo id e created_at diferentes (nunca
+-- produzidos pelo código, mas possíveis pelo schema); agora o id é único de
+-- verdade. É por isso que a cópia abaixo não pode ser um INSERT cego — uma
+-- base que de alguma forma contenha essa duplicata falharia no meio da
+-- migração, sem dizer o porquê. A checagem vem antes e nomeia o problema.
+--
+-- Com PK (execution_id) e (execution_id, number), idx_mohs_execution_id e
+-- idx_mohs_attempt_exec deixam de ser criados: viraram prefixo exato da PK.
+-- O schema passa a ser IDÊNTICO ao dos outros três dialetos, que sempre
+-- tiveram PK natural.
 
 DO $$
 DECLARE
     constraint_name       text;
+    duplicate_id          text;
     execution_partitioned boolean := EXISTS (SELECT 1 FROM pg_partitioned_table WHERE partrelid = to_regclass('mohs_execution'));
     attempt_partitioned   boolean := EXISTS (SELECT 1 FROM pg_partitioned_table WHERE partrelid = to_regclass('mohs_attempt'));
 BEGIN
@@ -94,6 +114,28 @@ BEGIN
     SET LOCAL lock_timeout = '2s';
     LOCK TABLE mohs_attempt, mohs_execution IN ACCESS EXCLUSIVE MODE;
 
+    -- Depois do selo (ninguém mais escreve) e antes da cópia: a PK nova é mais
+    -- estrita que a antiga, e uma violação de unicidade no meio do INSERT
+    -- diria apenas "duplicate key". Aqui ela diz QUAL id e o que fazer.
+    IF execution_partitioned THEN
+        SELECT execution_id INTO duplicate_id
+          FROM mohs_execution GROUP BY execution_id HAVING count(*) > 1 LIMIT 1;
+        IF duplicate_id IS NOT NULL THEN
+            RAISE EXCEPTION 'V5: mohs_execution tem mais de uma linha com execution_id = % — a PK '
+                'antiga (created_at, execution_id) permitia isso e a nova, (execution_id), não. '
+                'Resolva a duplicata (mantenha a linha correta) e rode a migração de novo.', duplicate_id;
+        END IF;
+    END IF;
+    IF attempt_partitioned THEN
+        SELECT execution_id INTO duplicate_id
+          FROM mohs_attempt GROUP BY execution_id, number HAVING count(*) > 1 LIMIT 1;
+        IF duplicate_id IS NOT NULL THEN
+            RAISE EXCEPTION 'V5: mohs_attempt tem mais de uma linha com o mesmo (execution_id, number) '
+                'para execution_id = % — a PK antiga incluía finished_at e a nova não. Resolva a '
+                'duplicata e rode a migração de novo.', duplicate_id;
+        END IF;
+    END IF;
+
     IF execution_partitioned THEN
 
         CREATE TABLE mohs_execution_flat (
@@ -110,7 +152,7 @@ BEGIN
             idempotency_key VARCHAR(255),
             payload         TEXT         NOT NULL,
             payload_type    VARCHAR(500) NOT NULL,
-            PRIMARY KEY (created_at, execution_id)
+            PRIMARY KEY (execution_id)
         );
         -- lista de colunas nos DOIS lados: a cópia não pode depender da ordem
         -- de declaração coincidir entre origem e destino
@@ -137,7 +179,7 @@ BEGIN
                            constraint_name, replace(constraint_name, '_flat_', '_'));
         END LOOP;
 
-        CREATE INDEX idx_mohs_execution_id   ON mohs_execution (execution_id);
+        -- idx_mohs_execution_id não é recriado: virou a PK
         CREATE INDEX idx_mohs_execution_job  ON mohs_execution (job_key, execution_id DESC);
         CREATE INDEX idx_mohs_execution_corr ON mohs_execution (correlation_id)
             WHERE correlation_id IS NOT NULL;
@@ -158,7 +200,7 @@ BEGIN
             outcome      VARCHAR(20)  NOT NULL,
             error_type   VARCHAR(500),
             error        TEXT,
-            PRIMARY KEY (finished_at, execution_id, number)
+            PRIMARY KEY (execution_id, number)
         );
         INSERT INTO mohs_attempt_flat (execution_id, number, node_id, started_at, finished_at,
                                        outcome, error_type, error)
@@ -174,8 +216,8 @@ BEGIN
                            constraint_name, replace(constraint_name, '_flat_', '_'));
         END LOOP;
 
+        -- idx_mohs_attempt_exec não é recriado: (execution_id) é prefixo exato da PK
         CREATE INDEX idx_mohs_attempt_throughput ON mohs_attempt (finished_at, outcome);
-        CREATE INDEX idx_mohs_attempt_exec ON mohs_attempt (execution_id);
         EXECUTE 'ANALYZE mohs_attempt';
     END IF;
 END $$;

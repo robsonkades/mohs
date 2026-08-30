@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.job;
 
 import java.time.Duration;
@@ -38,7 +53,7 @@ class ScheduleJobRequestTest {
                 .isInstanceOf(NullPointerException.class);
     }
 
-    /** "Quando roda" OU "daqui a quanto" — os dois juntos é indecisão do cliente, rejeitada com mensagem que ensina. */
+    /** "When it runs" OR "how long from now" — both together is client indecision, rejected with a message that teaches. */
     @Test
     void rejectsAtAndDelayTogether() {
         assertThatThrownBy(() -> new ScheduleJobRequest(Map.of(), Instant.now(), Duration.ofMinutes(5), null))
@@ -46,7 +61,7 @@ class ScheduleJobRequestTest {
                 .hasMessageContaining("mutually exclusive");
     }
 
-    /** delay negativo viraria at(now - X) em silêncio — execução imediatamente devida sem aviso. */
+    /** A negative delay would silently become at(now - X) — an execution immediately due, with no warning. */
     @Test
     void rejectsANegativeDelay() {
         assertThatThrownBy(() -> new ScheduleJobRequest(Map.of(), null, Duration.ofMinutes(-5), null))

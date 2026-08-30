@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.sql.ResultSet;
@@ -18,10 +33,9 @@ import io.mohs.engine.NodeStore;
 import io.mohs.engine.StoredNode;
 
 /**
- * {@link NodeStore} sobre {@code mohs_nodes} (Data Mapper, PoEAA). Sem
- * {@link JdbcSupport#namedTemplateWithStreamFetchSize} — {@link #findAll}
- * devolve {@code List}, não {@code Stream} (tabela limitada pelo tamanho
- * do cluster), então não precisa do fetch size de cursor.
+ * {@link NodeStore} over {@code mohs_nodes} (a Data Mapper, PoEAA). Without
+ * {@link JdbcSupport#namedTemplateWithStreamFetchSize} — {@link #findAll} returns a {@code List}, not a
+ * {@code Stream} (a table bounded by the cluster's size), so it does not need the cursor fetch size.
  */
 public final class JdbcNodeStore implements NodeStore {
 
@@ -50,7 +64,7 @@ public final class JdbcNodeStore implements NodeStore {
                 .addValue("lastHeartbeatAt", JdbcTimestamps.toUtcLocalDateTime(at))
                 .addValue("expiresAt", JdbcTimestamps.toUtcLocalDateTime(expiresAt));
 
-        // ver CONC-2 em JdbcJobStore.upsert — mesma corrida, mesma correção.
+        // See the equivalent race in JdbcJobStore.upsert — same race, same fix.
         int updated = jdbcTemplate.update(HEARTBEAT_UPDATE, params);
         if (updated == 0) {
             try {

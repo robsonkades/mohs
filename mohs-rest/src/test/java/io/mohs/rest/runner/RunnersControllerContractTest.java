@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.runner;
 
 import java.util.List;
@@ -22,11 +37,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * Ver Javadoc de {@link io.mohs.rest.job.JobsControllerContractTest} sobre
- * o {@code @TestConfiguration}/{@code mohs.enabled=false} — mesmo motivo
- * aqui: {@link io.mohs.rest.RestSliceConfiguration} não escaneia
- * {@code io.mohs.rest} no component-scan, então controller e
- * {@link RestExceptionHandler} entram via {@code @Bean} explícito.
+ * See {@link io.mohs.rest.job.JobsControllerContractTest}'s Javadoc about the
+ * {@code @TestConfiguration}/{@code mohs.enabled=false} pair — the same reason applies here:
+ * {@link io.mohs.rest.RestSliceConfiguration} does not component-scan {@code io.mohs.rest}, so the
+ * controller and {@link RestExceptionHandler} arrive through an explicit {@code @Bean}.
  */
 @WebMvcTest(properties = "mohs.enabled=false")
 class RunnersControllerContractTest {
@@ -50,7 +64,7 @@ class RunnersControllerContractTest {
     @Autowired
     private MockMvc mockMvc;
 
-    /** O contrato do design doc: nome, modo, teto e ocupação — nada de cursor, a lista é o que o boot declarou. */
+    /** The design document's contract: name, mode, ceiling and occupancy — no cursor, since the list is what the boot declared. */
     @Test
     void listExposesModeMaxAndRunningPerRunner() throws Exception {
         when(MOHS.runners()).thenReturn(List.of(
@@ -68,7 +82,7 @@ class RunnersControllerContractTest {
                 .andExpect(jsonPath("$[1].mode").value("IO"));
     }
 
-    /** Node sem runner declarado é impossível (o registry exige o default), mas lista vazia não pode virar 500. */
+    /** A node with no declared runner is impossible (the registry requires the default), but an empty list must not become a 500. */
     @Test
     void listOfNoRunnersIsAnEmptyArray() throws Exception {
         when(MOHS.runners()).thenReturn(List.of());

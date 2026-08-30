@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -57,10 +72,9 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
 /**
- * {@link Dispatcher} contra as portas JDBC reais (H2, Phase 5): cada
- * desfecho vira um {@link LeaseStore.CompletionResult} cercado pela posse
- * do {@link Dispatcher.Grant} — a posse dos seeds nasce pelo caminho real
- * (história → fila → claim), então o fence dos testes é o de verdade.
+ * {@link Dispatcher} against the real JDBC ports (H2): each outcome becomes a
+ * {@link LeaseStore.CompletionResult} fenced by the {@link Dispatcher.Grant}'s ownership — the seeds'
+ * ownership is born through the real path (history, queue, claim), so the tests' fence is the real one.
  */
 class DispatcherTest {
 
@@ -111,16 +125,16 @@ class DispatcherTest {
                 new EngineMetrics(new SimpleMeterRegistry()));
     }
 
-    /** A posse que o claim dos seeds entregou — o mesmo fence (NODE, EPOCH) da lease gravada. */
+    /** The ownership the seeds' claim handed over — the same (NODE, EPOCH) fence as the written lease. */
     private static Dispatcher.Grant grant(int attemptNumber) {
-        return new Dispatcher.Grant(NODE, EPOCH, attemptNumber, NOW, NOW);
+        return new Dispatcher.Grant(NODE, EPOCH, attemptNumber, NOW);
     }
 
     /**
-     * ADR-0047: com o {@link CompletionBatcher}, a conclusão vira group
-     * commit e o evento sai DEPOIS do flush — a garantia "publica só o que
-     * ficou durável" atravessa o batcher. A mecânica do batcher em si mora
-     * em {@link CompletionBatcherTest}; aqui é só o wiring do dispatcher.
+     * With the {@link CompletionBatcher}, the completion becomes a group commit and the event goes out
+     * AFTER the flush — the "publish only what became durable" guarantee crosses the batcher. The
+     * batcher's own mechanics live in {@link CompletionBatcherTest}; here it is only the dispatcher's
+     * wiring.
      */
     @Test
     void dispatchThroughTheBatcherCompletesAndPublishesAfterTheFlush() throws Exception {
@@ -141,7 +155,7 @@ class DispatcherTest {
         }
     }
 
-    /** História + fila + claim — a posse nasce pelo caminho real, com o fence (NODE, EPOCH). */
+    /** History, queue and claim — the ownership is born through the real path, with the (NODE, EPOCH) fence. */
     private Execution seedRunningExecution(String id, String jobKey) {
         return seedRunningExecution(id, jobKey, 1, "test");
     }
@@ -159,24 +173,22 @@ class DispatcherTest {
         return historyStore.find(ExecutionId.of(id), NOW).orElseThrow();
     }
 
-    /** Estado do read model derivado (§4.3): advisory + lease + fila, exatamente o que a API pública vê. */
+    /** The derived read model's state: advisory plus lease plus queue, exactly what the public API sees. */
     private ExecutionState stateOf(String id) {
         return historyStore.find(ExecutionId.of(id), clock.instant()).orElseThrow().state();
     }
 
     /**
-     * Job sem orçamento de retry, declarado: os testes que usam este helper
-     * medem o caminho TERMINAL — a primeira falha já é o desfecho. O par com
-     * orçamento monta a sua própria definição ({@code retries(2)} em
-     * {@link #failureWithRemainingBudgetSchedulesARetryWithBackoff}). Herdar
-     * o orçamento do default do produto faria estes testes mudarem de
-     * caminho a cada revisão de política.
+     * A job with no retry budget, declared: the tests using this helper measure the TERMINAL path — the
+     * first failure is already the outcome. The counterpart with a budget builds its own definition
+     * ({@code retries(2)} in {@link #failureWithRemainingBudgetSchedulesARetryWithBackoff}). Inheriting the
+     * budget from the product's default would make these tests change path with every policy revision.
      */
     private static JobDefinition onDemand(String jobKey) {
         return JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand().retries(0));
     }
 
-    /** ADR-0033: falha com orçamento renasce na fila com backoff dentro do bound (1s pra 1ª falha) — RETRY_WAITING derivado — e publica AttemptFailed + RetryScheduled, nunca Failed. */
+    /** A failure with budget is reborn in the queue with backoff inside the bound (1s for the 1st failure) — a derived RETRY_WAITING — and publishes AttemptFailed plus RetryScheduled, never Failed. */
     @Test
     void failureWithRemainingBudgetSchedulesARetryWithBackoff() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -191,7 +203,7 @@ class DispatcherTest {
         Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
         assertThat(found.attempts()).hasSize(1);
         assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.FAILED);
-        // o renascimento aterrissou na fila: attempt 2, visível no backoff
+        // The rebirth landed in the queue: attempt 2, visible after the backoff
         Instant retryVisibleAt = JdbcTimestamps.fromUtcLocalDateTime(rawJdbcTemplate.queryForObject(
                 "SELECT visible_at FROM mohs_ready WHERE execution_id = 'exec-1'", LocalDateTime.class));
         assertThat(rawJdbcTemplate.queryForObject(
@@ -205,7 +217,7 @@ class DispatcherTest {
         assertThat(listener.events().stream().filter(Failed.class::isInstance)).isEmpty();
     }
 
-    /** A última tentativa do orçamento falhando é FAILED terminal com Failed(exhausted=true) — o attemptNumber veio da lease (§5.3), não de contagem. */
+    /** The budget's last attempt failing is a terminal FAILED with Failed(exhausted=true) — the attemptNumber came from the lease, not from counting. */
     @Test
     void failureOnTheLastBudgetedAttemptFailsTerminally() throws Exception {
         Execution execution = seedRunningExecutionWithPriorFailedAttempt("exec-1", "welcome-email");
@@ -222,7 +234,7 @@ class DispatcherTest {
         assertThat(event.attemptsExhausted()).isTrue();
     }
 
-    /** Terminal por natureza, não por orçamento: falha pré-dispatch publica Failed(exhausted=false) — o campo responde a pergunta do Javadoc de Failed, não herda o valor do caminho vizinho. */
+    /** Terminal by nature, not by budget: a pre-dispatch failure publishes Failed(exhausted=false) — the field answers Failed's Javadoc question, it does not inherit the neighbouring path's value. */
     @Test
     void failBeforeDispatchPublishesFailedWithoutTheExhaustedFlag() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -234,13 +246,13 @@ class DispatcherTest {
         assertThat(event.attemptsExhausted()).isFalse();
     }
 
-    /** ADR-0035: conclusão terminal de ocorrência do scheduler em job fixed-delay rearma a corrente — fim da execução + interval. */
+    /** A terminal completion of a scheduler occurrence on a fixed-delay job rearms the chain — the execution's end plus the interval. */
     @Test
     void terminalCompletionOfASchedulerOccurrenceRearmsTheAfterFinishChain() {
         JobDefinition definition = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
         jobStore.upsert(definition);
         Execution execution = seedRunningExecution("exec-1", "poll", 1, Execution.SCHEDULER_ACTOR);
-        disarmTrigger("poll"); // NULL-until-finish: o disparo desarmou o trigger (ADR-0035)
+        disarmTrigger("poll"); // NULL-until-finish: the firing disarmed the trigger
         handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { });
 
         newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
@@ -249,7 +261,7 @@ class DispatcherTest {
         assertThat(nextFireAtOf("poll")).isEqualTo(NOW.plus(Duration.ofMinutes(5)));
     }
 
-    /** Execução manual de job fixed-delay não é a corrente — concluir não rearma. */
+    /** A manual execution of a fixed-delay job is not the chain — completing does not rearm. */
     @Test
     void terminalCompletionOfAManualExecutionDoesNotRearmTheChain() {
         JobDefinition definition = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
@@ -264,7 +276,7 @@ class DispatcherTest {
         assertThat(nextFireAtOf("poll")).isNull();
     }
 
-    /** Falha com orçamento não rearma — a corrente continua viva pelo retry; o rearme vem da conclusão terminal do retry. */
+    /** A failure with budget does not rearm — the chain stays alive through the retry; the rearm comes from the retry's terminal completion. */
     @Test
     void aBudgetedFailureOfASchedulerOccurrenceDoesNotRearm() {
         JobDefinition definition = JobDefinition.of("poll", Handler.class,
@@ -292,7 +304,7 @@ class DispatcherTest {
         return stored == null ? null : JdbcTimestamps.fromUtcLocalDateTime(stored);
     }
 
-    /** Segunda tentativa: um attempt FAILED já gravado e a entrada de fila do attempt 2 — o claim entrega a lease com attempt_number 2. */
+    /** A second attempt: one FAILED attempt already recorded plus the attempt-2 queue entry — the claim hands over the lease with attempt_number 2. */
     private Execution seedRunningExecutionWithPriorFailedAttempt(String id, String jobKey) {
         jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
         rawJdbcTemplate.update("""
@@ -353,7 +365,7 @@ class DispatcherTest {
         assertThat(found.attempts().get(0).error()).contains("no handler registered").contains("welcome-email");
     }
 
-    /** ExecutionInterceptor's own Javadoc: sua exceção É falha de attempt, mesmo tratamento que exceção do handler. */
+    /** ExecutionInterceptor's own Javadoc: its exception IS an attempt failure, treated exactly like a handler's. */
     @Test
     void interceptorExceptionCountsAsAttemptFailure() {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -408,7 +420,7 @@ class DispatcherTest {
         assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
     }
 
-    /** ADR-0034: sinal MANUAL + saída anormal = CANCELLED terminal com evento Cancelled — cancel vence orçamento (reagendar o que o operador mandou parar contradiz a ordem). */
+    /** A MANUAL signal plus an abnormal exit is a terminal CANCELLED with a Cancelled event — a cancel beats the budget (rescheduling what the operator ordered stopped would contradict the order). */
     @Test
     void manualCancellationMapsAnAbnormalExitToCancelledWithoutRetry() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -427,7 +439,7 @@ class DispatcherTest {
         assertThat(cancelled.attempt()).isEqualTo(1);
     }
 
-    /** ADR-0034: sinal TIMEOUT reclassifica a falha com causa de timeout e mantém o orçamento — e a thread sai limpa (interrupt pendente nunca sobrevive ao dispatch). */
+    /** A TIMEOUT signal reclassifies the failure with a timeout cause and keeps the budget — and the thread exits clean (a pending interrupt never survives the dispatch). */
     @Test
     void timeoutSignalMapsTheFailureToTimeoutCauseAndKeepsTheRetryBudget() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -447,7 +459,7 @@ class DispatcherTest {
         assertThat(Thread.currentThread().isInterrupted()).isFalse();
     }
 
-    /** ADR-0034/API-DESIGN passo 3 do shutdown: sinal SHUTDOWN reclassifica com causa NodeShutdown e segue o retry normal — at-least-once honesto até no desligamento. */
+    /** A SHUTDOWN signal reclassifies with a NodeShutdown cause and follows the normal retry — honest at-least-once even during shutdown. */
     @Test
     void shutdownSignalMapsTheFailureToNodeShutdownCause() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -464,7 +476,7 @@ class DispatcherTest {
         assertThat(failed.error().getMessage()).contains("node shutdown");
     }
 
-    /** ADR-0034: retorno normal com sinal disparado é SUCCEEDED — o trabalho terminou; registrar outra coisa mentiria e agendaria uma duplicata. */
+    /** A normal return with the signal raised is SUCCEEDED — the work finished; recording anything else would lie and would schedule a duplicate. */
     @Test
     void aHandlerThatFinishesDespiteTheSignalSucceeds() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -479,11 +491,10 @@ class DispatcherTest {
     }
 
     /**
-     * Aprovado no review do ciclo ADR-0034: falha da ESCRITA de sucesso não
-     * é falha do handler — propaga (o Engine loga e a lease fica de pé pro
-     * reaper, indistinguível de crash pré-conclusão) em vez de ser
-     * reclassificada pelo sinal (CANCELLED de trabalho concluído) ou pelo
-     * orçamento (FAILED→retry fabricando duplicata).
+     * A failure of the success WRITE is not a handler failure — it propagates (the Engine logs it and the
+     * lease stays up for the reaper, indistinguishable from a crash before completion) rather than being
+     * reclassified by the signal (a CANCELLED for finished work) or by the budget (a FAILED and retry
+     * fabricating a duplicate).
      */
     @Test
     void aFailingSuccessWriteIsNeverReclassifiedBySignalOrBudget() {
@@ -502,7 +513,7 @@ class DispatcherTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
     }
 
-    /** Checagem pré-start (review ADR-0034): MANUAL já em pé quando a task sai da fila — o handler nem roda, a ordem do operador é honrada sem gastar CPU. */
+    /** The pre-start check: MANUAL already raised when the task leaves the queue — the handler does not even run, and the operator's order is honoured without spending CPU. */
     @Test
     void aManualSignalRaisedBeforeTheHandlerStartsSkipsTheHandlerAndCancels() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -518,7 +529,7 @@ class DispatcherTest {
         listener.awaitEvent(Cancelled.class);
     }
 
-    /** Checagem pré-start (review ADR-0034): SHUTDOWN em task enfileirada — trabalho não feito falha NodeShutdown sem rodar e vira retry limpo em outro node (não iniciar trabalho novo é o primeiro passo de graceful shutdown). */
+    /** The pre-start check: SHUTDOWN on a queued task — work not done fails NodeShutdown without running and becomes a clean retry on another node (not starting new work is the first step of a graceful shutdown). */
     @Test
     void aShutdownSignalRaisedBeforeTheHandlerStartsSkipsTheHandlerAndFollowsTheBudget() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");

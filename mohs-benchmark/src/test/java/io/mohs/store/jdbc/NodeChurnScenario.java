@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -18,50 +33,47 @@ import io.mohs.engine.EngineSettings;
 import io.mohs.engine.JobHandler;
 
 /**
- * O deploy do dia a dia: cluster com backlog, um nó sai por
- * {@code stop(grace)} (o que um SIGTERM de orquestrador provoca) e um nó
- * novo entra no lugar no meio do drain. Nada aqui é caos — é terça-feira.
+ * An everyday deploy: a cluster with a backlog, one node leaving through {@code stop(grace)} — what
+ * an orchestrator's SIGTERM triggers — and a new node taking its place mid-drain. Nothing here is
+ * chaos; it is a Tuesday.
  *
- * <p>O que se afirma:
+ * <p>What is asserted:
  * <ul>
- *   <li>nenhuma execução se perde — todas terminam, e em {@code SUCCEEDED};</li>
- *   <li>a re-entrega é BOUNDED: só o que estava em voo quando o nó saiu
- *       pode rodar duas vezes (at-least-once, ADR-0003), e o
- *       {@code stop(grace)} existe justamente para que nem isso aconteça —
- *       o dano esperado com folga de grace é ZERO;</li>
- *   <li>os shards do nó que saiu voltam a ser reivindicados: se a
- *       atribuição derivada (ADR-0055) não reagisse à membership, a fila
- *       pararia com trabalho pronto na frente — e é isso que o
- *       {@code settled} pega.</li>
+ *   <li>no execution is lost — all of them finish, and in {@code SUCCEEDED};</li>
+ *   <li>redelivery is BOUNDED: only what was in flight when the node left may run twice, which is
+ *       the at-least-once contract, and {@code stop(grace)} exists precisely so that not even that
+ *       happens — the expected damage with enough grace is ZERO;</li>
+ *   <li>the departed node's shards are claimed again: if the derived assignment did not react to
+ *       membership, the queue would stall with ready work in front of it — and that is what
+ *       {@code settled} catches.</li>
  * </ul>
  *
- * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
- * -Dtest=NodeChurnScenario}.
+ * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=NodeChurnScenario}.
  */
 class NodeChurnScenario {
 
     private static final int SEED = 8_000;
     private static final Duration OBSERVATION = Duration.ofMinutes(2);
-    /** Handler lento de propósito: sem trabalho em voo no instante da saída, o cenário não testaria o drain. */
+    /** Deliberately slow handler: with no work in flight at the moment of exit, the scenario would not test the drain at all. */
     private static final Duration HANDLER_WORK = Duration.ofMillis(60);
-    /** Posse mínima antes de derrubar o nó: sair de mãos vazias mediria um cluster de 2 nós e chamaria isso de churn. */
+    /** Minimum ownership before killing the node: leaving empty-handed would measure a two-node cluster and call it churn. */
     private static final int IN_FLIGHT_BEFORE_EXIT = 20;
-    /** A folga entre drain e stop: a variável independente do experimento, não sincronização preguiçosa. */
+    /** The grace between drain and stop: the experiment's independent variable, not lazy synchronisation. */
     private static final Duration SETTLE_BEFORE_STOP = Duration.ofSeconds(1);
     /**
-     * Um retry além da primeira tentativa. É o que separa as duas leituras
-     * possíveis do achado: com orçamento, o reclaim de um órfão vira attempt
-     * sintético + renascimento na fila (reentrega BOUNDED — o contrato
-     * at-least-once da ADR-0003, que é o que este cenário diz medir); sem
-     * orçamento, o MESMO mecanismo vira FAILED terminal por configuração, e
-     * a bancada chamaria de "perda" o que o produto chama de "reentrega".
-     * A aresta de {@code retries=0} tem teste próprio abaixo.
+     * One retry beyond the first attempt. It is what separates the two possible readings of the
+     * finding: with a budget, reclaiming an orphan becomes a synthetic attempt plus a rebirth in
+     * the queue (BOUNDED redelivery — the at-least-once contract this scenario claims to measure);
+     * without a budget, the SAME mechanism becomes a terminal FAILED by configuration, and the
+     * bench would call "loss" what the product calls "redelivery". The {@code retries=0} edge has
+     * its own test below.
      */
     private static final int RETRIES = 1;
 
     @Test
     void aNodeLeavingAndAnotherJoiningMidDrainLosesNothing() {
-        DataSource dataSource = PostgresTestSupport.freshSchema();
+        ScenarioBackend backend = ScenarioBackend.current();
+        DataSource dataSource = backend.freshSchema();
         Clock clock = Clock.systemUTC();
         Map<String, Integer> invocationsPerExecution = new ConcurrentHashMap<>();
         AtomicInteger invocations = new AtomicInteger();
@@ -71,7 +83,7 @@ class NodeChurnScenario {
             Thread.sleep(HANDLER_WORK);
         };
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock)) {
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.dialect())) {
             cluster.defineJob("churn", spec -> spec.retries(RETRIES));
             for (int i = 0; i < 3; i++) {
                 cluster.addNode(settings(), List.of());
@@ -81,15 +93,15 @@ class NodeChurnScenario {
             cluster.seedReady("churn", SEED, 20);
             cluster.startAll();
 
-            // o nó tem de sair com trabalho NA MÃO: espera a posse encher
+            // The node must leave with work IN HAND: wait for ownership to fill up
             ScenarioCluster.awaitUntil(Duration.ofSeconds(30),
                     () -> cluster.countLease() >= IN_FLIGHT_BEFORE_EXIT);
             int inFlightAtExit = cluster.countLease();
 
-            // a posse POR NÓ tirada antes da saída: o bound de re-execução é
-            // sobre o que o nó QUE SAI tinha na mão, e countLease() global é
-            // ~3× mais frouxo do que a mensagem anuncia. Qual das linhas é a
-            // dele só se sabe depois — o nó que saiu é o único STOPPED.
+            // Per-NODE ownership taken before the exit: the re-execution bound is about what the
+            // DEPARTING node held, and a global countLease() is roughly 3x looser than the message
+            // announces. Which rows were its own is only known afterwards — the departed node is
+            // the only STOPPED one.
             Map<String, Integer> leasesByNodeAtExit = leasesByNode(cluster);
             ScenarioCluster.Node leaving = cluster.nodes().get(2);
             long exitAt = System.nanoTime();
@@ -115,11 +127,10 @@ class NodeChurnScenario {
             }
 
             assertThat(settled).as("the leaving node's shards must be re-claimed — a stalled queue means the assignment did not react").isTrue();
-            // com orçamento de retry, um órfão reclamado RENASCE na fila: o
-            // attempt sintético aparece em failureKinds (por isso ele não é
-            // exigido vazio), mas a EXECUÇÃO tem de acabar bem. A causa entra
-            // na mensagem para o vermelho já vir atribuído, sem depender de
-            // alguém ler o stdout.
+            // With a retry budget, a reclaimed orphan is REBORN in the queue: the synthetic attempt
+            // shows up in failureKinds (which is why that is not required to be empty), but the
+            // EXECUTION must end well. The cause goes into the message so that a red build arrives
+            // already attributed, without anyone having to read stdout.
             assertThat(failed)
                     .as("a graceful exit must not lose work — with retries=%d a reclaimed orphan is redelivered, "
                             + "not failed. Causes seen: %s", RETRIES, cluster.failureKinds())
@@ -127,30 +138,29 @@ class NodeChurnScenario {
             assertThat(succeeded).as("every seeded execution must end SUCCEEDED").isEqualTo(SEED);
             assertThat(reExecuted)
                     .as("re-execution must be bounded by what the LEAVING node held (%d) — that is the at-least-once "
-                            + "contract of ADR-0003; a graceful drain should leave zero", heldByLeavingNode)
+                            + "at-least-once contract; a graceful drain should leave zero", heldByLeavingNode)
                     .isLessThanOrEqualTo(heldByLeavingNode);
         }
     }
 
     /**
-     * O braço de contraste, e a ÚNICA variável que muda em relação ao teste
-     * acima é {@code drain} + folga antes do {@code stop} — o nó novo entra
-     * do mesmo jeito, no mesmo ponto. Sem essa disciplina o par não
-     * distinguiria a hipótese do {@code stop} da hipótese do nó nascente (a
-     * mesma TOCTOU que o {@link ColdStartScenario} caça: {@code findAll} e
-     * {@code findOrphaned} são leituras separadas dentro de um tick).
+     * The contrast arm. The ONLY variable that changes relative to the test above is {@code drain}
+     * plus the grace before {@code stop} — the new node joins the same way, at the same point.
+     * Without that discipline the pair could not tell the {@code stop} hypothesis apart from the
+     * nascent-node hypothesis (the same time-of-check/time-of-use window {@link ColdStartScenario}
+     * hunts: {@code findAll} and {@code findOrphaned} are separate reads within one tick).
      *
-     * <p>A hipótese: {@code stop} chama {@code drain}, que espera o que está
-     * em {@code inFlight} NAQUELE instante; o lote que o tick em curso já
-     * reivindicou e ainda não submeteu entra depois ({@code Engine} registra
-     * no {@code inFlight} DEPOIS do {@code runAsync}), e o heartbeat final
-     * — lease vencida por decisão da ADR-0051 — declara o nó morto com esse
-     * lote ainda rodando. Dar ao nó um tempo em {@code DRAINING}, onde o
-     * tick não reivindica mais nada, deve zerar a perda.
+     * <p>The hypothesis: {@code stop} calls {@code drain}, which waits for whatever is in
+     * {@code inFlight} AT THAT INSTANT; the batch the current tick already claimed but has not yet
+     * submitted arrives later ({@code Engine} registers it in {@code inFlight} AFTER the
+     * {@code runAsync}), and the final heartbeat — which expires the lease by design — declares the
+     * node dead with that batch still running. Giving the node time in {@code DRAINING}, where the
+     * tick claims nothing further, should drive the loss to zero.
      */
     @Test
     void drainingBeforeStoppingLosesNothing() throws Exception {
-        DataSource dataSource = PostgresTestSupport.freshSchema();
+        ScenarioBackend backend = ScenarioBackend.current();
+        DataSource dataSource = backend.freshSchema();
         Clock clock = Clock.systemUTC();
         AtomicInteger invocations = new AtomicInteger();
         JobHandler handler = (_, _) -> {
@@ -158,7 +168,7 @@ class NodeChurnScenario {
             Thread.sleep(HANDLER_WORK);
         };
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock)) {
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.dialect())) {
             cluster.defineJob("churn", spec -> spec.retries(RETRIES));
             for (int i = 0; i < 3; i++) {
                 cluster.addNode(settings(), List.of());
@@ -171,7 +181,7 @@ class NodeChurnScenario {
                     () -> cluster.countLease() >= IN_FLIGHT_BEFORE_EXIT);
             ScenarioCluster.Node leaving = cluster.nodes().get(2);
             leaving.engine().drain(Duration.ofSeconds(20));
-            Thread.sleep(SETTLE_BEFORE_STOP.toMillis()); // a folga que a hipótese diz faltar dentro do stop
+            Thread.sleep(SETTLE_BEFORE_STOP.toMillis()); // the slack the hypothesis says is missing inside the stop
             leaving.engine().stop(Duration.ofSeconds(20));
 
             ScenarioCluster.Node joining = cluster.addNode(settings(), List.of());
@@ -199,40 +209,37 @@ class NodeChurnScenario {
     }
 
     /**
-     * O pior caso do {@code stop(grace)}: {@code retries = 0} — a opção de
-     * quem prefere at-most-once ao risco de reentrega — combinado com a
-     * saída de um nó que tem trabalho na mão. Sem orçamento, um reclaim do
-     * órfão não tem para onde reagendar e vira {@code FAILED} terminal:
-     * nesta configuração, o que seria reentrega é perda.
+     * The worst case for {@code stop(grace)}: {@code retries = 0} — the choice of anyone who
+     * prefers at-most-once to the risk of redelivery — combined with a node leaving with work in
+     * hand. With no budget, reclaiming the orphan has nowhere to reschedule and becomes a terminal
+     * {@code FAILED}: in this configuration, what would be redelivery is loss.
      *
-     * <p>A asserção é de TETO, não de piso, e isso é deliberado: depois que
-     * a segunda espera do {@code Engine.stop} fechou a janela entre o
-     * {@code runAsync} e o {@code inFlight.add}, o esperado é justamente
-     * ZERO — e foi o que passou a medir. O cenário deixou de ser
-     * "demonstração da perda" e virou o GUARDA dela: se a janela reabrir,
-     * é aqui que o dano aparece primeiro, e limitado ao que o nó segurava.
-     * Um piso ({@code failed > 0}) transformaria a correção do produto em
-     * teste vermelho.
+     * <p>The assertion is a CEILING, not a floor, and that is deliberate. Once the second wait in
+     * {@code Engine.stop} closed the window between {@code runAsync} and {@code inFlight.add}, the
+     * expected value is precisely ZERO — and that is what it now measures. The scenario stopped
+     * being a "demonstration of the loss" and became its GUARD: if the window reopens, this is
+     * where the damage shows up first, bounded by what the node was holding. A floor
+     * ({@code failed > 0}) would turn a fix in the product into a red test.
      */
     @Test
     void aGracefulStopWithNoRetryBudgetLosesAtMostWhatTheNodeHeld() {
-        DataSource dataSource = PostgresTestSupport.freshSchema();
+        ScenarioBackend backend = ScenarioBackend.current();
+        DataSource dataSource = backend.freshSchema();
         Map<String, Integer> invocationsPerExecution = new ConcurrentHashMap<>();
         AtomicInteger invocations = new AtomicInteger();
-        // handler IDÊNTICO ao do primeiro teste, merge no mapa incluído: os
-        // dois só podem diferir em `retries`, senão o par não isola nada —
-        // e o merge por execução muda o tempo dentro do handler, que é
-        // justamente a janela que o experimento observa
+        // Handler IDENTICAL to the first test's, map merge included: the two may differ only in
+        // `retries`, otherwise the pair isolates nothing — and merging per execution changes the
+        // time spent inside the handler, which is exactly the window the experiment observes
         JobHandler handler = (_, ctx) -> {
             invocations.incrementAndGet();
             invocationsPerExecution.merge(ctx.executionId().value(), 1, Integer::sum);
             Thread.sleep(HANDLER_WORK);
         };
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC())) {
-            // orçamento zero DECLARADO: é a variável independente deste par —
-            // herdá-la do default do produto faria os dois testes medirem a
-            // mesma coisa no dia em que o default mudasse
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC(), backend.dialect())) {
+            // Zero budget DECLARED: it is this pair's independent variable — inheriting it from
+            // the product default would make both tests measure the same thing the day that
+            // default changed
             cluster.defineJob("churn", spec -> spec.retries(0));
             for (int i = 0; i < 3; i++) {
                 cluster.addNode(settings(), List.of());
@@ -268,10 +275,10 @@ class NodeChurnScenario {
                     cluster.failureKinds());
 
             assertThat(settled).as("the queue must drain even when the exit costs work").isTrue();
-            // conservação ANTES do teto: `isDrained` só olha fila e posse vazias,
-            // e o teto sozinho é satisfeito tanto por "nada se perdeu" quanto por
-            // "sumiram 8.000 sem nunca virar terminais". Sem esta linha o
-            // intervalo aceito é [0, 32] sobre um universo de tamanho desconhecido.
+            // Conservation BEFORE the ceiling: `isDrained` only looks at an empty queue and empty
+            // ownership, and the ceiling alone is satisfied both by "nothing was lost" and by
+            // "8,000 vanished without ever becoming terminal". Without this line the accepted
+            // interval is [0, 32] over a universe of unknown size.
             assertThat(succeeded + failed)
                     .as("conservation: every seeded execution must reach a terminal state — one that leaves "
                             + "mohs_ready without one is a loss the FAILED ceiling cannot see")
@@ -284,7 +291,7 @@ class NodeChurnScenario {
         }
     }
 
-    /** Quantas leases cada nó segura AGORA — a foto que o bound de re-execução usa. */
+    /** How many leases each node holds RIGHT NOW — the snapshot the re-execution bound uses. */
     private static Map<String, Integer> leasesByNode(ScenarioCluster cluster) {
         return cluster.jdbc().query("SELECT node_id, count(*) AS held FROM mohs_lease GROUP BY node_id", rs -> {
             Map<String, Integer> held = new java.util.LinkedHashMap<>();
@@ -296,19 +303,19 @@ class NodeChurnScenario {
     }
 
     /**
-     * O nó que saiu é o único {@code STOPPED} — é assim que o cenário o
-     * identifica sem alcançar o {@code nodeId} do Engine. Zero linhas não é
-     * mistério: é a corrida que a ADR-0041 aceita de propósito (um tick que
-     * leu o estado antes do {@code state.set(STOPPED)} commita o heartbeat
-     * DEPOIS do final e sobrescreve a linha). Nomear a corrida aqui evita
-     * que ela vire desconfiança do cenário inteiro.
+     * The departed node is the only {@code STOPPED} one, which is how the scenario identifies it
+     * without reaching into the Engine's {@code nodeId}.
+     *
+     * <p>Zero rows is not a mystery: it is a race accepted on purpose (a tick that read the state
+     * before {@code state.set(STOPPED)} commits its heartbeat AFTER the final one and overwrites
+     * the row). Naming the race here keeps it from turning into distrust of the whole scenario.
      */
     private static String stoppedNodeId(ScenarioCluster cluster) {
         List<String> stopped = cluster.jdbc().queryForList(
                 "SELECT node_id FROM mohs_nodes WHERE state = 'STOPPED'", String.class);
         assertThat(stopped)
                 .as("expected exactly one STOPPED row; zero means the in-flight tick's heartbeat overwrote the final "
-                        + "one (race accepted by ADR-0041/0051), and the re-execution bound has no baseline")
+                        + "one (an accepted race), and the re-execution bound has no baseline")
                 .hasSize(1);
         return stopped.getFirst();
     }
@@ -318,7 +325,7 @@ class NodeChurnScenario {
                 Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60));
     }
 
-    /** O que sobra quando algo se perdeu: quem era dono, e o histórico completo de algumas execuções mortas. */
+    /** What is left when something was lost: who owned it, and the full history of a few dead executions. */
     private static void dumpLostWork(ScenarioCluster cluster) {
         System.out.println("nodes at the end (the leaving one is the STOPPED row):");
         printRows(cluster, "SELECT node_id, state, last_heartbeat_at, expires_at FROM mohs_nodes");

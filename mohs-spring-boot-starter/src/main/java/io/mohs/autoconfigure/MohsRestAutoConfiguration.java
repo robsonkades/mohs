@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.autoconfigure;
 
 import java.time.Clock;
@@ -9,6 +24,7 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.web.servlet.DispatcherServlet;
 
@@ -17,6 +33,7 @@ import tools.jackson.databind.ObjectMapper;
 import io.mohs.core.Mohs;
 import io.mohs.rest.ActorResolver;
 import io.mohs.rest.HeaderActorResolver;
+import io.mohs.rest.batch.BatchesController;
 import io.mohs.rest.error.RestExceptionHandler;
 import io.mohs.rest.execution.ExecutionsController;
 import io.mohs.rest.job.JobsController;
@@ -27,35 +44,28 @@ import io.mohs.rest.ratelimit.RateLimitsController;
 import io.mohs.rest.runner.RunnersController;
 
 /**
- * Liga o contrato REST v1 ({@code io.mohs.rest}) à {@link Mohs} pública —
- * fechada por padrão (ADR-0010, princípio 5): {@code mohs.api.enabled=false}
- * não registra nenhum bean deste pacote. {@link ConditionalOnClass} em
- * {@link DispatcherServlet} evita carregar esta configuração quando o
- * consumidor não trouxe {@code spring-boot-starter-webmvc} (dependência
- * {@code optional} do módulo, mesmo padrão do actuator).
+ * Wires the v1 REST contract ({@code io.mohs.rest}) to the public {@link Mohs} facade — closed by
+ * default: {@code mohs.api.enabled=false} registers no bean from that package.
+ * {@link ConditionalOnClass} on {@link DispatcherServlet} avoids loading this configuration when
+ * the consumer did not bring {@code spring-boot-starter-webmvc} (an {@code optional} dependency of
+ * the module, the same pattern as the actuator).
  *
- * <p>Também condicionada ao gate mestre {@code mohs.enabled}: kill switch
- * vence em silêncio — o Javadoc do gate promete "desligar remove todos os
- * beans do Mohs", e falha de boot aqui transformaria o botão de emergência
- * em crash quando {@code mohs.api.enabled=true} já estiver no ambiente.
- * Sem essa condição, a combinação caía num {@code NoSuchBeanDefinitionException}
- * genérico ao criar {@link JobsController} (não há bean {@link Mohs}).
- * A proteção cobre só o gate por propriedade: host que exclui
- * {@link MohsAutoConfiguration} na mão ({@code spring.autoconfigure.exclude})
- * com a API ligada mantém o erro de boot — exclusão manual da auto-config
- * da própria biblioteca é cenário não suportado, de propósito (a
- * alternativa, {@code @ConditionalOnBean(Mohs.class)}, esconderia também
- * misconfiguração genuína que deveria estourar).
+ * <p>It is also conditional on the master {@code mohs.enabled} gate: the kill switch wins silently.
+ * The gate's own documentation promises that turning it off removes every Mohs bean, and a boot
+ * failure here would turn the emergency button into a crash whenever {@code mohs.api.enabled=true}
+ * was already set in the environment. Without that condition, the combination fell into a generic
+ * {@code NoSuchBeanDefinitionException} while creating {@link JobsController} (there is no
+ * {@link Mohs} bean).
  *
- * <p>{@code batches} é o único controller sem {@code @Bean} aqui: continua
- * contrato M2 sem implementação por trás, e registrá-lo antes do tempo só
- * exporia uma rota que responde 501 ({@code RestExceptionHandler} traduz a
- * {@code UnsupportedOperationException} do stub), sem ganho nenhum.
+ * <p>The protection covers only the property gate: a host that excludes
+ * {@link MohsAutoConfiguration} by hand ({@code spring.autoconfigure.exclude}) with the API on
+ * keeps the boot error — manually excluding the library's own auto-configuration is deliberately
+ * unsupported (the alternative, {@code @ConditionalOnBean(Mohs.class)}, would also hide genuine
+ * misconfiguration that ought to blow up).
  *
- * <p>{@link ActorResolver} é {@link ConditionalOnMissingBean}: a 1.x
- * troca {@link HeaderActorResolver} (atribuição declarativa, não
- * autenticada) por uma implementação de segurança real sem mudar
- * contrato nenhum (ADR-0010, princípio 5).
+ * <p>{@link ActorResolver} is {@link ConditionalOnMissingBean}: 1.x can swap
+ * {@link HeaderActorResolver} (declarative attribution, not authenticated) for a real security
+ * implementation without changing any contract.
  */
 @AutoConfiguration(after = MohsAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "mohs", name = "enabled", matchIfMissing = true)
@@ -65,8 +75,17 @@ public class MohsRestAutoConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(MohsRestAutoConfiguration.class);
 
-    public MohsRestAutoConfiguration() {
-        log.warn("mohs.api.enabled=true: API operacional sem autenticação; não exponha publicamente");
+    /**
+     * The only active guardrail a user reads before exposing the API, which is why its wording
+     * matters more than an ordinary log line's: it says what the API CAN do, and what to do about
+     * it ({@code REST-API-DESIGN.md} promises that guidance and the message was not delivering it).
+     */
+    public MohsRestAutoConfiguration(MohsProperties properties) {
+        String basePath = properties.api().basePath();
+        log.warn("mohs.api.enabled=true: the operational API is served at {} with NO authentication. It can cancel,"
+                + " retry and pause jobs, drain nodes and change rate limits. Restrict it to an internal network,"
+                + " or put a gateway/mTLS in front of {} and /mohs-ui before exposing this instance.",
+                basePath, basePath);
     }
 
     @Bean
@@ -91,11 +110,16 @@ public class MohsRestAutoConfiguration {
     }
 
     @Bean
+    public BatchesController mohsBatchesController(Mohs mohs) {
+        return new BatchesController(mohs);
+    }
+
+    @Bean
     public NodesController mohsNodesController(Mohs mohs) {
         return new NodesController(mohs);
     }
 
-    /** Node-local por natureza: descreve o processo que atende a requisição, não o cluster (ver {@link io.mohs.core.RunnerSnapshot}). */
+    /** Node-local by nature: it describes the process answering the request, not the cluster (see {@link io.mohs.core.RunnerSnapshot}). */
     @Bean
     public RunnersController mohsRunnersController(Mohs mohs) {
         return new RunnersController(mohs);
@@ -106,10 +130,16 @@ public class MohsRestAutoConfiguration {
         return new RateLimitsController(mohs, mohsActorResolver);
     }
 
-    /** {@code AutoCloseable}: o container chama {@code close()} no shutdown — timer parado, streams SSE completados (fim de stream limpo, não conexão morta). */
+    /** {@code AutoCloseable}: the bean's destroy method is the backstop — what closes the streams within the deadline that matters is {@link MohsOverviewStreamLifecycle}. */
     @Bean
     public OverviewStreamBroadcaster mohsOverviewStreamBroadcaster(Mohs mohs, @Qualifier("mohsClock") Clock mohsClock) {
         return OverviewStreamBroadcaster.start(mohs, mohsClock);
+    }
+
+    /** {@link SmartLifecycle} — closes the SSE streams before the web server starts waiting on active requests; without it shutdown spends the whole phase (see {@link MohsOverviewStreamLifecycle}'s Javadoc). */
+    @Bean
+    public SmartLifecycle mohsOverviewStreamLifecycle(OverviewStreamBroadcaster mohsOverviewStreamBroadcaster) {
+        return new MohsOverviewStreamLifecycle(mohsOverviewStreamBroadcaster);
     }
 
     @Bean

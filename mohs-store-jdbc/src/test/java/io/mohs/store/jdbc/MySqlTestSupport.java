@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import javax.sql.DataSource;
@@ -10,15 +25,14 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.testcontainers.mysql.MySQLContainer;
 
 /**
- * Container MySQL compartilhado — mesmo desenho de {@link
- * PostgresTestSupport} (ADR-0023): singleton container, schema aplicado
- * uma vez só quando o container sobe (MySQL não tem {@code CREATE INDEX
- * IF NOT EXISTS} — reaplicar o script a cada teste quebraria no segundo
- * teste em diante, índice já existe). Isolamento por {@code DELETE} em
- * vez de {@code TRUNCATE} (MySQL exige desabilitar {@code
- * FOREIGN_KEY_CHECKS} pra truncar tabela referenciada por FK — {@code
- * DELETE} respeitando a ordem das FKs é mais simples e não depende de
- * estado de sessão).
+ * A shared MySQL container — the same design as {@link PostgresTestSupport}: a singleton container, with
+ * the schema applied only once when the container starts (MySQL has no {@code CREATE INDEX IF NOT
+ * EXISTS} — reapplying the script per test would break from the second test onwards, the index already
+ * existing).
+ *
+ * <p>Isolation through {@code DELETE} rather than {@code TRUNCATE} (MySQL requires disabling
+ * {@code FOREIGN_KEY_CHECKS} to truncate a table referenced by a foreign key — a {@code DELETE}
+ * respecting the foreign-key order is simpler and does not depend on session state).
  */
 final class MySqlTestSupport {
 
@@ -40,7 +54,7 @@ final class MySqlTestSupport {
         return dataSource;
     }
 
-    /** Limpa todas as tabelas — o schema já foi aplicado uma vez quando o container subiu. */
+    /** Clears every table — the schema was applied once, when the container started. */
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);

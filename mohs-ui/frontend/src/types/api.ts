@@ -95,12 +95,29 @@ export interface ThroughputView {
   window: string;
   succeeded: number;
   failed: number;
+  /**
+   * Terminal executions per second over `window`, divided server-side (ADR-0063). The division is
+   * trivial; parsing the ISO-8601 duration to do it here is not, and a client that gets it wrong
+   * draws a wrong chart with no symptom. `window` stays in the payload so this can be checked.
+   */
+  ratePerSecond: number;
 }
 
 /** io.mohs.rest.overview.OverviewResponse */
 export interface OverviewResponse {
   executionCountsByStatus: Partial<Record<ExecutionState, number>>;
   throughput: ThroughputView;
+  /**
+   * A short fixed window (PT10S) that exists to become a rate, not to be read as a count
+   * (ADR-0063). It is NOT a slice of `throughput`: the long window is caller-chosen and may be
+   * shorter than 10s, and the two counts are separate round trips — so subtracting or stacking one
+   * from the other goes negative sooner or later.
+   *
+   * <p>Without it the dashboard has only instantaneous gauges, and by Little`s Law those sit at
+   * zero for any fast job: measured, 4 of 60 samples showed live work while 39 executions
+   * completed per minute.
+   */
+  recent: ThroughputView;
 }
 
 /** io.mohs.rest.ratelimit.RateLimitResponse */

@@ -1,20 +1,33 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.core.execution;
 
 import io.mohs.core.event.ExecutionEvent;
 
 /**
- * Estado de ciclo de vida de uma {@link Execution}. Não enumerado
- * explicitamente nos documentos de design; derivado aqui das variantes de
- * {@link ExecutionEvent} e do filtro {@code GET /executions?status=} do
- * design REST — ver {@code docs/adr/0010-rest-api-v1.md}.
+ * The lifecycle state of an {@link Execution}. Not enumerated explicitly in the design documents;
+ * derived here from the {@link ExecutionEvent} variants and the {@code GET /executions?status=}
+ * filter of the REST design.
  *
- * <p>{@code RETRY_WAITING} (era {@code RETRY_SCHEDULED} até a Phase 5 do
- * redesign, §16.3-3) é a execução aguardando o backoff de um retry — e
- * <b>não é claimável</b>: quando o backoff vence ela volta a
- * {@link #ENQUEUED}, e a fila tem uma única regra de admissão
- * ({@code visible_at <= now}, §4.3/§5.8 do redesign). O rename carrega a
- * mudança de semântica: "scheduled" prometia um estado que o claim lia;
- * "waiting" diz o que ele é — uma espera.
+ * <p>{@code RETRY_WAITING} (formerly {@code RETRY_SCHEDULED}) is an execution waiting out a retry's
+ * backoff, and it is <b>not claimable</b>: when the backoff expires it returns to {@link #ENQUEUED},
+ * and the queue has a single admission rule ({@code visible_at <= now}).
+ *
+ * <p>The rename carries the change in meaning: "scheduled" promised a state the claim read, while
+ * "waiting" says what it is — a wait.
  */
 public enum ExecutionState {
     ENQUEUED,

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest;
 
 import java.util.List;
@@ -7,19 +22,17 @@ import java.util.function.Function;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Página de resultado por keyset pagination (PoEAA/DDIA) — {@code
- * nextCursor} ausente marca a última página. Usada só nas listagens
- * genuinamente sem teto ({@code GET /executions},
- * {@code GET /jobs/{jobKey}/executions}); listagens de cardinalidade
- * limitada (jobs, queues, rate-limits, runners, nodes) retornam
- * {@code List<T>} direto.
+ * A result page using keyset pagination (PoEAA/DDIA) — an absent {@code nextCursor} marks the last
+ * page.
  *
- * <p>Tamanho de página: parâmetro {@code size} nos dois endpoints acima,
- * opcional — {@link #DEFAULT_PAGE_SIZE} quando ausente, {@link
- * #MAX_PAGE_SIZE} como teto rígido (requisitar mais que isso não estoura
- * erro, satura no teto) — decidido agora, no contrato M2, porque página
- * ilimitada numa tabela sem teto é superfície real de DoS; enforcement
- * fica pra M3 (`io.mohs.rest` ainda não tem implementação por trás).
+ * <p>Used only on the genuinely unbounded listings ({@code GET /executions},
+ * {@code GET /jobs/{jobKey}/executions}); listings of bounded cardinality (jobs, queues, rate
+ * limits, runners, nodes) return a {@code List<T>} directly.
+ *
+ * <p>Page size: the optional {@code size} parameter on both endpoints above —
+ * {@link #DEFAULT_PAGE_SIZE} when absent, with {@link #MAX_PAGE_SIZE} as a hard ceiling (asking for
+ * more is not an error, it saturates at the ceiling). Decided at contract time because an unbounded
+ * page over an unbounded table is a real denial-of-service surface.
  */
 public record CursorPage<T>(List<T> items, @Nullable String nextCursor) {
 
@@ -32,14 +45,13 @@ public record CursorPage<T>(List<T> items, @Nullable String nextCursor) {
     }
 
     /**
-     * Monta a página a partir de um resultado buscado com {@code size + 1}
-     * itens (convenção de {@code HistoryStore#findPage}) — o item extra
-     * denuncia se há próxima página sem round-trip a mais, e é descartado
-     * do corpo devolvido.
+     * Builds the page from a result fetched with {@code size + 1} items ({@code HistoryStore#findPage}'s
+     * convention) — the extra item reveals whether there is a next page without an additional round
+     * trip, and is dropped from the returned body.
      *
-     * @param fetched no máximo {@code size + 1} itens
-     * @param size tamanho de página pedido pelo chamador
-     * @param cursorOf extrai o cursor opaco do último item de uma página cheia
+     * @param fetched at most {@code size + 1} items
+     * @param size the page size requested by the caller
+     * @param cursorOf extracts the opaque cursor from the last item of a full page
      */
     public static <T> CursorPage<T> of(List<T> fetched, int size, Function<T, String> cursorOf) {
         boolean hasMore = fetched.size() > size;
@@ -48,11 +60,10 @@ public record CursorPage<T>(List<T> items, @Nullable String nextCursor) {
     }
 
     /**
-     * Normaliza o {@code size} pedido pelo cliente — todo parâmetro de
-     * request é input hostil até validado: satura em {@link #MAX_PAGE_SIZE}
-     * por cima (semântica já decidida no contrato M2) e em {@code 1} por
-     * baixo ({@code 0}/negativo estourariam como 500 dentro de {@code
-     * ExecutionQuery}/{@link #of}, nunca o mecanismo certo de validação).
+     * Normalises the {@code size} the client asked for — every request parameter is hostile input
+     * until validated: it saturates at {@link #MAX_PAGE_SIZE} above and at {@code 1} below
+     * ({@code 0} or a negative value would blow up as a 500 inside {@code ExecutionQuery}/{@link #of},
+     * which is never the right validation mechanism).
      */
     public static int clampSize(@Nullable Integer requested) {
         return requested == null ? DEFAULT_PAGE_SIZE : Math.clamp(requested, 1, MAX_PAGE_SIZE);

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.time.Instant;
@@ -6,35 +21,31 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
 /**
- * Bind/leitura de instantes contra colunas temporais sem fuso ({@code
- * TIMESTAMP} do H2/Postgres, {@code DATETIME} do MySQL, {@code DATETIME2}
- * do SQL Server) — DBTUNE-1, revisto na ADR-0049 (Phase 2): a travessia é
- * {@link LocalDateTime} via JDBC 4.2 ({@code setObject}/{@code getObject}),
- * NUNCA {@code java.sql.Timestamp}. O caminho legado convertia pelo fuso
- * <b>default da JVM</b> nas duas pontas; o offset constante se cancelava
- * dentro de uma JVM, mas o gap de horário de verão não — {@code
- * Timestamp.valueOf} resolve um {@code LocalDateTime} inexistente
- * empurrando-o pra frente, e durante a hora do gap todo instante gravado
- * saía 1h errado (bug reportado 2026-08-19; em {@code refilled_at} isso é
- * um balde aparentemente vazio de tokens — burst acima do limite, o modo
- * de falha que a ADR-0042 existe pra impedir). {@link LocalDateTime} não
- * consulta fuso nenhum: o wall-clock UTC atravessa verbatim nos 4
- * dialetos, e as duas funções são inversas em TODO instante, gap incluso.
+ * Binding and reading instants against zoneless temporal columns (H2's and Postgres's
+ * {@code TIMESTAMP}, MySQL's {@code DATETIME}, SQL Server's {@code DATETIME2}): the crossing is
+ * {@link LocalDateTime} through JDBC 4.2 ({@code setObject}/{@code getObject}), NEVER
+ * {@code java.sql.Timestamp}.
  *
- * <p>Contrato do projeto, inalterado: toda coluna temporal guarda o
- * wall-clock em UTC. Por que não {@code timestamptz}/{@code
- * datetimeoffset} já: MySQL torna a uniformidade impossível ({@code
- * TIMESTAMP} termina em 2038 — inaceitável para {@code next_fire_at} de um
- * scheduler) e a conversão de tipo nas tabelas atuais não paga nada que
- * esta travessia já não pague; as tabelas novas da Phase 5 (§7.2 do
- * redesign) nascem tz-aware.
+ * <p>The legacy path converted through the <b>JVM's default zone</b> at both ends; the constant offset
+ * cancelled out within one JVM, but the daylight-saving gap did not — {@code Timestamp.valueOf} resolves
+ * a nonexistent {@code LocalDateTime} by pushing it forward, and during the gap hour every instant
+ * written came out an hour wrong (reported 2026-08-19; in {@code refilled_at} that means an apparently
+ * empty token bucket — a burst above the limit, the failure mode the rate limit exists to prevent).
+ * {@link LocalDateTime} consults no zone at all: the UTC wall clock crosses verbatim in all four
+ * dialects, and the two functions are inverses at EVERY instant, gap included.
+ *
+ * <p>The project's contract, unchanged: every temporal column stores the wall clock in UTC. Why not
+ * {@code timestamptz}/{@code datetimeoffset} yet: MySQL makes uniformity impossible (its
+ * {@code TIMESTAMP} ends in 2038 — unacceptable for a scheduler's {@code next_fire_at}) and converting
+ * the type on the current tables buys nothing this crossing does not already provide; the newer tables
+ * are born tz-aware.
  */
 public final class JdbcTimestamps {
 
     private JdbcTimestamps() {
     }
 
-    /** Público: usado também por {@code io.mohs.store.jdbc.dialect} (os 4 binds de {@code now} da claim query) — ambos são pacotes internos, isto nunca vira API pública do módulo. */
+    /** Public: also used by {@code io.mohs.store.jdbc.dialect} (the claim query's four {@code now} binds) — both are internal packages, so this never becomes the module's public API. */
     public static LocalDateTime toUtcLocalDateTime(Instant instant) {
         return LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
     }
@@ -44,15 +55,14 @@ public final class JdbcTimestamps {
     }
 
     /**
-     * Travessia das tabelas TZ-AWARE da Phase 5 ({@code TIMESTAMPTZ} do
-     * Postgres — §7.2 do redesign, o que a ADR-0049 adiou pra cá):
-     * {@link OffsetDateTime} em UTC via JDBC 4.2. {@link LocalDateTime}
-     * seria interpretado pelo fuso da SESSÃO numa coluna tz-aware —
-     * exatamente a classe de bug que a ADR-0049 matou; o offset explícito
-     * atravessa verbatim independente de {@code TimeZone} de sessão. Os
-     * dialetos sem coluna tz-aware (H2/MySQL/SQL Server, equivalentes
-     * funcionais do split) continuam na travessia LocalDateTime — a
-     * escolha é do {@code JdbcDialect}.
+     * The crossing for the TZ-AWARE tables (Postgres's {@code TIMESTAMPTZ}): {@link OffsetDateTime} in
+     * UTC through JDBC 4.2.
+     *
+     * <p>A {@link LocalDateTime} would be interpreted in the SESSION's zone against a tz-aware column —
+     * exactly the class of bug the zoneless crossing killed; an explicit offset crosses verbatim
+     * regardless of the session's {@code TimeZone}. The dialects with no tz-aware column (H2, MySQL, SQL
+     * Server, the split's functional equivalents) stay on the LocalDateTime crossing — the choice belongs
+     * to {@code JdbcDialect}.
      */
     public static OffsetDateTime toUtcOffsetDateTime(Instant instant) {
         return instant.atOffset(ZoneOffset.UTC);

@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.job;
 
 import java.net.URI;
@@ -32,6 +47,7 @@ import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.job.JobKey;
 import io.mohs.rest.AcceptedExecutionResponse;
+import io.mohs.rest.ExecutionLocations;
 import io.mohs.rest.ActorResolver;
 import io.mohs.rest.ApiPaths;
 import io.mohs.rest.CursorPage;
@@ -41,11 +57,11 @@ import io.mohs.rest.error.PayloadValidationException;
 import io.mohs.rest.execution.ExecutionSummaryResponse;
 
 /**
- * Área de recurso "jobs" (ver {@code docs/REST-API-DESIGN.md}). Definição
- * de job é código, não API — não há {@code POST}/{@code PUT}/{@code DELETE}
- * de definição aqui, só leitura e invocação sobre definição existente; o
- * {@code PATCH .../schedule} (ADR-0036) é ajuste runtime de emergência
- * sobre a agenda, não definição.
+ * The "jobs" resource area.
+ *
+ * <p>A job's definition is code, not API — there is no {@code POST}/{@code PUT}/{@code DELETE} of a
+ * definition here, only reads and invocation over an existing one. {@code PATCH .../schedule} is an
+ * emergency runtime adjustment to the schedule, not a definition.
  */
 @RestController
 @RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/jobs")
@@ -53,7 +69,7 @@ public class JobsController {
 
     private static final Logger log = LoggerFactory.getLogger(JobsController.class);
 
-    /** Distância de edição máxima para sugerir um {@code jobKey} vizinho num 404 (§5.13 do documento mestre). */
+    /** The maximum edit distance for suggesting a neighbouring {@code jobKey} in a 404. */
     private static final int NEARBY_THRESHOLD = 2;
 
     private final Mohs mohs;
@@ -78,7 +94,7 @@ public class JobsController {
         return JobResponse.from(requireJob(jobKey));
     }
 
-    /** Status 202 vem de {@link ResponseEntity#getStatusCode()} no corpo do método — {@code @ResponseStatus} não tem efeito sobre {@code ResponseEntity} (REST-1). */
+    /** The 202 comes from {@link ResponseEntity#getStatusCode()} in the method body — {@code @ResponseStatus} has no effect on a {@code ResponseEntity}. */
     @PostMapping("/{jobKey}/schedule")
     public ResponseEntity<AcceptedExecutionResponse> schedule(@PathVariable String jobKey, @RequestBody ScheduleJobRequest body,
             @RequestHeader(value = "Idempotency-Key", required = false) @Nullable String idempotencyKey, HttpServletRequest request) {
@@ -92,13 +108,13 @@ public class JobsController {
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             command = command.idempotencyKey(idempotencyKey);
         }
-        // os três terminais de ScheduleCommand — at/delay já validados como exclusivos no record
+        // ScheduleCommand's three terminals — at and delay were already validated as exclusive in the record
         Enqueued enqueued = body.at() != null ? command.at(body.at())
                 : body.delay() != null ? command.after(body.delay())
                 : command.now();
 
         AcceptedExecutionResponse accepted = AcceptedExecutionResponse.from(enqueued);
-        URI location = URI.create(basePath + "/executions/" + accepted.executionId());
+        URI location = ExecutionLocations.ofExecution(request, basePath, accepted.executionId());
         return ResponseEntity.accepted().location(location).body(accepted);
     }
 
@@ -115,37 +131,36 @@ public class JobsController {
     }
 
     /**
-     * ADR-0036 — muda a agenda em runtime, sob o contrato de PATCH de
-     * emergência da casa: a resposta avisa que a mudança vale até o próximo
-     * boot ({@code on-conflict=override} restaura o código com diff
-     * logado). Corpo é {@link ScheduleView} ({@code CRON}/{@code INTERVAL}/
-     * {@code ON_DEMAND}); agenda irrealizável (cron que nunca dispara) vira
-     * 422 que ensina, nunca 500.
+     * Changes the schedule at runtime, under the house's emergency PATCH contract: the response
+     * warns that the change holds until the next boot ({@code on-conflict=override} restores the
+     * code's version with a logged diff).
+     *
+     * <p>The body is a {@link ScheduleView} ({@code CRON}/{@code INTERVAL}/{@code ON_DEMAND}); an
+     * unrealisable schedule (a cron that never fires) becomes a 422 that teaches, never a 500.
      */
     @PatchMapping("/{jobKey}/schedule")
     public RuntimePatchResponse<JobResponse> reschedule(@PathVariable String jobKey, @RequestBody ScheduleView body,
             HttpServletRequest request) {
         JobKey key = requireJob(jobKey).definition().key();
-        // actor validado ANTES da mutação (review ADR-0036): 4xx é contrato de "nada
-        // mudou" — resolver depois deixava a agenda alterada com 400 na mão do cliente
-        // e SEM a trilha de auditoria (actor é inegociável em mutação, ADR-0010)
+        // The actor is validated BEFORE the mutation: a 4xx is a contract of "nothing changed" —
+        // resolving it afterwards left the schedule altered with a 400 in the client's hand and NO
+        // audit trail (an actor is non-negotiable on a mutation)
         String actor = actorResolver.resolve(request);
         JobSnapshot snapshot = rescheduleOrReject(key, body)
                 .orElseThrow(() -> new JobNotFoundException(key, nearbyJobKeys(key)));
-        // loga o que ESTE actor pediu (o body), não o snapshot pós-escrita — trilha de
-        // auditoria registra intenção; dois PATCHes concorrentes nunca trocam de autoria
-        log.info("job '{}' rescheduled at runtime by '{}' to {} — emergency change (ADR-0036), reverts on next boot under on-conflict=override",
+        // Logs what THIS actor asked for (the body), not the post-write snapshot — an audit trail
+        // records intent, and two concurrent PATCHes never swap authorship
+        log.info("job '{}' rescheduled at runtime by '{}' to {} — an emergency change, reverting on the next boot under on-conflict=override",
                 key.value(), actor, body);
         return RuntimePatchResponse.of(JobResponse.from(snapshot));
     }
 
     /**
-     * Toda IAE deste escopo é validação de agenda por construção
-     * ({@code jobKey} já passou por {@code requireJob}): os compact
-     * constructors dos specs em {@code toSchedule()} (interval não
-     * positivo, cron em branco) e o {@code NextFireCalculator} (cron
-     * irrealizável) — o 422 do contrato cobre as duas fontes; fora deste
-     * escopo, IAE alheia nunca é traduzida.
+     * Every IAE in this scope is schedule validation by construction ({@code jobKey} has already
+     * passed {@code requireJob}): the compact constructors of the specs in {@code toSchedule()} (a
+     * non-positive interval, a blank cron) and {@code NextFireCalculator} (an unrealisable cron).
+     * The contract's 422 covers both sources; outside this scope, an unrelated IAE is never
+     * translated.
      */
     private Optional<JobSnapshot> rescheduleOrReject(JobKey key, ScheduleView body) {
         try {
@@ -155,7 +170,7 @@ public class JobsController {
         }
     }
 
-    /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. Lista é sumário ({@link ExecutionSummaryResponse}) — attempts moram no detalhe. */
+    /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view. */
     @GetMapping("/{jobKey}/executions")
     public CursorPage<ExecutionSummaryResponse> executions(
             @PathVariable String jobKey, @RequestParam(required = false) @Nullable String cursor, @RequestParam(required = false) @Nullable Integer size) {
@@ -190,8 +205,8 @@ public class JobsController {
         try {
             return objectMapper.convertValue(rawPayload, payloadType.get());
         } catch (DatabindException e) {
-            // Jackson 3: falha de databind propaga DatabindException direto —
-            // não é mais embrulhada em IllegalArgumentException como no Jackson 2.
+            // Jackson 3: a databind failure propagates DatabindException directly — it is no longer
+            // wrapped in IllegalArgumentException as it was in Jackson 2.
             throw new PayloadValidationException("payload",
                     "payload incompatible with " + payloadType.get().getSimpleName() + ": " + e.getMessage());
         }

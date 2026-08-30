@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import java.sql.Timestamp;
@@ -18,23 +33,20 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import io.mohs.engine.SyncableClock;
 
 /**
- * Implementação "database" das três de
- * {@code docs/adr/0008-configurable-time-source.md}: o banco é a
- * autoridade de tempo do cluster — {@link #instant()} nunca faz I/O, é
- * O(1) sobre o offset já amostrado por {@link #sync()}. Implementa
- * {@link SyncableClock} (porta em {@code io.mohs.engine}) em vez de expor
- * {@code sync()}/{@code currentOffset()} só como métodos concretos —
- * mesmo padrão adapter de {@code JdbcJobStore}/{@code JobStore}.
+ * The "database" time source: the database is the cluster's time authority — {@link #instant()} never
+ * does I/O, being O(1) over the offset already sampled by {@link #sync()}.
  *
- * <p>Só o offset é responsabilidade desta classe — "de quanto em quanto
- * tempo reamostrar" é decisão de quem a usa (agendamento entra em
- * {@code io.mohs.autoconfigure}, junto do resto do property binding de
- * {@code mohs.time.*}).
+ * <p>It implements {@link SyncableClock} (a port in {@code io.mohs.engine}) rather than exposing
+ * {@code sync()}/{@code currentOffset()} only as concrete methods — the same adapter pattern as
+ * {@code JdbcJobStore}/{@code JobStore}.
  *
- * <p>É o único lugar do motor onde ler o relógio de verdade
- * ({@link Clock#systemUTC()}) é o propósito da classe, não uma violação
- * da regra "todo agora vem do Clock injetado" — {@code ArchitectureTest}
- * abre exceção só para esta classe.
+ * <p>Only the offset is this class's responsibility — "how often to resample" is a decision for its
+ * user (the scheduling belongs to {@code io.mohs.autoconfigure}, alongside the rest of
+ * {@code mohs.time.*}'s property binding).
+ *
+ * <p>It is the one place in the engine where reading the real clock ({@link Clock#systemUTC()}) is the
+ * class's purpose rather than a violation of "every now comes from the injected Clock" —
+ * {@code ArchitectureTest} makes an exception for this class alone.
  */
 public final class DatabaseClock extends Clock implements SyncableClock {
 
@@ -63,7 +75,7 @@ public final class DatabaseClock extends Clock implements SyncableClock {
         return zone;
     }
 
-    /** View com outro zone, delegando {@link #instant()} pra este mesmo relógio. */
+    /** A view in another zone, delegating {@link #instant()} to this same clock. */
     @Override
     public Clock withZone(ZoneId zone) {
         Objects.requireNonNull(zone, "zone");
@@ -95,17 +107,16 @@ public final class DatabaseClock extends Clock implements SyncableClock {
         return offset.get();
     }
 
-    /** Mede o offset banco×app com compensação de ida-e-volta e aplica o clamp monotônico. */
+    /** Measures the database-to-application offset with round-trip compensation and applies the monotonic clamp. */
     @Override
     public void sync() {
         try {
             Instant beforeQuery = systemClock.instant();
             long t0 = System.nanoTime();
-            // Timestamp deliberado (não a travessia da ADR-0049): aqui a fonte
-            // é o relógio do banco, não coluna zoneless — tz-aware em PG/H2;
-            // no SQL Server CURRENT_TIMESTAMP é DATETIME zoneless interpretado
-            // pelo fuso da JVM (gap conhecido, registrado na ADR-0049 com a
-            // correção esboçada — mudar exige aprovação: altera comportamento)
+            // A deliberate Timestamp (not the usual crossing): here the source is the database's clock,
+            // not a zoneless column — tz-aware on PG and H2. On SQL Server and MySQL it would NOT be,
+            // which is why the auto-configuration refuses mohs.time.mode=database on both rather than
+            // sampling a difference between two zones and calling it a clock offset
             Timestamp databaseTimestamp = jdbcTemplate.queryForObject(NOW_QUERY, Timestamp.class);
             long t1 = System.nanoTime();
 
@@ -129,18 +140,15 @@ public final class DatabaseClock extends Clock implements SyncableClock {
     }
 
     /**
-     * "now + sampledOffset < now + offset atual" simplifica pra
-     * "sampledOffset < offset atual" — o {@code now} é o mesmo dos dois
-     * lados, não precisa ler o relógio de novo pra comparar. Reamostragem
-     * que voltaria no tempo (ADR-0008) é descartada — não ajustada pra um
-     * valor mínimo seguro — e tenta de novo na próxima chamada, quando o
-     * tempo real já terá avançado o bastante.
+     * "now + sampledOffset < now + current offset" simplifies to "sampledOffset < current offset" — the
+     * {@code now} is the same on both sides, so there is no need to read the clock again to compare. A
+     * resample that would go backwards in time is discarded — not adjusted to some minimum safe value —
+     * and is retried on the next call, by which point real time will have advanced enough.
      *
-     * <p>{@code accumulateAndGet} torna o clamp atômico independente de
-     * quem chama {@link #sync()} — nada assume escritor único; se duas
-     * amostragens concorrentes chegam aqui, a comparação e a escrita
-     * acontecem como uma unidade só, sem janela para uma escrita mais
-     * antiga sobrescrever uma mais nova já publicada.
+     * <p>{@code accumulateAndGet} makes the clamp atomic regardless of who calls {@link #sync()} —
+     * nothing assumes a single writer; if two concurrent samplings arrive here, the comparison and the
+     * write happen as one unit, with no window for an older write to overwrite a newer one already
+     * published.
      */
     private void applyIfMonotonic(Duration sampledOffset) {
         offset.accumulateAndGet(sampledOffset, (current, sampled) -> sampled.compareTo(current) < 0 ? current : sampled);

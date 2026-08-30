@@ -17,7 +17,10 @@
  * (https://github.com/spring-projects/spring-framework), under the same license. Changes: moved
  * to this package; dropped the org.springframework.util.Assert dependency (Assert in this
  * package covers the same call) — org.jspecify.annotations.Nullable is back, now that this
- * project depends on JSpecify directly; no other functional changes.
+ * project depends on JSpecify directly. ONE functional divergence: nextOrSame() retries the
+ * roll-forward in a loop against the seed instead of once, so that next() cannot return its own
+ * argument for "L-n" day-of-month expressions (upstream defect, reproduced against 7.0.8 — see
+ * the Javadoc on that method).
  */
 package io.mohs.cron;
 
@@ -346,20 +349,37 @@ final class QuartzCronField extends CronField {
     }
 
 
+    /**
+     * Functional divergence from upstream (see this file's header).
+     *
+     * <p>Spring attempts the roll-forward ONCE and does not re-check the result. For day-of-month
+     * {@code L-n} expressions that single retry still lands before the seed — {@code
+     * rollbackToMidnight} compares only {@code DAY_OF_MONTH}, not the whole date — and the loop in
+     * {@link CronExpression#nextOrSame} then converges on a fixed point: {@code next()} returns its
+     * OWN argument and stops advancing ({@code L-28}, {@code L-30}, {@code L-40}).
+     *
+     * <p>What that costs downstream: {@code FiringPlanner.planSeries} assumes strict progress, so
+     * it materialises the same occurrence up to the cap of 1,440 and returns {@code next_fire_at}
+     * unchanged — the trigger stays due forever and the job re-executes on every tick. Measured:
+     * 1,440 occurrences, 1 distinct.
+     *
+     * <p>Hence the roll-forward becomes a loop measured against the SEED, and exhaustion returns
+     * {@code null}, which the chain already knows how to translate into "this expression never
+     * fires" — a loud failure instead of a silent storm.
+     */
     @Override
     public <T extends Temporal & Comparable<? super T>> @Nullable T nextOrSame(T temporal) {
+        T seed = temporal;
         T result = adjust(temporal);
-        if (result != null) {
-            if (result.compareTo(temporal) < 0) {
-                // We ended up before the start, roll forward and try again
-                temporal = this.rollForwardType.rollForward(temporal);
-                result = adjust(temporal);
-                if (result != null) {
-                    result = type().reset(result);
-                }
+        for (int i = 0; i < CronExpression.MAX_ATTEMPTS && result != null && result.compareTo(seed) < 0; i++) {
+            // We ended up before the start, roll forward and try again
+            temporal = this.rollForwardType.rollForward(temporal);
+            result = adjust(temporal);
+            if (result != null) {
+                result = type().reset(result);
             }
         }
-        return result;
+        return (result != null && result.compareTo(seed) < 0) ? null : result;
     }
 
     @SuppressWarnings("unchecked")

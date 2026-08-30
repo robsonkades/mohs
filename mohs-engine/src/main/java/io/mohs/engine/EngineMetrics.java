@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -17,23 +32,22 @@ import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 
 /**
- * As métricas {@code mohs.*} do engine (ARCHITECTURE_REDESIGN_PLAN §14.4,
- * Phase 0) — operabilidade é requisito, não acabamento (CLAUDE.md, "design
- * for 3 a.m."). Regra de cardinalidade aplicada aqui, não por convenção:
- * labels são {@code job} (limitado pelo número de definições),
- * {@code outcome}/{@code reason} (enums) — id de execução NUNCA vira label.
+ * The engine's {@code mohs.*} metrics — operability is a requirement, not finishing polish (design
+ * for 3 a.m.).
  *
- * <p>A duração de execução deriva dos timestamps do {@link Attempt} — a
- * mesma janela persistida que BASELINE e dashboard leem, uma fonte só. A
- * latência de claim chega em nanos medidos por {@code System.nanoTime} no
- * chamador (invariante de tempo monotônico do CLAUDE.md). Num resync de
- * relógio para trás a janela pode sair negativa e o {@code Timer} do
- * Micrometer descarta a amostra em silêncio — sumiço de amostras durante
- * resync é comportamento esperado, não perda de dado.
+ * <p>The cardinality rule is enforced here rather than by convention: the labels are {@code job}
+ * (bounded by the number of definitions) and {@code outcome}/{@code reason} (enums) — an execution
+ * id NEVER becomes a label.
  *
- * <p>Valores de label são contrato tanto quanto os nomes: minúsculos,
- * snake_case ({@code succeeded}, {@code attempts_exhausted}) — o primeiro
- * dashboard salvo congela esse vocabulário.
+ * <p>Execution duration derives from the {@link Attempt}'s timestamps — the same persisted window
+ * the benchmarks and the dashboard read, so there is a single source. Claim latency arrives in nanoseconds
+ * measured by {@code System.nanoTime} in the caller (the project's monotonic-time invariant). During
+ * a backwards clock resync the window may come out negative and Micrometer's {@code Timer} silently
+ * drops the sample — missing samples during a resync is expected behaviour, not data loss.
+ *
+ * <p>Label values are contract just as much as the names: lower case, snake_case
+ * ({@code succeeded}, {@code attempts_exhausted}) — the first saved dashboard freezes that
+ * vocabulary.
  */
 public final class EngineMetrics {
 
@@ -49,9 +63,9 @@ public final class EngineMetrics {
         this.claimBatchSize = DistributionSummary.builder("mohs.claim.batch.size")
                 .description("executions claimed per round — full batches mean claim-bound, small ones dispatch-bound")
                 .register(registry);
-        // pré-registro dos reasons conhecidos (review S5.5): counter lazy só
-        // nasce no primeiro incremento, e alerta com increase() não distingue
-        // "série ausente" de zero — a série existir desde o boot é o contrato
+        // Pre-registering the known reasons: a lazy counter is only born on its first increment, and
+        // an alert using increase() cannot distinguish "series missing" from zero — the series
+        // existing from boot is the contract
         for (String reason : new String[] {"concurrency-cap", "rate-limit", "window-closed", "stray-lease"}) {
             registry.counter("mohs.claim.requeued", "reason", reason);
         }
@@ -62,17 +76,16 @@ public final class EngineMetrics {
         claimBatchSize.record(claimed);
     }
 
-    /** Do agendado ao início do handler — o SLO visível pro usuário, por job. */
+    /** From scheduled to the handler's start — the SLO visible to the user, per job. */
     void dispatchLatency(JobKey job, Duration sinceScheduled) {
         registry.timer("mohs.dispatch.latency", "job", job.value()).record(sinceScheduled);
     }
 
     /**
-     * Um attempt confirmado pelo CAS de conclusão. Todo attempt conta em
-     * {@code mohs.attempt.total}; só transição terminal conta em
-     * {@code mohs.execution.total} — retry ainda não é desfecho da
-     * execução, e a razão attempts/executions é o indicador de saúde que
-     * o §14.4 promete.
+     * One attempt confirmed by the completion CAS. Every attempt counts in
+     * {@code mohs.attempt.total}; only a terminal transition counts in {@code mohs.execution.total} —
+     * a retry is not yet the execution's outcome, and the attempts-to-executions ratio is the health
+     * indicator.
      */
     void attemptFinished(JobKey job, Attempt attempt, ExecutionState newState) {
         String outcome = labelValue(attempt.outcome());
@@ -88,35 +101,43 @@ public final class EngineMetrics {
     }
 
     /**
-     * Qualquer valor não-zero aqui significa node morto ou parado (§14.4) —
-     * o label diz o que o reclaim decidiu. {@code attemptsExhausted} separa
-     * o FAILED por orçamento esgotado do FAILED por job aposentado (a
-     * Execution sozinha não distingue: nas duas o desfecho é FAILED — quem
-     * sabe o motivo é a decisão do reaper, e ela vira o label aqui) —
-     * confundi-los mandaria o operador investigar retry budget num
-     * retirement em massa.
+     * Any non-zero value here means a dead or stopped node — the label says what the reclaim decided.
+     *
+     * <p>{@code attemptsExhausted} separates a FAILED from an exhausted budget from a FAILED from a
+     * retired job (the Execution alone cannot tell them apart: both end FAILED — what knows the reason
+     * is the reaper's decision, and it becomes the label here). Confusing them would send the operator
+     * investigating retry budgets during a mass retirement.
      */
     void leaseReclaimed(ExecutionState postReclaimState, boolean attemptsExhausted) {
         String reason = switch (postReclaimState) {
             case RETRY_WAITING -> "retry";
             case FAILED -> attemptsExhausted ? "attempts_exhausted" : "job_retired";
             case CANCELLED -> "cancelled";
-            // inalcançáveis pós-reclaim; braços explícitos para o compilador acusar um ExecutionState novo
+            // Unreachable after a reclaim; explicit arms so the compiler flags a new ExecutionState
             case ENQUEUED, RUNNING, SUCCEEDED -> labelValue(postReclaimState);
         };
         registry.counter("mohs.lease.reclaimed", "reason", reason).increment();
     }
 
     /**
-     * §5.4 (Phase 5): perdas de admissão pós-claim — o cap virou no meio da
-     * rodada, ou o rate limit foi levado por outro nó entre as duas fases.
-     * Churn esperado e limitado a uma rodada por virada de guard; valor
-     * CRESCENTE sustentado significa a lista de inadmissíveis chegando
-     * atrasada (cabeça da fila dominada por job travado — a nota de design
-     * do tuning do S5.2).
+     * Post-claim admission losses — the cap turned mid-round, or the rate limit was taken by another
+     * node between the two phases.
+     *
+     * <p>Expected churn, bounded to one round per guard flip; a sustained INCREASING value means the
+     * inadmissible list is arriving late (the queue's head dominated by a stuck job).
      */
     void claimRequeued(String reason, int count) {
         registry.counter("mohs.claim.requeued", "reason", reason).increment(count);
+    }
+
+    /**
+     * A tick step failed. On a dashboard at 3 a.m. it separates "the node is idle because the queue is
+     * empty" from "the node is idle because every tick dies" — a distinction that previously existed
+     * only in a line of {@code log.error}. The label is the STEP, not the exception: the operational
+     * question is WHICH part of the tick stopped.
+     */
+    void tickStepFailed(String step) {
+        registry.counter("mohs.tick.failed", "step", step).increment();
     }
 
     private static String labelValue(ExecutionState state) {
@@ -124,12 +145,13 @@ public final class EngineMetrics {
     }
 
     /**
-     * {@code strongReference}: o supplier é uma method reference efêmera —
-     * sem ela o gauge sumiria no primeiro GC. Limitação registrada: sem o
-     * label {@code node}, dois engines no mesmo registry (um Mohs por
-     * datasource, §13.3 do plano) colidem no id e o segundo bind é ignorado
-     * em silêncio pelo Micrometer — o gatilho para adicionar a tag é o
-     * primeiro cenário multi-engine real, pagando a cardinalidade só então.
+     * {@code strongReference}: the supplier is an ephemeral method reference — without it the gauge
+     * would vanish at the first GC.
+     *
+     * <p>A recorded limitation: with no {@code node} label, two engines in the same registry (one Mohs
+     * per datasource) collide on the id and the second bind is silently ignored by Micrometer. The
+     * trigger for adding the tag is the first real multi-engine scenario, paying the cardinality only
+     * then.
      */
     void bindNodeGauges(Supplier<Number> inFlight, int capacity) {
         Gauge.builder("mohs.node.inflight", inFlight)
@@ -138,6 +160,24 @@ public final class EngineMetrics {
                 .register(registry);
         Gauge.builder("mohs.node.capacity", () -> capacity)
                 .description("dispatch-concurrency of this node")
+                .strongReference(true)
+                .register(registry);
+    }
+
+    /**
+     * The backlog — the leading indicator of trouble, and the one signal that says "the cluster is
+     * falling behind" before any latency percentile moves.
+     *
+     * <p>The supplier reads a value the engine SAMPLED on its own cadence; it does not query the
+     * database. That is deliberate: a gauge is evaluated once per scrape, by every scraper, and a
+     * counting query on that path would let a monitoring system decide the load it is measuring.
+     *
+     * <p>The number is cluster-wide, so every node publishes the same one: aggregate it with
+     * {@code max} across instances, never {@code sum}.
+     */
+    void bindQueueDepthGauge(Supplier<Number> depth) {
+        Gauge.builder("mohs.queue.depth", depth)
+                .description("entries in the queue visible to a claim — the backlog, cluster-wide")
                 .strongReference(true)
                 .register(registry);
     }

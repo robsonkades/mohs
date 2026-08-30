@@ -1,50 +1,54 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 /**
- * Motor de execução interno (claim, dispatch, retry, misfire). Não faz
- * parte da API pública — ver {@code io.mohs.core} para os contratos
- * públicos.
+ * The internal execution engine (claim, dispatch, retry, misfire). Not part of the public API — see
+ * {@code io.mohs.core} for the public contracts.
  *
- * <p>As portas de persistência (Repository/Data Mapper, PoEAA) que
- * {@code io.mohs.store.jdbc} implementa — este pacote não conhece JDBC, só
- * os contratos: {@link io.mohs.engine.JobStore} (definições;
- * {@link io.mohs.engine.StoredJob} combina
- * {@link io.mohs.core.definition.JobDefinition} com o estado operacional
- * que a ADR-0006 mantém separado do definicional),
- * {@link io.mohs.engine.WorkQueue} (a fila {@code mohs_ready} — claim,
- * requeue, cancel de enfileirado, rearme manual),
- * {@link io.mohs.engine.LeaseStore} (a posse {@code mohs_lease} com o
- * fence {@code (node_id, epoch)} e a transação de conclusão do §7.5-3),
- * {@link io.mohs.engine.HistoryStore} (história
- * {@code mohs_execution}/{@code mohs_attempt} e o read model derivado),
- * {@link io.mohs.engine.StoreTransactions} (a unidade de enqueue do
- * §7.5-1), {@link io.mohs.engine.BatchStore} (contadores de lote,
- * {@link io.mohs.engine.BatchCounters}),
- * {@link io.mohs.engine.RateLimitStore} e
- * {@link io.mohs.engine.NodeStore} (heartbeat/lease do NÓ, ADR-0051 —
- * {@link io.mohs.engine.StoredNode} é sua leitura).
- * {@link io.mohs.engine.SyncableClock} é a mesma ideia aplicada ao
- * {@code Clock}: a porta mora aqui, {@code DatabaseClock}
- * (io.mohs.store.jdbc) implementa — o motor nunca importa
- * {@code NamedParameterJdbcTemplate}/{@code DataSource}.
+ * <p>The persistence ports (Repository/Data Mapper, PoEAA) that {@code io.mohs.store.jdbc}
+ * implements — this package knows no JDBC, only the contracts: {@link io.mohs.engine.JobStore}
+ * (definitions; {@link io.mohs.engine.StoredJob} combines
+ * {@link io.mohs.core.definition.JobDefinition} with the operational state kept separate from the
+ * definitional one), {@link io.mohs.engine.WorkQueue} (the {@code mohs_ready} queue — claim,
+ * requeue, cancelling an enqueued entry, manual rearm), {@link io.mohs.engine.LeaseStore} (the
+ * {@code mohs_lease} ownership with the {@code (node_id, epoch)} fence and the completion
+ * transaction), {@link io.mohs.engine.HistoryStore} ({@code mohs_execution}/{@code mohs_attempt}
+ * history and the derived read model), {@link io.mohs.engine.StoreTransactions} (the enqueue unit),
+ * {@link io.mohs.engine.BatchStore} (batch counters, {@link io.mohs.engine.BatchCounters}),
+ * {@link io.mohs.engine.RateLimitStore} and {@link io.mohs.engine.NodeStore} (the NODE's
+ * heartbeat and lease — {@link io.mohs.engine.StoredNode} is its read form).
  *
- * <p>{@link io.mohs.engine.Dispatcher} invoca o handler de uma execução
- * reivindicada, via {@link io.mohs.engine.HandlerRegistry} (registro
- * {@code JobKey → JobHandler} em memória, povoado por
- * {@code io.mohs.autoconfigure}), e publica
- * {@link io.mohs.core.event.ExecutionEvent} através de
- * {@link io.mohs.engine.ExecutionEventPublisher}; a conclusão pode passar
- * pelo group commit do {@link io.mohs.engine.CompletionBatcher}
- * (ADR-0047).
+ * <p>{@link io.mohs.engine.SyncableClock} is the same idea applied to the {@code Clock}: the port
+ * lives here and {@code DatabaseClock} (io.mohs.store.jdbc) implements it — the engine never
+ * imports {@code NamedParameterJdbcTemplate} or {@code DataSource}.
  *
- * <p>{@link io.mohs.engine.Engine} é quem liga tudo: o poll loop de
- * intervalo fixo (heartbeat do nó + reaper de leases de nós mortos +
- * reconciliação + triggers + claim com admissão §5.4 + dispatch a cada
- * tick) e implementa {@link io.mohs.core.MohsLifecycle} diretamente — a
- * mesma máquina de estados da ADR-0007.
- * {@link io.mohs.engine.MohsExecutors} é a fábrica central de
- * executor/scheduler que {@code Engine}/{@code Dispatcher}/
- * {@code ExecutionEventPublisher} recebem injetado: nenhuma classe deste
- * pacote cria {@code Executor}/{@code ScheduledExecutorService} na
- * própria mão.
+ * <p>{@link io.mohs.engine.Dispatcher} invokes a claimed execution's handler through
+ * {@link io.mohs.engine.HandlerRegistry} (the in-memory {@code JobKey} to {@code JobHandler}
+ * registry, populated by {@code io.mohs.autoconfigure}) and publishes
+ * {@link io.mohs.core.event.ExecutionEvent} through
+ * {@link io.mohs.engine.ExecutionEventPublisher}; the completion may go through
+ * {@link io.mohs.engine.CompletionBatcher}'s group commit.
+ *
+ * <p>{@link io.mohs.engine.Engine} is what ties it all together: the poll loop (the node's
+ * heartbeat, the reaper of dead nodes' leases, reconciliation, triggers, the claim with its
+ * admission rules and the dispatch, on every tick), and it implements
+ * {@link io.mohs.core.MohsLifecycle} directly.
+ *
+ * <p>{@link io.mohs.engine.MohsExecutors} is the central executor/scheduler factory that
+ * {@code Engine}, {@code Dispatcher} and {@code ExecutionEventPublisher} receive injected: no class
+ * in this package creates an {@code Executor} or {@code ScheduledExecutorService} by hand.
  */
 @NullMarked
 package io.mohs.engine;

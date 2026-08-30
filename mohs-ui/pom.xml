@@ -16,30 +16,11 @@
     <description>Dashboard operacional: Overview, Jobs, Executions e Rate Limits sobre a API REST do Mohs.</description>
 
     <properties>
-        <!-- -Dskip.frontend=true pula o npm inteiro (e a cópia do dist): a suíte Java não precisa
-             do bundle, e `npm ci` falha com EPERM enquanto um `npm run dev` estiver segurando os
-             binários do esbuild/rollup em node_modules — sem isso, todo `mvnw verify` backend-only
-             ficaria refém de o dev server estar no ar. O jar publicado NUNCA pode ser construído
-             com isso ligado: sairia sem o dashboard. -->
         <skip.frontend>false</skip.frontend>
     </properties>
 
-    <!--
-        Sem dependência nenhuma, e sem src/main/java: este módulo é só o bundle do dashboard no
-        classpath, em /mohs-ui-webapp. Quem serve é MohsUiAutoConfiguration, no starter, ligada por
-        @ConditionalOnResource sobre o index.html — não há classe marcadora para o starter compilar
-        contra, então ele também não depende daqui.
-    -->
     <build>
         <plugins>
-            <!--
-                Compila o dashboard React/TypeScript de frontend/ e joga a saída em
-                target/classes/mohs-ui-webapp — deliberadamente NÃO em classpath:/static (um dos
-                lugares que o Spring Boot serve sozinho em "/"): o dashboard é servido só sob
-                /mohs-ui pelo resource handler da MohsUiAutoConfiguration, para nunca colidir com
-                o que o aplicativo hospedeiro já serve na raiz. Só frontend/ (a fonte) vai pro git;
-                node, node_modules e dist são saída de build (ver frontend/.gitignore).
-            -->
             <plugin>
                 <groupId>com.github.eirslett</groupId>
                 <artifactId>frontend-maven-plugin</artifactId>

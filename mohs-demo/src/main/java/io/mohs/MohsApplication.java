@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs;
 
 import java.util.Map;
@@ -10,26 +25,23 @@ import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.FilterType;
 
 /**
- * {@code @ComponentScan} exclui {@code io.mohs.rest} — sem isso, o
- * component-scan default (raiz {@code io.mohs}) acharia
- * {@code JobsController}/{@code ExecutionsController} sozinho, colidindo
- * com o {@code @Bean} explícito de {@code MohsRestAutoConfiguration}
- * sempre que {@code mohs.api.enabled=true} (dois bean definitions pro
- * mesmo tipo). Excluir o pacote também faz este app de dev exercitar
- * exatamente o caminho de auto-configuration que um consumidor real usa
- * — o {@code main()} só mora dentro do pacote da própria lib por
- * conveniência de desenvolvimento.
+ * {@code @ComponentScan} excludes {@code io.mohs.rest}.
  *
- * <p>{@code excludeFilters} repete os dois filtros default de {@code
- * @SpringBootApplication} ({@link TypeExcludeFilter}, {@link
- * AutoConfigurationExcludeFilter}) porque declarar {@code @ComponentScan}
- * diretamente na classe SUBSTITUI o meta-anotado, não soma a ele — sem
- * isso, {@code MohsAutoConfiguration}/{@code MohsRestAutoConfiguration}
- * (ambos sob {@code io.mohs}) voltam a ser achadas pelo scan comum, além
- * do caminho de auto-configuration — confirmado batendo de frente com
- * {@code @WebMvcTest} de qualquer outro controller (bean duplicado /
- * {@code mohsClock} exigindo {@code DataSource} numa fatia que não devia
- * carregar o motor nenhum).
+ * <p>Without that, the default component scan (rooted at {@code io.mohs}) would find
+ * {@code JobsController}/{@code ExecutionsController} on its own and collide with the explicit
+ * {@code @Bean} in {@code MohsRestAutoConfiguration} whenever {@code mohs.api.enabled=true} — two
+ * bean definitions for the same type. Excluding the package also makes this dev application
+ * exercise exactly the auto-configuration path a real consumer takes; {@code main()} only lives
+ * inside the library's own package as a development convenience.
+ *
+ * <p>{@code excludeFilters} repeats the two default filters of {@code @SpringBootApplication}
+ * ({@link TypeExcludeFilter}, {@link AutoConfigurationExcludeFilter}) because declaring
+ * {@code @ComponentScan} directly on the class REPLACES the meta-annotated one rather than adding
+ * to it. Without them, {@code MohsAutoConfiguration} and {@code MohsRestAutoConfiguration} (both
+ * under {@code io.mohs}) are found by the ordinary scan as well as through auto-configuration —
+ * confirmed by a head-on collision with {@code @WebMvcTest} for any other controller (duplicate
+ * bean, and {@code mohsClock} demanding a {@code DataSource} in a slice that should load no engine
+ * at all).
  */
 @SpringBootApplication
 @ComponentScan(basePackages = "io.mohs", excludeFilters = {
@@ -40,18 +52,18 @@ import org.springframework.context.annotation.FilterType;
 public class MohsApplication {
 
     /**
-     * Config de dev local vive aqui, nunca em {@code src/main/resources/
-     * application.yaml}: um {@code application.yaml} no classpath root do
-     * jar da biblioteca compete com o do aplicativo hospedeiro (só um é
-     * carregado, decidido pela ordem do classpath) — config de aplicação é
-     * sempre do app, nunca da dependência. {@code defaultProperties} perde
-     * pra qualquer fonte externa (arquivo do dev, argumento, env var): só
-     * preenche o vazio, e só quando é este {@code main()} que sobe.
+     * Local development configuration lives here, never in {@code src/main/resources/
+     * application.yaml}: an {@code application.yaml} at the library jar's classpath root competes
+     * with the host application's own — only one is loaded, decided by classpath order — and
+     * application configuration always belongs to the application, never to a dependency.
+     * {@code defaultProperties} loses to any external source (a developer's file, an argument, an
+     * environment variable): it only fills the gap, and only when this {@code main()} is what
+     * started the process.
      */
     public static void main(String[] args) {
         SpringApplication app = new SpringApplication(MohsApplication.class);
-        // schema por conta do Flyway próprio do Mohs (ADR-0048) — o
-        // spring.sql.init que morava aqui saiu junto com a Phase 2
+        // The schema is owned by Mohs's own Flyway migrations; the spring.sql.init that used to
+        // live here went away with them
         app.setDefaultProperties(Map.of(
                 "spring.application.name", "mohs",
                 "mohs.jdbc.dialect", "h2"));

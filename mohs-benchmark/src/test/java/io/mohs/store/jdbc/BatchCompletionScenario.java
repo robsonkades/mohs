@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -24,49 +39,46 @@ import io.mohs.engine.BatchCompletionCallbacks;
 import io.mohs.engine.EngineSettings;
 
 /**
- * S10 do §20.2 — um lote grande criado pela fachada pública e drenado por
- * um cluster de 3 nós. O critério é o contador da ADR-0043: o
- * {@code BatchCompleted} nasce do {@code UPDATE ... RETURNING} que fecha o
- * lote, então DOIS nós concluindo o penúltimo e o último membro ao mesmo
- * tempo têm de produzir UM evento, não dois — e nenhum se a corrida
- * perdesse o incremento.
+ * A large batch created through the public facade and drained by a three-node cluster.
  *
- * <p>Membros que FALHAM contam igual (o lote fecha por total, não por
- * sucesso): metade dos membros lança de propósito, o que também exercita o
- * caminho de {@code Failed} fechando lote. O job declara
- * {@code retries(1)} — não é detalhe de bancada, é o que torna a asserção
- * do contador FALSIFICÁVEL: cada membro que falha é invocado DUAS vezes e
- * tem de contar UMA, e é isso que separa "contou a falha terminal" de
- * "contou cada tentativa", que fecharia o lote cedo. Sem orçamento
- * ({@code retries = 0}) os dois comportamentos produziriam o mesmo número
- * e a asserção não provaria nada.
+ * <p>The criterion is the batch counter: {@code BatchCompleted} is born from the
+ * {@code UPDATE ... RETURNING} that closes the batch, so TWO nodes completing the second-to-last
+ * and the last member at the same time must produce ONE event — not two, and not none, which is
+ * what a lost increment would give.
  *
- * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
- * -Dtest=BatchCompletionScenario}.
+ * <p>Members that FAIL count just the same, because a batch closes on its total rather than on
+ * successes: half the members throw on purpose, which also exercises the path where a
+ * {@code Failed} closes a batch. The job declares {@code retries(1)}, and that is not a bench
+ * detail — it is what makes the counter assertion FALSIFIABLE: each failing member is invoked
+ * TWICE and must count ONCE, which is what separates "counted the terminal failure" from "counted
+ * every attempt", the latter closing the batch early. With no budget ({@code retries = 0}) both
+ * behaviours would produce the same number and the assertion would prove nothing.
+ *
+ * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=BatchCompletionScenario}.
  */
 class BatchCompletionScenario {
 
     private static final int MEMBERS = 20_000;
     /**
-     * Um retry além da primeira tentativa: é o que torna FALSIFICÁVEL a
-     * asserção sobre o contador. Sem orçamento (retries=0) cada membro é
-     * invocado UMA vez, e aí "conta a falha terminal" e "conta cada attempt"
-     * produzem o mesmo número — um contador por-attempt passaria verde. Com
-     * um retry, o membro que falha é invocado DUAS vezes e tem de contar UMA.
+     * One retry beyond the first attempt: this is what makes the counter assertion FALSIFIABLE.
+     *
+     * <p>With no budget each member is invoked ONCE, and then "count the terminal failure" and
+     * "count every attempt" produce the same number — a per-attempt counter would pass green. With
+     * one retry the failing member is invoked TWICE and must count ONCE.
      */
     private static final int RETRIES = 1;
     private static final int NODES = 3;
     private static final Duration DRAIN_TIMEOUT = Duration.ofMinutes(3);
     /**
-     * Janela extra depois do fechamento: um SEGUNDO evento chegaria aqui, e
-     * afirmar "exatamente um" sem esperar por ele seria afirmar sobre uma
-     * corrida que ainda não terminou.
+     * Extra window after closure: a SECOND event would arrive within it, and asserting "exactly
+     * one" without waiting would be asserting about a race that has not finished.
      */
     private static final Duration SECOND_EVENT_WINDOW = Duration.ofSeconds(5);
 
     @Test
     void aLargeBatchClosesExactlyOnceUnderConcurrentCompletion() {
-        DataSource dataSource = PostgresTestSupport.freshSchema();
+        ScenarioBackend backend = ScenarioBackend.current();
+        DataSource dataSource = backend.freshSchema();
         Clock clock = Clock.systemUTC();
         List<BatchCompleted> completions = Collections.synchronizedList(new ArrayList<>());
         AtomicInteger invocations = new AtomicInteger();
@@ -82,7 +94,7 @@ class BatchCompletionScenario {
         };
         BatchCompletionCallbacks callbacks = new BatchCompletionCallbacks();
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock)) {
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.dialect())) {
             cluster.defineJob("member", spec -> spec.retries(RETRIES));
             for (int i = 0; i < NODES; i++) {
                 cluster.addNode(settings(), List.of(collector, callbacks));
@@ -113,10 +125,9 @@ class BatchCompletionScenario {
             report(createNanos, drainNanos, closed, completions, invocations.get(), failures.get(),
                     cluster.countReady(), cluster.countLease(), terminalEvents.get());
 
-            // A evidência PRIMÁRIA vem da tabela, não do evento: mohs_batches
-            // é a fonte de verdade da ADR-0043 e não perde nada. O canal de
-            // eventos é best-effort por contrato, então ele é verificado
-            // (abaixo) mas nunca é a única testemunha.
+            // The PRIMARY evidence comes from the table, not from the event: mohs_batches is the
+            // source of truth and loses nothing. The event channel is best-effort by contract, so
+            // it is verified (below) but is never the only witness.
             Map<String, Object> counters = cluster.jdbc().queryForMap(
                     "SELECT total, succeeded, failed FROM mohs_batches WHERE id = ?", batch.batchId());
             assertThat(counters.get("total")).isEqualTo(MEMBERS);
@@ -126,16 +137,16 @@ class BatchCompletionScenario {
                     .isEqualTo(MEMBERS / 2);
             assertThat(counters.get("succeeded")).isEqualTo(MEMBERS / 2);
 
-            // com um retry, cada membro par roda duas vezes: a igualdade
-            // ESTRITA é o que separa "o contador é terminal" de "o contador é
-            // por attempt", que a desigualdade frouxa deixaria passar
+            // With one retry, every even member runs twice: STRICT equality is what separates
+            // "the counter is terminal" from "the counter is per-attempt", which a loose
+            // inequality would let through
             assertThat(invocations.get())
                     .as("every deliberate failure must be invoked twice with retries=%d — otherwise the counter "
                             + "assertion above cannot tell terminal counting from per-attempt counting", RETRIES)
                     .isEqualTo(MEMBERS + MEMBERS / 2);
 
-            // e só agora o canal: se todo evento terminal chegou, ele não
-            // descartou nada, e a contagem de BatchCompleted significa algo
+            // Only now the channel: if every terminal event arrived, it dropped nothing, and the
+            // BatchCompleted count means something
             assertThat(terminalEvents.get())
                     .as("the event channel dropped events — the BatchCompleted assertion below would be vacuous")
                     .isEqualTo(MEMBERS);

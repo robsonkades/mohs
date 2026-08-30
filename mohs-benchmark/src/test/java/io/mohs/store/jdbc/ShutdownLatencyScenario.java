@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.store.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -15,28 +30,26 @@ import io.mohs.engine.EngineSettings;
 import io.mohs.engine.JobHandler;
 
 /**
- * Quanto custa um SIGTERM com o nó CHEIO — a pergunta operacional que o
- * {@link NodeChurnScenario} não responde, porque lá o interesse é o que se
- * perde, não quanto se espera. Aqui o nó sai com o dispatch saturado
- * ({@code dispatchConcurrency} execuções em voo, handler lento), e o que se
- * mede é o relógio: um orquestrador que espera
- * {@code terminationGracePeriodSeconds} precisa saber se o
- * {@code stop(grace)} termina em tempo de handler ou em tempo de grace.
+ * What a SIGTERM costs with the node FULL — the operational question {@link NodeChurnScenario} does
+ * not answer, because there the interest is what is lost, not how long the wait is.
  *
- * <p>O teto declarado é o contrato do drain (ADR-0007): drenar é esperar o
- * que está em voo TERMINAR, então o piso é a duração de um handler e o teto
- * é o {@code grace}. O que este cenário protege é o meio-termo — que a
- * espera não vire o grace inteiro por causa de trabalho que ninguém está
- * mais esperando de fato.
+ * <p>Here the node leaves with dispatch saturated ({@code dispatchConcurrency} executions in
+ * flight, slow handler), and what is measured is the clock: an orchestrator waiting
+ * {@code terminationGracePeriodSeconds} needs to know whether {@code stop(grace)} finishes in
+ * handler time or in grace time.
  *
- * <p>Roda por nome: {@code ./mvnw -pl mohs-benchmark test
- * -Dtest=ShutdownLatencyScenario}.
+ * <p>The declared ceiling is the drain contract: draining means waiting for what is in flight to
+ * FINISH, so the floor is one handler's duration and the ceiling is {@code grace}. What this
+ * scenario protects is the middle ground — that the wait does not become the whole grace because
+ * of work nobody is actually waiting for any more.
+ *
+ * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=ShutdownLatencyScenario}.
  */
 class ShutdownLatencyScenario {
 
     private static final int SEED = 20_000;
     private static final int DISPATCH_CONCURRENCY = 256;
-    /** Handler deliberadamente lento: é ele que mantém o nó CHEIO no instante do sinal. */
+    /** Deliberately slow handler: it is what keeps the node FULL at the instant of the signal. */
     private static final Duration HANDLER_WORK = Duration.ofMillis(250);
     private static final Duration GRACE = Duration.ofSeconds(30);
 
@@ -56,9 +69,9 @@ class ShutdownLatencyScenario {
         };
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC())) {
-            // retries(0): o número medido é o CUSTO do stop, e uma reentrega
-            // por reclaim inflaria `invocations` sem que a janela de shutdown
-            // — a variável do experimento — tivesse mudado
+            // retries(0): the measured number is the COST of the stop, and a redelivery from a
+            // reclaim would inflate `invocations` without the shutdown window — the experiment's
+            // variable — having changed
             cluster.defineJob("slow", spec -> spec.retries(0));
             for (int i = 0; i < 2; i++) {
                 cluster.addNode(settings(), List.of());
@@ -67,8 +80,8 @@ class ShutdownLatencyScenario {
             cluster.seedReady("slow", SEED, 20);
             cluster.startAll();
 
-            // o nó tem de estar CHEIO: esperar a posse do cluster chegar perto
-            // do teto dos dois nós é o que faz o sinal cair no pior instante
+            // The node has to be FULL: waiting for cluster ownership to approach both nodes'
+            // ceiling is what makes the signal land at the worst instant
             ScenarioCluster.awaitUntil(Duration.ofSeconds(60),
                     () -> cluster.countLease() >= DISPATCH_CONCURRENCY);
             int inFlightAtSignal = cluster.countLease();

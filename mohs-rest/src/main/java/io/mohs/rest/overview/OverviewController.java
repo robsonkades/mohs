@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.rest.overview;
 
 import java.time.Duration;
@@ -17,26 +32,24 @@ import io.mohs.rest.CursorPage;
 import io.mohs.rest.error.PayloadValidationException;
 
 /**
- * {@code GET /overview} — âncora de polling do dashboard (ver
- * {@code docs/REST-API-DESIGN.md}): contagens do trabalho vivo + vazão
- * terminal da janela recente, tudo pela fachada {@link Mohs} (a REST não
- * enxerga o motor — fronteira do ArchitectureTest). {@code /stream} é o
- * mesmo retrato empurrado por SSE — ver
- * {@link OverviewStreamBroadcaster}.
+ * {@code GET /overview} — the dashboard's polling anchor:
+ * live-work counts plus the terminal throughput of the recent window, all through the {@link Mohs}
+ * facade (REST does not see the engine — the ArchitectureTest boundary).
+ *
+ * <p>{@code /stream} is the same snapshot pushed over SSE — see {@link OverviewStreamBroadcaster}.
  */
 @RestController
 @RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/overview")
 public class OverviewController {
 
-    /** Default do {@code ?window=} — 60s lê como "vazão por minuto" sem aritmética do lado do consumidor. A janela aplicada viaja na resposta ({@code throughput.window}). */
+    /** The {@code ?window=} default — 60s reads as "throughput per minute" with no arithmetic on the consumer's side. The applied window travels in the response ({@code throughput.window}). */
     static final Duration DEFAULT_THROUGHPUT_WINDOW = Duration.ofSeconds(60);
 
     /**
-     * Clamp do {@code ?window=}, mesmo idioma de {@link CursorPage#clampSize}
-     * — o teto protege o contrato "barato por construção": o custo da
-     * contagem é proporcional à janela, e acima de 1h isso é analytics
-     * sobre histórico, não dashboard. Quem pediu mais recebe o teto e VÊ o
-     * teto na resposta.
+     * The {@code ?window=} clamp, in the same idiom as {@link CursorPage#clampSize} — the ceiling
+     * protects the "cheap by construction" contract: the count's cost is proportional to the window,
+     * and above an hour that is analytics over history, not a dashboard. Whoever asks for more gets
+     * the ceiling and SEES the ceiling in the response.
      */
     static final Duration MIN_THROUGHPUT_WINDOW = Duration.ofSeconds(1);
     static final Duration MAX_THROUGHPUT_WINDOW = Duration.ofHours(1);
@@ -50,12 +63,11 @@ public class OverviewController {
     }
 
     /**
-     * {@code ?window=} como {@code String} + parse explícito
-     * ({@link DurationStyle#detectAndParse}: aceita {@code 15m} e
-     * {@code PT15M}), nunca binder do host: Mohs é biblioteca embarcada —
-     * depender do {@code ConversionService} MVC da aplicação hospedeira
-     * faria o formato aceito variar por host. Valor imparseável → 422 que
-     * ensina, não 500.
+     * {@code ?window=} as a {@code String} plus an explicit parse
+     * ({@link DurationStyle#detectAndParse}, which accepts both {@code 15m} and {@code PT15M}),
+     * never the host's binder: Mohs is an embedded library, and depending on the host application's
+     * MVC {@code ConversionService} would make the accepted format vary per host. An unparseable
+     * value becomes a 422 that teaches, not a 500.
      */
     @GetMapping
     public OverviewResponse overview(@RequestParam(required = false) @Nullable String window) {

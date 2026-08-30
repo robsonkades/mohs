@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.mohs.engine;
 
 import java.time.Duration;
@@ -43,7 +58,7 @@ class MohsExecutorsTest {
         assertThat(threadRef.get().getName()).startsWith("mohs-probe-");
     }
 
-    /** CLAUDE.md: "Limite de concorrência com Semaphore, nunca via tamanho de pool" — aqui é o Semaphore interno do SimpleAsyncTaskExecutor. */
+    /** "Bound concurrency with a Semaphore, never through pool size" — here it is SimpleAsyncTaskExecutor's internal Semaphore. */
     @Test
     void ioBoundExecutorRejectsTasksBeyondConcurrencyLimit() throws Exception {
         AsyncTaskExecutor executor = MohsExecutors.ioBoundExecutor("mohs-probe", 1);
@@ -94,7 +109,7 @@ class MohsExecutorsTest {
         assertThatThrownBy(() -> MohsExecutors.scheduler("test", 0)).isInstanceOf(IllegalArgumentException.class);
     }
 
-    /** O corpo da tarefa (claim/reaper em Engine) é JDBC bloqueante — I/O-bound, daí virtual thread (CLAUDE.md). */
+    /** The task's body (claim and reaper in Engine) is blocking JDBC — I/O-bound, hence virtual threads. */
     @Test
     void schedulerRunsScheduledTaskOnNamedVirtualThread() throws Exception {
         ThreadPoolTaskScheduler scheduler = MohsExecutors.scheduler("mohs-sched-probe", 1);
@@ -112,15 +127,14 @@ class MohsExecutorsTest {
     }
 
     /**
-     * poolSize continua sendo o teto real de execuções concorrentes com
-     * virtual threads — {@link ThreadPoolTaskScheduler}, não thread-per-task
-     * (ver Javadoc de {@link MohsExecutors#scheduler}). Tarefas
-     * independentes, não uma única recorrente via
-     * {@code scheduleWithFixedDelay}: essa nunca se sobrepõe a si mesma por
-     * contrato do próprio JDK (a próxima execução só é agendada depois que a
-     * anterior termina) — não provaria nada sobre {@code poolSize}, valeria
-     * pra qualquer tamanho de pool. Aqui, {@code taskCount} tarefas distintas
-     * disputam o mesmo pool de tamanho 1 de propósito.
+     * poolSize remains the real ceiling on concurrent executions with virtual threads —
+     * {@link ThreadPoolTaskScheduler}, not thread-per-task (see {@link MohsExecutors#scheduler}'s
+     * Javadoc).
+     *
+     * <p>Independent tasks, not a single recurring one through {@code scheduleWithFixedDelay}: that one
+     * never overlaps itself by the JDK's own contract (the next execution is only scheduled once the
+     * previous finishes) — it would prove nothing about {@code poolSize} and would hold for any pool
+     * size. Here, {@code taskCount} distinct tasks contend for the same pool of size 1 on purpose.
      */
     @Test
     void schedulerWithPoolSizeOneNeverRunsTasksConcurrently() throws Exception {
