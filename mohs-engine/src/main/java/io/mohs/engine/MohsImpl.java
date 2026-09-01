@@ -84,7 +84,7 @@ public final class MohsImpl implements Mohs {
      */
     private static final Duration RECENT_WINDOW = Duration.ofSeconds(10);
 
-    /** The ceiling of mohs_batches' `name` column in all four dialects — validated here so it becomes an error that teaches, not an INSERT failure. */
+    /** The ceiling of mohs_batches' `name` column in all four databases — validated here so it becomes an error that teaches, not an INSERT failure. */
     private static final int MAX_BATCH_NAME_LENGTH = 255;
 
     private static final Logger log = LoggerFactory.getLogger(MohsImpl.class);
@@ -165,7 +165,7 @@ public final class MohsImpl implements Mohs {
         }
         if (name.length() > MAX_BATCH_NAME_LENGTH) {
             throw new IllegalArgumentException("a batch name must be at most " + MAX_BATCH_NAME_LENGTH
-                    + " characters (the column limit in every dialect), got " + name.length());
+                    + " characters (the column limit on every supported database), got " + name.length());
         }
         List<Member> members = collectMembers(configurer);
         if (members.isEmpty()) {

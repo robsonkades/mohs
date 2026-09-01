@@ -28,22 +28,19 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import io.mohs.engine.BatchCounters;
 import io.mohs.engine.BatchStore;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
 /** {@link BatchStore} over {@code mohs_batches} (a Data Mapper, PoEAA). */
 public final class JdbcBatchStore implements BatchStore {
 
-    private static final String INCREMENT_SUCCEEDED =
-            "UPDATE mohs_batches SET succeeded = succeeded + 1 WHERE id = :id";
-
-    private static final String INCREMENT_FAILED =
-            "UPDATE mohs_batches SET failed = failed + 1 WHERE id = :id";
-
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final Clock clock;
+    private final JdbcDelegate delegate;
 
-    public JdbcBatchStore(DataSource dataSource, Clock clock) {
+    public JdbcBatchStore(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
         this.jdbcTemplate = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
 
     @Override
@@ -58,38 +55,33 @@ public final class JdbcBatchStore implements BatchStore {
                 .addValue("name", name)
                 .addValue("total", total)
                 .addValue("createdAt", JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
-        jdbcTemplate.update("""
-                INSERT INTO mohs_batches (id, name, total, succeeded, failed, created_at)
-                VALUES (:id, :name, :total, 0, 0, :createdAt)
-                """, params);
+        jdbcTemplate.update(delegate.insertBatch(), params);
     }
 
-    /** Explicit columns rather than {@code SELECT *} — {@code created_at} is operator forensics, never read here, and this re-read runs on EVERY member completion. */
     @Override
     public Optional<BatchCounters> find(String batchId) {
         Objects.requireNonNull(batchId, "batchId");
-        return JdbcSupport.findOne(jdbcTemplate,
-                "SELECT id, name, total, succeeded, failed FROM mohs_batches WHERE id = :id",
+        return JdbcSupport.findOne(jdbcTemplate, delegate.findBatch(),
                 new MapSqlParameterSource("id", batchId),
                 JdbcBatchStore::mapRow);
     }
 
     @Override
     public BatchCounters incrementSucceeded(String batchId) {
-        return incrementAndRead(batchId, INCREMENT_SUCCEEDED);
+        return incrementAndRead(batchId, delegate.incrementBatchSucceeded());
     }
 
     @Override
     public BatchCounters incrementFailed(String batchId) {
-        return incrementAndRead(batchId, INCREMENT_FAILED);
+        return incrementAndRead(batchId, delegate.incrementBatchFailed());
     }
 
     /**
      * An {@code UPDATE} followed by a {@code SELECT}, rather than the {@code UPDATE ... RETURNING} the
      * design names: H2 does not support the clause (measured while implementing) and neither does MySQL,
-     * so this is the only path that serves all four dialects. One extra round trip on Postgres and SQL
+     * so this is the only path that serves all four databases. One extra round trip on Postgres and SQL
      * Server is the price, and the measurement showed the candidates separated by less than a round trip
-     * — optimising per dialect before having a number that justifies it would be premature
+     * — optimising per delegate before having a number that justifies it would be premature
      * generalisation.
      *
      * <p>The re-read is stable because the {@code UPDATE}'s row lock is held until the commit: no other

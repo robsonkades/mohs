@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mohs</groupId>
+        <groupId>io.github.robsonkades</groupId>
         <artifactId>mohs-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
@@ -13,15 +13,15 @@
     <packaging>jar</packaging>
 
     <name>Mohs :: Engine</name>
-    <description>Motor: claim, poll/dispatch, misfire, retry, reaper — e as SPIs de store que o backend implementa.</description>
+    <description>The engine: claim, poll/dispatch, misfire, retry and reaper, plus the store SPIs a backend implements.</description>
 
     <dependencies>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-api</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-cron</artifactId>
         </dependency>
         <dependency>

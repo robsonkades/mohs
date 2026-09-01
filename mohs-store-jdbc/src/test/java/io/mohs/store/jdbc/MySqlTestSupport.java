@@ -36,6 +36,7 @@ import org.testcontainers.mysql.MySQLContainer;
  */
 final class MySqlTestSupport {
 
+    // The tag is duplicated in .github/workflows/maven.yml, which pre-pulls it while Maven compiles.
     private static final MySQLContainer CONTAINER = new MySQLContainer("mysql:8.0");
 
     static {

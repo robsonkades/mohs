@@ -25,6 +25,7 @@ import io.mohs.core.schedule.CronSpec;
 import io.mohs.core.schedule.IntervalSpec;
 import io.mohs.core.schedule.Misfire;
 import io.mohs.core.schedule.OnDemandSpec;
+import io.mohs.core.schedule.Schedule;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -102,26 +103,23 @@ class JobDefinitionTest {
 
     @Test
     void rejectsNegativeRetries() {
-        assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
-                null, null, Misfire.IGNORE, true, 0, -1, null, null, DefinitionSource.PROGRAMMATIC))
-                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> definitionWithPolicy(true, 0, -1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("retries");
     }
 
     @Test
     void rejectsMaxConcurrentExecutionsSetWhenConcurrencyIsAllowed() {
-        assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
-                null, null, Misfire.IGNORE, true, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
-                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> definitionWithPolicy(true, 1, 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("maxConcurrentExecutions must be 0");
     }
 
     @Test
     void rejectsNonPositiveMaxConcurrentExecutionsWhenConcurrencyIsNotAllowed() {
-        assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
-                null, null, Misfire.IGNORE, false, 0, 0, null, null, DefinitionSource.PROGRAMMATIC))
-                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> definitionWithPolicy(false, 0, 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must be at least 1");
     }
 
     @Test
@@ -175,21 +173,16 @@ class JobDefinitionTest {
 
     @Test
     void rejectsNullKeyHandlerTypeScheduleMisfireSource() {
-        assertThatThrownBy(() -> new JobDefinition(
-                null, null, Handler.class, new OnDemandSpec(), null, null, Misfire.IGNORE, false, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
-                .isInstanceOf(NullPointerException.class);
-        assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, null, new OnDemandSpec(), null, null, Misfire.IGNORE, false, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
-                .isInstanceOf(NullPointerException.class);
-        assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, Handler.class, null, null, null, Misfire.IGNORE, false, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
-                .isInstanceOf(NullPointerException.class);
-        assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, Handler.class, new OnDemandSpec(), null, null, null, false, 1, 0, null, null, DefinitionSource.PROGRAMMATIC))
-                .isInstanceOf(NullPointerException.class);
-        assertThatThrownBy(() -> new JobDefinition(
-                JobKey.of("id"), null, Handler.class, new OnDemandSpec(), null, null, Misfire.IGNORE, false, 1, 0, null, null, null))
-                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> definitionWith(null, Handler.class, new OnDemandSpec(), Misfire.IGNORE, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(NullPointerException.class).hasMessage("key");
+        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), null, new OnDemandSpec(), Misfire.IGNORE, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(NullPointerException.class).hasMessage("handlerType");
+        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), Handler.class, null, Misfire.IGNORE, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(NullPointerException.class).hasMessage("schedule");
+        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), Handler.class, new OnDemandSpec(), null, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(NullPointerException.class).hasMessage("misfire");
+        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), Handler.class, new OnDemandSpec(), Misfire.IGNORE, null))
+                .isInstanceOf(NullPointerException.class).hasMessage("source");
     }
 
     @Test
@@ -198,5 +191,28 @@ class JobDefinitionTest {
             spec.cron("0 0 2 * * *", ZoneId.of("UTC"));
             spec.every(Duration.ofSeconds(30));
         })).isInstanceOf(IllegalStateException.class);
+    }
+
+    /**
+     * A definition valid in everything but the five components the canonical constructor refuses to
+     * accept null for — which this signature spells out, in the order the constructor checks them.
+     * Spelled out at the call site instead, the fifteen positional arguments bury the single
+     * {@code null} the test is about among the nine that are merely "unset".
+     */
+    private static JobDefinition definitionWith(
+            JobKey key, Class<?> handlerType, Schedule schedule, Misfire misfire, DefinitionSource source) {
+        return new JobDefinition(key, null, handlerType, schedule,
+                null, null, null, misfire, false, false, 1, 0, null, null, source);
+    }
+
+    /**
+     * A definition valid in everything but the concurrency ceiling and the retry budget — the trio the
+     * canonical constructor cross-validates, and the only thing the rejection tests vary.
+     */
+    private static JobDefinition definitionWithPolicy(
+            boolean allowConcurrentExecutions, int maxConcurrentExecutions, int retries) {
+        return new JobDefinition(JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
+                null, null, null, Misfire.IGNORE, false,
+                allowConcurrentExecutions, maxConcurrentExecutions, retries, null, null, DefinitionSource.PROGRAMMATIC);
     }
 }

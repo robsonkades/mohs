@@ -127,8 +127,8 @@ public final class Engine implements MohsLifecycle {
 
     /**
      * The ceiling on the inadmissible list that goes into the claim's {@code NOT IN} — a comfortable
-     * margin under the ~2100-parameter limit of SQL Server's driver (the smallest of the four
-     * dialects), with the rest of the bind already discounted.
+     * margin under the ~2100-parameter limit of SQL Server's driver (the tightest ceiling of the four
+     * databases), with the rest of the bind already discounted.
      */
     static final int MAX_INADMISSIBLE_FILTER = 1000;
 

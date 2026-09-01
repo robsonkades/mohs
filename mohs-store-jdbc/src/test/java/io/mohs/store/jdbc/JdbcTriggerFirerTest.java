@@ -42,7 +42,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
-import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -69,10 +69,10 @@ class JdbcTriggerFirerTest {
     void setUp() {
         dataSource = freshH2DataSource();
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
-        jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
-        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), new JdbcBatchStore(dataSource, clock));
-        firer = new JdbcTriggerFirer(dataSource, historyStore, workQueue);
+        jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
+        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDelegate());
+        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate()));
+        firer = new JdbcTriggerFirer(dataSource, historyStore, workQueue, new H2JdbcDelegate());
         rawJdbc = new JdbcTemplate(dataSource);
     }
 

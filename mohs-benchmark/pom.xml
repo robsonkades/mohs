@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mohs</groupId>
+        <groupId>io.github.robsonkades</groupId>
         <artifactId>mohs-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
@@ -21,19 +21,19 @@
 
     <dependencies>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-store-jdbc</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-store-jdbc</artifactId>
             <version>${project.version}</version>
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-test</artifactId>
             <scope>test</scope>
         </dependency>

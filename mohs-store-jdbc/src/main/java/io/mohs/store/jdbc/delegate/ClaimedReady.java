@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.mohs.store.jdbc.dialect;
+package io.mohs.store.jdbc.delegate;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -24,7 +24,7 @@ import java.sql.SQLException;
  */
 public record ClaimedReady(String executionId, String jobKey, int attempt, int priority) {
 
-    /** A {@code mohs_ready} row (the {@code attempt}/{@code priority} columns) — one mapping for all four dialects: Postgres's single statement also returns from the ordered SELECT over {@code picked}, not from the lease's {@code RETURNING}. */
+    /** A {@code mohs_ready} row (the {@code attempt}/{@code priority} columns) — one mapping for all four delegates: Postgres's single statement also returns from the ordered SELECT over {@code picked}, not from the lease's {@code RETURNING}. */
     static ClaimedReady fromReadyRow(ResultSet rs, int rowNum) throws SQLException {
         return new ClaimedReady(rs.getString("execution_id"), rs.getString("job_key"), rs.getInt("attempt"), rs.getInt("priority"));
     }

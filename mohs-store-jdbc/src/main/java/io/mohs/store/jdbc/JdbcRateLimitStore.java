@@ -39,6 +39,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import io.mohs.core.RateLimitSnapshot;
 import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.RateLimitStore;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
 /** {@link RateLimitStore} over {@code mohs_rate_limits} (a Data Mapper, PoEAA), including the token bucket. */
 public final class JdbcRateLimitStore implements RateLimitStore {
@@ -80,9 +81,10 @@ public final class JdbcRateLimitStore implements RateLimitStore {
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final Clock clock;
+    private final JdbcDelegate delegate;
     private final Set<String> unknownLimitsAlreadyWarned = ConcurrentHashMap.newKeySet();
 
-    public JdbcRateLimitStore(DataSource dataSource, Clock clock) {
+    public JdbcRateLimitStore(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
         // Its own template, not JdbcSupport.namedTemplateWithStreamFetchSize: it is the only store that
         // needs a time ceiling (see BUCKET_LOCK_TIMEOUT). The convention's fetch size stays — findAll
         // returns a Stream.
@@ -91,6 +93,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
         template.setQueryTimeout((int) BUCKET_LOCK_TIMEOUT.toSeconds());
         this.jdbcTemplate = new NamedParameterJdbcTemplate(template);
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
 
     /**
@@ -108,35 +111,23 @@ public final class JdbcRateLimitStore implements RateLimitStore {
                 .addValue("refilledAt", JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
 
         // See the equivalent race in JdbcJobStore.upsert — same race, same fix.
-        int updated = jdbcTemplate.update(UPDATE_SPEC, params);
+        int updated = jdbcTemplate.update(delegate.updateRateLimitSpec(), params);
         if (updated == 0) {
             try {
-                jdbcTemplate.update(INSERT_FULL_BUCKET, params);
+                jdbcTemplate.update(delegate.insertFullRateLimitBucket(), params);
             } catch (DuplicateKeyException _) {
-                jdbcTemplate.update(UPDATE_SPEC, params);
+                jdbcTemplate.update(delegate.updateRateLimitSpec(), params);
             }
         }
         return rateLimit;
     }
-
-    private static final String UPDATE_SPEC = """
-            UPDATE mohs_rate_limits
-               SET max_count = :maxCount, window_duration = :windowDuration,
-                   tokens = CASE WHEN tokens > :maxCount THEN :maxCount ELSE tokens END
-             WHERE name = :name
-            """;
-
-    private static final String INSERT_FULL_BUCKET = """
-            INSERT INTO mohs_rate_limits (name, max_count, window_duration, tokens, refilled_at)
-            VALUES (:name, :maxCount, :windowDuration, :maxCount, :refilledAt)
-            """;
 
     @Override
     public Optional<RateLimitSnapshot> find(String name) {
         Objects.requireNonNull(name, "name");
         Instant now = clock.instant();
         return JdbcSupport.findOne(jdbcTemplate,
-                "SELECT * FROM mohs_rate_limits WHERE name = :name",
+                delegate.findRateLimitByName(),
                 new MapSqlParameterSource("name", name),
                 rs -> toSnapshot(rs, now));
     }
@@ -144,7 +135,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     @Override
     public Stream<RateLimitSnapshot> findAll() {
         Instant now = clock.instant();
-        return jdbcTemplate.queryForStream("SELECT * FROM mohs_rate_limits", new MapSqlParameterSource(),
+        return jdbcTemplate.queryForStream(delegate.findAllRateLimits(), new MapSqlParameterSource(),
                 (rs, _) -> toSnapshot(rs, now));
     }
 
@@ -219,7 +210,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
      * window mid-round would refill the balance at the old rate — a silent burst above the new limit.
      */
     private boolean chargeIfUnchanged(String name, Bucket expected, Bucket refilled, int permits) {
-        return jdbcTemplate.update(CHARGE_GUARDED_BY_CAS, new MapSqlParameterSource("name", name)
+        return jdbcTemplate.update(delegate.chargeRateLimitByCas(), new MapSqlParameterSource("name", name)
                 .addValue("tokens", refilled.tokens() - permits)
                 .addValue("refilledAt", JdbcTimestamps.toUtcLocalDateTime(refilled.refilledAt()))
                 .addValue("expectedTokens", expected.tokens())
@@ -228,16 +219,9 @@ public final class JdbcRateLimitStore implements RateLimitStore {
                 .addValue("expectedWindow", expected.windowText())) == 1;
     }
 
-    private static final String CHARGE_GUARDED_BY_CAS = """
-            UPDATE mohs_rate_limits
-               SET tokens = :tokens, refilled_at = :refilledAt
-             WHERE name = :name AND tokens = :expectedTokens AND refilled_at = :expectedRefilledAt
-               AND max_count = :expectedMax AND window_duration = :expectedWindow
-            """;
-
     private Optional<Bucket> readBucket(String name) {
         return JdbcSupport.findOne(jdbcTemplate,
-                "SELECT max_count, window_duration, tokens, refilled_at FROM mohs_rate_limits WHERE name = :name",
+                delegate.readRateLimitBucket(),
                 new MapSqlParameterSource("name", name),
                 JdbcRateLimitStore::mapBucket);
     }

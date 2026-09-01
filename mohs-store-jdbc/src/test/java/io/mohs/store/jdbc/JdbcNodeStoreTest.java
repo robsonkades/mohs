@@ -30,6 +30,7 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
 import io.mohs.core.EngineState;
 import io.mohs.engine.StoredNode;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -42,7 +43,7 @@ class JdbcNodeStoreTest {
 
     @BeforeEach
     void setUp() {
-        store = new JdbcNodeStore(freshH2DataSource());
+        store = new JdbcNodeStore(freshH2DataSource(), new H2JdbcDelegate());
     }
 
     private static DataSource freshH2DataSource() {
@@ -102,7 +103,7 @@ class JdbcNodeStoreTest {
                 "INSERT INTO mohs_nodes (node_id, state, last_heartbeat_at, epoch) VALUES (?, 'RUNNING', ?, 0)",
                 "legacy-node", JdbcTimestamps.toUtcLocalDateTime(at));
 
-        assertThat(new JdbcNodeStore(dataSource).findAll()).containsExactly(
+        assertThat(new JdbcNodeStore(dataSource, new H2JdbcDelegate()).findAll()).containsExactly(
                 new StoredNode("legacy-node", EngineState.RUNNING, at, 0, null));
     }
 

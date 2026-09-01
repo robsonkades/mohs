@@ -30,8 +30,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * A source scan guarding a batch invariant; it lives in this module, rather than in mohs-demo's
  * {@code ArchitectureTest}, because it scans the {@code src/main/java} of the module it runs in — and all
- * the SQL that writes a terminal state into the {@code mohs_execution} advisory is here
- * ({@code JdbcLeaseStore}, {@code JdbcWorkQueue}, {@code JdbcJobStore}).
+ * the SQL that writes a terminal state into the {@code mohs_execution} advisory is here, in
+ * {@code io.mohs.store.jdbc.delegate}: one copy per delegate of {@code cancelExecution},
+ * {@code terminalStateUpdate} and {@code cancelDrainedExecutions}. Since every statement moved into the
+ * delegates the scan's reach GREW — twelve write sites instead of three — which is exactly what a rule
+ * that protects a class rather than known cases is for.
  */
 class TerminalStateWriteScanTest {
 
@@ -41,6 +44,9 @@ class TerminalStateWriteScanTest {
 
     /** The marker every terminal write site must carry, with the reason beside it. */
     private static final String BATCH_COUNTED_MARKER = "batch-counted:";
+
+    /** How far above a write the marker may sit: close enough to be read along with it, and no further. */
+    private static final int MARKER_LOOKBEHIND = 6;
 
     /**
      * The rule the batch design needed and did not have: <b>whoever writes a terminal state into
@@ -95,5 +101,4 @@ class TerminalStateWriteScanTest {
                 .anyMatch(line -> line.contains(BATCH_COUNTED_MARKER));
     }
 
-    private static final int MARKER_LOOKBEHIND = 6;
 }

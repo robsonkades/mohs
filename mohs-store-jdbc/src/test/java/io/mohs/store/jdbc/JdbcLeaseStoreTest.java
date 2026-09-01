@@ -38,7 +38,7 @@ import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.LeaseStore;
 import io.mohs.engine.WorkQueue;
-import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -57,10 +57,10 @@ class JdbcLeaseStoreTest {
         DataSource dataSource = freshH2DataSource();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
-        store = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
-        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
-        jobStore = new JdbcJobStore(dataSource, clock);
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
+        store = new JdbcLeaseStore(dataSource, new H2JdbcDelegate(), batchStore);
+        queue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), batchStore);
+        jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
     }
 
     private static DataSource freshH2DataSource() {

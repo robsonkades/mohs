@@ -61,7 +61,7 @@ import io.mohs.store.jdbc.JdbcJobStore;
 import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcTimestamps;
 import io.mohs.store.jdbc.JdbcWorkQueue;
-import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -101,11 +101,11 @@ class DispatcherTest {
         dataSource = freshH2DataSource();
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
-        historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
-        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
-        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
+        jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
+        historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDelegate());
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), batchStore);
+        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate(), batchStore);
         handlerRegistry = new HandlerRegistry();
         listener = new RecordingListener();
         eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);

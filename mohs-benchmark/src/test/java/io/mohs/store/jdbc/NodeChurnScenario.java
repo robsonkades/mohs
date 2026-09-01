@@ -83,7 +83,7 @@ class NodeChurnScenario {
             Thread.sleep(HANDLER_WORK);
         };
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.dialect())) {
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.delegate())) {
             cluster.defineJob("churn", spec -> spec.retries(RETRIES));
             for (int i = 0; i < 3; i++) {
                 cluster.addNode(settings(), List.of());
@@ -168,7 +168,7 @@ class NodeChurnScenario {
             Thread.sleep(HANDLER_WORK);
         };
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.dialect())) {
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.delegate())) {
             cluster.defineJob("churn", spec -> spec.retries(RETRIES));
             for (int i = 0; i < 3; i++) {
                 cluster.addNode(settings(), List.of());
@@ -236,7 +236,7 @@ class NodeChurnScenario {
             Thread.sleep(HANDLER_WORK);
         };
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC(), backend.dialect())) {
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC(), backend.delegate())) {
             // Zero budget DECLARED: it is this pair's independent variable — inheriting it from
             // the product default would make both tests measure the same thing the day that
             // default changed

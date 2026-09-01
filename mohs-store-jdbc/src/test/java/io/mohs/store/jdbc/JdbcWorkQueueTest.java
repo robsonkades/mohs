@@ -37,7 +37,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.Shards;
 import io.mohs.engine.WorkQueue;
-import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -63,13 +63,13 @@ class JdbcWorkQueueTest {
     void setUp() {
         dataSource = freshH2DataSource();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        queue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC)));
+        queue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC), new H2JdbcDelegate()));
     }
 
     /** A batch member does not rearm — the batch already counted this failure; re-running would count the outcome TWICE in a batch that may already be closed (the same guard as the earlier era's CAS). */
     @Test
     void rearmForManualRetryRefusesABatchMember() {
-        new JdbcJobStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC))
+        new JdbcJobStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC), new H2JdbcDelegate())
                 .upsert(JobDefinition.of("job-a", Handler.class, spec -> spec.onDemand()));
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, correlation_id, payload, payload_type)
@@ -97,7 +97,7 @@ class JdbcWorkQueueTest {
 
     /**
      * The idle gate's probe ({@code hasVisibleWork}) crosses the driver with the node's LIST of shards —
-     * 64 parameters on a single node. Collection binding belongs to the driver, not the dialect, so each
+     * 64 parameters on a single node. Collection binding belongs to the driver, not the delegate, so each
      * one pays for its own test; the rest of the scenario proves the predicate: another node's shard does
      * not count, and an entry that is still invisible does not count.
      */

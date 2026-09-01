@@ -34,6 +34,7 @@ import io.mohs.engine.HistoryStore;
 import io.mohs.engine.Shards;
 import io.mohs.engine.TriggerFirer;
 import io.mohs.engine.WorkQueue;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
 /**
  * {@link TriggerFirer} over {@code mohs_job_definitions} plus the split tables: the trigger's advance
@@ -45,7 +46,7 @@ import io.mohs.engine.WorkQueue;
  *
  * <p>The CAS compares {@code next_fire_at} against the value {@code findDueRecurring} READ from the
  * column itself — never an instant computed in the JVM that never went through the database (temporal
- * precision does not make a guaranteed round trip between the JVM and the four dialects; a value read
+ * precision does not make a guaranteed round trip between the JVM and the four databases; a value read
  * and re-serialised by {@link JdbcTimestamps} compares equal by construction).
  */
 public final class JdbcTriggerFirer implements TriggerFirer {
@@ -54,8 +55,10 @@ public final class JdbcTriggerFirer implements TriggerFirer {
     private final TransactionTemplate transactionTemplate;
     private final HistoryStore historyStore;
     private final WorkQueue workQueue;
+    private final JdbcDelegate delegate;
 
-    public JdbcTriggerFirer(DataSource dataSource, HistoryStore historyStore, WorkQueue workQueue) {
+    public JdbcTriggerFirer(DataSource dataSource, HistoryStore historyStore, WorkQueue workQueue,
+            JdbcDelegate delegate) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -64,6 +67,7 @@ public final class JdbcTriggerFirer implements TriggerFirer {
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
         this.workQueue = Objects.requireNonNull(workQueue, "workQueue");
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
 
     @Override
@@ -75,13 +79,7 @@ public final class JdbcTriggerFirer implements TriggerFirer {
         Objects.requireNonNull(payload, "payload");
         Objects.requireNonNull(now, "now");
         return Boolean.TRUE.equals(transactionTemplate.execute(_ -> {
-            // retired in the predicate: a Mohs.remove between the sweep and this CAS has already cancelled
-            // what was in the queue — inserting occurrences AFTER that sweep would leave them as zombies
-            // until an eventual resurrection.
-            int advanced = jdbcTemplate.update("""
-                    UPDATE mohs_job_definitions SET next_fire_at = :newNextFireAt
-                    WHERE job_key = :jobKey AND next_fire_at = :observedNextFireAt AND retired = :retired
-                    """,
+            int advanced = jdbcTemplate.update(delegate.advanceTriggerByCas(),
                     new MapSqlParameterSource()
                             .addValue("jobKey", key.value())
                             .addValue("observedNextFireAt", JdbcTimestamps.toUtcLocalDateTime(observedNextFireAt))

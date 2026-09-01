@@ -34,8 +34,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import tools.jackson.databind.json.JsonMapper;
 
 import io.github.robsonkades.uuidv7.UUIDv7;
-import io.mohs.store.jdbc.dialect.JdbcDialect;
-import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
+import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.PolicySpec;
@@ -117,7 +117,7 @@ final class ScenarioCluster implements AutoCloseable {
     private final DataSource dataSource;
     private final Clock clock;
     private final JdbcTemplate jdbcTemplate;
-    private final JdbcDialect dialect;
+    private final JdbcDelegate delegate;
     private final JdbcJobStore jobStore;
     private final JdbcHistoryStore historyStore;
     private final JdbcWorkQueue workQueue;
@@ -129,21 +129,21 @@ final class ScenarioCluster implements AutoCloseable {
 
     /** The reference dialect — the shape every scenario had hardcoded before there was a choice. */
     ScenarioCluster(DataSource dataSource, Clock clock) {
-        this(dataSource, clock, new PostgresJdbcDialect());
+        this(dataSource, clock, new PostgresJdbcDelegate());
     }
 
-    ScenarioCluster(DataSource dataSource, Clock clock, JdbcDialect dialect) {
+    ScenarioCluster(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.jdbcTemplate = new JdbcTemplate(dataSource);
-        this.dialect = Objects.requireNonNull(dialect, "dialect");
-        this.batchStore = new JdbcBatchStore(dataSource, clock);
-        this.jobStore = new JdbcJobStore(dataSource, clock);
-        this.historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), dialect);
-        this.workQueue = new JdbcWorkQueue(dataSource, dialect, batchStore);
-        this.leaseStore = new JdbcLeaseStore(dataSource, dialect, batchStore);
-        this.rateLimitStore = new JdbcRateLimitStore(dataSource, clock);
-        this.nodeStore = new JdbcNodeStore(dataSource);
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
+        this.batchStore = new JdbcBatchStore(dataSource, clock, delegate);
+        this.jobStore = new JdbcJobStore(dataSource, clock, delegate);
+        this.historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), delegate);
+        this.workQueue = new JdbcWorkQueue(dataSource, delegate, batchStore);
+        this.leaseStore = new JdbcLeaseStore(dataSource, delegate, batchStore);
+        this.rateLimitStore = new JdbcRateLimitStore(dataSource, clock, delegate);
+        this.nodeStore = new JdbcNodeStore(dataSource, delegate);
     }
 
     JdbcTemplate jdbc() {
@@ -208,7 +208,7 @@ final class ScenarioCluster implements AutoCloseable {
         Dispatcher dispatcher = new Dispatcher(leaseStore, jobStore, handlers, clock, List.of(), listeners,
                 events, metrics, batcher);
         Engine engine = new Engine(workQueue, dispatcher, historyStore, leaseStore, jobStore, nodeStore,
-                new JdbcTriggerFirer(dataSource, historyStore, workQueue), new ExecutionWindowRegistry(List.of()),
+                new JdbcTriggerFirer(dataSource, historyStore, workQueue, delegate), new ExecutionWindowRegistry(List.of()),
                 rateLimitStore, clock, settings, runners, metrics);
         Node node = new Node(engine, handlers, runners, batcher, events, List.copyOf(listeners));
         nodes.add(node);
@@ -298,14 +298,14 @@ final class ScenarioCluster implements AutoCloseable {
      * the size of the backlog cannot give: 10k entries one second old and 10k entries a minute old
      * are the same count and a different incident.
      *
-     * <p>Read through the dialect rather than as a raw {@code Timestamp}: PostgreSQL stores
+     * <p>Read through the delegate rather than as a raw {@code Timestamp}: PostgreSQL stores
      * {@code TIMESTAMPTZ} and the other two a zoneless column, and reading the second as the first
      * shifts the answer by the JVM's offset — a bench that reports a lag of three hours because of
      * a time zone is worse than no bench.
      */
     Duration oldestQueuedAge() {
         Instant oldest = jdbcTemplate.query("SELECT MIN(visible_at) AS oldest FROM mohs_ready",
-                rs -> rs.next() ? dialect.readSplitTimestamp(rs, "oldest") : null);
+                rs -> rs.next() ? delegate.readSplitTimestamp(rs, "oldest") : null);
         return oldest == null ? Duration.ZERO : Duration.between(oldest, clock.instant());
     }
 

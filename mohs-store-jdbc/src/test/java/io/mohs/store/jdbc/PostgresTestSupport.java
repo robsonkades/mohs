@@ -34,6 +34,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  */
 final class PostgresTestSupport {
 
+    // The tag is duplicated in .github/workflows/maven.yml, which pre-pulls it while Maven compiles.
     private static final PostgreSQLContainer CONTAINER = new PostgreSQLContainer("postgres:16-alpine");
 
     static {
@@ -56,17 +57,9 @@ final class PostgresTestSupport {
         return dataSource;
     }
 
-    /** Clears every table — the schema was applied once, when the container started. */
-    static DataSource freshSchema() {
-        DataSource dataSource = dataSource();
-        new JdbcTemplate(dataSource).execute(
-                "TRUNCATE TABLE mohs_job_definitions, mohs_batches, mohs_rate_limits, mohs_nodes, mohs_ready, mohs_lease, mohs_execution, mohs_attempt, mohs_idempotency CASCADE");
-        return dataSource;
-    }
-
     /**
-     * A NEW, empty database in the same container — for the structural guardian (schema file versus the
-     * Flyway chain), which needs two schemas built from scratch by different paths, something the shared
+     * A NEW, empty database in the same container — for the structural guardian (the installer versus the
+     * delta chain), which needs two schemas built from scratch by different paths, something the shared
      * database (its schema applied in the static block) does not offer.
      */
     static DataSource freshEmptyDatabase(String name) {
@@ -79,4 +72,13 @@ final class PostgresTestSupport {
         dataSource.setPassword(CONTAINER.getPassword());
         return dataSource;
     }
+
+    /** Clears every table — the schema was applied once, when the container started. */
+    static DataSource freshSchema() {
+        DataSource dataSource = dataSource();
+        new JdbcTemplate(dataSource).execute(
+                "TRUNCATE TABLE mohs_job_definitions, mohs_batches, mohs_rate_limits, mohs_nodes, mohs_ready, mohs_lease, mohs_execution, mohs_attempt, mohs_idempotency CASCADE");
+        return dataSource;
+    }
+
 }

@@ -94,7 +94,7 @@ class BatchCompletionScenario {
         };
         BatchCompletionCallbacks callbacks = new BatchCompletionCallbacks();
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.dialect())) {
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.delegate())) {
             cluster.defineJob("member", spec -> spec.retries(RETRIES));
             for (int i = 0; i < NODES; i++) {
                 cluster.addNode(settings(), List.of(collector, callbacks));

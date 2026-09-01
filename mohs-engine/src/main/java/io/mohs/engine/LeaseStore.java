@@ -125,7 +125,7 @@ public interface LeaseStore {
      * The completion transaction: a {@code DELETE} of the leases fenced by {@code (node_id, epoch)} —
      * the count says exactly which ones this caller still owned — an {@code INSERT} of the confirmed
      * attempts, the advisory terminal {@code UPDATE} of history — matched by {@code execution_id},
-     * which is the primary key on every dialect, so it touches at most one row — the batch count and
+     * which is the primary key on every database, so it touches at most one row — the batch count and
      * the fixed-delay rearm: all or nothing.
      *
      * <p>A result with {@code owned = false} belonged to a lost incarnation and is discarded —

@@ -78,7 +78,7 @@ import io.mohs.store.jdbc.JdbcRateLimitStore;
 import io.mohs.store.jdbc.JdbcTimestamps;
 import io.mohs.store.jdbc.JdbcTriggerFirer;
 import io.mohs.store.jdbc.JdbcWorkQueue;
-import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -118,13 +118,13 @@ class EngineTest {
         dataSource = freshH2DataSource();
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
-        historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
-        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
-        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
-        rateLimitStore = new JdbcRateLimitStore(dataSource, clock);
-        nodeStore = new JdbcNodeStore(dataSource);
+        jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
+        historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDelegate());
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), batchStore);
+        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate(), batchStore);
+        rateLimitStore = new JdbcRateLimitStore(dataSource, clock, new H2JdbcDelegate());
+        nodeStore = new JdbcNodeStore(dataSource, new H2JdbcDelegate());
         handlerRegistry = new HandlerRegistry();
     }
 
@@ -202,7 +202,7 @@ class EngineTest {
         EngineMetrics metrics = new EngineMetrics(meterRegistry);
         Dispatcher dispatcher = new Dispatcher(leaseStoreOverride, jobStoreOverride, handlerRegistry, engineClock, List.of(), listeners, eventExecutor, metrics);
         return new Engine(workQueueOverride, dispatcher, historyStoreOverride, leaseStoreOverride, jobStoreOverride, nodeStoreOverride,
-                new JdbcTriggerFirer(dataSource, historyStore, workQueue), windowRegistry,
+                new JdbcTriggerFirer(dataSource, historyStore, workQueue, new H2JdbcDelegate()), windowRegistry,
                 rateLimitStore, engineClock, settings, runnerRegistry, metrics);
     }
 
@@ -524,7 +524,7 @@ class EngineTest {
     @Test
     void recurringJobFiresOnItsOwnIntervalNotOnTheBackoffPoints() throws Exception {
         Clock realClock = Clock.systemUTC();
-        JdbcJobStore punctualJobStore = new JdbcJobStore(dataSource, realClock);
+        JdbcJobStore punctualJobStore = new JdbcJobStore(dataSource, realClock, new H2JdbcDelegate());
         punctualJobStore.upsert(JobDefinition.of("punctual", Handler.class, spec -> spec.every(Duration.ofSeconds(1))));
         List<Instant> firedAt = new CopyOnWriteArrayList<>();
         CountDownLatch fired = new CountDownLatch(4);

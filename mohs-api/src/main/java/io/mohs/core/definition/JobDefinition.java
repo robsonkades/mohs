@@ -68,16 +68,6 @@ public record JobDefinition(
         @Nullable String retryPolicy,
         DefinitionSource source) {
 
-    /** The earlier signature — {@code startPaused = false} (the job is born armed) and {@code rateLimit = null} (no rate limit). */
-    @Deprecated(since = "0.1", forRemoval = true)
-    public JobDefinition(JobKey key, @Nullable String name, Class<?> handlerType, Schedule schedule,
-            @Nullable String runner, @Nullable String window, Misfire misfire, boolean allowConcurrentExecutions,
-            int maxConcurrentExecutions, int retries, @Nullable Duration timeout, @Nullable String retryPolicy,
-            DefinitionSource source) {
-        this(key, name, handlerType, schedule, runner, window, null, misfire, false, allowConcurrentExecutions,
-                maxConcurrentExecutions, retries, timeout, retryPolicy, source);
-    }
-
     public JobDefinition {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(handlerType, "handlerType");

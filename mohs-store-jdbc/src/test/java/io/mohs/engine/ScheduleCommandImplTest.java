@@ -53,7 +53,7 @@ import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcNodeStore;
 import io.mohs.store.jdbc.JdbcStoreTransactions;
 import io.mohs.store.jdbc.JdbcWorkQueue;
-import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -80,13 +80,13 @@ class ScheduleCommandImplTest {
     void setUp() {
         dataSource = freshH2DataSource();
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
-        JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
-        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
-        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
-        JdbcLeaseStore leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
+        JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
+        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDelegate());
+        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), batchStore);
+        JdbcLeaseStore leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate(), batchStore);
         mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
-                new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock,
+                new JdbcNodeStore(dataSource, new H2JdbcDelegate()), mock(RateLimitStore.class), new HandlerRegistry(), clock,
                 mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks(),
                 new RunnerRegistry(List.of(MohsRunner.io("io").build())), wakes::incrementAndGet);
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));

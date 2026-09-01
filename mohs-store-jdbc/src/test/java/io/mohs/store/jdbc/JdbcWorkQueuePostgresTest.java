@@ -31,7 +31,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.Shards;
 import io.mohs.engine.WorkQueue;
-import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
+import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -54,7 +54,7 @@ class JdbcWorkQueuePostgresTest {
     void setUp() {
         dataSource = PostgresTestSupport.freshSchema();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC)));
+        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDelegate(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC), new PostgresJdbcDelegate()));
     }
 
     private WorkQueue.ReadyEntry entry(String id, String jobKey, int priority, int attempt, Instant visibleAt) {
@@ -63,7 +63,7 @@ class JdbcWorkQueuePostgresTest {
 
     /**
      * The idle gate's probe ({@code hasVisibleWork}) crosses the driver with the node's LIST of shards —
-     * 64 parameters on a single node. Collection binding belongs to the driver, not the dialect, so each
+     * 64 parameters on a single node. Collection binding belongs to the driver, not the delegate, so each
      * one pays for its own test; the rest of the scenario proves the predicate: another node's shard does
      * not count, and an entry that is still invisible does not count.
      */
@@ -97,7 +97,7 @@ class JdbcWorkQueuePostgresTest {
 
         // The ORDER is pinned on purpose: an INSERT's RETURNING guarantees no order, so the statement
         // returns from the ordered SELECT over picked — the port's contract is the same in all four
-        // dialects
+        // delegates
         assertThat(claimed).extracting(w -> w.executionId().value())
                 .containsExactly("exec-high", "exec-normal");
         assertThat(claimed).filteredOn(w -> w.executionId().value().equals("exec-normal"))

@@ -57,6 +57,7 @@ import io.mohs.core.schedule.Misfire;
 import io.mohs.core.schedule.OnDemandSpec;
 import io.mohs.core.schedule.Schedule;
 import io.mohs.engine.StoredJob;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,7 +76,7 @@ class JdbcJobStoreTest {
     void setUp() {
         dataSource = freshH2DataSource();
         clock = new MutableClock(Instant.parse("2026-08-13T00:00:00Z"), ZoneId.of("UTC"));
-        store = new JdbcJobStore(dataSource, clock);
+        store = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
     }
 
     private static DataSource freshH2DataSource() {
@@ -107,7 +108,7 @@ class JdbcJobStoreTest {
     /** The public builder always stamps PROGRAMMATIC; only the canonical constructor yields ANNOTATION. */
     private static JobDefinition annotationSourcedDefinition(String id) {
         return new JobDefinition(JobKey.of(id), null, Handler.class, new OnDemandSpec(),
-                null, null, Misfire.IGNORE, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
+                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
     }
 
     @Test
@@ -606,7 +607,7 @@ class JdbcJobStoreTest {
             JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), false));
             store.upsert(definition);
             List<String> statements = new ArrayList<>();
-            JdbcJobStore spying = new JdbcJobStore(sqlRecordingDataSource(statements), clock);
+            JdbcJobStore spying = new JdbcJobStore(sqlRecordingDataSource(statements), clock, new H2JdbcDelegate());
 
             spying.upsert(definition); // agenda inalterada — preserva
 
@@ -621,7 +622,7 @@ class JdbcJobStoreTest {
         void upsertWritesTheTriggerColumnWhenTheScheduleChanges() {
             store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), false)));
             List<String> statements = new ArrayList<>();
-            JdbcJobStore spying = new JdbcJobStore(sqlRecordingDataSource(statements), clock);
+            JdbcJobStore spying = new JdbcJobStore(sqlRecordingDataSource(statements), clock, new H2JdbcDelegate());
 
             spying.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(1), false)));
 
@@ -741,7 +742,7 @@ class JdbcJobStoreTest {
     void removeCountsCancelledBatchMembersIntoTheirBatch() {
         JdbcTemplate raw = new JdbcTemplate(dataSource);
         store.upsert(definition("welcome-email", new OnDemandSpec()));
-        new JdbcBatchStore(dataSource, clock).insert("b6", "nightly", 3);
+        new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate()).insert("b6", "nightly", 3);
         seedExecution("m1", "welcome-email", "PENDING", true);
         seedExecution("m2", "welcome-email", "PENDING", true);
         seedExecution("m3", "welcome-email", "SUCCEEDED", false);

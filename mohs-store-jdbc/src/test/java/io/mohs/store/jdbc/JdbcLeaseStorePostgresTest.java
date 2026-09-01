@@ -33,7 +33,7 @@ import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.LeaseStore;
 import io.mohs.engine.WorkQueue;
-import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
+import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -60,10 +60,10 @@ class JdbcLeaseStorePostgresTest {
         DataSource dataSource = PostgresTestSupport.freshSchema();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
-        store = new JdbcLeaseStore(dataSource, new PostgresJdbcDialect(), batchStore);
-        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect(), batchStore);
-        jobStore = new JdbcJobStore(dataSource, clock);
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new PostgresJdbcDelegate());
+        store = new JdbcLeaseStore(dataSource, new PostgresJdbcDelegate(), batchStore);
+        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDelegate(), batchStore);
+        jobStore = new JdbcJobStore(dataSource, clock, new PostgresJdbcDelegate());
     }
 
     @Test

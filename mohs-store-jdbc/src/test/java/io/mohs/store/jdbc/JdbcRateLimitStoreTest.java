@@ -41,7 +41,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.core.RateLimitSnapshot;
 import io.mohs.core.resource.RateLimit;
-import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -58,7 +58,7 @@ class JdbcRateLimitStoreTest {
     void setUp() {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         dataSource = freshH2DataSource();
-        store = new JdbcRateLimitStore(dataSource, clock);
+        store = new JdbcRateLimitStore(dataSource, clock, new H2JdbcDelegate());
     }
 
     private static DataSource freshH2DataSource() {

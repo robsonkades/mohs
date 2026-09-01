@@ -32,7 +32,7 @@ import io.mohs.core.job.JobKey;
 /**
  * HISTORY ({@code mohs_execution}/{@code mohs_attempt}/{@code mohs_idempotency}).
  *
- * <p>Append plus ONE terminal update per execution; the tables are flat in every dialect, and future
+ * <p>Append plus ONE terminal update per execution; the tables are flat in every database, and future
  * retention is a batched DELETE. The {@code state} here is an ADVISORY read model: while work is in
  * flight, the truth is the lease — reads that need truth join {@link LeaseStore}, reads that need
  * speed (the dashboard) use the column and accept the bounded staleness of one flush.
@@ -48,7 +48,7 @@ public interface HistoryStore {
      * An accepted execution, ready for its birth record.
      *
      * <p>{@code createdAt} is the enqueue instant — a column of the row, no longer part of its
-     * identity: the primary key is {@code execution_id} on every dialect, so nothing about it needs
+     * identity: the primary key is {@code execution_id} on every database, so nothing about it needs
      * to travel to the completion. {@code correlationId} carries the batch until it is generalised.
      */
     record NewExecution(ExecutionId executionId, JobKey jobKey, int shard, int priority, Instant scheduledAt,
@@ -123,7 +123,7 @@ public interface HistoryStore {
     /** Headers only — the reaper's cold path (rearming, batching and pruning terminal candidates) without paying for payload deserialisation. */
     List<ExecutionHead> findHeads(List<ExecutionId> ids);
 
-    /** One execution's attempts, in number order — the detail view. The primary key {@code (execution_id, number)} serves both the predicate and the ordering, on every dialect. */
+    /** One execution's attempts, in number order — the detail view. The primary key {@code (execution_id, number)} serves both the predicate and the ordering, on every database. */
     List<Attempt> findAttempts(ExecutionId executionId);
 
     /**

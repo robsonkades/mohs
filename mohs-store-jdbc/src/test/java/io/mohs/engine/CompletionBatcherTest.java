@@ -45,7 +45,7 @@ import io.mohs.store.jdbc.JdbcJobStore;
 import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcTimestamps;
 import io.mohs.store.jdbc.JdbcWorkQueue;
-import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -87,10 +87,10 @@ class CompletionBatcherTest {
         new ResourceDatabasePopulator(new ClassPathResource("schema-h2.sql")).execute(h2);
         dataSource = h2;
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
-        jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
-        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDialect(), batchStore);
-        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDialect(), batchStore);
+        jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
+        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate(), batchStore);
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), batchStore);
         jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
     }
 

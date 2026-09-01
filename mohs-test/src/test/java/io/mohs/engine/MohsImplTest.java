@@ -395,7 +395,7 @@ class MohsImplTest {
     void removeRejectsAnAnnotationSourcedDefinitionWithAnErrorThatTeaches() {
         // The public builder always stamps PROGRAMMATIC; only the canonical constructor yields ANNOTATION
         jobStore.upsert(new JobDefinition(JobKey.of("annotated"), null, Handler.class, new OnDemandSpec(),
-                null, null, Misfire.IGNORE, true, 0, 0, null, null, DefinitionSource.ANNOTATION));
+                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION));
 
         assertThatThrownBy(() -> mohs.remove(JobKey.of("annotated")))
                 .isInstanceOf(IllegalArgumentException.class)

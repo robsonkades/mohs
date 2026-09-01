@@ -32,6 +32,7 @@ import org.testcontainers.mssqlserver.MSSQLServerContainer;
  */
 final class SqlServerTestSupport {
 
+    // The tag is duplicated in .github/workflows/maven.yml, which pre-pulls it while Maven compiles.
     private static final MSSQLServerContainer CONTAINER = new MSSQLServerContainer("mcr.microsoft.com/mssql/server:2025-latest")
             .acceptLicense();
 

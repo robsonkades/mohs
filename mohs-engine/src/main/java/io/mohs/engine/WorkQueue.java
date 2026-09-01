@@ -85,7 +85,7 @@ public interface WorkQueue {
      * memory BEFORE the round, per job rather than per candidate. A deliberate snapshot: a guard that
      * flips mid-round is resolved at dispatch (admission lost, so a requeue), not here.
      *
-     * <p>The returned list comes IN {@code (priority, visible_at)} ORDER in all four dialects
+     * <p>The returned list comes IN {@code (priority, visible_at)} ORDER in all four delegates
      * (contract, not accident). A sizing invariant: {@code limit} is at most the dispatch headroom
      * (~1k), which is below 2000 — SQL Server's parameter ceiling; the portable form deliberately does
      * not chunk the DELETE's {@code IN}.

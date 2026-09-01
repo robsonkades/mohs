@@ -36,6 +36,7 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.engine.BatchCounters;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -50,7 +51,7 @@ class JdbcBatchStoreTest {
     void setUp() {
         dataSource = freshH2DataSource();
         MutableClock clock = new MutableClock(Instant.parse("2026-08-13T00:00:00Z"), ZoneId.of("UTC"));
-        store = new JdbcBatchStore(dataSource, clock);
+        store = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
     }
 
     private static DataSource freshH2DataSource() {

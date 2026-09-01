@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mohs</groupId>
+        <groupId>io.github.robsonkades</groupId>
         <artifactId>mohs-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
@@ -13,11 +13,11 @@
     <packaging>jar</packaging>
 
     <name>Mohs :: REST</name>
-    <description>API REST operacional (ADR-0010): um subpacote por controller, mais error/ com o handler RFC 7807.</description>
+    <description>Operational REST API: one subpackage per controller, plus error/ with the RFC 7807 handler.</description>
 
     <dependencies>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-api</artifactId>
         </dependency>
         <dependency>

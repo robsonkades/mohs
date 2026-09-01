@@ -18,7 +18,6 @@ package io.mohs.store.jdbc;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -45,7 +44,7 @@ import io.mohs.engine.BatchCounters;
 import io.mohs.engine.BatchStore;
 import io.mohs.engine.JobStore;
 import io.mohs.engine.LeaseStore;
-import io.mohs.store.jdbc.dialect.JdbcDialect;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
 /**
  * {@link LeaseStore} over {@code mohs_lease}.
@@ -60,10 +59,10 @@ public final class JdbcLeaseStore implements LeaseStore {
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
-    private final JdbcDialect dialect;
+    private final JdbcDelegate delegate;
     private final BatchStore batchStore;
 
-    public JdbcLeaseStore(DataSource dataSource, JdbcDialect dialect, BatchStore batchStore) {
+    public JdbcLeaseStore(DataSource dataSource, JdbcDelegate delegate, BatchStore batchStore) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -72,31 +71,9 @@ public final class JdbcLeaseStore implements LeaseStore {
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         // The fence assumes "last write wins" under an explicit READ COMMITTED
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
-        this.dialect = Objects.requireNonNull(dialect, "dialect");
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
     }
-
-    private static final String ATTEMPT_INSERT = """
-            INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome, error_type, error)
-            VALUES (:executionId, :number, :nodeId, :startedAt, :finishedAt, :outcome, :errorType, :error)
-            """;
-
-    /**
-     * One statement for both completion paths — the dispatcher's and the reaper's.
-     *
-     * <p>There used to be two, differing only in an extra {@code created_at = :createdAt}: on the
-     * partitioned schema the hot path carried the value so Postgres could prune partitions, and the
-     * reaper, which never loaded it, needed a version without. Neither the pruning nor the second
-     * statement outlived the partitioning — the plans measured identical (4 buffers, 0.047 ms, with
-     * {@code created_at} demoted to a {@code Filter} even when present). What kept them apart was a
-     * guarantee rather than a plan: {@code execution_id} alone was not unique by the schema. Now that
-     * it is the primary key, it is.
-     */
-    // batch-counted: countIntoBatch, in the same transaction as the complete
-    private static final String TERMINAL_UPDATE = """
-            UPDATE mohs_execution SET state = :state, finished_at = :finishedAt
-            WHERE execution_id = :executionId
-            """;
 
     @Override
     public Map<ExecutionId, Completion> complete(List<CompletionResult> results, JobStore jobStore) {
@@ -154,7 +131,7 @@ public final class JdbcLeaseStore implements LeaseStore {
     }
 
     private List<CompletionResult> deleteLeasesKeepingFenceWinners(List<CompletionResult> results) {
-        int[] deleted = jdbcTemplate.batchUpdate(JdbcSupport.FENCED_LEASE_DELETE, results.stream()
+        int[] deleted = jdbcTemplate.batchUpdate(delegate.fencedLeaseDelete(), results.stream()
                 .map(r -> JdbcSupport.fencedLeaseDeleteParams(r.executionId().value(), r.nodeId(), r.epoch()))
                 .toArray(MapSqlParameterSource[]::new));
         List<CompletionResult> winners = new ArrayList<>(results.size());
@@ -162,7 +139,7 @@ public final class JdbcLeaseStore implements LeaseStore {
             if (deleted[i] == Statement.SUCCESS_NO_INFO) {
                 // Without a count there is no way to know what the fence discarded — and a presence-based
                 // fallback is ambiguous (an absent row may be OUR win or somebody else's already completed
-                // re-claim). No driver of the four dialects does this for a DELETE; if one starts to, the
+                // re-claim). No driver of the four databases does this for a DELETE; if one starts to, the
                 // per-row path gets implemented deliberately, not improvised.
                 throw new IllegalStateException("driver returned SUCCESS_NO_INFO for the fenced lease delete batch — "
                         + "completion cannot tell fence winners apart; implement the per-row path for this driver");
@@ -175,7 +152,7 @@ public final class JdbcLeaseStore implements LeaseStore {
     }
 
     private void insertAttempts(List<CompletionResult> winners) {
-        jdbcTemplate.batchUpdate(ATTEMPT_INSERT, winners.stream()
+        jdbcTemplate.batchUpdate(delegate.insertAttempt(), winners.stream()
                 .map(this::attemptParams)
                 .toArray(MapSqlParameterSource[]::new));
     }
@@ -185,8 +162,8 @@ public final class JdbcLeaseStore implements LeaseStore {
                 .addValue("executionId", result.executionId().value())
                 .addValue("number", result.attemptNumber())
                 .addValue("nodeId", result.nodeId())
-                .addValue("startedAt", dialect.splitTimestamp(result.startedAt()))
-                .addValue("finishedAt", dialect.splitTimestamp(result.finishedAt()))
+                .addValue("startedAt", delegate.splitTimestamp(result.startedAt()))
+                .addValue("finishedAt", delegate.splitTimestamp(result.finishedAt()))
                 .addValue("outcome", result.outcome().name())
                 .addValue("errorType", result.errorType())
                 .addValue("error", result.error());
@@ -198,24 +175,24 @@ public final class JdbcLeaseStore implements LeaseStore {
                 .map(this::terminalUpdateParams)
                 .toArray(MapSqlParameterSource[]::new);
         if (updates.length > 0) {
-            jdbcTemplate.batchUpdate(TERMINAL_UPDATE, updates);
+            jdbcTemplate.batchUpdate(delegate.terminalStateUpdate(), updates);
         }
     }
 
     private MapSqlParameterSource terminalUpdateParams(CompletionResult result) {
         return new MapSqlParameterSource()
                 .addValue("state", Objects.requireNonNull(result.terminalState()).name())
-                .addValue("finishedAt", dialect.splitTimestamp(result.finishedAt()))
+                .addValue("finishedAt", delegate.splitTimestamp(result.finishedAt()))
                 .addValue("executionId", result.executionId().value());
     }
 
     private void offerRetries(List<CompletionResult> winners) {
         MapSqlParameterSource[] retries = winners.stream()
                 .filter(r -> r.retry() != null)
-                .map(r -> JdbcSupport.readyEntryParams(Objects.requireNonNull(r.retry()), dialect))
+                .map(r -> JdbcSupport.readyEntryParams(Objects.requireNonNull(r.retry()), delegate))
                 .toArray(MapSqlParameterSource[]::new);
         if (retries.length > 0) {
-            jdbcTemplate.batchUpdate(JdbcSupport.READY_INSERT, retries);
+            jdbcTemplate.batchUpdate(delegate.readyInsert(), retries);
         }
     }
 
@@ -226,33 +203,20 @@ public final class JdbcLeaseStore implements LeaseStore {
         }
         List<Lease> leases = new ArrayList<>();
         for (List<String> chunk : JdbcSupport.chunksOf(List.copyOf(nodeIds))) {
-            leases.addAll(jdbcTemplate.query("""
-                    SELECT execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested
-                    FROM mohs_lease WHERE node_id IN (:nodeIds)
-                    """, new MapSqlParameterSource("nodeIds", chunk), (rs, _) -> mapLease(rs)));
+            leases.addAll(jdbcTemplate.query(delegate.findLeasesByNodes(),
+                    new MapSqlParameterSource("nodeIds", chunk), (rs, _) -> mapLease(rs)));
         }
         return leases;
     }
 
     @Override
     public List<Lease> findOrphaned(Collection<String> aliveNodeIds, int limit) {
-        // claimed_at leading: a mass death drains oldest first; the dialect's TOP/LIMIT — the same pair of
-        // clauses as the earlier era's findPage
         MapSqlParameterSource params = new MapSqlParameterSource().addValue("limit", limit);
         String sql;
         if (aliveNodeIds.isEmpty()) {
-            sql = """
-                    SELECT %sexecution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested
-                    FROM mohs_lease
-                    ORDER BY claimed_at
-                    %s""".formatted(dialect.topClause(), dialect.limitClause());
+            sql = delegate.findOrphanedLeases();
         } else {
-            sql = """
-                    SELECT %sexecution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested
-                    FROM mohs_lease
-                    WHERE node_id NOT IN (:aliveNodeIds)
-                    ORDER BY claimed_at
-                    %s""".formatted(dialect.topClause(), dialect.limitClause());
+            sql = delegate.findOrphanedLeasesExceptAlive();
             params.addValue("aliveNodeIds", aliveNodeIds);
         }
         return jdbcTemplate.query(sql, params, (rs, _) -> mapLease(rs));
@@ -269,10 +233,7 @@ public final class JdbcLeaseStore implements LeaseStore {
         // same try, the node stayed alive, heartbeating and claiming nothing
         Map<JobKey, Integer> counts = LinkedHashMap.newLinkedHashMap(jobKeys.size());
         for (List<String> chunk : JdbcSupport.chunksOf(jobKeys.stream().map(JobKey::value).toList())) {
-            jdbcTemplate.query("""
-                    SELECT job_key, COUNT(*) AS leases FROM mohs_lease
-                    WHERE job_key IN (:jobKeys) GROUP BY job_key
-                    """, new MapSqlParameterSource("jobKeys", chunk),
+            jdbcTemplate.query(delegate.countLeasesByJob(), new MapSqlParameterSource("jobKeys", chunk),
                     rs -> {
                         counts.put(JobKey.of(rs.getString("job_key")), rs.getInt("leases"));
                     });
@@ -283,7 +244,7 @@ public final class JdbcLeaseStore implements LeaseStore {
     @Override
     public boolean requestCancellation(ExecutionId id) {
         Objects.requireNonNull(id, "id");
-        return jdbcTemplate.update("UPDATE mohs_lease SET cancel_requested = :flag WHERE execution_id = :executionId",
+        return jdbcTemplate.update(delegate.requestLeaseCancellation(),
                 new MapSqlParameterSource().addValue("flag", true).addValue("executionId", id.value())) == 1;
     }
 
@@ -294,10 +255,8 @@ public final class JdbcLeaseStore implements LeaseStore {
         }
         Set<ExecutionId> flagged = new LinkedHashSet<>();
         for (List<String> chunk : JdbcSupport.chunksOf(ids.stream().map(ExecutionId::value).toList())) {
-            flagged.addAll(jdbcTemplate.query("""
-                    SELECT execution_id FROM mohs_lease
-                    WHERE execution_id IN (:ids) AND cancel_requested = :flag
-                    """, new MapSqlParameterSource().addValue("ids", chunk).addValue("flag", true),
+            flagged.addAll(jdbcTemplate.query(delegate.findCancelRequestedLeases(),
+                    new MapSqlParameterSource().addValue("ids", chunk).addValue("flag", true),
                     (rs, _) -> ExecutionId.of(rs.getString("execution_id"))));
         }
         return flagged;
@@ -311,7 +270,7 @@ public final class JdbcLeaseStore implements LeaseStore {
                 rs.getLong("epoch"),
                 rs.getInt("attempt_number"),
                 rs.getInt("priority"),
-                Objects.requireNonNull(dialect.readSplitTimestamp(rs, "claimed_at"), "claimed_at"),
+                Objects.requireNonNull(delegate.readSplitTimestamp(rs, "claimed_at"), "claimed_at"),
                 rs.getBoolean("cancel_requested"));
     }
 }

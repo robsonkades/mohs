@@ -32,10 +32,7 @@ module io.mohs.engine {
     requires spring.context;
     requires spring.tx;
     requires spring.beans;
-    // automatic module: o jar do uuidv7 nao declara Automatic-Module-Name, entao o
-    // nome deriva do arquivo. Fragil por natureza — se o artefato passar a declarar
-    // o nome, esta linha muda junto
-    requires uuidv7;
+    requires io.github.robsonkades.uuidv7;
 
     exports io.mohs.engine to io.mohs.store.jdbc, io.mohs.autoconfigure, io.mohs.test;
 }

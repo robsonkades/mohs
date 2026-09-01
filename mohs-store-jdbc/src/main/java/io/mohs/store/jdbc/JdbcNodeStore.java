@@ -31,6 +31,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import io.mohs.core.EngineState;
 import io.mohs.engine.NodeStore;
 import io.mohs.engine.StoredNode;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
 /**
  * {@link NodeStore} over {@code mohs_nodes} (a Data Mapper, PoEAA). Without
@@ -40,16 +41,12 @@ import io.mohs.engine.StoredNode;
 public final class JdbcNodeStore implements NodeStore {
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final JdbcDelegate delegate;
 
-    public JdbcNodeStore(DataSource dataSource) {
+    public JdbcNodeStore(DataSource dataSource, JdbcDelegate delegate) {
         this.jdbcTemplate = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
-
-    private static final String HEARTBEAT_UPDATE = """
-            UPDATE mohs_nodes SET state = :state, last_heartbeat_at = :lastHeartbeatAt,
-                epoch = :epoch, expires_at = :expiresAt
-            WHERE node_id = :nodeId
-            """;
 
     @Override
     public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
@@ -65,26 +62,25 @@ public final class JdbcNodeStore implements NodeStore {
                 .addValue("expiresAt", JdbcTimestamps.toUtcLocalDateTime(expiresAt));
 
         // See the equivalent race in JdbcJobStore.upsert — same race, same fix.
-        int updated = jdbcTemplate.update(HEARTBEAT_UPDATE, params);
+        int updated = jdbcTemplate.update(delegate.heartbeatUpdate(), params);
         if (updated == 0) {
             try {
-                jdbcTemplate.update("INSERT INTO mohs_nodes (node_id, state, last_heartbeat_at, epoch, expires_at)"
-                        + " VALUES (:nodeId, :state, :lastHeartbeatAt, :epoch, :expiresAt)", params);
+                jdbcTemplate.update(delegate.insertNode(), params);
             } catch (DuplicateKeyException _) {
-                jdbcTemplate.update(HEARTBEAT_UPDATE, params);
+                jdbcTemplate.update(delegate.heartbeatUpdate(), params);
             }
         }
     }
 
     @Override
     public List<StoredNode> findAll() {
-        return jdbcTemplate.query("SELECT * FROM mohs_nodes", (rs, _) -> mapRow(rs));
+        return jdbcTemplate.query(delegate.findAllNodes(), (rs, _) -> mapRow(rs));
     }
 
     @Override
     public int deleteHeartbeatsBefore(Instant cutoff) {
         Objects.requireNonNull(cutoff, "cutoff");
-        return jdbcTemplate.update("DELETE FROM mohs_nodes WHERE last_heartbeat_at < :cutoff",
+        return jdbcTemplate.update(delegate.deleteHeartbeatsBefore(),
                 new MapSqlParameterSource().addValue("cutoff", JdbcTimestamps.toUtcLocalDateTime(cutoff)));
     }
 

@@ -95,7 +95,7 @@ class BurstAbsorptionScenario {
         Clock clock = Clock.systemUTC();
         AtomicInteger invocations = new AtomicInteger();
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.dialect())) {
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.delegate())) {
             // retries(0): a retry would re-enter the same queue and inflate the very backlog being
             // measured, turning a dispatch hiccup into an arrival rate the scenario never applied
             cluster.defineJob("burst", spec -> spec.retries(0));

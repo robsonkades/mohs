@@ -34,12 +34,12 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.BatchStore;
 import io.mohs.engine.WorkQueue;
-import io.mohs.store.jdbc.dialect.ClaimedReady;
-import io.mohs.store.jdbc.dialect.JdbcDialect;
+import io.mohs.store.jdbc.delegate.ClaimedReady;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
 /**
  * {@link WorkQueue} over {@code mohs_ready}/{@code mohs_lease}. The claim is the transaction in which
- * queue and ownership change together or not at all; the SQL's shape belongs to {@link JdbcDialect}
+ * queue and ownership change together or not at all; the SQL's shape belongs to {@link JdbcDelegate}
  * (a single statement on Postgres, three portable statements elsewhere).
  *
  * <p>{@link #offer} deliberately does NOT open a transaction: the enqueue takes part in the caller's —
@@ -49,57 +49,20 @@ import io.mohs.store.jdbc.dialect.JdbcDialect;
 public final class JdbcWorkQueue implements WorkQueue {
 
     /**
-     * {@code EXISTS} rather than {@code LIMIT 1}/{@code TOP 1}: it short-circuits the same way and is
-     * the same shape in all four dialects — not worth a {@link JdbcDialect} method for a yes-or-no
-     * question.
-     *
-     * <p>The {@code %s} is the lock-free read hint: empty under MVCC, {@code WITH (NOLOCK)} on SQL
-     * Server, where a plain {@code SELECT} would take shared locks on the system's hottest table — and
-     * what would block is the tick's thread, which carries the heartbeat. The hint's anomalies are
-     * exactly the error the probe's contract already declares acceptable (a missed row costs one poll; a
-     * dirty row costs one lap).
-     */
-    private static final String VISIBLE_WORK_EXISTS = """
-            SELECT CASE WHEN EXISTS (
-                SELECT 1 FROM mohs_ready %sWHERE shard IN (:shards) AND visible_at <= :now
-            ) THEN 1 ELSE 0 END
-            """;
-
-    /**
-     * No shard predicate: the backlog is the queue's, not this node's. The lock-free hint is here for
-     * the same reason it is on the probe above — a metric must never take a shared lock on the hot
-     * path it is measuring — with one difference worth naming: a probe tolerates the hint's anomalies
-     * because a wrong answer costs a lap, while a COUNT under them is simply approximate. That is what
-     * a gauge is.
-     *
-     * <p>No index leads with {@code visible_at}, and none is added: a second index on the system's
-     * hottest table, paid by every enqueue, claim and requeue, is a bad trade for a number sampled once
-     * every ten seconds. The count therefore SCANS, and what it scans is {@code mohs_ready} — the
-     * queue, never history — which also means its cost grows with the very backlog it is reporting.
-     *
-     */
-    private static final String VISIBLE_WORK_COUNT = """
-            SELECT COUNT(*) FROM mohs_ready %sWHERE visible_at <= :now
-            """;
-
-    /**
      * Shorter than the prune's, and for a stricter reason: the prune runs hourly and can afford to
      * wait for a peer's locks, while this runs every ten seconds and takes no locks at all — if it has
      * not answered in two seconds the queue is deep enough that the claim is the thing that matters.
      */
     private static final int COUNT_TIMEOUT_SECONDS = 2;
 
-    private final String visibleWorkExists;
-    private final String visibleWorkCount;
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final NamedParameterJdbcTemplate countTemplate;
     private final TransactionTemplate claimTransaction;
-    private final JdbcDialect dialect;
+    private final JdbcDelegate delegate;
     private final BatchStore batchStore;
 
-    public JdbcWorkQueue(DataSource dataSource, JdbcDialect dialect, BatchStore batchStore) {
+    public JdbcWorkQueue(DataSource dataSource, JdbcDelegate delegate, BatchStore batchStore) {
         Objects.requireNonNull(dataSource, "dataSource");
-        this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         this.claimTransaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         // A claim is ALWAYS its own transaction — REQUIRES_NEW makes that executable rather than merely
@@ -111,9 +74,8 @@ public final class JdbcWorkQueue implements WorkQueue {
         // The same reasoning: SKIP LOCKED plus the inserts assume an explicit READ COMMITTED, never the
         // database's default (MySQL defaults to REPEATABLE READ).
         this.claimTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
-        this.dialect = Objects.requireNonNull(dialect, "dialect");
-        this.visibleWorkExists = VISIBLE_WORK_EXISTS.formatted(dialect.lockFreeReadHint());
-        this.visibleWorkCount = VISIBLE_WORK_COUNT.formatted(dialect.lockFreeReadHint());
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
+        this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
         // A template of its own: the timeout must not reach the claim or the requeue, which are the
         // work rather than the measurement of it
         JdbcTemplate countOperations = new JdbcTemplate(dataSource);
@@ -132,7 +94,7 @@ public final class JdbcWorkQueue implements WorkQueue {
         List<String> inadmissibleKeys = inadmissible.stream().map(JobKey::value).toList();
         // requireNonNull documents the invariant for @NullMarked — the callback never returns null
         List<ClaimedReady> claimed = Objects.requireNonNull(claimTransaction.execute(
-                _ -> dialect.claimReady(jdbcTemplate, shard, nodeId, epoch, limit, inadmissibleKeys, now)));
+                _ -> delegate.claimReady(jdbcTemplate, shard, nodeId, epoch, limit, inadmissibleKeys, now)));
         return claimed.stream()
                 .map(row -> new ClaimedWork(ExecutionId.of(row.executionId()), JobKey.of(row.jobKey()), row.attempt(), row.priority()))
                 .toList();
@@ -144,9 +106,9 @@ public final class JdbcWorkQueue implements WorkQueue {
         if (shards.isEmpty()) {
             return false;
         }
-        Integer found = jdbcTemplate.queryForObject(visibleWorkExists, new MapSqlParameterSource()
+        Integer found = jdbcTemplate.queryForObject(delegate.visibleWorkExists(), new MapSqlParameterSource()
                 .addValue("shards", shards)
-                .addValue("now", dialect.splitTimestamp(now)), Integer.class);
+                .addValue("now", delegate.splitTimestamp(now)), Integer.class);
         return found != null && found == 1;
     }
 
@@ -166,8 +128,8 @@ public final class JdbcWorkQueue implements WorkQueue {
     @Override
     public long countVisible(Instant now) {
         Objects.requireNonNull(now, "now");
-        Long depth = countTemplate.queryForObject(visibleWorkCount,
-                new MapSqlParameterSource("now", dialect.splitTimestamp(now)), Long.class);
+        Long depth = countTemplate.queryForObject(delegate.visibleWorkCount(),
+                new MapSqlParameterSource("now", delegate.splitTimestamp(now)), Long.class);
         return depth == null ? 0L : depth;
     }
 
@@ -176,8 +138,8 @@ public final class JdbcWorkQueue implements WorkQueue {
         if (entries.isEmpty()) {
             return;
         }
-        jdbcTemplate.batchUpdate(JdbcSupport.READY_INSERT, entries.stream()
-                .map(entry -> JdbcSupport.readyEntryParams(entry, dialect))
+        jdbcTemplate.batchUpdate(delegate.readyInsert(), entries.stream()
+                .map(entry -> JdbcSupport.readyEntryParams(entry, delegate))
                 .toArray(MapSqlParameterSource[]::new));
     }
 
@@ -196,10 +158,10 @@ public final class JdbcWorkQueue implements WorkQueue {
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
             int requeued = 0;
             for (Requeue order : ordered) {
-                int fenceWon = jdbcTemplate.update(JdbcSupport.FENCED_LEASE_DELETE,
+                int fenceWon = jdbcTemplate.update(delegate.fencedLeaseDelete(),
                         JdbcSupport.fencedLeaseDeleteParams(order.executionId().value(), order.nodeId(), order.epoch()));
                 if (fenceWon == 1) {
-                    jdbcTemplate.update(JdbcSupport.READY_INSERT, JdbcSupport.readyEntryParams(order.entry(), dialect));
+                    jdbcTemplate.update(delegate.readyInsert(), JdbcSupport.readyEntryParams(order.entry(), delegate));
                     requeued++;
                 }
             }
@@ -214,21 +176,14 @@ public final class JdbcWorkQueue implements WorkQueue {
         // requireNonNull: the same invariant as claim()
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
             MapSqlParameterSource idParam = new MapSqlParameterSource("executionId", id.value());
-            if (jdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = :executionId", idParam) == 0) {
+            if (jdbcTemplate.update(delegate.deleteReadyById(), idParam) == 0) {
                 return false;
             }
-            // The advisory terminal, matched by id — the primary key, the same match
-            // LeaseStore's TERMINAL_UPDATE makes
-            // batch-counted: incrementFailed just below, in this transaction
-            jdbcTemplate.update("""
-                    UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :finishedAt
-                    WHERE execution_id = :executionId
-                    """, idParam.addValue("finishedAt", dialect.splitTimestamp(now)));
+            jdbcTemplate.update(delegate.cancelExecution(), idParam.addValue("finishedAt", delegate.splitTimestamp(now)));
             // Cancelling is terminal, and an end that does not count leaves the batch open forever — it
             // counts as a failure in the SAME transaction as the delete (without the delete having taken
             // the entry, this point is not reached, so it counts exactly once)
-            String batchId = jdbcTemplate.queryForObject(
-                    "SELECT correlation_id FROM mohs_execution WHERE execution_id = :executionId", idParam, String.class);
+            String batchId = jdbcTemplate.queryForObject(delegate.findBatchIdByExecution(), idParam, String.class);
             if (batchId != null) {
                 batchStore.incrementFailed(batchId);
             }
@@ -249,26 +204,12 @@ public final class JdbcWorkQueue implements WorkQueue {
         // requireNonNull: the same invariant as claim()
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
             MapSqlParameterSource params = new MapSqlParameterSource("executionId", id.value());
-            // correlation_id IS NULL: a batch member does not rearm — the batch already counted this
-            // failure; re-running would count the outcome TWICE in a batch that may already be closed (a
-            // negative pending, a second BatchCompleted).
-            int rearmed = jdbcTemplate.update("""
-                    UPDATE mohs_execution SET state = 'PENDING', finished_at = NULL
-                    WHERE execution_id = :executionId AND state = 'FAILED'
-                      AND correlation_id IS NULL
-                      AND EXISTS (SELECT 1 FROM mohs_job_definitions j
-                                  WHERE j.job_key = mohs_execution.job_key AND j.retired = :retired)
-                    """, params.addValue("retired", false));
+            int rearmed = jdbcTemplate.update(delegate.rearmExecutionByCas(), params.addValue("retired", false));
             if (rearmed == 0) {
                 return false;
             }
-            jdbcTemplate.update("""
-                    INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
-                    SELECT e.execution_id, e.job_key, e.shard, e.priority,
-                           (SELECT COUNT(*) + 1 FROM mohs_attempt a WHERE a.execution_id = e.execution_id),
-                           :visibleAt
-                    FROM mohs_execution e WHERE e.execution_id = :executionId
-                    """, params.addValue("visibleAt", dialect.splitTimestamp(now)));
+            jdbcTemplate.update(delegate.rearmReadyFromHistory(),
+                    params.addValue("visibleAt", delegate.splitTimestamp(now)));
             return true;
         }));
     }

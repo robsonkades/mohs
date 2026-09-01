@@ -50,7 +50,7 @@ class InMemoryJobStoreTest {
     /** The public builder always stamps PROGRAMMATIC; only the canonical constructor yields ANNOTATION. */
     private static JobDefinition annotationSourcedDefinition(String id) {
         return new JobDefinition(JobKey.of(id), null, Handler.class, new OnDemandSpec(),
-                null, null, Misfire.IGNORE, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
+                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
     }
 
     private final InMemoryJobStore store = new InMemoryJobStore();

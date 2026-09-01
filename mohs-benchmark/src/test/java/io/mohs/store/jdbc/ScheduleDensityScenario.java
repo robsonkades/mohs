@@ -93,7 +93,7 @@ class ScheduleDensityScenario {
         Clock clock = Clock.systemUTC();
         AtomicInteger invocations = new AtomicInteger();
 
-        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.dialect())) {
+        try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.delegate())) {
             Duration seeding = seedDenseSchedule(cluster, definitions - due);
 
             for (int i = 0; i < NODES; i++) {

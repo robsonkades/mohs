@@ -36,7 +36,7 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.HistoryStore;
-import io.mohs.store.jdbc.dialect.H2JdbcDialect;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -55,7 +55,7 @@ class JdbcHistoryStoreTest {
     void setUp() {
         DataSource dataSource = freshH2DataSource();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDialect());
+        store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDelegate());
     }
 
     private static DataSource freshH2DataSource() {

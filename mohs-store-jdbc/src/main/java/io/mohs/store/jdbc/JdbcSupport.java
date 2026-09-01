@@ -28,7 +28,7 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import io.mohs.engine.WorkQueue;
-import io.mohs.store.jdbc.dialect.JdbcDialect;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
 /**
  * JDBC conventions shared between the {@code io.mohs.store.jdbc} stores — the same idiom already used in
@@ -52,29 +52,6 @@ final class JdbcSupport {
     /** Well below SQL Server's 2100-parameter ceiling for {@code IN (:ids)} — one node's in-flight work easily exceeds 1k ids. */
     static final int MAX_IDS_PER_QUERY = 1000;
 
-    /**
-     * The {@code INSERT} into {@code mohs_ready} — enqueue, retry and requeue are the SAME operation with
-     * a different {@code visibleAt}: {@code JdbcWorkQueue#offer}/{@code #requeue} and the retry's rebirth
-     * inside {@code JdbcLeaseStore#complete}'s completion transaction share this statement and
-     * {@link #readyEntryParams}.
-     */
-    static final String READY_INSERT = """
-            INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
-            VALUES (:executionId, :jobKey, :shard, :priority, :attempt, :visibleAt)
-            """;
-
-    /**
-     * The {@code DELETE} from {@code mohs_lease} fenced by {@code (node_id, epoch)} — the fencing token:
-     * the lease only drops if it still belongs to the observed incarnation.
-     *
-     * <p>The SAME statement decides the fence in the requeue ({@code JdbcWorkQueue}) and in the
-     * completion ({@code JdbcLeaseStore}) — shared so the semantics can never diverge between the two.
-     */
-    static final String FENCED_LEASE_DELETE = """
-            DELETE FROM mohs_lease
-            WHERE execution_id = :executionId AND node_id = :nodeId AND epoch = :epoch
-            """;
-
     private JdbcSupport() {
     }
 
@@ -87,18 +64,18 @@ final class JdbcSupport {
         return chunks;
     }
 
-    /** {@link #READY_INSERT}'s parameters — {@code visibleAt}'s temporal crossing belongs to the dialect ({@code splitTimestamp}). */
-    static MapSqlParameterSource readyEntryParams(WorkQueue.ReadyEntry entry, JdbcDialect dialect) {
+    /** {@link JdbcDelegate#readyInsert()}'s parameters — {@code visibleAt}'s temporal crossing belongs to the delegate ({@code splitTimestamp}). */
+    static MapSqlParameterSource readyEntryParams(WorkQueue.ReadyEntry entry, JdbcDelegate delegate) {
         return new MapSqlParameterSource()
                 .addValue("executionId", entry.executionId().value())
                 .addValue("jobKey", entry.jobKey().value())
                 .addValue("shard", entry.shard())
                 .addValue("priority", entry.priority())
                 .addValue("attempt", entry.attempt())
-                .addValue("visibleAt", dialect.splitTimestamp(entry.visibleAt()));
+                .addValue("visibleAt", delegate.splitTimestamp(entry.visibleAt()));
     }
 
-    /** {@link #FENCED_LEASE_DELETE}'s parameters. */
+    /** {@link JdbcDelegate#fencedLeaseDelete()}'s parameters. */
     static MapSqlParameterSource fencedLeaseDeleteParams(String executionId, String nodeId, long epoch) {
         return new MapSqlParameterSource()
                 .addValue("executionId", executionId)

@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mohs</groupId>
+        <groupId>io.github.robsonkades</groupId>
         <artifactId>mohs-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
@@ -13,7 +13,7 @@
     <packaging>jar</packaging>
 
     <name>Mohs :: API</name>
-    <description>API pública: contratos de job, schedule, definition, execution, event e resource (ADR-0015).</description>
+    <description>Public API: the job, schedule, definition, execution, event and resource contracts.</description>
 
     <dependencies>
         <dependency>

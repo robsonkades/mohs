@@ -40,7 +40,7 @@ import io.mohs.engine.HandlerRegistry;
 import io.mohs.engine.MohsImpl;
 import io.mohs.engine.RateLimitStore;
 import io.mohs.engine.RunnerRegistry;
-import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
+import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -52,7 +52,7 @@ import static org.mockito.Mockito.mock;
  * the entire transaction ({@code 25P02 current transaction is aborted}) and the recovery path that reads
  * the winner runs on a dead connection.
  *
- * <p>H2 proves the cross-dialect half (rollback-only avoided); only real Postgres proves the connection
+ * <p>H2 proves the cross-delegate half (rollback-only avoided); only real Postgres proves the connection
  * stays healthy AFTER the conflict.
  */
 class ScheduleCommandPostgresTest {
@@ -69,19 +69,19 @@ class ScheduleCommandPostgresTest {
     void setUp() {
         dataSource = PostgresTestSupport.freshSchema();
         MutableClock clock = new MutableClock(NOW, ZoneId.of("UTC"));
-        JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock);
-        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new PostgresJdbcDialect());
-        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new PostgresJdbcDialect(), batchStore);
-        JdbcLeaseStore leaseStore = new JdbcLeaseStore(dataSource, new PostgresJdbcDialect(), batchStore);
+        JdbcJobStore jobStore = new JdbcJobStore(dataSource, clock, new PostgresJdbcDelegate());
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new PostgresJdbcDelegate());
+        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new PostgresJdbcDelegate());
+        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new PostgresJdbcDelegate(), batchStore);
+        JdbcLeaseStore leaseStore = new JdbcLeaseStore(dataSource, new PostgresJdbcDelegate(), batchStore);
         mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
-                new JdbcNodeStore(dataSource), mock(RateLimitStore.class), new HandlerRegistry(), clock,
+                new JdbcNodeStore(dataSource, new PostgresJdbcDelegate()), mock(RateLimitStore.class), new HandlerRegistry(), clock,
                 mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks(),
                 new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { });
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));
     }
 
-    /** The proof only the 25P02 dialect can give: a primary-key conflict, the savepoint undone, and the SAME connection reads the winner while the host commits. */
+    /** The proof only the 25P02 delegate can give: a primary-key conflict, the savepoint undone, and the SAME connection reads the winner while the host commits. */
     @Test
     void duplicateIdempotencyKeyInsideAHostTransactionLeavesTheConnectionUsable() {
         TransactionTemplate host = new TransactionTemplate(new DataSourceTransactionManager(dataSource));

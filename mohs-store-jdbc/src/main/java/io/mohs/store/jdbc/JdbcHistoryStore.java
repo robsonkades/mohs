@@ -42,7 +42,7 @@ import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.HistoryStore;
-import io.mohs.store.jdbc.dialect.JdbcDialect;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
 /**
  * {@link HistoryStore} over {@code mohs_execution}/{@code mohs_attempt}/{@code mohs_idempotency}.
@@ -58,7 +58,7 @@ public final class JdbcHistoryStore implements HistoryStore {
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final NamedParameterJdbcTemplate pruneTemplate;
     private final JsonMapper objectMapper;
-    private final JdbcDialect dialect;
+    private final JdbcDelegate delegate;
 
     /**
      * Shorter than any sensible {@code node-lease-ttl}, so a prune waiting on another node's locks
@@ -67,7 +67,7 @@ public final class JdbcHistoryStore implements HistoryStore {
      */
     private static final int PRUNE_TIMEOUT_SECONDS = 5;
 
-    public JdbcHistoryStore(DataSource dataSource, JsonMapper objectMapper, JdbcDialect dialect) {
+    public JdbcHistoryStore(DataSource dataSource, JsonMapper objectMapper, JdbcDelegate delegate) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         // A template of its own: the timeout must not reach the read model or the payload read, which
@@ -76,21 +76,8 @@ public final class JdbcHistoryStore implements HistoryStore {
         pruneOperations.setQueryTimeout(PRUNE_TIMEOUT_SECONDS);
         this.pruneTemplate = new NamedParameterJdbcTemplate(pruneOperations);
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
-        this.dialect = Objects.requireNonNull(dialect, "dialect");
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
-
-    private static final String RECORD = """
-            INSERT INTO mohs_execution (
-                execution_id, job_key, shard, priority, state, scheduled_at, created_at, actor,
-                correlation_id, idempotency_key, payload, payload_type)
-            VALUES (:executionId, :jobKey, :shard, :priority, 'PENDING', :scheduledAt, :createdAt, :actor,
-                :correlationId, :idempotencyKey, :payload, :payloadType)
-            """;
-
-    private static final String IDEMPOTENCY_INSERT = """
-            INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at)
-            VALUES (:jobKey, :idempotencyKey, :executionId, :createdAt)
-            """;
 
     @Override
     public void record(List<NewExecution> executions) {
@@ -104,9 +91,9 @@ public final class JdbcHistoryStore implements HistoryStore {
                 .map(this::idempotencyParams)
                 .toArray(MapSqlParameterSource[]::new);
         if (keys.length > 0) {
-            jdbcTemplate.batchUpdate(IDEMPOTENCY_INSERT, keys);
+            jdbcTemplate.batchUpdate(delegate.insertIdempotency(), keys);
         }
-        jdbcTemplate.batchUpdate(RECORD, executions.stream()
+        jdbcTemplate.batchUpdate(delegate.recordExecution(), executions.stream()
                 .map(this::recordParams)
                 .toArray(MapSqlParameterSource[]::new));
     }
@@ -116,7 +103,7 @@ public final class JdbcHistoryStore implements HistoryStore {
                 .addValue("jobKey", execution.jobKey().value())
                 .addValue("idempotencyKey", execution.idempotencyKey())
                 .addValue("executionId", execution.executionId().value())
-                .addValue("createdAt", dialect.splitTimestamp(execution.createdAt()));
+                .addValue("createdAt", delegate.splitTimestamp(execution.createdAt()));
     }
 
     private MapSqlParameterSource recordParams(NewExecution execution) {
@@ -125,33 +112,23 @@ public final class JdbcHistoryStore implements HistoryStore {
                 .addValue("jobKey", execution.jobKey().value())
                 .addValue("shard", execution.shard())
                 .addValue("priority", execution.priority())
-                .addValue("scheduledAt", dialect.splitTimestamp(execution.scheduledAt()))
-                .addValue("createdAt", dialect.splitTimestamp(execution.createdAt()))
+                .addValue("scheduledAt", delegate.splitTimestamp(execution.scheduledAt()))
+                .addValue("createdAt", delegate.splitTimestamp(execution.createdAt()))
                 .addValue("actor", execution.actor())
                 .addValue("correlationId", execution.correlationId())
                 .addValue("idempotencyKey", execution.idempotencyKey())
-                .addValue("payload", writePayload(execution.payload()))
+                .addValue("payload", objectMapper.writeValueAsString(execution.payload()))
                 .addValue("payloadType", execution.payload().getClass().getName());
-    }
-
-    private String writePayload(Object payload) {
-        return objectMapper.writeValueAsString(payload);
     }
 
     @Override
     public Optional<ExecutionId> findByIdempotencyKey(JobKey jobKey, String idempotencyKey) {
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(idempotencyKey, "idempotencyKey");
-        return JdbcSupport.findOne(jdbcTemplate, """
-                SELECT execution_id FROM mohs_idempotency
-                WHERE job_key = :jobKey AND idempotency_key = :idempotencyKey
-                """,
+        return JdbcSupport.findOne(jdbcTemplate, delegate.findExecutionIdByIdempotencyKey(),
                 new MapSqlParameterSource().addValue("jobKey", jobKey.value()).addValue("idempotencyKey", idempotencyKey),
                 rs -> ExecutionId.of(rs.getString("execution_id")));
     }
-
-    private static final String HEAD_COLUMNS =
-            "execution_id, job_key, scheduled_at, created_at, actor, priority, correlation_id";
 
     /** The same discipline as {@code findPayloads}: a PER-ROW verdict — an unreadable row does not contaminate its neighbours; only infrastructure propagates. */
     @Override
@@ -163,7 +140,7 @@ public final class JdbcHistoryStore implements HistoryStore {
         Map<ExecutionId, PayloadRow> rows = new LinkedHashMap<>();
         Map<ExecutionId, RuntimeException> unreadable = new LinkedHashMap<>();
         for (List<String> chunk : JdbcSupport.chunksOf(ids.stream().map(ExecutionId::value).toList())) {
-            jdbcTemplate.query("SELECT " + HEAD_COLUMNS + ", payload, payload_type FROM mohs_execution WHERE execution_id IN (:ids)",
+            jdbcTemplate.query(delegate.findPayloads(),
                     new MapSqlParameterSource("ids", chunk), rs -> {
                 ExecutionId id = ExecutionId.of(rs.getString("execution_id"));
                 try {
@@ -184,7 +161,7 @@ public final class JdbcHistoryStore implements HistoryStore {
         }
         List<ExecutionHead> heads = new ArrayList<>(ids.size());
         for (List<String> chunk : JdbcSupport.chunksOf(ids.stream().map(ExecutionId::value).toList())) {
-            heads.addAll(jdbcTemplate.query("SELECT " + HEAD_COLUMNS + " FROM mohs_execution WHERE execution_id IN (:ids)",
+            heads.addAll(jdbcTemplate.query(delegate.findHeads(),
                     new MapSqlParameterSource("ids", chunk), (rs, _) -> mapHead(rs)));
         }
         return heads;
@@ -194,8 +171,8 @@ public final class JdbcHistoryStore implements HistoryStore {
         return new ExecutionHead(
                 ExecutionId.of(rs.getString("execution_id")),
                 JobKey.of(rs.getString("job_key")),
-                Objects.requireNonNull(dialect.readSplitTimestamp(rs, "scheduled_at"), "scheduled_at"),
-                Objects.requireNonNull(dialect.readSplitTimestamp(rs, "created_at"), "created_at"),
+                Objects.requireNonNull(delegate.readSplitTimestamp(rs, "scheduled_at"), "scheduled_at"),
+                Objects.requireNonNull(delegate.readSplitTimestamp(rs, "created_at"), "created_at"),
                 rs.getString("actor"),
                 rs.getInt("priority"),
                 rs.getString("correlation_id"));
@@ -216,10 +193,8 @@ public final class JdbcHistoryStore implements HistoryStore {
     @Override
     public List<Attempt> findAttempts(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
-        return jdbcTemplate.query("""
-                SELECT number, started_at, finished_at, outcome, error FROM mohs_attempt
-                WHERE execution_id = :executionId ORDER BY number
-                """, new MapSqlParameterSource("executionId", executionId.value()), (rs, _) -> mapAttempt(rs));
+        return jdbcTemplate.query(delegate.findAttempts(),
+                new MapSqlParameterSource("executionId", executionId.value()), (rs, _) -> mapAttempt(rs));
     }
 
     /**
@@ -243,29 +218,15 @@ public final class JdbcHistoryStore implements HistoryStore {
     @Override
     public int pruneIdempotencyBefore(Instant cutoff) {
         Objects.requireNonNull(cutoff, "cutoff");
-        return pruneTemplate.update("DELETE FROM mohs_idempotency WHERE created_at < :cutoff",
-                new MapSqlParameterSource("cutoff", dialect.splitTimestamp(cutoff)));
+        return pruneTemplate.update(delegate.pruneIdempotencyBefore(),
+                new MapSqlParameterSource("cutoff", delegate.splitTimestamp(cutoff)));
     }
-
-    private static final String READ_MODEL_COLUMNS = """
-            e.execution_id, e.job_key, e.state, e.scheduled_at, e.created_at, e.actor, e.priority,
-            e.correlation_id, e.idempotency_key,
-            l.node_id AS lease_node, l.claimed_at AS lease_claimed_at,
-            r.execution_id AS ready_id, r.attempt AS ready_attempt, r.visible_at AS ready_visible_at
-            """;
-
-    private static final String READ_MODEL_FROM = """
-            FROM mohs_execution e
-            LEFT JOIN mohs_lease l ON l.execution_id = e.execution_id
-            LEFT JOIN mohs_ready r ON r.execution_id = e.execution_id
-            """;
 
     @Override
     public Optional<Execution> find(ExecutionId id, Instant now) {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(now, "now");
-        Optional<Execution> summary = JdbcSupport.findOne(jdbcTemplate,
-                "SELECT " + READ_MODEL_COLUMNS + READ_MODEL_FROM + "WHERE e.execution_id = :executionId",
+        Optional<Execution> summary = JdbcSupport.findOne(jdbcTemplate, delegate.findExecutionById(),
                 new MapSqlParameterSource("executionId", id.value()),
                 rs -> mapDerived(rs, now, List.of()));
         // The detail view carries attempts (the earlier era's contract preserved); two reads, not an NxM
@@ -285,7 +246,7 @@ public final class JdbcHistoryStore implements HistoryStore {
         Objects.requireNonNull(now, "now");
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("limit", limit)
-                .addValue("now", dialect.splitTimestamp(now));
+                .addValue("now", delegate.splitTimestamp(now));
         List<String> conditions = new ArrayList<>();
         if (jobKey != null) {
             conditions.add("e.job_key = :jobKey");
@@ -293,11 +254,11 @@ public final class JdbcHistoryStore implements HistoryStore {
         }
         if (from != null) {
             conditions.add("e.scheduled_at >= :from");
-            params.addValue("from", dialect.splitTimestamp(from));
+            params.addValue("from", delegate.splitTimestamp(from));
         }
         if (to != null) {
             conditions.add("e.scheduled_at <= :to");
-            params.addValue("to", dialect.splitTimestamp(to));
+            params.addValue("to", delegate.splitTimestamp(to));
         }
         if (cursor != null) {
             conditions.add("e.execution_id < :cursor");
@@ -317,10 +278,8 @@ public final class JdbcHistoryStore implements HistoryStore {
             }
         }
         String where = conditions.isEmpty() ? "" : "WHERE " + String.join(" AND ", conditions) + "\n";
-        String sql = "SELECT " + dialect.topClause() + READ_MODEL_COLUMNS + READ_MODEL_FROM + where
-                + "ORDER BY e.execution_id DESC " + dialect.limitClause();
         // A SUMMARY by contract (the earlier era preserved): empty attempts in the listing
-        return jdbcTemplate.query(sql, params, (rs, _) -> mapDerived(rs, now, List.of()));
+        return jdbcTemplate.query(delegate.findExecutionPage(where), params, (rs, _) -> mapDerived(rs, now, List.of()));
     }
 
     /** The derivation — see {@link HistoryStore#find}'s Javadoc. */
@@ -338,9 +297,9 @@ public final class JdbcHistoryStore implements HistoryStore {
         } else if (leaseNode != null) {
             state = ExecutionState.RUNNING;
             owner = leaseNode;
-            firedAt = dialect.readSplitTimestamp(rs, "lease_claimed_at");
+            firedAt = delegate.readSplitTimestamp(rs, "lease_claimed_at");
         } else if (queued && rs.getInt("ready_attempt") > 1
-                && Objects.requireNonNull(dialect.readSplitTimestamp(rs, "ready_visible_at"), "ready_visible_at").isAfter(now)) {
+                && Objects.requireNonNull(delegate.readSplitTimestamp(rs, "ready_visible_at"), "ready_visible_at").isAfter(now)) {
             state = ExecutionState.RETRY_WAITING;
         } else {
             // queued and visible — or inside the window of a completion flush in
@@ -348,7 +307,7 @@ public final class JdbcHistoryStore implements HistoryStore {
             state = ExecutionState.ENQUEUED;
         }
         return new Execution(id, JobKey.of(rs.getString("job_key")), state,
-                Objects.requireNonNull(dialect.readSplitTimestamp(rs, "scheduled_at"), "scheduled_at"),
+                Objects.requireNonNull(delegate.readSplitTimestamp(rs, "scheduled_at"), "scheduled_at"),
                 firedAt, attempts, rs.getString("actor"), Priority.fromValue(rs.getInt("priority")),
                 rs.getString("idempotency_key"), rs.getString("correlation_id"), owner);
     }
@@ -357,18 +316,13 @@ public final class JdbcHistoryStore implements HistoryStore {
     public Map<ExecutionState, Long> countActiveByState(Instant now) {
         Objects.requireNonNull(now, "now");
         Map<ExecutionState, Long> counts = new LinkedHashMap<>();
-        // Two small queries, with a cost equal to the live work by construction: the queue IS the backlog
-        // and the ownership IS what is executing — history does not enter
-        jdbcTemplate.query("""
-                SELECT COUNT(*) AS queued,
-                       SUM(CASE WHEN attempt > 1 AND visible_at > :now THEN 1 ELSE 0 END) AS waiting
-                FROM mohs_ready
-                """, new MapSqlParameterSource("now", dialect.splitTimestamp(now)), rs -> {
+        jdbcTemplate.query(delegate.countActiveInQueue(),
+                new MapSqlParameterSource("now", delegate.splitTimestamp(now)), rs -> {
             long waiting = rs.getLong("waiting");
             counts.put(ExecutionState.ENQUEUED, rs.getLong("queued") - waiting);
             counts.put(ExecutionState.RETRY_WAITING, waiting);
         });
-        Long running = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", new MapSqlParameterSource(), Long.class);
+        Long running = jdbcTemplate.queryForObject(delegate.countRunning(), new MapSqlParameterSource(), Long.class);
         counts.put(ExecutionState.RUNNING, running == null ? 0L : running);
         return counts;
     }
@@ -377,11 +331,8 @@ public final class JdbcHistoryStore implements HistoryStore {
     public Map<ExecutionState, Long> countTerminalOutcomesSince(Instant since) {
         Objects.requireNonNull(since, "since");
         Map<ExecutionState, Long> counts = new LinkedHashMap<>();
-        jdbcTemplate.query("""
-                SELECT outcome, COUNT(*) AS finished FROM mohs_attempt
-                WHERE finished_at >= :since AND outcome IN ('SUCCEEDED', 'FAILED')
-                GROUP BY outcome
-                """, new MapSqlParameterSource("since", dialect.splitTimestamp(since)), rs -> {
+        jdbcTemplate.query(delegate.countTerminalOutcomesSince(),
+                new MapSqlParameterSource("since", delegate.splitTimestamp(since)), rs -> {
             counts.put(ExecutionState.valueOf(rs.getString("outcome")), rs.getLong("finished"));
         });
         return counts;
@@ -390,8 +341,8 @@ public final class JdbcHistoryStore implements HistoryStore {
     private Attempt mapAttempt(ResultSet rs) throws SQLException {
         return new Attempt(
                 rs.getInt("number"),
-                Objects.requireNonNull(dialect.readSplitTimestamp(rs, "started_at"), "started_at"),
-                dialect.readSplitTimestamp(rs, "finished_at"),
+                Objects.requireNonNull(delegate.readSplitTimestamp(rs, "started_at"), "started_at"),
+                delegate.readSplitTimestamp(rs, "finished_at"),
                 ExecutionState.valueOf(rs.getString("outcome")),
                 rs.getString("error"));
     }

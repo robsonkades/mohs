@@ -32,7 +32,7 @@ import java.time.ZoneOffset;
  * written came out an hour wrong (reported 2026-08-19; in {@code refilled_at} that means an apparently
  * empty token bucket — a burst above the limit, the failure mode the rate limit exists to prevent).
  * {@link LocalDateTime} consults no zone at all: the UTC wall clock crosses verbatim in all four
- * dialects, and the two functions are inverses at EVERY instant, gap included.
+ * databases, and the two functions are inverses at EVERY instant, gap included.
  *
  * <p>The project's contract, unchanged: every temporal column stores the wall clock in UTC. Why not
  * {@code timestamptz}/{@code datetimeoffset} yet: MySQL makes uniformity impossible (its
@@ -45,7 +45,7 @@ public final class JdbcTimestamps {
     private JdbcTimestamps() {
     }
 
-    /** Public: also used by {@code io.mohs.store.jdbc.dialect} (the claim query's four {@code now} binds) — both are internal packages, so this never becomes the module's public API. */
+    /** Public: also used by {@code io.mohs.store.jdbc.delegate} (each delegate's {@code splitTimestamp}) — both are internal packages, so this never becomes the module's public API. */
     public static LocalDateTime toUtcLocalDateTime(Instant instant) {
         return LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
     }
@@ -60,9 +60,9 @@ public final class JdbcTimestamps {
      *
      * <p>A {@link LocalDateTime} would be interpreted in the SESSION's zone against a tz-aware column —
      * exactly the class of bug the zoneless crossing killed; an explicit offset crosses verbatim
-     * regardless of the session's {@code TimeZone}. The dialects with no tz-aware column (H2, MySQL, SQL
+     * regardless of the session's {@code TimeZone}. The databases with no tz-aware column (H2, MySQL, SQL
      * Server, the split's functional equivalents) stay on the LocalDateTime crossing — the choice belongs
-     * to {@code JdbcDialect}.
+     * to {@code JdbcDelegate}.
      */
     public static OffsetDateTime toUtcOffsetDateTime(Instant instant) {
         return instant.atOffset(ZoneOffset.UTC);

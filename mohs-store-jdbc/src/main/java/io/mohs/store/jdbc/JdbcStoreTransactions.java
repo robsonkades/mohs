@@ -48,7 +48,7 @@ public final class JdbcStoreTransactions implements StoreTransactions {
 
     public JdbcStoreTransactions(DataSource dataSource) {
         // DataSourceTransactionManager is created with nestedTransactionAllowed=true — NESTED here is a
-        // pure JDBC savepoint, supported by all four dialects
+        // pure JDBC savepoint, supported by all four databases
         this.transactionTemplate = new TransactionTemplate(
                 new DataSourceTransactionManager(Objects.requireNonNull(dataSource, "dataSource")));
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_NESTED);

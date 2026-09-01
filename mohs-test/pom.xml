@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mohs</groupId>
+        <groupId>io.github.robsonkades</groupId>
         <artifactId>mohs-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
@@ -13,11 +13,11 @@
     <packaging>jar</packaging>
 
     <name>Mohs :: Test Kit</name>
-    <description>Kit de teste: JobStore em memória e Clock mutável, para testar sem backend real.</description>
+    <description>Test kit: an in-memory JobStore and a mutable Clock, for testing a job without a real backend.</description>
 
     <dependencies>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-engine</artifactId>
         </dependency>
     </dependencies>

@@ -20,14 +20,14 @@ import java.util.function.Supplier;
 
 import javax.sql.DataSource;
 
-import io.mohs.store.jdbc.dialect.JdbcDialect;
-import io.mohs.store.jdbc.dialect.MySqlJdbcDialect;
-import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
-import io.mohs.store.jdbc.dialect.SqlServerJdbcDialect;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
+import io.mohs.store.jdbc.delegate.MySqlJdbcDelegate;
+import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
+import io.mohs.store.jdbc.delegate.SqlServerJdbcDelegate;
 
 /**
  * Which database a scenario runs against — the seam that was missing while the whole bench was
- * wired to {@code PostgresJdbcDialect} plus {@code PostgresTestSupport} by hand.
+ * wired to {@code PostgresJdbcDelegate} plus {@code PostgresTestSupport} by hand.
  *
  * <p>The gap it closes is specific: concurrent claim, ownership reclaim and batch closing under
  * contention were measured on the reference dialect ONLY, and those three are exactly where the
@@ -46,19 +46,19 @@ import io.mohs.store.jdbc.dialect.SqlServerJdbcDialect;
  */
 enum ScenarioBackend {
 
-    POSTGRES(PostgresTestSupport::freshSchema, PostgresJdbcDialect::new),
-    SQLSERVER(SqlServerTestSupport::freshSchema, SqlServerJdbcDialect::new),
-    MYSQL(MySqlTestSupport::freshSchema, MySqlJdbcDialect::new);
+    POSTGRES(PostgresTestSupport::freshSchema, PostgresJdbcDelegate::new),
+    SQLSERVER(SqlServerTestSupport::freshSchema, SqlServerJdbcDelegate::new),
+    MYSQL(MySqlTestSupport::freshSchema, MySqlJdbcDelegate::new);
 
     /** The property a run overrides; absent means the reference dialect, so an unqualified run keeps measuring what it always measured. */
     static final String PROPERTY = "mohs.scenario.backend";
 
     private final Supplier<DataSource> freshSchema;
-    private final Supplier<JdbcDialect> dialect;
+    private final Supplier<JdbcDelegate> delegate;
 
-    ScenarioBackend(Supplier<DataSource> freshSchema, Supplier<JdbcDialect> dialect) {
+    ScenarioBackend(Supplier<DataSource> freshSchema, Supplier<JdbcDelegate> delegate) {
         this.freshSchema = freshSchema;
-        this.dialect = dialect;
+        this.delegate = delegate;
     }
 
     static ScenarioBackend current() {
@@ -76,7 +76,7 @@ enum ScenarioBackend {
         return freshSchema.get();
     }
 
-    JdbcDialect dialect() {
-        return dialect.get();
+    JdbcDelegate delegate() {
+        return delegate.get();
     }
 }

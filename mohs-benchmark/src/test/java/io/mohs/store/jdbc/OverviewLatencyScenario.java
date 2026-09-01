@@ -32,7 +32,7 @@ import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.execution.ExecutionState;
-import io.mohs.store.jdbc.dialect.PostgresJdbcDialect;
+import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
 
 /**
  * The cost of {@code GET /overview} once the database is no longer small. The endpoint is the
@@ -88,7 +88,7 @@ class OverviewLatencyScenario {
         // production pays for the connection once per pool, not once per poll.
         DataSource measured = new SingleConnectionDataSource(dataSource.getConnection(), true);
         JdbcHistoryStore history =
-                new JdbcHistoryStore(measured, JsonMapper.builder().build(), new PostgresJdbcDialect());
+                new JdbcHistoryStore(measured, JsonMapper.builder().build(), new PostgresJdbcDelegate());
 
         seedHistory(jdbc);
         seedBacklog(jdbc);
