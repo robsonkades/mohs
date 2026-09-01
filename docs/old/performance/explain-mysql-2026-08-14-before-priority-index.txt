@@ -1,8 +1,0 @@
--> Limit: 20 row(s)  (cost=990 rows=20) (actual time=1.35..1.42 rows=20 loops=1)
-    -> Nested loop inner join  (cost=990 rows=1209) (actual time=1.35..1.42 rows=20 loops=1)
-        -> Sort: e.priority, e.scheduled_at  (cost=310 rows=3023) (actual time=1.33..1.33 rows=20 loops=1)
-            -> Filter: ((e.state = 'ENQUEUED') and (e.scheduled_at <= TIMESTAMP'2026-08-14 12:00:00'))  (cost=310 rows=3023) (actual time=0.0184..0.749 rows=3000 loops=1)
-                -> Table scan on e  (cost=310 rows=3023) (actual time=0.0148..0.483 rows=3000 loops=1)
-        -> Filter: ((j.allow_concurrent_executions = true) or (j.running_execution_count < j.max_concurrent_executions))  (cost=0.25 rows=0.4) (actual time=0.00418..0.00423 rows=1 loops=20)
-            -> Single-row index lookup on j using job_key (job_key=e.job_key)  (cost=0.25 rows=1) (actual time=0.00352..0.00353 rows=1 loops=20)
-

@@ -1,7 +1,0 @@
--> Nested loop inner join  (cost=11.8 rows=20) (actual time=0.0363..0.0706 rows=20 loops=1)
-    -> Table scan on lookup_ids  (cost=2.14..4.75 rows=20) (actual time=0.0146..0.0159 rows=20 loops=1)
-        -> Materialize  (cost=2..2 rows=20) (actual time=0.0134..0.0134 rows=20 loops=1)
-            -> Rows fetched before execution  (cost=0..0 rows=20) (actual time=262e-6..728e-6 rows=20 loops=1)
-    -> Filter: (e.id = lookup_ids.id)  (cost=0.255 rows=1) (actual time=0.00252..0.00257 rows=1 loops=20)
-        -> Single-row index lookup on e using PRIMARY (id=lookup_ids.id)  (cost=0.255 rows=1) (actual time=0.00228..0.0023 rows=1 loops=20)
-
