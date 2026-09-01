@@ -1,4 +1,4 @@
--- ADR-0058: o particionamento semanal do Postgres sai. Ele era a única
+-- O particionamento semanal do Postgres sai. Ele era a única
 -- divergência estrutural entre o Tier 1 e os Tier 2/3 (MySQL, SQL Server e
 -- H2 sempre foram tabelas planas), custava uma classe de produção com modo
 -- de falha próprio (create-ahead só no boot) e comprava um benefício que
@@ -8,10 +8,10 @@
 -- recriada e os dados COPIADOS, e é por isso que esta é a única migração do
 -- projeto que move linhas. A ordem importa — selar, criar a nova, copiar,
 -- dropar a antiga (o DROP leva as partições junto) e só então renomear,
--- para que uma falha no meio deixe a antiga intacta. O Flyway roda cada
--- migração em UMA transação e o Postgres tem DDL transacional: falha depois
--- do DROP faz ROLLBACK da conversão inteira (verificado) — não existe
--- schema meio-convertido.
+-- para que uma falha no meio deixe a antiga intacta. APLIQUE ESTA MIGRAÇÃO
+-- EM UMA ÚNICA TRANSAÇÃO: o Postgres tem DDL transacional, e só assim uma
+-- falha depois do DROP faz ROLLBACK da conversão inteira (verificado) e não
+-- deixa schema meio-convertido.
 --
 -- O LOCK vem ANTES da cópia, e é o que separa esta migração de uma perda
 -- silenciosa de dados: sem ele, um OUTRO nó ainda no ar consegue commitar
@@ -26,7 +26,7 @@
 --
 -- Guardada por "é particionada?" via to_regclass (resolve pelo search_path
 -- do DDL, ao contrário de relname, que confunde schemas homônimos): quem tem
--- o schema aplicado por fora (mohs.jdbc.migrate=false) já chega aqui com
+-- o schema instalado a partir de schema-postgresql.sql já chega aqui com
 -- tabelas normais, e nesse caso copiar milhões de linhas para chegar ao
 -- mesmo lugar seria caro e inútil.
 --
@@ -34,7 +34,7 @@
 -- dentro de uma transação. Pico de espaço = 2x a maior das duas tabelas
 -- (mais os índices), WAL proporcional, e a tabela fica SELADA (nem leitura)
 -- do LOCK até o COMMIT. Numa base grande isto é janela de manutenção, não
--- deploy de rotina — ver as consequências na ADR-0058.
+-- deploy de rotina.
 --
 -- As PKs são normalizadas AQUI, na mesma janela. A coluna de tempo à frente
 -- era exigência do particionamento, e sem ele a medição diz que a PK não
@@ -71,15 +71,15 @@ BEGIN
     -- sem as tabelas — sai ANTES de exigir isolamento e ANTES de selar. Sem
     -- linha para copiar não há perda a evitar, e um no-op não pode derrubar o
     -- boot: nem por lock_timeout, nem por nível de transação. É o que faz o
-    -- caminho recomendado da ADR-0058 (rodar à mão, boot passa por cima)
-    -- realmente passar por cima.
+    -- caminho recomendado (rodar à mão antes de subir a aplicação)
+    -- ser realmente um no-op aqui.
     IF NOT (execution_partitioned OR attempt_partitioned) THEN
         RETURN;
     END IF;
 
     -- O selo depende de snapshot POR STATEMENT: sob REPEATABLE READ ou
     -- SERIALIZABLE o INSERT … SELECT enxerga o snapshot ANTERIOR ao LOCK (o
-    -- Flyway já leu mohs_schema_history nesta transação) e o DROP leva junto
+    -- transação já leu qualquer coisa) e o DROP leva junto
     -- tudo que foi commitado no meio — a mesma perda silenciosa que o LOCK
     -- existe para fechar. Não dá para trocar o nível aqui (PL/pgSQL recusa
     -- SET TRANSACTION ISOLATION LEVEL), e o nível vem do DataSource do HOST
@@ -92,7 +92,7 @@ BEGIN
         RAISE EXCEPTION 'V5 exige transaction_isolation = read committed (atual: %). O DataSource do '
             'host está configurado com outro nível — sob ele esta migração PERDE, em silêncio, as '
             'linhas escritas por outros nós durante a cópia. Rode a V5 à mão numa sessão READ '
-            'COMMITTED, ou remova a configuração durante o upgrade (ADR-0058).',
+            'COMMITTED, ou remova a configuração durante o upgrade.',
             current_setting('transaction_isolation');
     END IF;
 

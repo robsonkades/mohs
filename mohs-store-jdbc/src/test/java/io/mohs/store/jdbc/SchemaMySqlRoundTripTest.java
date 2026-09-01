@@ -39,7 +39,7 @@ import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.BatchCounters;
 import io.mohs.engine.HistoryStore;
 import io.mohs.engine.StoredJob;
-import io.mohs.store.jdbc.dialect.MySqlJdbcDialect;
+import io.mohs.store.jdbc.delegate.MySqlJdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -70,7 +70,7 @@ class SchemaMySqlRoundTripTest {
 
     @Test
     void jobStoreRoundTripsAgainstMySql() {
-        JdbcJobStore store = new JdbcJobStore(dataSource, clock);
+        JdbcJobStore store = new JdbcJobStore(dataSource, clock, new MySqlJdbcDelegate());
         JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io"));
 
         store.upsert(definition);
@@ -82,9 +82,9 @@ class SchemaMySqlRoundTripTest {
 
     @Test
     void historyStoreRoundTripsThePayloadStoredAsText() {
-        new JdbcJobStore(dataSource, clock).upsert(
+        new JdbcJobStore(dataSource, clock, new MySqlJdbcDelegate()).upsert(
                 JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
-        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new MySqlJdbcDialect());
+        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new MySqlJdbcDelegate());
         Instant when = Instant.parse("2026-08-13T00:00:00Z");
 
         store.record(List.of(new HistoryStore.NewExecution(ExecutionId.of("019abc-1"), JobKey.of("welcome-email"),
@@ -96,15 +96,15 @@ class SchemaMySqlRoundTripTest {
     }
 
     /**
-     * The deduplication's semantics in the real dialect, not just the DDL: the Idempotent Receiver is
+     * The deduplication's semantics in the real delegate, not just the DDL: the Idempotent Receiver is
      * {@code mohs_idempotency}'s primary-key conflict — the same key collides, and an execution with no
      * key never contends for the table.
      */
     @Test
     void idempotencyPrimaryKeyRejectsDuplicatesAndAllowsNullKeys() {
-        new JdbcJobStore(dataSource, clock).upsert(
+        new JdbcJobStore(dataSource, clock, new MySqlJdbcDelegate()).upsert(
                 JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
-        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new MySqlJdbcDialect());
+        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new MySqlJdbcDelegate());
 
         store.record(List.of(newExecutionWithKey("idem-1", "req-1")));
         assertThatThrownBy(() -> store.record(List.of(newExecutionWithKey("idem-2", "req-1"))))
@@ -125,9 +125,9 @@ class SchemaMySqlRoundTripTest {
     /** A plain DATETIME (no fraction) would round this to the second — this proves DATETIME(6) preserves the microsecond. */
     @Test
     void historyStoreRoundTripsSubSecondPrecision() {
-        new JdbcJobStore(dataSource, clock).upsert(
+        new JdbcJobStore(dataSource, clock, new MySqlJdbcDelegate()).upsert(
                 JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
-        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new MySqlJdbcDialect());
+        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new MySqlJdbcDelegate());
         Instant scheduledAt = Instant.parse("2026-08-13T00:00:00.123456Z");
 
         store.record(List.of(new HistoryStore.NewExecution(ExecutionId.of("019abc-2"), JobKey.of("welcome-email"),
@@ -141,7 +141,7 @@ class SchemaMySqlRoundTripTest {
 
     @Test
     void batchStoreRoundTripsAgainstMySql() {
-        JdbcBatchStore store = new JdbcBatchStore(dataSource, clock);
+        JdbcBatchStore store = new JdbcBatchStore(dataSource, clock, new MySqlJdbcDelegate());
 
         store.insert("batch-1", "nightly", 10);
         BatchCounters counters = store.find("batch-1").orElseThrow();
@@ -151,7 +151,7 @@ class SchemaMySqlRoundTripTest {
 
     @Test
     void rateLimitStoreRoundTripsAgainstMySql() {
-        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, Clock.systemUTC());
+        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, Clock.systemUTC(), new MySqlJdbcDelegate());
         RateLimit rateLimit = new RateLimit("smtp", 100, Duration.ofMinutes(1));
 
         store.upsert(rateLimit);
@@ -164,7 +164,7 @@ class SchemaMySqlRoundTripTest {
      * refill counts tokens from the time elapsed since it and writes back the instant advanced by what it
      * converted — never "now".
      *
-     * <p>If the dialect swallows that instant's sub-second fraction, the bucket wakes with the wrong age:
+     * <p>If the delegate swallows that instant's sub-second fraction, the bucket wakes with the wrong age:
      * older releases an extra token and blows precisely the limit protecting the external resource;
      * younger holds a job back without a single error in the log. Until now the {@code charge} path only
      * ran on H2.
@@ -180,7 +180,7 @@ class SchemaMySqlRoundTripTest {
     @Test
     void chargingAcrossATokenBoundaryProvesRefilledAtKeepsItsFraction() {
         clock.advance(Duration.ofMillis(500));
-        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, clock);
+        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, clock, new MySqlJdbcDelegate());
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
 
         assertThat(store.charge("smtp", 50, clock.instant())).isTrue();

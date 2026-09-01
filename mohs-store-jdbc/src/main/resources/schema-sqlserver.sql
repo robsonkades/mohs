@@ -1,4 +1,4 @@
--- Schema JDBC do Mohs (io.mohs.store.jdbc) para SQL Server (ADR-0023).
+-- Schema JDBC do Mohs (io.mohs.store.jdbc) para SQL Server.
 -- Divergências reais do dialeto H2/Postgres: T-SQL não tem
 -- "CREATE TABLE/INDEX IF NOT EXISTS" — usa IF OBJECT_ID(...) IS NULL /
 -- IF NOT EXISTS (SELECT ... FROM sys.indexes) guardando a instrução,
@@ -25,21 +25,22 @@ CREATE TABLE mohs_job_definitions (
     interval_after_finish  BIT,
     runner          NVARCHAR(255),
     window_name     NVARCHAR(255),
-    rate_limit      NVARCHAR(255), -- nome do RateLimit cluster-wide (ADR-0042)
+    rate_limit      NVARCHAR(255), -- nome do RateLimit cluster-wide
     misfire         NVARCHAR(20)  NOT NULL,
-    start_paused    BIT           NOT NULL DEFAULT 0, -- definicional (ADR-0037) — ver schema-h2.sql
+    start_paused    BIT           NOT NULL DEFAULT 0, -- definicional — ver schema-h2.sql
     allow_concurrent_executions BIT NOT NULL DEFAULT 1,
-    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = 0 (ADR-0020); o cap deriva de mohs_lease (ADR-D)
+    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = 0; o cap deriva de mohs_lease
     retries         INT           NOT NULL DEFAULT 0,
     timeout         NVARCHAR(50),
     retry_policy    NVARCHAR(255),
     source          NVARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
-    orphaned        BIT           NOT NULL DEFAULT 0, -- operacional (ADR-0006)
-    paused          BIT           NOT NULL DEFAULT 0, -- operacional (ADR-0006)
+    orphaned        BIT           NOT NULL DEFAULT 0, -- operacional
+    paused          BIT           NOT NULL DEFAULT 0, -- operacional
     retired         BIT           NOT NULL DEFAULT 0, -- aposentadoria explícita (Mohs.remove) — ver schema-h2.sql
-    next_fire_at    DATETIME2,    -- estado do trigger (ADR-0035) — ver schema-h2.sql
+    next_fire_at    DATETIME2,    -- estado do trigger — ver schema-h2.sql
     created_at      DATETIME2     NOT NULL,
-    updated_at      DATETIME2     NOT NULL
+    updated_at      DATETIME2     NOT NULL,
+    INDEX idx_mohs_job_next_fire NONCLUSTERED (next_fire_at) -- the per-tick due-trigger sweep; see the V9 delta for the measurement
 );
 
 IF OBJECT_ID('mohs_batches', 'U') IS NULL
@@ -58,12 +59,12 @@ CREATE TABLE mohs_rate_limits (
     name            NVARCHAR(255) PRIMARY KEY,
     max_count       INT NOT NULL,
     window_duration NVARCHAR(50) NOT NULL,
-    -- balde de tokens (ADR-0042): capacidade = max_count, um token a cada window/max
+    -- balde de tokens: capacidade = max_count, um token a cada window/max
     tokens          INT NOT NULL,
     refilled_at     DATETIME2 NOT NULL
 );
 
--- Heartbeat de node (ADR-0012). Desde a ADR-0051 deixou de ser só
+-- Heartbeat de node. Desde a Phase 4 do redesign deixou de ser só
 -- informativa: o reaper consulta expires_at/last_heartbeat_at para decidir
 -- quem está morto (aliveNodeIds do Engine).
 IF OBJECT_ID('mohs_nodes', 'U') IS NULL
@@ -71,15 +72,15 @@ CREATE TABLE mohs_nodes (
     node_id           NVARCHAR(255) PRIMARY KEY,
     state             NVARCHAR(20) NOT NULL,
     last_heartbeat_at DATETIME2    NOT NULL,
-    epoch             BIGINT       NOT NULL DEFAULT 0, -- encarnação do nó (ADR-0051)
-    expires_at        DATETIME2                        -- lease do NÓ (ADR-0051)
+    epoch             BIGINT       NOT NULL DEFAULT 0, -- encarnação do nó
+    expires_at        DATETIME2                        -- lease do NÓ
 );
 IF COL_LENGTH('mohs_nodes', 'epoch') IS NULL
 ALTER TABLE mohs_nodes ADD epoch BIGINT NOT NULL DEFAULT 0;
 IF COL_LENGTH('mohs_nodes', 'expires_at') IS NULL
 ALTER TABLE mohs_nodes ADD expires_at DATETIME2;
 
--- --- Phase 5 (ADR-A): o hot path fora da história -----------------------------
+-- --- Phase 5: o hot path fora da história -----------------------------
 -- Quatro perfis de escrita, quatro tabelas (racional na migração
 -- V3__table_split.sql; SQL Server é o equivalente funcional Tier 2 — sem
 -- partições nesta fase).
@@ -148,7 +149,7 @@ CREATE TABLE mohs_idempotency (
     idempotency_key NVARCHAR(255) NOT NULL,
     execution_id    NVARCHAR(255) NOT NULL,
     created_at      DATETIME2    NOT NULL,
-    -- NONCLUSTERED de propósito (ADR-0062): com NVARCHAR a chave mede 1020 bytes,
+    -- NONCLUSTERED de propósito: com NVARCHAR a chave mede 1020 bytes,
     -- acima do teto de 900 do índice CLUSTERIZADO (o não-clusterizado é 1700). Sem
     -- isto, um Idempotency-Key longo falha no INSERT com Msg 1946.
     CONSTRAINT pk_mohs_idempotency PRIMARY KEY NONCLUSTERED (job_key, idempotency_key)

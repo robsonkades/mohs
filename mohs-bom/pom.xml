@@ -3,13 +3,13 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-bom</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>Mohs :: BOM</name>
-    <description>Bill of Materials dos módulos publicáveis do Mohs.</description>
+    <description>Bill of Materials for the published Mohs modules.</description>
     <url>https://mohs.io</url>
 
     <licenses>
@@ -49,42 +49,42 @@
     <dependencyManagement>
         <dependencies>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-cron</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-api</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-engine</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-store-jdbc</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-rest</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-ui</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-test</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-spring-boot-starter</artifactId>
                 <version>${project.version}</version>
             </dependency>

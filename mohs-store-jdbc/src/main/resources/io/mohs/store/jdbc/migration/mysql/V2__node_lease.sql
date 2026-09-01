@@ -1,4 +1,4 @@
--- Phase 4 do redesign (ADR-0051) — ver o V2 do Postgres para o porquê.
+-- Phase 4 do redesign — ver o V2 do Postgres para o porquê.
 -- MySQL: ADD COLUMN/CREATE INDEX sem IF NOT EXISTS — guardas por
 -- information_schema + SQL dinâmico, mesma forma (e mesmo motivo: adoção
 -- idempotente) das guardas de índice da V1.

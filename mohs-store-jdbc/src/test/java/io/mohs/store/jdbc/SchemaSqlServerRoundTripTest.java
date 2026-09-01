@@ -39,7 +39,7 @@ import io.mohs.core.resource.RateLimit;
 import io.mohs.engine.BatchCounters;
 import io.mohs.engine.HistoryStore;
 import io.mohs.engine.StoredJob;
-import io.mohs.store.jdbc.dialect.SqlServerJdbcDialect;
+import io.mohs.store.jdbc.delegate.SqlServerJdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,7 +71,7 @@ class SchemaSqlServerRoundTripTest {
 
     @Test
     void jobStoreRoundTripsAgainstSqlServer() {
-        JdbcJobStore store = new JdbcJobStore(dataSource, clock);
+        JdbcJobStore store = new JdbcJobStore(dataSource, clock, new SqlServerJdbcDelegate());
         JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io"));
 
         store.upsert(definition);
@@ -83,9 +83,9 @@ class SchemaSqlServerRoundTripTest {
 
     @Test
     void historyStoreRoundTripsThePayloadStoredAsNvarcharMax() {
-        new JdbcJobStore(dataSource, clock).upsert(
+        new JdbcJobStore(dataSource, clock, new SqlServerJdbcDelegate()).upsert(
                 JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
-        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new SqlServerJdbcDialect());
+        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new SqlServerJdbcDelegate());
         Instant when = Instant.parse("2026-08-13T00:00:00Z");
 
         store.record(List.of(new HistoryStore.NewExecution(ExecutionId.of("019abc-1"), JobKey.of("welcome-email"),
@@ -97,15 +97,15 @@ class SchemaSqlServerRoundTripTest {
     }
 
     /**
-     * The deduplication's semantics in the real dialect, not just the DDL: the Idempotent Receiver is
+     * The deduplication's semantics in the real delegate, not just the DDL: the Idempotent Receiver is
      * {@code mohs_idempotency}'s primary-key conflict — the same key collides, and an execution with no
      * key never contends for the table.
      */
     @Test
     void idempotencyPrimaryKeyRejectsDuplicatesAndAllowsNullKeys() {
-        new JdbcJobStore(dataSource, clock).upsert(
+        new JdbcJobStore(dataSource, clock, new SqlServerJdbcDelegate()).upsert(
                 JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
-        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new SqlServerJdbcDialect());
+        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new SqlServerJdbcDelegate());
 
         store.record(List.of(newExecutionWithKey("idem-1", "req-1")));
         assertThatThrownBy(() -> store.record(List.of(newExecutionWithKey("idem-2", "req-1"))))
@@ -125,7 +125,7 @@ class SchemaSqlServerRoundTripTest {
 
     @Test
     void batchStoreRoundTripsAgainstSqlServer() {
-        JdbcBatchStore store = new JdbcBatchStore(dataSource, clock);
+        JdbcBatchStore store = new JdbcBatchStore(dataSource, clock, new SqlServerJdbcDelegate());
 
         store.insert("batch-1", "nightly", 10);
         BatchCounters counters = store.find("batch-1").orElseThrow();
@@ -135,7 +135,7 @@ class SchemaSqlServerRoundTripTest {
 
     @Test
     void rateLimitStoreRoundTripsAgainstSqlServer() {
-        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, Clock.systemUTC());
+        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, Clock.systemUTC(), new SqlServerJdbcDelegate());
         RateLimit rateLimit = new RateLimit("smtp", 100, Duration.ofMinutes(1));
 
         store.upsert(rateLimit);
@@ -148,7 +148,7 @@ class SchemaSqlServerRoundTripTest {
      * refill counts tokens from the time elapsed since it and writes back the instant advanced by what it
      * converted — never "now".
      *
-     * <p>If the dialect swallows that instant's sub-second fraction, the bucket wakes with the wrong age:
+     * <p>If the delegate swallows that instant's sub-second fraction, the bucket wakes with the wrong age:
      * older releases an extra token and blows precisely the limit protecting the external resource;
      * younger holds a job back without a single error in the log. Until now the {@code charge} path only
      * ran on H2.
@@ -164,7 +164,7 @@ class SchemaSqlServerRoundTripTest {
     @Test
     void chargingAcrossATokenBoundaryProvesRefilledAtKeepsItsFraction() {
         clock.advance(Duration.ofMillis(500));
-        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, clock);
+        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, clock, new SqlServerJdbcDelegate());
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
 
         assertThat(store.charge("smtp", 50, clock.instant())).isTrue();

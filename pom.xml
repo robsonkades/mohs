@@ -3,14 +3,14 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-parent</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <name>Mohs</name>
     <description>Job scheduling for Java/Spring Boot</description>
-    <url>https://mohs.io</url>
+    <url>https://github.com/robsonkades/mohs</url>
 
     <licenses>
         <license>
@@ -67,7 +67,7 @@
         <spring-boot.version>4.1.1</spring-boot.version>
         <project.build.outputTimestamp>2026-08-29T00:00:00Z</project.build.outputTimestamp>
         <gpg.skip>true</gpg.skip>
-        <uuidv7.version>1.1.0</uuidv7.version>
+        <uuidv7.version>1.2.0</uuidv7.version>
         <archunit.version>1.4.1</archunit.version>
     </properties>
 
@@ -81,42 +81,42 @@
                 <scope>import</scope>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-cron</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-api</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-engine</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-store-jdbc</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-rest</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-ui</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-test</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.mohs</groupId>
+                <groupId>io.github.robsonkades</groupId>
                 <artifactId>mohs-spring-boot-starter</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -164,15 +164,6 @@
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
-                    <!--
-                        3.15.0, not 3.14.0: the older plugin's ASM cannot read a Java 25 class file
-                        (major version 69), and it has to — mohs-engine carries a module-info, so the
-                        plugin parses its dependencies' module descriptors. Under `test` that reads
-                        target/classes and happens to work; under `verify` it reads the packaged jars
-                        and fails with "Unsupported class file major version 69". `./mvnw clean
-                        verify` is the project's build command, so this was a build that could not
-                        complete.
-                    -->
                     <version>3.15.0</version>
                     <configuration>
                         <release>${maven.compiler.release}</release>
@@ -269,5 +260,4 @@
             </plugin>
         </plugins>
     </build>
-
 </project>

@@ -1,4 +1,4 @@
--- ADR-0062: consequência do NVARCHAR, decidida em vez de descoberta em produção.
+-- Consequência do NVARCHAR, decidida em vez de descoberta em produção.
 --
 -- Trocar VARCHAR por NVARCHAR (DB-5) dobra os bytes da chave, e mohs_idempotency
 -- é a única do schema que isso empurra para fora de um limite: a PK clusterizada
@@ -13,13 +13,13 @@
 -- (divergiria dos outros três dialetos) nem deixar a tabela heap (o DELETE de
 -- retenção num heap não desaloca páginas sem TABLOCK, e esta é justamente a
 -- tabela que mais poda). Clusterizar por created_at NÃO é neutro, e a conta tem os
--- dois lados (ADR-0062). A favor: o valor é monotônico (Clock injetado), então o
+-- dois lados. A favor: o valor é monotônico (Clock injetado), então o
 -- INSERT segue na cauda e a poda por retenção vira range delete na própria
 -- clusterizada — o que torna idx_mohs_idempotency_created da V7 redundante NESTE
 -- dialeto. Contra: o INSERT passa a manter DUAS estruturas, o SELECT de dedupe
 -- vira seek + Key Lookup, e a mesma monotonicidade concentra todos os nós na
 -- última página (PAGELATCH_EX). A troca é obrigatória de qualquer forma — 900
--- bytes é limite duro —, mas o SALDO ainda não foi medido: gatilho na ADR-0062.
+-- bytes é limite duro —, mas o SALDO ainda não foi medido.
 IF EXISTS (SELECT 1 FROM sys.indexes
            WHERE object_id = OBJECT_ID('mohs_idempotency', 'U') AND is_primary_key = 1 AND type_desc = 'CLUSTERED')
 BEGIN

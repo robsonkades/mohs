@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mohs</groupId>
+        <groupId>io.github.robsonkades</groupId>
         <artifactId>mohs-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
@@ -13,19 +13,19 @@
     <packaging>jar</packaging>
 
     <name>Mohs :: Spring Boot Starter</name>
-    <description>Auto-configuration, properties e validações de boot — o único artefato que o aplicativo declara.</description>
+    <description>Auto-configuration, properties and boot validations: the only artifact an application declares.</description>
 
     <dependencies>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-engine</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-store-jdbc</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-rest</artifactId>
         </dependency>
         <dependency>
@@ -55,7 +55,7 @@
             <optional>true</optional>
         </dependency>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-test</artifactId>
             <scope>test</scope>
         </dependency>

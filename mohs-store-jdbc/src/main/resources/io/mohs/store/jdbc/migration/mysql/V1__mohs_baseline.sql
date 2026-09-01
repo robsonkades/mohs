@@ -1,4 +1,4 @@
--- Schema JDBC do Mohs (io.mohs.store.jdbc) para MySQL (8.0+ — ADR-0023).
+-- Schema JDBC do Mohs (io.mohs.store.jdbc) para MySQL (8.0+).
 -- Divergências reais do dialeto H2/Postgres: TIMESTAMP no MySQL tem
 -- semântica própria de auto-init/auto-update e alcance limitado
 -- (1970-2038) — usa DATETIME(6) pra guardar só o valor, sem armadilha;
@@ -12,12 +12,11 @@
 -- do servidor (nem todo MySQL 8 vem configurado utf8mb4 por padrão).
 -- BOOLEAN/TRUE/FALSE funcionam igual (alias de TINYINT(1)/1/0); LIMIT e
 -- FOR UPDATE SKIP LOCKED são nativos desde o MySQL 8.0, sem divergência
--- de query (ver JdbcDialect, ADR-0023).
+-- de query (ver JdbcDelegate).
 -- MySQL não tem "CREATE INDEX IF NOT EXISTS" — cada índice é guardado por
--- information_schema + SQL dinâmico (ADR-0048): a V1 do Flyway precisa ser
--- idempotente pra ADOTAR instalação existente (DDL do MySQL comita
--- implicitamente — uma falha no meio deixaria migração success=false e o
--- boot em loop, o 🔴 da bancada da Phase 2).
+-- information_schema + SQL dinâmico: a V1 precisa ser idempotente pra
+-- ADOTAR instalação existente (DDL do MySQL comita implicitamente — uma
+-- falha no meio deixaria a migração pela metade, sem como repeti-la).
 -- DBTUNE-1: toda coluna DATETIME guarda wall-clock em UTC, gravado/lido
 -- só via io.mohs.store.jdbc.JdbcTimestamps — ver schema-h2.sql para o porquê.
 
@@ -33,20 +32,20 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     interval_after_finish  BOOLEAN,
     runner          VARCHAR(255),
     window_name     VARCHAR(255),
-    rate_limit      VARCHAR(255), -- nome do RateLimit cluster-wide (ADR-0042)
+    rate_limit      VARCHAR(255), -- nome do RateLimit cluster-wide
     misfire         VARCHAR(20)  NOT NULL,
-    start_paused    BOOLEAN      NOT NULL DEFAULT FALSE, -- definicional (ADR-0037) — ver schema-h2.sql
+    start_paused    BOOLEAN      NOT NULL DEFAULT FALSE, -- definicional — ver schema-h2.sql
     allow_concurrent_executions BOOLEAN NOT NULL DEFAULT TRUE,
-    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE (ADR-0020)
-    running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job (ADR-0018/0020)
+    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE
+    running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job
     retries         INT          NOT NULL DEFAULT 0,
     timeout         VARCHAR(50),
     retry_policy    VARCHAR(255),
     source          VARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
-    orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
-    paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
+    orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional
+    paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional
     retired         BOOLEAN      NOT NULL DEFAULT FALSE, -- aposentadoria explícita (Mohs.remove) — ver schema-h2.sql
-    next_fire_at    DATETIME(6), -- estado do trigger (ADR-0035) — ver schema-h2.sql
+    next_fire_at    DATETIME(6), -- estado do trigger — ver schema-h2.sql
     created_at      DATETIME(6)  NOT NULL,
     updated_at      DATETIME(6)  NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
@@ -70,16 +69,16 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     actor            VARCHAR(255) NOT NULL,
     idempotency_key  VARCHAR(255),
     priority         INT          NOT NULL DEFAULT 20, -- Priority.value(); 20 = NORMAL
-    node_id          VARCHAR(255),  -- claim, etapa 3 (ADR-0016)
-    lease_expires_at DATETIME(6),   -- claim, etapa 3 (ADR-0012/0016)
-    cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE, -- cancel cooperativo (ADR-0034) — ver schema-h2.sql
+    node_id          VARCHAR(255),  -- claim, etapa 3
+    lease_expires_at DATETIME(6),   -- claim, etapa 3
+    cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE, -- cancel cooperativo — ver schema-h2.sql
     batch_id         VARCHAR(255) REFERENCES mohs_batches(id),
     payload          TEXT         NOT NULL, -- não CLOB: MySQL não tem
     payload_type     VARCHAR(500) NOT NULL,
     created_at       DATETIME(6)  NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
 -- MySQL não tem índice parcial/filtrado — Postgres e SQL Server usam
--- WHERE state IN ('ENQUEUED', 'RETRY_WAITING') aqui (DBTUNE-5, ADR-0033); MySQL fica com a composta cheia.
+-- WHERE state IN ('ENQUEUED', 'RETRY_WAITING') aqui (DBTUNE-5); MySQL fica com a composta cheia.
 SET @mohs_sql = IF(EXISTS(SELECT 1 FROM information_schema.statistics
                           WHERE table_schema = DATABASE() AND table_name = 'mohs_executions'
                             AND index_name = 'idx_mohs_executions_claim'),
@@ -148,12 +147,12 @@ CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     name            VARCHAR(255) PRIMARY KEY,
     max_count       INT NOT NULL,
     window_duration VARCHAR(50) NOT NULL,
-    -- balde de tokens (ADR-0042): capacidade = max_count, um token a cada window/max
+    -- balde de tokens: capacidade = max_count, um token a cada window/max
     tokens          INT NOT NULL,
     refilled_at     DATETIME(6) NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
 
--- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma
+-- Heartbeat de node — só informativo, GET /nodes; nenhuma
 -- lógica de claim/reclaim consulta esta tabela.
 CREATE TABLE IF NOT EXISTS mohs_nodes (
     node_id           VARCHAR(255) PRIMARY KEY,

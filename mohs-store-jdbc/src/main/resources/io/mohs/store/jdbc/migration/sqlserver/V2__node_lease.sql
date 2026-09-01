@@ -1,4 +1,4 @@
--- Phase 4 do redesign (ADR-0051) — ver o V2 do Postgres para o porquê,
+-- Phase 4 do redesign — ver o V2 do Postgres para o porquê,
 -- inclusive o predicado do índice owner (DBTUNE-22: sem
 -- lease_expires_at no filtro, o CAS de conclusão cercado o implicaria e
 -- competiria com o seek pelo PK clustered; com ele, o PK vence por

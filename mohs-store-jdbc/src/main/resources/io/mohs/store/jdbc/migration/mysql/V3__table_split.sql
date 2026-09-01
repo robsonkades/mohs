@@ -1,6 +1,6 @@
--- Phase 5 do redesign (ADR-A) — ver o V3 do Postgres para o racional das
--- quatro tabelas. MySQL é Tier 2 (ADR-0050): equivalente funcional, sem
--- partições nesta fase (retenção continua no mecanismo ADR-0032; partição
+-- Phase 5 do redesign — ver o V3 do Postgres para o racional das
+-- quatro tabelas. MySQL é Tier 2: equivalente funcional, sem
+-- partições nesta fase (retenção continua no mecanismo de sempre; partição
 -- por RANGE chega com trigger medido). Tabelas NOVAS levam os índices
 -- INLINE no CREATE TABLE IF NOT EXISTS — dispensa as guardas
 -- information_schema/PREPARE da V1/V2, que só existem porque lá as

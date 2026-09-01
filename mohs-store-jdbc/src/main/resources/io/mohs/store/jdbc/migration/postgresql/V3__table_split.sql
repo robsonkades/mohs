@@ -1,10 +1,10 @@
--- Phase 5 do redesign (ADR-A, §7.2 do plano): o hot path sai da tabela de
+-- Phase 5 do redesign (§7.2 do plano): o hot path sai da tabela de
 -- história. Quatro perfis de escrita, quatro tabelas:
 --   mohs_ready   — A FILA. INSERT no enqueue/retry/requeue, DELETE no claim;
 --                  tamanho = backlog, nunca história (§5.3).
 --   mohs_lease   — A POSSE. INSERT no claim, DELETE na conclusão; fence
 --                  (node_id, epoch) — §6.2/6.3, o sucessor do fence
---                  (node_id, fired_at) da ADR-0051.
+--                  (node_id, fired_at) da Phase 4.
 --   mohs_execution / mohs_attempt — A HISTÓRIA. Append + UM update terminal,
 --                  particionadas por tempo: retenção vira DROP de partição.
 --   mohs_idempotency — a ÚNICA unicidade que atravessa partições (PG exige
@@ -12,16 +12,15 @@
 --                  particionada, o que destruiria a semântica da dedup);
 --                  o conflito de PK no insert É o check (Idempotent
 --                  Receiver, EIP).
--- Expand da fase (PLAN.md S5.1): as tabelas novas nascem AO LADO das
--- antigas; o flip do engine é o S5.3 e o contract (drop das antigas) o
--- S5.4. Timestamps aqui são TIMESTAMPTZ (o que a ADR-0049 adiou para
--- estas tabelas); ids continuam VARCHAR (PLAN.md, decisão 7).
--- Idempotente como toda migração daqui (ADR-0048).
+-- Expand da fase: as tabelas novas nascem AO LADO das antigas; o flip do
+-- engine e o contract (drop das antigas) vêm depois. Timestamps aqui são
+-- TIMESTAMPTZ (o que ficou adiado para estas tabelas); ids continuam VARCHAR.
+-- Idempotente como toda migração daqui.
 
 CREATE TABLE IF NOT EXISTS mohs_ready (
     execution_id VARCHAR(255) PRIMARY KEY,
     job_key      VARCHAR(255) NOT NULL,
-    shard        SMALLINT     NOT NULL DEFAULT 0, -- ownership chega na Phase 6 (ADR-F); 0 até lá
+    shard        SMALLINT     NOT NULL DEFAULT 0, -- ownership chega na Phase 6; 0 até lá
     priority     INT          NOT NULL DEFAULT 20,
     attempt      INT          NOT NULL,           -- o attempt que esta entrada VAI virar (§5.3)
     visible_at   TIMESTAMPTZ  NOT NULL
@@ -62,7 +61,7 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     created_at      TIMESTAMPTZ  NOT NULL,
     finished_at     TIMESTAMPTZ,
     actor           VARCHAR(255) NOT NULL,
-    correlation_id  VARCHAR(255),           -- batch (ADR-0043) até a Phase 8 generalizar
+    correlation_id  VARCHAR(255),           -- batch até a Phase 8 generalizar
     idempotency_key VARCHAR(255),
     payload         TEXT         NOT NULL,
     payload_type    VARCHAR(500) NOT NULL,
@@ -108,13 +107,13 @@ CREATE TABLE IF NOT EXISTS mohs_idempotency (
 
 -- HISTÓRICO: quando esta migração foi escrita, as partições SEMANAIS eram
 -- criadas adiante por um gestor no engine e a DEFAULT era o backstop de
--- operabilidade. A ADR-0058 removeu o particionamento inteiro — gestor,
+-- operabilidade. O particionamento inteiro foi removido — gestor,
 -- PARTITION BY e DEFAULT —, e a V5 converte estas duas tabelas em normais
 -- logo em seguida. O que sobra aqui é a forma histórica, preservada porque
 -- migração aplicada não se reescreve por estética.
--- Guardadas por "o pai é particionado?" desde a ADR-0058: quem já tinha o
--- schema aplicado por fora (mohs.jdbc.migrate=false) e liga o Flyway depois
--- chega aqui com as tabelas JÁ normais, e um CREATE ... PARTITION OF sobre
+-- Guardadas por "o pai é particionado?" desde essa remoção: quem já tinha o
+-- schema aplicado a partir de schema-postgresql.sql e só depois aplica as
+-- deltas chega aqui com as tabelas JÁ normais, e um CREATE ... PARTITION OF sobre
 -- pai não-particionado é erro duro, não no-op — o IF NOT EXISTS não cobre
 -- esse caso porque a queixa é sobre o pai. Em banco novo nada muda: o V3
 -- acabou de criá-las particionadas e o V5 as converte em seguida.

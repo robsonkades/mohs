@@ -4,8 +4,8 @@
 DROP TABLE IF EXISTS mohs_attempts;
 DROP TABLE IF EXISTS mohs_executions;
 
--- ADR-D: o cap de concorrência deriva de mohs_lease (posse viva É a vaga
--- ocupada) — o contador de mutex da era ADR-0018/0020 morre junto.
+-- O cap de concorrência deriva de mohs_lease (posse viva É a vaga
+-- ocupada) — o contador de mutex da era anterior morre junto.
 -- Guardado (mesma dança PREPARE do schema-mysql.sql): no caminho de
 -- ADOÇÃO, o schema.sql pós-S5.4 nunca criou a coluna — MySQL não tem
 -- DROP COLUMN IF EXISTS.

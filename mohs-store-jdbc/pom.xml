@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mohs</groupId>
+        <groupId>io.github.robsonkades</groupId>
         <artifactId>mohs-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
@@ -13,11 +13,11 @@
     <packaging>jar</packaging>
 
     <name>Mohs :: Store JDBC</name>
-    <description>Persistência JDBC de jobs e execuções, com dialeto por banco (ADR-0023) e os schemas DDL.</description>
+    <description>JDBC persistence for jobs and executions, with per-database SQL and the DDL schemas.</description>
 
     <dependencies>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-engine</artifactId>
         </dependency>
         <dependency>
@@ -33,27 +33,11 @@
             <artifactId>uuidv7</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-core</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-database-postgresql</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-mysql</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-sqlserver</artifactId>
-        </dependency>
-        <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.mohs</groupId>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-test</artifactId>
             <scope>test</scope>
         </dependency>

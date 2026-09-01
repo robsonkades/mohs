@@ -51,10 +51,13 @@ public record MohsProperties(
         @DefaultValue Map<String, RateLimitSpec> rateLimits) {
 
     /**
+     * Mohs does NOT create or migrate its schema: the operator applies {@code schema-<dialect>.sql}
+     * before the application starts, and the versioned {@code V*.sql} files in the jar are the deltas
+     * for an upgrade. There is no {@code migrate} switch because there is nothing to switch off.
+     *
      * @param dialect an explicit choice, never auto-detected from the {@code DataSource}. No default — mandatory.
-     * @param migrate Mohs runs its own Flyway migrations at boot ({@code mohs_schema_history}); {@code false} for anyone managing the schema externally (a DBA) — the migrations stay in the jar as the source
      */
-    public record Jdbc(@Nullable Dialect dialect, @DefaultValue("true") boolean migrate) {
+    public record Jdbc(@Nullable Dialect dialect) {
 
         public enum Dialect {
             H2, POSTGRESQL, MYSQL, SQLSERVER
@@ -67,7 +70,7 @@ public record MohsProperties(
      * @param batchSize the maximum number of executions claimed per claim
      * @param claimRounds how many claims one tick chains while the batch keeps coming back full and dispatch has headroom — it loosens the coupling between throughput and {@code poll-interval} under backlog; 1 (the default) is the classic one-claim-per-tick shape
      * @param leaseTtl feeds {@code lease_expires_at} at claim time; it is also the staleness cutoff for a legacy node row with no {@code expires_at}
-     * @param nodeLeaseTtl the NODE's lease — each tick's heartbeat promises "alive until now+TTL" in {@code mohs_nodes.expires_at}; the reaper only reclaims executions from a node whose promise has expired
+     * @param nodeLeaseTtl the NODE's lease — each tick's heartbeat promises "alive until now+TTL" in {@code mohs_nodes.expires_at}; the reaper only reclaims executions from a node whose promise has expired; a sanity floor of 12s is validated at boot — one tick sleeps up to a third of the TTL and then spends up to 7s on the idempotency prune and the queue-depth count, and 12s is the smallest promise that still outlasts that with a second of margin for clock skew
      * @param watchdogTimeout the Watchdog Bound: a runtime ceiling — on reaching it the node RELEASES ownership (a fenced failure, with normal retry); {@code null} (the default) means no ceiling; when present it must be greater than {@code node-lease-ttl} (validated while assembling the engine)
      * @param misfireThreshold separates a late firing from a lost one — an occurrence due within the threshold fires late under any policy; anything older answers to the job's {@code Misfire}
      * @param idempotencyRetention how long an {@code Idempotency-Key} keeps deduplicating — it IS the window, because the key deduplicates for exactly as long as its row lives in {@code mohs_idempotency}; the engine prunes older rows hourly, and {@code 0s} turns pruning off and keeps every key forever (an unbounded table)

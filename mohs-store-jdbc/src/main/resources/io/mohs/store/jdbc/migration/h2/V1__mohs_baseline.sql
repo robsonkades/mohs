@@ -5,7 +5,7 @@
 -- mais legível pra debug manual que millis, nenhuma delas precisa de
 -- range query. Sem execution_windows/runners: os dois são bean-resolved
 -- ("predicados só existem em código", §5.8 do documento mestre), não
--- dado persistido. ADR-0023: um arquivo por dialeto — H2/Postgres eram
+-- dado persistido. Um arquivo por dialeto — H2/Postgres eram
 -- idênticos até agora, mas MySQL/SQL Server divergem o bastante pra não
 -- fazer mais sentido um "schema.sql" genérico.
 -- DBTUNE-1: toda coluna temporal guarda wall-clock em UTC — nenhuma tem
@@ -28,20 +28,20 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     interval_after_finish  BOOLEAN,
     runner          VARCHAR(255),
     window_name     VARCHAR(255),
-    rate_limit      VARCHAR(255), -- nome do RateLimit cluster-wide (ADR-0042)
+    rate_limit      VARCHAR(255), -- nome do RateLimit cluster-wide
     misfire         VARCHAR(20)  NOT NULL,
-    start_paused    BOOLEAN      NOT NULL DEFAULT FALSE, -- definicional (ADR-0037): nasce pausado no 1º registro; 'paused' segue operacional
+    start_paused    BOOLEAN      NOT NULL DEFAULT FALSE, -- definicional: nasce pausado no 1º registro; 'paused' segue operacional
     allow_concurrent_executions BOOLEAN NOT NULL DEFAULT TRUE,
-    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE (ADR-0020)
-    running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job (ADR-0018/0020)
+    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE
+    running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job
     retries         INT          NOT NULL DEFAULT 0,
     timeout         VARCHAR(50),
     retry_policy    VARCHAR(255),
     source          VARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
-    orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
-    paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
+    orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional
+    paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional
     retired         BOOLEAN      NOT NULL DEFAULT FALSE, -- aposentadoria explícita (Mohs.remove): some das leituras/claim, linha fica pela FK de mohs_executions (histórico preservado)
-    next_fire_at    TIMESTAMP,   -- estado do trigger (ADR-0035): NULL = nada a disparar (on-demand; fixed-delay aguardando o fim da execução anterior)
+    next_fire_at    TIMESTAMP,   -- estado do trigger: NULL = nada a disparar (on-demand; fixed-delay aguardando o fim da execução anterior)
     created_at      TIMESTAMP    NOT NULL,
     updated_at      TIMESTAMP    NOT NULL
 );
@@ -65,16 +65,16 @@ CREATE TABLE IF NOT EXISTS mohs_executions (
     actor            VARCHAR(255) NOT NULL,
     idempotency_key  VARCHAR(255),
     priority         INT          NOT NULL DEFAULT 20, -- Priority.value(); 20 = NORMAL
-    node_id          VARCHAR(255),  -- claim, etapa 3 (ADR-0016)
-    lease_expires_at TIMESTAMP,     -- claim, etapa 3 (ADR-0012/0016)
-    cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE, -- cancel cooperativo (ADR-0034): setado em RUNNING, polled pelo node dono a cada tick; fica TRUE em SUCCEEDED que venceu a corrida (histórico); limpo APENAS pelo rearm de retry manual (ordem mais nova do operador)
+    node_id          VARCHAR(255),  -- claim, etapa 3
+    lease_expires_at TIMESTAMP,     -- claim, etapa 3
+    cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE, -- cancel cooperativo: setado em RUNNING, polled pelo node dono a cada tick; fica TRUE em SUCCEEDED que venceu a corrida (histórico); limpo APENAS pelo rearm de retry manual (ordem mais nova do operador)
     batch_id         VARCHAR(255) REFERENCES mohs_batches(id),
     payload          TEXT         NOT NULL, -- não CLOB: não existe em Postgres, TEXT funciona em H2 e Postgres (DB-3)
     payload_type     VARCHAR(500) NOT NULL,
     created_at       TIMESTAMP    NOT NULL
 );
 -- H2 não tem índice parcial/filtrado — Postgres e SQL Server usam
--- WHERE state IN ('ENQUEUED', 'RETRY_WAITING') aqui (DBTUNE-5, ADR-0033); H2 fica com a composta cheia.
+-- WHERE state IN ('ENQUEUED', 'RETRY_WAITING') aqui (DBTUNE-5); H2 fica com a composta cheia.
 CREATE INDEX IF NOT EXISTS idx_mohs_executions_claim ON mohs_executions (state, priority, scheduled_at);
 -- Sem índice parcial (ver comentário acima) — composta cheia pro reaper
 -- também (DBTUNE-10): state líder, igual à do claim.
@@ -103,12 +103,12 @@ CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     name            VARCHAR(255) PRIMARY KEY,
     max_count       INT NOT NULL,
     window_duration VARCHAR(50) NOT NULL,
-    -- balde de tokens (ADR-0042): capacidade = max_count, um token a cada window/max
+    -- balde de tokens: capacidade = max_count, um token a cada window/max
     tokens          INT NOT NULL,
     refilled_at     TIMESTAMP NOT NULL
 );
 
--- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma
+-- Heartbeat de node — só informativo, GET /nodes; nenhuma
 -- lógica de claim/reclaim consulta esta tabela.
 CREATE TABLE IF NOT EXISTS mohs_nodes (
     node_id           VARCHAR(255) PRIMARY KEY,

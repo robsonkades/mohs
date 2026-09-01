@@ -1,6 +1,6 @@
--- Phase 5 do redesign (ADR-A) — ver o V3 do Postgres para o racional das
--- quatro tabelas. SQL Server é Tier 2 (ADR-0050): equivalente funcional,
--- sem partições nesta fase (retenção continua no mecanismo ADR-0032;
+-- Phase 5 do redesign — ver o V3 do Postgres para o racional das
+-- quatro tabelas. SQL Server é Tier 2: equivalente funcional,
+-- sem partições nesta fase (retenção continua no mecanismo de sempre;
 -- particionamento nativo chega com trigger medido). Guardas T-SQL de
 -- statement único (mesma forma da V1/V2); índices INLINE no CREATE —
 -- tabela nova ou nada, sem estado intermediário a guardar.

@@ -1,4 +1,4 @@
--- Schema JDBC do Mohs (io.mohs.store.jdbc) para MySQL (8.0+ — ADR-0023).
+-- Schema JDBC do Mohs (io.mohs.store.jdbc) para MySQL (8.0+).
 -- Divergências reais do dialeto H2/Postgres: TIMESTAMP no MySQL tem
 -- semântica própria de auto-init/auto-update e alcance limitado
 -- (1970-2038) — usa DATETIME(6) pra guardar só o valor, sem armadilha;
@@ -12,12 +12,11 @@
 -- do servidor (nem todo MySQL 8 vem configurado utf8mb4 por padrão).
 -- BOOLEAN/TRUE/FALSE funcionam igual (alias de TINYINT(1)/1/0); LIMIT e
 -- FOR UPDATE SKIP LOCKED são nativos desde o MySQL 8.0, sem divergência
--- de query (ver JdbcDialect, ADR-0023).
+-- de query (ver JdbcDelegate).
 -- MySQL não tem "CREATE INDEX IF NOT EXISTS" — cada índice é guardado por
--- information_schema + SQL dinâmico (ADR-0048): a V1 do Flyway precisa ser
--- idempotente pra ADOTAR instalação existente (DDL do MySQL comita
--- implicitamente — uma falha no meio deixaria migração success=false e o
--- boot em loop, o 🔴 da bancada da Phase 2).
+-- information_schema + SQL dinâmico: a V1 precisa ser idempotente pra
+-- ADOTAR instalação existente (DDL do MySQL comita implicitamente — uma
+-- falha no meio deixaria a migração pela metade, sem como repeti-la).
 -- DBTUNE-1: toda coluna DATETIME guarda wall-clock em UTC, gravado/lido
 -- só via io.mohs.store.jdbc.JdbcTimestamps — ver schema-h2.sql para o porquê.
 
@@ -33,21 +32,22 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     interval_after_finish  BOOLEAN,
     runner          VARCHAR(255),
     window_name     VARCHAR(255),
-    rate_limit      VARCHAR(255), -- nome do RateLimit cluster-wide (ADR-0042)
+    rate_limit      VARCHAR(255), -- nome do RateLimit cluster-wide
     misfire         VARCHAR(20)  NOT NULL,
-    start_paused    BOOLEAN      NOT NULL DEFAULT FALSE, -- definicional (ADR-0037) — ver schema-h2.sql
+    start_paused    BOOLEAN      NOT NULL DEFAULT FALSE, -- definicional — ver schema-h2.sql
     allow_concurrent_executions BOOLEAN NOT NULL DEFAULT TRUE,
-    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE (ADR-0020); o cap deriva de mohs_lease (ADR-D)
+    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = FALSE; o cap deriva de mohs_lease
         retries         INT          NOT NULL DEFAULT 0,
     timeout         VARCHAR(50),
     retry_policy    VARCHAR(255),
     source          VARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
-    orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
-    paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional (ADR-0006)
+    orphaned        BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional
+    paused          BOOLEAN      NOT NULL DEFAULT FALSE, -- operacional
     retired         BOOLEAN      NOT NULL DEFAULT FALSE, -- aposentadoria explícita (Mohs.remove) — ver schema-h2.sql
-    next_fire_at    DATETIME(6), -- estado do trigger (ADR-0035) — ver schema-h2.sql
+    next_fire_at    DATETIME(6), -- estado do trigger — ver schema-h2.sql
     created_at      DATETIME(6)  NOT NULL,
-    updated_at      DATETIME(6)  NOT NULL
+    updated_at      DATETIME(6)  NOT NULL,
+    INDEX idx_mohs_job_next_fire (next_fire_at) -- the per-tick due-trigger sweep; see the V9 delta for the measurement
 ) DEFAULT CHARACTER SET utf8mb4;
 
 CREATE TABLE IF NOT EXISTS mohs_batches (
@@ -64,23 +64,23 @@ CREATE TABLE IF NOT EXISTS mohs_rate_limits (
     name            VARCHAR(255) PRIMARY KEY,
     max_count       INT NOT NULL,
     window_duration VARCHAR(50) NOT NULL,
-    -- balde de tokens (ADR-0042): capacidade = max_count, um token a cada window/max
+    -- balde de tokens: capacidade = max_count, um token a cada window/max
     tokens          INT NOT NULL,
     refilled_at     DATETIME(6) NOT NULL
 ) DEFAULT CHARACTER SET utf8mb4;
 
--- Heartbeat de node (ADR-0012). Desde a ADR-0051 deixou de ser só
+-- Heartbeat de node. Desde a Phase 4 do redesign deixou de ser só
 -- informativa: o reaper consulta expires_at/last_heartbeat_at para decidir
 -- quem está morto (aliveNodeIds do Engine).
 CREATE TABLE IF NOT EXISTS mohs_nodes (
     node_id           VARCHAR(255) PRIMARY KEY,
     state             VARCHAR(20) NOT NULL,
     last_heartbeat_at DATETIME(6) NOT NULL,
-    epoch             BIGINT      NOT NULL DEFAULT 0, -- encarnação do nó (ADR-0051)
-    expires_at        DATETIME(6)                     -- lease do NÓ (ADR-0051)
+    epoch             BIGINT      NOT NULL DEFAULT 0, -- encarnação do nó
+    expires_at        DATETIME(6)                     -- lease do NÓ
 ) DEFAULT CHARACTER SET utf8mb4;
 
--- --- Phase 5 (ADR-A): o hot path fora da história -----------------------------
+-- --- Phase 5: o hot path fora da história -----------------------------
 -- Quatro perfis de escrita, quatro tabelas (racional na migração
 -- V3__table_split.sql; MySQL é o equivalente funcional Tier 2 — sem
 -- partições nesta fase). Índices inline no CREATE: tabelas

@@ -1,4 +1,4 @@
--- Schema JDBC do Mohs (io.mohs.store.jdbc) para SQL Server (ADR-0023).
+-- Schema JDBC do Mohs (io.mohs.store.jdbc) para SQL Server.
 -- Divergências reais do dialeto H2/Postgres: T-SQL não tem
 -- "CREATE TABLE/INDEX IF NOT EXISTS" — usa IF OBJECT_ID(...) IS NULL /
 -- IF NOT EXISTS (SELECT ... FROM sys.indexes) guardando a instrução,
@@ -25,20 +25,20 @@ CREATE TABLE mohs_job_definitions (
     interval_after_finish  BIT,
     runner          NVARCHAR(255),
     window_name     NVARCHAR(255),
-    rate_limit      NVARCHAR(255), -- nome do RateLimit cluster-wide (ADR-0042)
+    rate_limit      NVARCHAR(255), -- nome do RateLimit cluster-wide
     misfire         NVARCHAR(20)  NOT NULL,
-    start_paused    BIT           NOT NULL DEFAULT 0, -- definicional (ADR-0037) — ver schema-h2.sql
+    start_paused    BIT           NOT NULL DEFAULT 0, -- definicional — ver schema-h2.sql
     allow_concurrent_executions BIT NOT NULL DEFAULT 1,
-    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = 0 (ADR-0020)
-    running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job (ADR-0018/0020)
+    max_concurrent_executions INT NOT NULL DEFAULT 0, -- só != 0 quando allow_concurrent_executions = 0
+    running_execution_count INT NOT NULL DEFAULT 0, -- contador de mutex por job
     retries         INT           NOT NULL DEFAULT 0,
     timeout         NVARCHAR(50),
     retry_policy    NVARCHAR(255),
     source          NVARCHAR(20)  NOT NULL, -- ANNOTATION | PROGRAMMATIC
-    orphaned        BIT           NOT NULL DEFAULT 0, -- operacional (ADR-0006)
-    paused          BIT           NOT NULL DEFAULT 0, -- operacional (ADR-0006)
+    orphaned        BIT           NOT NULL DEFAULT 0, -- operacional
+    paused          BIT           NOT NULL DEFAULT 0, -- operacional
     retired         BIT           NOT NULL DEFAULT 0, -- aposentadoria explícita (Mohs.remove) — ver schema-h2.sql
-    next_fire_at    DATETIME2,    -- estado do trigger (ADR-0035) — ver schema-h2.sql
+    next_fire_at    DATETIME2,    -- estado do trigger — ver schema-h2.sql
     created_at      DATETIME2     NOT NULL,
     updated_at      DATETIME2     NOT NULL
 );
@@ -64,9 +64,9 @@ CREATE TABLE mohs_executions (
     actor            NVARCHAR(255) NOT NULL,
     idempotency_key  NVARCHAR(255),
     priority         INT           NOT NULL DEFAULT 20, -- Priority.value(); 20 = NORMAL
-    node_id          NVARCHAR(255),  -- claim, etapa 3 (ADR-0016)
-    lease_expires_at DATETIME2,      -- claim, etapa 3 (ADR-0012/0016)
-    cancel_requested BIT           NOT NULL DEFAULT 0, -- cancel cooperativo (ADR-0034) — ver schema-h2.sql
+    node_id          NVARCHAR(255),  -- claim, etapa 3
+    lease_expires_at DATETIME2,      -- claim, etapa 3
+    cancel_requested BIT           NOT NULL DEFAULT 0, -- cancel cooperativo — ver schema-h2.sql
     batch_id         NVARCHAR(255) REFERENCES mohs_batches(id),
     payload          NVARCHAR(MAX) NOT NULL, -- não CLOB/TEXT: deprecado em SQL Server
     payload_type     NVARCHAR(500) NOT NULL,
@@ -77,9 +77,9 @@ CREATE TABLE mohs_executions (
 -- da tabela (execuções terminais) é peso morto que este índice não
 -- carrega. state sai das colunas porque o WHERE já fixa esse valor
 -- (DBTUNE-5, medido: -95.2% Postgres / -84.2% SQL Server no tamanho do
--- índice, throughput de claim estável — docs/performance/BASELINE.md).
+-- índice, throughput de claim estável).
 IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_mohs_executions_claim' AND object_id = OBJECT_ID('mohs_executions'))
-CREATE INDEX idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_WAITING'); -- ADR-0033: par de estados claimáveis, ver schema-postgresql.sql
+CREATE INDEX idx_mohs_executions_claim ON mohs_executions (priority, scheduled_at) WHERE state IN ('ENQUEUED', 'RETRY_WAITING'); -- par de estados claimáveis, ver schema-postgresql.sql
 -- Índice filtrado pro reaper (DBTUNE-10): só a execução RUNNING é
 -- candidata a reclaim — mesmo raciocínio da DBTUNE-5, WHERE em vez de
 -- coluna porque o predicado já fixa o state.
@@ -125,12 +125,12 @@ CREATE TABLE mohs_rate_limits (
     name            NVARCHAR(255) PRIMARY KEY,
     max_count       INT NOT NULL,
     window_duration NVARCHAR(50) NOT NULL,
-    -- balde de tokens (ADR-0042): capacidade = max_count, um token a cada window/max
+    -- balde de tokens: capacidade = max_count, um token a cada window/max
     tokens          INT NOT NULL,
     refilled_at     DATETIME2 NOT NULL
 );
 
--- Heartbeat de node (ADR-0012) — só informativo, GET /nodes; nenhuma
+-- Heartbeat de node — só informativo, GET /nodes; nenhuma
 -- lógica de claim/reclaim consulta esta tabela.
 IF OBJECT_ID('mohs_nodes', 'U') IS NULL
 CREATE TABLE mohs_nodes (

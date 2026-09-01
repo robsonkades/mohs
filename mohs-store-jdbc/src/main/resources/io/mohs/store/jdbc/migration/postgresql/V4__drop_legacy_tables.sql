@@ -4,6 +4,6 @@
 DROP TABLE IF EXISTS mohs_attempts;
 DROP TABLE IF EXISTS mohs_executions;
 
--- ADR-D: o cap de concorrência deriva de mohs_lease (posse viva É a vaga
--- ocupada) — o contador de mutex da era ADR-0018/0020 morre junto.
+-- O cap de concorrência deriva de mohs_lease (posse viva É a vaga
+-- ocupada) — o contador de mutex da era anterior morre junto.
 ALTER TABLE mohs_job_definitions DROP COLUMN IF EXISTS running_execution_count;

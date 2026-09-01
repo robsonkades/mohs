@@ -4,8 +4,8 @@
 DROP TABLE IF EXISTS mohs_attempts;
 DROP TABLE IF EXISTS mohs_executions;
 
--- ADR-D: o cap de concorrência deriva de mohs_lease (posse viva É a vaga
--- ocupada) — o contador de mutex da era ADR-0018/0020 morre junto.
+-- O cap de concorrência deriva de mohs_lease (posse viva É a vaga
+-- ocupada) — o contador de mutex da era anterior morre junto.
 -- Guardado por COL_LENGTH: no caminho de ADOÇÃO, o schema.sql pós-S5.4
 -- nunca criou a coluna. O DEFAULT inline da V1 virou constraint sem nome —
 -- precisa cair antes da coluna, e o nome só se descobre em runtime.

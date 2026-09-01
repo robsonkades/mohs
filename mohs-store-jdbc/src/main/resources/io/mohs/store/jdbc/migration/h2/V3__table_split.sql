@@ -1,6 +1,6 @@
--- Phase 5 do redesign (ADR-A) — ver o V3 do Postgres para o racional das
--- quatro tabelas. H2 é Tier 3 (ADR-0050, dev/teste): equivalente
--- FUNCIONAL, sem partições (retenção continua no mecanismo ADR-0032),
+-- Phase 5 do redesign — ver o V3 do Postgres para o racional das
+-- quatro tabelas. H2 é Tier 3 (dev/teste): equivalente
+-- FUNCIONAL, sem partições (retenção continua no mecanismo de sempre),
 -- sem storage options, sem índice parcial/INCLUDE. A história ganha
 -- índice em created_at no lugar da PK composta particionada do PG —
 -- mesmo predicado de poda, outro suporte físico.

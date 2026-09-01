@@ -1,4 +1,4 @@
--- ADR-0062: o nome do lote vira dado durável.
+-- O nome do lote vira dado durável.
 --
 -- Mohs.batch(name, ...) exigia um nome, fazia requireNonNull nele e o
 -- descartava: não ia para o store, não aparecia em BatchSnapshot, em
