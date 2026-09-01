@@ -62,11 +62,15 @@ public class MohsApplication {
      */
     public static void main(String[] args) {
         SpringApplication app = new SpringApplication(MohsApplication.class);
-        // The schema is owned by Mohs's own Flyway migrations; the spring.sql.init that used to
-        // live here went away with them
+        // Mohs does not create its schema — the application does, and this demo is an application.
+        // spring.sql.init is the ordinary Boot mechanism for it, and schema-h2.sql ships in
+        // mohs-store-jdbc's jar, so a host reaches it on the classpath exactly like this. A real
+        // deployment applies the file with its own tooling instead and leaves this off.
         app.setDefaultProperties(Map.of(
                 "spring.application.name", "mohs",
-                "mohs.jdbc.dialect", "h2"));
+                "mohs.jdbc.dialect", "h2",
+                "spring.sql.init.mode", "always",
+                "spring.sql.init.schema-locations", "classpath:schema-h2.sql"));
         app.run(args);
     }
 
