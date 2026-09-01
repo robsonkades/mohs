@@ -1,11 +1,22 @@
 # Technical debt
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-08-31 · Source of Truth: Repository
 
-> **Resolved on 2026-08-29**, in the release-readiness pass: TD-01, TD-03, TD-04, TD-05, TD-07,
-> TD-08, TD-10, TD-13, TD-14 (through a boot guard), TD-17 and TD-20. Each entry below carries what
-> happened. Nothing was closed by lowering a bar — the two items that changed shape rather than
-> disappearing (TD-14, TD-17) say so explicitly.
+> **Only open items are listed.** Eleven were closed in the 2026-08-29 release-readiness pass
+> (TD-01, TD-03, TD-04, TD-05, TD-07, TD-08, TD-10, TD-13, TD-16, TD-17, TD-20) and their entries
+> have been removed rather than kept as an archive — what was fixed is visible in the code and the
+> changelog. **Numbers are never reused**, so a gap in the sequence means an item that is gone.
+>
+> **Changed on 2026-08-31.** **TD-14 is closed** — the now-query and its crossing became per-dialect
+> and state UTC where the server is zoneless, so `mohs.time.mode=database` is supported on all four
+> dialects instead of refused on two. The measurement the previous pass could not take is in
+> `DatabaseClockZoneTest`. TD-12's count was wrong and is corrected: 30 of 34 `.sql` files, not 27
+> of 30.
+>
+> **Changed on 2026-08-30.** Removing the migration engine and deleting `mohs-demo/src/test` moved
+> two items and opened one: TD-12 shrank to the SQL files alone, TD-15 stopped being half-enforced
+> and became unenforced, and **TD-21 is new** — the architecture rules and the only end-to-end
+> coverage went with those tests.
 
 Every item was found by reading the source, the tests and the build. Each has evidence, an impact and
 a recommended fix. Nothing here is speculative.
@@ -17,7 +28,9 @@ A repository-wide scan for `TODO`, `FIXME`, `HACK` and `XXX` across Java, SQL an
 inside SQL comments, and the fourth is a Javadoc sentence *warning against* a TODO disguised as a
 test.
 
-There is exactly **one** `@Deprecated` element in the whole tree.
+There are **no** `@Deprecated` elements in the tree: the one that existed — a compatibility
+constructor on `JobDefinition` — was removed, because nothing has been released yet and there is no
+compatibility to keep.
 
 Most of what follows is therefore **deliberate deferral**, recorded in the code itself, rather than
 neglect. Where the code already names a gap, this document quotes it.
@@ -26,95 +39,11 @@ neglect. Where the code already names a gap, this document quotes it.
 
 | Severity | Count | Items |
 | --- | --- | --- |
-| **Critical** | 0 | — (TD-01 resolved) |
-| **High** | 2 | TD-02, TD-06 (TD-03, TD-04, TD-05 resolved) |
-| **Medium** | 4 | TD-09, TD-11, TD-12, TD-14 (reduced to a boot guard) |
-| **Low** | 4 | TD-15, TD-16, TD-18, TD-19 |
-
----
-
-## Resolved
-
-### TD-01 — `BatchesController` is implemented and tested, but never registered — **RESOLVED**
-
-`MohsRestAutoConfiguration` now declares `mohsBatchesController`, and the stale Javadoc claiming
-batches "remains a contract with no implementation" is gone. The recurrence guard is
-`MohsRestAutoConfigurationTest#everyRestControllerInThePackageIsRegisteredWhenTheApiIsOn`: it scans
-`io.mohs.rest` for `@RestController` and asserts a bean for each — the class of defect a slice test
-cannot catch, because a slice builds the controller itself.
-
-### TD-03 — the idempotency prune is never called — **RESOLVED**
-
-`mohs.engine.idempotency-retention` (default `7d`) IS the deduplication window, and the engine's
-tick prunes on an hourly cadence. `0s` opts out and keeps every key forever, which is the previous
-behaviour, now chosen rather than inherited.
-
-### TD-04 — no health indicator — **RESOLVED**
-
-`MohsHealthIndicator`, contributed under the `mohs` key when the host brings the actuator
-(`spring-boot-health` is an `optional` dependency of the starter). `RUNNING` → `UP`,
-`PAUSED`/`DRAINING` → `OUT_OF_SERVICE`, `CREATED`/`STOPPED` → `DOWN`. **It never touches the
-database.**
-
-### TD-05 — no CI, no coverage, no static analysis — **RESOLVED**
-
-`.github/workflows/maven.yml` runs `mvn -B -ntp verify` — with the frontend — on every push and pull
-request; `codeql.yml` runs static analysis on every push and weekly; `dependabot.yml` keeps the
-three ecosystems current. JaCoCo produces a report per module. **No coverage threshold**, on
-purpose: a limit chosen before the first measurement is a number invented to be met.
-
-### TD-07 — `@OnExecution` is public API with no implementation — **RESOLVED**
-
-Implemented. An annotated method becomes a subscriber of the engine's event stream through
-`OnExecutionRegistry`, with `ExecutionListener`'s contract (asynchronous, best-effort, unordered).
-`job()` now defaults to empty, meaning every job, which is also what makes `BATCH_COMPLETED`
-observable. A signature that cannot receive its declared event still fails the boot.
-
-### TD-08 — `retryPolicy` is accepted, persisted, and ignored — **RESOLVED**
-
-`io.mohs.core.execution.RetryPolicy` is the SPI. It replaces the budget while it returns a delay, is
-consulted on both failure paths (a handler that threw and a lease reclaimed from a dead node — the
-latter with a `null` error), and a job naming a bean that does not exist fails the boot instead of
-falling back silently. A policy that throws or returns a negative delay falls back to the built-in
-backoff, logged: a bug in someone's Strategy must not strand an execution in `RUNNING`.
-
-### TD-10 — no queue-depth metric — **RESOLVED**
-
-`mohs.queue.depth`, sampled by the engine's tick every 10 s and published as a gauge — never queried
-on the scrape, so a metrics pipeline cannot decide the load it is measuring. The number is
-cluster-wide: aggregate with `max`, never `sum`.
-
-### TD-13 — a user-facing string in Portuguese — **RESOLVED**
-
-`RuntimePatchResponse.BOOT_REVERSION_NOTICE` is English.
-
-### TD-17 — PostgreSQL primary keys lead with a time column — **RESOLVED, verified against a real database**
-
-`mohs_execution` is keyed on `(execution_id)` and `mohs_attempt` on `(execution_id, number)`, the
-same shape the other three dialects always had. The normalisation rides inside `V5`, which already
-recreates and copies both tables — doing it later would have cost a second full copy, with the same
-outage window, on somebody's production database. `idx_mohs_execution_id` and `idx_mohs_attempt_exec`
-are gone (they became the keys), the two terminal-`UPDATE` constants collapsed into one, and
-`executionCreatedAt` no longer travels from the claim to the completion. It **changes a guarantee**:
-`execution_id` is now unique by the schema, and `V5` checks for a pre-existing duplicate before
-copying so the failure names the row instead of saying "duplicate key".
-
-Verified 2026-08-30 against real PostgreSQL, MySQL and SQL Server (Testcontainers): the whole suite
-is green — 758 tests, 0 failures, 0 errors — including the structural guard that compares the Flyway
-path against `schema-postgresql.sql`, which is what proves the two installation paths still converge
-after the key changed, and the two new tests that pin the uniqueness the schema now enforces.
-
-### TD-20 — no release process — **RESOLVED**
-
-`<scm>`, `<developers>`, `<issueManagement>`, `distributionManagement` (Central Portal — OSSRH was
-retired in June 2025), `project.build.outputTimestamp`, sources and Javadoc jars on every build, GPG
-signing behind `gpg.skip` (default `true`, overridden by the release workflow), and
-`central-publishing-maven-plugin` with `autoPublish=false`. `mohs-demo` and `mohs-benchmark` are
-excluded through `maven.deploy.skip` **and** `skipPublishing`. `.github/workflows/release.yml` is the
-manual pipeline. `CHANGELOG.md` exists. Two prerequisites remain outside the repository: the
-`io.mohs` namespace verified in the Portal against the DNS of mohs.io, and a published GPG key.
-
----
+| **Critical** | 0 | — |
+| **High** | 3 | TD-02, TD-06, TD-21 |
+| **Medium** | 3 | TD-09, TD-11, TD-12 |
+| **Low** | 3 | TD-15, TD-18, TD-19 |
+| **Total open** | **9** | |
 
 ## High
 
@@ -126,16 +55,25 @@ manual pipeline. `CHANGELOG.md` exists. Two prerequisites remain outside the rep
 | **Evidence** | The only purge in the tree is `Engine#purgeStaleNodeRows`, for `mohs_nodes`. `V3__table_split.sql`'s header names retention as a later phase; `V5__drop_partitioning.sql` removed the partitioning that would have served it |
 | **Impact** | Unbounded storage growth; payloads retained indefinitely, which may be a data-protection obligation |
 | **Fix** | Ship a retention policy, or document the operator's obligation prominently. **The second is done** — see [data lifecycle](06-data/data-lifecycle.md) |
-| **Decision record** | [DR-016](15-design-decisions/records/DR-016-no-automatic-history-retention.md) |
 
 ### TD-06 — `GET /overview`'s counts lost the lock-free read hint on SQL Server
 
 | | |
 | --- | --- |
-| **Problem** | `countActiveByState` and `countTerminalOutcomesSince` were rewritten over the split tables and **no longer use `JdbcDialect#lockFreeReadHint`**. On SQL Server without RCSI they take shared locks on all three hot tables |
-| **Evidence** | The only caller of `lockFreeReadHint` is `JdbcWorkQueue#hasVisibleWork`. `OverviewStreamBroadcaster`'s Javadoc records the regression explicitly |
-| **Impact** | On SQL Server without `READ_COMMITTED_SNAPSHOT`, dashboard polling contends with the claim and completion hot path — and the SSE stream polls every 2 s |
-| **Fix** | Either restore the hint on those counts, or document `READ_COMMITTED_SNAPSHOT ON` as a **requirement** for SQL Server rather than a recommendation |
+| **Problem** | `countActiveByState` and `countTerminalOutcomesSince` were rewritten over the split tables and **carry no lock-free read hint**. On SQL Server without RCSI they take shared locks on all three hot tables |
+| **Evidence** | `SqlServerJdbcDelegate` spells `WITH (NOLOCK)` into `visibleWorkExists` and `visibleWorkCount` — the idle gate — and nowhere else. `OverviewStreamBroadcaster`'s Javadoc records the regression explicitly |
+| **Impact** | **Measured on SQL Server 2022 with RCSI off, which is the default.** With one uncommitted claim holding X locks on 1000 `mohs_ready` rows, `countActiveInQueue` did not merely contend — it **blocked to a lock timeout** (`Msg 1222`). The idle gate, which carries `WITH (NOLOCK)`, answered immediately. With `READ_COMMITTED_SNAPSHOT ON` the same count answered correctly and without blocking. The SSE stream runs this every 2 s |
+| **Fix** | **Not by spreading the hint.** In the same measurement `NOLOCK` read a depth of 49,000 against 50,000 committed — it saw the uncommitted `DELETE` of a claim that then rolled back, which is a wrong number indistinguishable from a right one on an operational dashboard. RCSI fixes both sides and would retire the existing `NOLOCK` too. The open decision is whether to make it a **documented requirement** of the SQL Server dialect, refused loudly at boot rather than degraded silently |
+
+### TD-21 — There is no end-to-end test, and no executable architecture rule
+
+| | |
+| --- | --- |
+| **Problem** | `mohs-demo/src/test` was deleted on 2026-08-30. It held the ArchUnit suite (12 rules) and the only tests that loaded the assembled application: a full context boot with the whole example catalogue, the dashboard integration and the runners endpoint |
+| **Evidence** | `mohs-demo` has `src/main` only, and its `pom.xml` no longer declares a test dependency. The reactor went from 778 to 753 tests |
+| **Impact** | Two distinct holes. **Wiring**: every bean is tested in isolation and nothing asserts they assemble — a defect in the auto-configuration path a real consumer takes now reaches the first application that tries the starter, not CI. This is exactly the class of bug that shipped once already: a controller implemented, contract-tested, and never registered, so the route answered the host's 404. **Invariants**: six rules that used to fail the build are now convention — the engine reading the wall clock directly, `UUID.randomUUID`, `ThreadLocal` and `synchronized` methods on concurrent paths, missing `@NullMarked`, and package cycles. Each compiles cleanly and passes every remaining test |
+| **Why it happened** | Deliberate: the demo is an example application, and tests were not wanted there. The debt is the coverage, not the decision |
+| **Fix** | Both holes need a module that sees every other on one classpath, which is what `mohs-demo` was. Either restore a test source set there, or add a `mohs-integration-tests` module that is never published. The cheaper partial fix for the invariants alone is a source scan inside each module, next to `TerminalStateWriteScanTest` — see TD-15 |
 
 ---
 
@@ -154,44 +92,35 @@ Recorded in `EngineMetrics#bindNodeGauges`: with two engines in the same registr
 deferral is deliberate — the trigger is the first real multi-engine scenario, paying the cardinality
 only then — but the failure is silent, which is the part worth revisiting.
 
-### TD-12 — Mixed prose language in the codebase
+### TD-12 — The SQL comments are still in Portuguese
 
-The majority of Javadoc has been translated to English, but a minority of comments and short Javadoc
-lines remain in Portuguese, sometimes within the same file (for example `Misfire`, `MohsJob`,
-`RecurringJob`). `mohs-ui` is English throughout, deliberately. The project's own rule says one
-bilingual subtree is worse than either language; the same argument applies to a bilingual file.
-Migration is deferred with **no date**.
+**The Java is done**: no `.java` file in the reactor carries Portuguese prose, and `mohs-ui` is
+English throughout. What remains is the SQL — **30 of the 34 `.sql` files**: the four
+`schema-*.sql` installers and 26 of the 30 files in the per-database delta chain. The four already
+in English are the `V9__due_trigger_index.sql` series, written in English from the start.
 
-### TD-14 — `DatabaseClock` misreads time on SQL Server — **reduced to a boot guard**
+That subtree matters more than it did. With no migration engine, those files are what an **operator**
+opens and applies by hand, so their comments are user-facing documentation now, not internal notes.
 
-`mohs.time.mode=database` on SQL Server now fails the boot naming `mohs.time.mode=application` as
-the alternative, so the misconfiguration is no longer silently available. The clock itself is
-**unchanged**: the real fix is a per-dialect now-query (`SYSUTCDATETIME()`), which alters the
-clock's behaviour and needs its own decision — and could not be verified in this pass, with no
-container to run SQL Server against. What follows is the original finding, still accurate about the
-clock.
+Migration is deferred with **no date**, and the reason is unchanged: that prose is the record of why
+a migration is shaped the way it is, and a careless pass would lose the argument.
 
-Recorded in `DatabaseClock#sync`: on SQL Server, `CURRENT_TIMESTAMP` is a zoneless `DATETIME`
-interpreted in the JVM's zone. The comment notes the fix is sketched out and needs approval because it
-changes behaviour. Until then, `mohs.time.mode=database` **should not be used on SQL Server** — and
-nothing in the code prevents it.
 
 ---
 
 ## Low
 
-### TD-15 — The UUIDv7 invariant is only half enforced
+### TD-15 — The UUIDv7 invariant is not enforced at all
 
-ArchUnit forbids `UUID.randomUUID` (calls **and** method references). The other half — no `IDENTITY`,
-`SERIAL`, `AUTO_INCREMENT` or `SEQUENCE` in any schema — is prose, because ArchUnit does not read SQL.
-The rule's own Javadoc declares the gap. A SQL scan over `schema-*.sql` and the migration folders
-would close it.
+It used to be half enforced: ArchUnit forbade `UUID.randomUUID` (calls **and** method references),
+while the other half — no `IDENTITY`, `SERIAL`, `AUTO_INCREMENT` or `SEQUENCE` in any schema — was
+prose, because ArchUnit does not read SQL. The ArchUnit half went with `mohs-demo/src/test`, so today
+**neither half is checked**.
 
-### TD-16 — The `synchronized`-block gap in the architecture rules
-
-`no_synchronized_methods_in_concurrency_critical_code` catches only the **method modifier**. A
-`synchronized (lock) { … }` block is not modelled by ArchUnit, which has no instruction-level bytecode
-inspection in its public API. Declared in the rule's Javadoc.
+Both are closable by a source scan in `mohs-store-jdbc`, next to the ones that already run there
+(`TerminalStateWriteScanTest`, `SqlServerUnicodeScanTest`): one pass over `src/main/java` for
+`randomUUID`, one over the `.sql` files for the four forbidden keywords. That is the cheapest way to
+get the invariant back without restoring a whole-classpath module.
 
 ### TD-18 — The SQL Server clustered-key trade is unmeasured
 
@@ -207,6 +136,10 @@ the last page (`PAGELATCH_EX`).
 script**, and no test framework in `devDependencies`. `tsc -b` is the only automated check on roughly
 90 TypeScript files.
 
+It got worse on 2026-08-30: `MohsUiIntegrationTest` — which at least asserted that the bundle was
+served and that the hashed assets the index references actually resolve — went with
+`mohs-demo/src/test`. Nothing now catches a dashboard that ships broken. See TD-21.
+
 ## Documented limitations that are *not* debt
 
 Deliberate decisions with recorded reasoning. Listed here so nobody files them as bugs.
@@ -215,11 +148,11 @@ Deliberate decisions with recorded reasoning. Listed here so nobody files them a
 | --- | --- |
 | **Priority starvation**: `BACKGROUND` can starve under sustained higher-priority load | Documented in `Priority`'s Javadoc. Aging was not implemented |
 | **64-node ceiling** on claiming nodes | `SHARD_COUNT` is fixed by decision; 64 divides cleanly into any plausible cluster |
-| **Cross-node dispatch latency** bounded by `max-poll-interval` | The NOTIFY tier that would close it was measured and withdrawn ([DR-008](15-design-decisions/records/DR-008-adaptive-poll-and-the-withdrawn-notify-tier.md)) |
+| **Cross-node dispatch latency** bounded by `max-poll-interval` | The NOTIFY tier that would close it was measured and withdrawn |
 | **No dead-letter queue** | Exhausted retries are terminal `FAILED` rows in history, queryable and manually retryable |
 | **No circuit breaker** over the database | Opening one would stop the heartbeat, which is exactly what must not stop |
 | **`onCompletion` is JVM-local** | Stated in the contract; the outbox pattern is prescribed instead |
-| **The REST API is unauthenticated** | [DR-013](15-design-decisions/records/DR-013-rest-api-off-by-default-no-auth.md) |
+| **The REST API is unauthenticated** | Off by default, and turning it on WARNs at boot |
 | **`ExecutionWindow` equality is identity-based** | Predicates are lambdas; true value semantics would require modelling exclusions as sealed data |
 | **No ordering guarantee between execution events** | Delivery is asynchronous per listener, by contract |
 | **The group-commit durability window** (up to 5 ms) | Declared; the opt-out exists |
@@ -230,11 +163,11 @@ Deliberate decisions with recorded reasoning. Listed here so nobody files them a
 
 | Priority | Item | Effort |
 | --- | --- | --- |
-| 1 | **TD-06** — decide: restore the hint, or make RCSI a requirement on SQL Server | Small |
-| 2 | **TD-02** — a retention policy | Medium; needs per-dialect batched deletes |
-| 3 | **TD-14** — the per-dialect now-query, so `mohs.time.mode=database` works on SQL Server rather than being refused | Medium; changes behaviour |
-| 4 | **TD-19** — frontend tests | Medium |
-| 5 | **TD-11** — a `node` label on the `mohs.node.*` gauges, or a loud failure on the second bind | Small |
-| 6 | **TD-09** — deliver `JobContext#progress`, or remove it | Small |
-| 7 | **TD-15 / TD-16** — close the two half-enforced invariants (a SQL scan; instruction-level bytecode) | Small |
-| 8 | **TD-12** — finish the prose translation | Large, mechanical |
+| 1 | **TD-21** — a home for the end-to-end tests and the architecture rules | Medium; the rules themselves already exist in git history |
+| 2 | **TD-06** — decide: restore the hint, or make RCSI a requirement on SQL Server | Small |
+| 3 | **TD-02** — a retention policy | Medium; needs per-dialect batched deletes |
+| 4 | **TD-15** — a source scan for `randomUUID` and for `IDENTITY`/`SERIAL`/`AUTO_INCREMENT`/`SEQUENCE`, inside `mohs-store-jdbc` | Small, and it does not wait on TD-21 |
+| 5 | **TD-19** — frontend tests | Medium |
+| 6 | **TD-11** — a `node` label on the `mohs.node.*` gauges, or a loud failure on the second bind | Small |
+| 7 | **TD-09** — deliver `JobContext#progress`, or remove it | Small |
+| 8 | **TD-12** — finish the prose translation, now that the SQL is what an operator reads | Large, mechanical |

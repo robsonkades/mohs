@@ -52,7 +52,7 @@ something could not be determined, it is marked rather than guessed.
 | Design decisions | Complete | High | 16 records reconstructed from code evidence |
 | Technical debt | Complete | High | 20 items, each with evidence and impact |
 | **Deployment** | **Partial — by necessity** | Low | The repository contains **no** deployment artefacts. Documented as guidance for the host, with that stated plainly |
-| **CI/CD** | **Not applicable** | — | **No pipeline exists.** Recorded as TD-05 rather than given a section of its own |
+| **CI/CD** | Covered in `12-build/` | — | The pipeline runs `./mvnw verify` on every push and pull request |
 | **Messaging** | **Not applicable** | — | **No broker exists.** Verified against every module POM. No section created |
 | **Integrations** | **Not applicable** | — | The only runtime dependency is the database, covered under data. No section created |
 
@@ -88,18 +88,20 @@ Things that genuinely could not be determined from the repository:
 
 ## Inconsistencies found between code, tests, documentation and configuration
 
-Reported rather than fixed, since the task was documentation. All are in
-[technical debt](technical-debt.md) with evidence.
+Reported rather than fixed at the time, since the task was documentation. **Five of the seven have
+since been fixed**; the table is kept as the record of what a documentation pass found by reading
+the code against itself. The two still open are 3 and 5 — they are in
+[technical debt](technical-debt.md) as TD-06 and TD-12.
 
 | # | Inconsistency |
 | --- | --- |
-| 1 | **`BatchesController` is implemented and contract-tested, but no bean registers it.** `MohsRestAutoConfiguration`'s Javadoc still claims it "remains a contract with no implementation behind it" — stale. The route does not exist at runtime (TD-01) |
-| 2 | **`HistoryStore#pruneIdempotencyBefore` is described as "called by housekeeping"** and has an index added specifically for it — and has no production caller (TD-03) |
-| 3 | **`OverviewStreamBroadcaster`'s Javadoc records that the overview counts stopped using `lockFreeReadHint`**, reintroducing shared locks on SQL Server without RCSI. Verified: the only caller of that method is the idle-gate probe (TD-06) |
-| 4 | **`RuntimePatchResponse.BOOT_REVERSION_NOTICE` is in Portuguese** while every other user-facing API string is English — and it crosses the wire on every `PATCH` (TD-13) |
-| 5 | **Mixed prose language inside single files** (e.g. `Misfire`, `MohsJob`, `RecurringJob`), against the project's own stated principle (TD-12) |
+| 1 | **`BatchesController` is implemented and contract-tested, but no bean registers it.** `MohsRestAutoConfiguration`'s Javadoc still claims it "remains a contract with no implementation behind it" — stale. The route did not exist at runtime. **Fixed**: a bean registers it, and a test asserts every controller has one |
+| 2 | **`HistoryStore#pruneIdempotencyBefore` is described as "called by housekeeping"** and has an index added specifically for it — and had no production caller. **Fixed**: the engine prunes hourly |
+| 3 | **`OverviewStreamBroadcaster`'s Javadoc records that the overview counts dropped the lock-free read hint**, reintroducing shared locks on SQL Server without RCSI. Verified: the hint survives only on the idle-gate probe. **Open** — TD-06 |
+| 4 | **`RuntimePatchResponse.BOOT_REVERSION_NOTICE` is in Portuguese** while every other user-facing API string is English — and it crossed the wire on every `PATCH`. **Fixed** |
+| 5 | **Mixed prose language inside single files**, against the project's own stated principle. **Partly fixed**: the Java is now English throughout; 30 of the 34 `.sql` files are still Portuguese — TD-12 |
 | 6 | **`NodeStore`'s Javadoc references `mohs.engine.node-heartbeat-interval`** as configuration "that does not exist yet" — it still does not; the cadence is derived from `node-lease-ttl` |
-| 7 | **`DatabaseClock` documents a SQL Server correctness gap** in `database` time mode, and nothing prevents that combination (TD-14) |
+| 7 | **`DatabaseClock` documented a SQL Server correctness gap** in `database` time mode, and nothing prevented that combination. **Fixed in the clock**: the now-query and its crossing are per-dialect and state UTC where the server is zoneless, so the mode is supported on all four rather than refused — TD-14, closed |
 
 ## Documentation risks — what will go stale first
 
@@ -112,22 +114,21 @@ Reported rather than fixed, since the task was documentation. All are in
 | **Line counts and file counts** | High | Only two are quoted — `Engine.java`'s 1,768 lines and the test-file counts. Both are re-derivable in one command |
 | **Log message texts** | Medium | Quoted where the wording is itself a design artefact; paraphrased elsewhere |
 | **The technical-debt list** | High by design | It should shrink. Each item names the fix |
-| **The `docs/old/` reference** | Low | Mentioned once, in the repository map, as provenance |
+| **The absence of a decision log** | Medium | The arguments now live in the documents that own each subject and in the code. That is more readable and more likely to stay true, but it means no single page lists what was decided — a reader looking for one will not find it |
 
 ## Statistics
 
 | Metric | Value |
 | --- | --- |
-| Documentation files created | **90** in `docs/`, plus the root `README.md` = **91** |
-| Sections | 16, plus two cross-cutting documents |
-| Decision records written | **16** (`DR-001` … `DR-016`) |
-| Mermaid diagrams | **30** |
+| Documentation files | **74** in `docs/`, plus the root `README.md` = **75** |
+| Sections | 15, plus two cross-cutting documents |
+| Mermaid diagrams | **29** |
 | Modules analysed | **11** |
 | Java source files read or scanned | ~290 (78 API, 47 engine, 52 store, 66 REST, 20 starter, 10 cron, 6 test kit, 8 demo, 10 benchmark) |
 | SQL files analysed | **27** (4 schema files + 23 migrations) |
 | REST endpoints documented | **18** across 7 resource areas |
 | Configuration properties documented | **23** scalar properties + 2 map families |
-| Database tables documented | **9**, plus Flyway's history table |
+| Database tables documented | **9** |
 | Indexes documented | **15** named indexes plus 9 primary keys |
 | Metrics documented | **11** |
 | Architecture rules documented | **12** ArchUnit rules + 4 source/schema scans |
@@ -173,7 +174,7 @@ Each of these requires information the repository does not currently hold:
 | A tuning cookbook per workload archetype | Real workload profiles |
 | An OpenAPI document | Either springdoc, or a hand-maintained spec — with the risk that it drifts from the controllers |
 | A security-hardening checklist for regulated environments | The compliance regime in question |
-| A performance-regression baseline in CI | A CI pipeline (TD-05) |
+| A performance-regression baseline in CI | The pipeline runs `./mvnw verify`; no scenario is measured against a baseline |
 | Frontend architecture documentation | A decision about whether the dashboard is a supported extension surface or an internal artefact |
 
 ## Recommended documentation maintenance
@@ -186,4 +187,4 @@ Each of these requires information the repository does not currently hold:
 | A metric or label changes | `09-observability/metrics.md` — label values are contract |
 | A new measurement is taken | `10-performance/performance-characteristics.md`, **with the environment stated** |
 | A debt item is fixed | `technical-debt.md`, and the capability table in `01-overview/capabilities.md` |
-| An architecturally significant decision is made | A new `DR-nnn` under `15-design-decisions/records/` |
+| An architecturally significant decision is made | The document that owns the subject, plus a comment on the code — the argument, never a record number |

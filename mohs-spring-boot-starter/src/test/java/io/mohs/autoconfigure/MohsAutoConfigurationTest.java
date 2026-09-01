@@ -15,10 +15,14 @@
  */
 package io.mohs.autoconfigure;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -27,6 +31,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import javax.sql.DataSource;
 
@@ -39,7 +44,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.context.annotation.Bean;
 import org.springframework.boot.autoconfigure.task.TaskExecutionAutoConfiguration;
 import org.springframework.boot.autoconfigure.task.TaskSchedulingAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -64,6 +72,8 @@ import io.mohs.core.resource.MohsRunner;
 import io.mohs.engine.HandlerRegistry;
 import io.mohs.store.jdbc.DatabaseClock;
 import io.mohs.store.jdbc.JdbcJobStore;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -173,24 +183,167 @@ class MohsAutoConfigurationTest {
     }
 
     /**
-     * The combination that used to boot and then answer the wrong time. The dialect is declared while
-     * the DataSource stays H2 — the guard runs before a single query is issued, so the test needs
-     * neither engine, and the ONE thing it must prove is that the boot stops instead of proceeding
-     * with an offset that is really a zone difference.
+     * The combination that used to be refused at boot. It was refused because {@code CURRENT_TIMESTAMP}
+     * is zoneless on both, and the offset sampled from it was the distance between two zones; now each
+     * asks for UTC explicitly and reads the answer as a {@code LocalDateTime} stated to be UTC, so
+     * there is nothing left to refuse and {@code mohs.time.mode=application} is a preference rather
+     * than the only way to boot.
      *
-     * <p>Both dialects, because a guard that closes one trap and leaves its twin open is worse than
-     * none: it says the subject was handled.
+     * <p>Both databases, for the reason the guard covered both: a change that opens one and forgets its
+     * twin reads as if the subject was handled.
+     *
+     * <p>The boot still stops here, and the reason is now the honest one. The DataSource stays H2 while
+     * the dialect is declared, so {@code SELECT SYSUTCDATETIME()} does not even parse: the FIRST clock
+     * sample fails. What used to be refused for being a zoneless dialect is now refused for the only
+     * thing that actually matters — the engine would otherwise start on the local clock the operator
+     * said not to trust, with one WARN as the only sign. That the offset is real on a server of the
+     * declared kind is {@code DatabaseClockZoneTest}'s subject, against real containers.
      */
     @ParameterizedTest
     @ValueSource(strings = {"sqlserver", "mysql"})
-    void databaseTimeModeOnAZonelessDialectFailsTheBootNamingTheAlternative(String dialect) {
+    void databaseTimeModeStopsTheBootWhenTheFirstSampleFails(String dialect) {
         runnerWith(freshH2DataSource(), "mohs.time.mode=database", "mohs.jdbc.dialect=" + dialect).run(context -> {
             assertThat(context).hasFailed();
             assertThat(context.getStartupFailure())
                     .rootCause()
-                    .hasMessageContaining("mohs.time.mode=database is not supported on")
+                    .hasMessageContaining("the first clock sample against the database failed")
                     .hasMessageContaining("mohs.time.mode=application");
         });
+    }
+
+    /**
+     * A delegate this repository does not ship. It is the whole point of {@code @ConditionalOnMissingBean}
+     * on {@code mohsJdbcDelegate}: a database Mohs has never heard of is served by a bean, not by adding a
+     * constant to an enum here — and the property that is otherwise mandatory becomes unnecessary,
+     * because there is nothing left for it to select.
+     */
+    @Test
+    void aDelegateBeanWinsOverTheEnumAndMakesThePropertyUnnecessary() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(MohsAutoConfiguration.class))
+                .withBean(DataSource.class, MohsAutoConfigurationTest::freshH2DataSource)
+                .withBean(JdbcDelegate.class, CommunityDelegate::new)
+                .withPropertyValues("mohs.engine.poll-interval=50ms")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(JdbcDelegate.class)).isInstanceOf(CommunityDelegate.class);
+                });
+    }
+
+    /**
+     * Database time reaches a delegate written elsewhere and boots on it. This used to be a refusal:
+     * the mode was gated on a boolean asking whether {@code CURRENT_TIMESTAMP} carried a zone, and
+     * anything that did not answer — a third-party delegate most of all — was turned away. The gate is
+     * gone because what it guarded is gone: the statement now asks for UTC explicitly where the server
+     * is zoneless, and the crossing back is abstract, so a delegate cannot inherit someone else's
+     * answer by saying nothing. {@link CommunityDelegate} supplies both halves and gets a clock.
+     *
+     * <p>What the offset is worth is not this test's question — it needs a server in another zone, and
+     * that is {@code DatabaseClockZoneTest}, against real containers. Here the property is narrower and
+     * still worth holding: the mode is no longer closed to delegates this repository did not write.
+     */
+    @Test
+    void databaseTimeModeBootsForADelegateWrittenElsewhere() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(MohsAutoConfiguration.class))
+                .withBean(DataSource.class, MohsAutoConfigurationTest::freshH2DataSource)
+                .withBean(JdbcDelegate.class, CommunityDelegate::new)
+                .withPropertyValues("mohs.engine.poll-interval=50ms", "mohs.time.mode=database")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean("mohsClock", Clock.class)).isInstanceOf(DatabaseClock.class);
+                });
+    }
+
+    /**
+     * The case {@code @ConditionalOnMissingBean} cannot cover, and the reason every injection point of
+     * the delegate is named {@code delegate} rather than {@code mohsJdbcDelegate}.
+     *
+     * <p>A community delegate shipped in its OWN auto-configuration is ordered against this one by
+     * Spring, not by the host — order it after and the condition has already passed, so both delegates
+     * reach the context. With the injection points carrying the bean's own name, Spring would resolve
+     * that ambiguity by name and silently pick the built-in, running its SQL
+     * instead of the substitute's. Failing the boot is the only honest answer.
+     *
+     * <p>This test is the net under a naming convention that nothing else enforces: rename those five
+     * parameters back "for consistency" and the silent wrong choice returns with a green suite.
+     */
+    @Test
+    void twoDelegatesFailTheBootRatherThanLettingTheBuiltInWinSilently() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(MohsAutoConfiguration.class, LateDelegateAutoConfiguration.class))
+                .withBean(DataSource.class, MohsAutoConfigurationTest::freshH2DataSource)
+                .withPropertyValues("mohs.jdbc.dialect=h2", "mohs.engine.poll-interval=50ms")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .as("two JdbcDelegate candidates must be an error, never a silent choice")
+                            .hasRootCauseInstanceOf(NoUniqueBeanDefinitionException.class);
+                });
+    }
+
+    /**
+     * The convention asserted directly, because the context test above cannot see the case that
+     * actually costs something.
+     *
+     * <p>Singletons are pre-instantiated in declaration order, so the FIRST bean to resolve a delegate
+     * decides which one every bean after it sees. Rename only that parameter back and Spring resolves
+     * it by name: the bean is built with the BUILT-IN delegate, it issues the built-in's SQL against a
+     * schema installed for another database, and only the NEXT bean raises the ambiguity that fails
+     * the boot.
+     *
+     * <p>A context test observes the END of the boot; that substitution happens in the middle. So
+     * assert the invariant itself: none of these parameters may carry the bean's name.
+     */
+    @Test
+    void noDelegateInjectionPointIsNamedAfterTheDelegateBean() {
+        List<String> inspected = new ArrayList<>();
+        // Every nested @Configuration, discovered rather than listed: a third one added later would
+        // otherwise slip past the rule while the floor below stayed satisfied by the existing ten
+        List<Class<?>> configurations = Stream.concat(Stream.of(MohsAutoConfiguration.class),
+                Arrays.stream(MohsAutoConfiguration.class.getDeclaredClasses())).toList();
+        for (Class<?> configuration : configurations) {
+            for (Method beanMethod : configuration.getDeclaredMethods()) {
+                if (!beanMethod.isAnnotationPresent(Bean.class)) {
+                    continue;
+                }
+                for (Parameter parameter : beanMethod.getParameters()) {
+                    if (parameter.getType() != JdbcDelegate.class) {
+                        continue;
+                    }
+                    inspected.add(configuration.getSimpleName() + "#" + beanMethod.getName());
+                    // Without -parameters the compiler emits arg0/arg1 and every name below passes
+                    // vacuously — the convention this test defends would be gone with a green suite
+                    assertThat(parameter.isNamePresent())
+                            .as("%s#%s: parameter names were not compiled in (-parameters is off), so this "
+                                    + "rule cannot see the name it exists to check",
+                                    configuration.getSimpleName(), beanMethod.getName())
+                            .isTrue();
+                    assertThat(parameter.getName())
+                            .as("%s#%s: a JdbcDelegate parameter named after the bean lets Spring resolve two "
+                                    + "candidates by name instead of failing the boot",
+                                    configuration.getSimpleName(), beanMethod.getName())
+                            .isNotEqualTo("mohsJdbcDelegate");
+                }
+            }
+        }
+        // A net has to prove it caught something: a @Bean moved into another nested @Configuration
+        // would empty this loop, and the rule would keep passing over nothing at all. Nine today —
+        // eight here plus DatabaseTimeConfiguration#mohsClock; the tenth JdbcDelegate parameter in
+        // the file belongs to a private static helper, which is not an injection point. It was ten
+        // until mohsFlyway went away with the migrations, and this floor is what noticed
+        assertThat(inspected).as("no JdbcDelegate injection point was inspected — the scan found nothing to check")
+                .hasSizeGreaterThanOrEqualTo(9);
+    }
+
+    /** Ordered AFTER Mohs on purpose: that is what makes the condition miss it and both beans coexist. */
+    @AutoConfiguration(after = MohsAutoConfiguration.class)
+    static class LateDelegateAutoConfiguration {
+
+        @Bean
+        JdbcDelegate lateCommunityDelegate() {
+            return new CommunityDelegate();
+        }
     }
 
     /** The default ({@code application}): the system clock and no resync bean — the conditional scheduler must not exist outside database mode. */
@@ -504,7 +657,7 @@ class MohsAutoConfigurationTest {
     void bootWarnsWhenADeclaredJobTimeoutReachesTheWatchdogBound() {
         DataSource dataSource = freshH2DataSource();
         // A job persisted by an earlier deploy — the WARN runs at engine start, with the store already populated
-        new JdbcJobStore(dataSource, new MutableClock(Instant.parse("2026-08-15T12:00:00Z"), ZoneId.of("UTC")))
+        new JdbcJobStore(dataSource, new MutableClock(Instant.parse("2026-08-15T12:00:00Z"), ZoneId.of("UTC")), new H2JdbcDelegate())
                 .upsert(JobDefinition.of("slow-report", Handler.class, spec -> spec.onDemand().timeout(Duration.ofMinutes(5))));
         ch.qos.logback.classic.Logger lifecycleLogger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(MohsEngineLifecycle.class);
@@ -533,6 +686,31 @@ class MohsAutoConfigurationTest {
                             .hasStackTraceContaining("mohs.engine.watchdog-timeout")
                             .hasStackTraceContaining("mohs.engine.node-lease-ttl");
                 });
+    }
+
+    /**
+     * One second below the floor, so the pair with {@link #nodeLeaseTtlAtTheFloorBoots} pins the
+     * constant instead of merely proving the check exists. Eleven seconds is not absurd — it clears the
+     * healthy-tick budget by a third of a second — and that is the point: the floor is chosen by
+     * margin, so the value it has to reject is the one right underneath it. The message has to carry
+     * the floor, not just the property name; it is what the operator types.
+     */
+    @Test
+    void nodeLeaseTtlJustBelowTheFloorFailsBoot() {
+        runnerWith(freshH2DataSource(), "mohs.engine.node-lease-ttl=11s")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("mohs.engine.node-lease-ttl")
+                            .hasStackTraceContaining("12s");
+                });
+    }
+
+    /** The floor itself boots — the rejection is of what is below it, not of everything short of the default. */
+    @Test
+    void nodeLeaseTtlAtTheFloorBoots() {
+        runnerWith(freshH2DataSource(), "mohs.engine.node-lease-ttl=12s")
+                .run(context -> assertThat(context).hasNotFailed());
     }
 
     /** Retry end to end: the 1st attempt fails, the execution comes back as RETRY_WAITING with backoff, the same claim path picks it up again and the 2nd succeeds. */
@@ -573,7 +751,7 @@ class MohsAutoConfigurationTest {
     @Test
     void bootFailsWhenAJobNamesARetryPolicyBeanThatDoesNotExist() {
         DataSource dataSource = freshH2DataSource();
-        new JdbcJobStore(dataSource, new MutableClock(Instant.parse("2026-08-15T12:00:00Z"), ZoneId.of("UTC")))
+        new JdbcJobStore(dataSource, new MutableClock(Instant.parse("2026-08-15T12:00:00Z"), ZoneId.of("UTC")), new H2JdbcDelegate())
                 .upsert(JobDefinition.of("flaky-report", Handler.class, spec -> spec.onDemand().retryPolicy("myRetryPolicyBean")));
 
         runnerWith(dataSource).run(context -> {

@@ -16,12 +16,17 @@ conflicts with real code, the code wins.
 - Prose written in the code (Javadoc, comments, `package-info.java`) is in
   **English** — migrated on 2026-08-29, when the whole codebase was translated
   in one pass (297 files; the vendored `mohs-cron` Javadoc was already English).
-  New prose is written in English from the start; there is no mixed subtree
-  left, and reintroducing Portuguese in code would recreate exactly the
+  New prose is written in English from the start, in `.sql` as much as in
+  `.java`. **The Java is done: no `.java` file in the reactor carries Portuguese
+  prose.** One subtree is not — the store SQL, 30 of the 34 `.sql` files under
+  `mohs-store-jdbc/src/main/resources`, are still commented in Portuguese
+  (TD-12, deferred with no date, because that prose is the record of why a
+  migration is shaped the way it is and a careless pass would lose the
+  argument). Reintroducing Portuguese anywhere else would widen exactly the
   bilingual split that ADR-0045 §6 argues against.
-- **No ADR references in code.** Decisions are cited by their ARGUMENT, never
+- **No decision-record references in code.** Decisions are cited by their ARGUMENT, never
   by number: a comment says *why*, and a reader must not have to open
-  `docs/adr/` to understand the line in front of them. The ADRs remain the
+  the decision log to understand the line in front of them. The records remain the
   record of the decision — they are just not load-bearing for reading the code.
 - Identifiers (classes, methods, fields, packages) are in English — the
   vocabulary locked in `docs/API-DESIGN.md`/`docs/MOHS-DOCUMENTO-MESTRE.md`
@@ -38,7 +43,8 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
   celebrating the basics: the bar for excellence starts after them.
 - Every relevant decision is born with explicit trade-offs: alternatives
   considered, why this one, what we are paying. Architecture decisions become
-  a mini-ADR (context → decision → consequences) in `docs/adr/`.
+  a decision record (context → decision → consequences → alternatives) in
+  `docs/15-design-decisions/records/`, numbered `DR-nnn`.
 - Think failure modes first: what happens if the process dies between claim
   and execution? If two nodes fire the same trigger? If the clock goes
   backwards? Code that doesn't answer these is not ready.
@@ -120,7 +126,9 @@ For any task that changes code:
 - `docs/MOHS-DOCUMENTO-MESTRE.md` — product vision and vocabulary.
 - `docs/API-DESIGN.md` — public API design (source of naming).
 - `docs/REST-API-DESIGN.md` — endpoint ↔ controller table (M2).
-- `docs/adr/` — architecture decisions; an ADR outranks opinions in chat.
+- `docs/15-design-decisions/` — the decision log (`DR-nnn`); a record outranks
+  opinions in chat. `docs/old/adr/` is the historical `ADR-nnnn` series and goes
+  away with `docs/old/`; no new record is written there.
 - `BASELINE.md` — reference performance numbers.
 - `docs/RATE-LIMIT-EVOLUTION.md` — deferred rate-limit improvements, each with
   its measured trigger (companion to ADR-0042).
@@ -139,12 +147,12 @@ For any task that changes code:
 - `docs/old/PLAN.md` — current refactor steps; one step per commit/PR.
 
 ## Identity and naming
-- Repository: github.com/robsonkades/mohs · Maven groupId: `io.mohs` ·
+- Repository: github.com/robsonkades/mohs · Maven groupId: `io.github.robsonkades` ·
   domains: mohs.io / mohs.dev. The `mohs-io` org was the plan in
   `docs/old/MOHS-DOCUMENTO-MESTRE.md`; the repository actually lives under the
   personal account, and every URL in the POMs, the workflows and the community
   files points there.
-- Multi-module reactor under `io.mohs:mohs-parent`, full Spring Boot
+- Multi-module reactor under `io.github.robsonkades:mohs-parent`, full Spring Boot
   (ADR-0044, which revokes ADR-0001's single artifact): `mohs-cron`,
   `mohs-api`, `mohs-engine`, `mohs-store-jdbc`, `mohs-rest`, `mohs-test`,
   `mohs-ui`, `mohs-spring-boot-starter`, `mohs-demo` (app, never published)
@@ -155,8 +163,8 @@ For any task that changes code:
 
 ## Architecture (a map, not an encyclopedia)
 Public API (contracts, M1 — see
-`docs/adr/0015-consolidate-public-api-under-core.md`, which revises
-`docs/adr/0013-public-api-subpackaging.md`), all under `io.mohs.core`:
+`docs/old/adr/0015-consolidate-public-api-under-core.md`, which revises
+`docs/old/adr/0013-public-api-subpackaging.md`), all under `io.mohs.core`:
 - `io.mohs.core` — facade (`Mohs`, `MohsLifecycle`, `EngineState`,
   `ScheduleCommand`) and scheduling receipt (`Batch`, `BatchBuilder`)
 - `io.mohs.core.job` — shared identity (`JobKey`, `JobRef`), extracted apart

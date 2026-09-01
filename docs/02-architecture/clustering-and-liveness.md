@@ -97,7 +97,7 @@ sequenceDiagram
 ```
 
 The epoch bump is what makes the zombie lose **all** its writes, not merely the reclaimed one.
-`ArchitectureTest`-independent evidence: the `SUSPEND` scenario in `scripts/chaos-recovery.ps1`
+Evidence from a running cluster rather than from a static rule: the `SUSPEND` scenario in `scripts/chaos-recovery.ps1`
 asserts zero executions with more than one `SUCCEEDED` attempt.
 
 ## Sharding
@@ -230,7 +230,7 @@ Summarised in the standard vocabulary:
 For clusters where host clocks are not trustworthy, `mohs.time.mode=database` swaps the injected
 `Clock` for `DatabaseClock`:
 
-- `sync()` samples `SELECT CURRENT_TIMESTAMP` with round-trip compensation (the midpoint of the
+- `sync()` samples the delegate's now-query with round-trip compensation (the midpoint of the
   request), computes the offset, and applies a **monotonic clamp** — a sample that would move time
   backwards is discarded rather than adjusted, and retried next time.
 - `instant()` never performs I/O: it is `systemClock.instant() + offset`, O(1).
@@ -239,8 +239,13 @@ For clusters where host clocks are not trustworthy, `mohs.time.mode=database` sw
 - A first synchronous sync happens at boot, deliberately blocking — the engine must not start with
   an unsynchronised clock — and then `mohs.time.sync-interval` (30 s) schedules the resync.
 
-**Known gap**: on SQL Server, `CURRENT_TIMESTAMP` is a zoneless `DATETIME` interpreted in the JVM's
-zone. Recorded in `DatabaseClock#sync`'s comments; see [technical debt](../technical-debt.md).
+**The zone is stated, never implied.** The statement and the crossing back to an instant are one
+decision, and both belong to the delegate. PostgreSQL and H2 answer `CURRENT_TIMESTAMP` with a zone
+and are read as an `OffsetDateTime`; SQL Server and MySQL are zoneless, so they ask for UTC outright
+(`SYSUTCDATETIME()`, `UTC_TIMESTAMP(6)`) and are read as a `LocalDateTime` declared to be UTC. Read
+back as a `java.sql.Timestamp` instead, those two measured a three-hour "clock offset" on a JVM three
+hours from the server — the distance between two zones, not between two clocks.
+`DatabaseClockZoneTest` holds this against a real server of each kind.
 
 ## Cluster-wide mutual exclusion, in full
 

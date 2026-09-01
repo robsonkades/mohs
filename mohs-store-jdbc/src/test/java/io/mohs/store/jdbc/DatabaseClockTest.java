@@ -16,6 +16,7 @@
 package io.mohs.store.jdbc;
 
 import java.sql.SQLException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -33,6 +34,8 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.slf4j.LoggerFactory;
 
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
+import io.mohs.store.jdbc.delegate.JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -47,6 +50,8 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  */
 class DatabaseClockTest {
 
+    private static final ZoneId UTC = ZoneId.of("UTC");
+    private static final JdbcDelegate DELEGATE = new H2JdbcDelegate();
     private static final Duration SKEW_WARN_THRESHOLD = Duration.ofSeconds(1);
     private static final Duration TOLERANCE = Duration.ofSeconds(2);
 
@@ -66,6 +71,10 @@ class DatabaseClockTest {
         logger.detachAppender(logAppender);
     }
 
+    private static DatabaseClock clockOver(DataSource dataSource, Clock appClock) {
+        return new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, DELEGATE, UTC, appClock);
+    }
+
     private static DataSource h2DataSource() {
         JdbcDataSource h2 = new JdbcDataSource();
         h2.setURL("jdbc:h2:mem:clock-sync-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
@@ -76,8 +85,8 @@ class DatabaseClockTest {
 
     @Test
     void appliesTheSampledOffsetWhenDatabaseAndAppClockAgree() {
-        MutableClock appClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
-        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        MutableClock appClock = new MutableClock(Instant.now(), UTC);
+        DatabaseClock clock = clockOver(dataSource, appClock);
 
         clock.sync();
 
@@ -87,8 +96,8 @@ class DatabaseClockTest {
     @Test
     void appliesAPositiveOffsetWhenTheDatabaseIsAhead() {
         Duration expected = Duration.ofSeconds(5);
-        MutableClock appClock = new MutableClock(Instant.now().minus(expected), ZoneId.of("UTC"));
-        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        MutableClock appClock = new MutableClock(Instant.now().minus(expected), UTC);
+        DatabaseClock clock = clockOver(dataSource, appClock);
 
         clock.sync();
 
@@ -107,8 +116,8 @@ class DatabaseClockTest {
      */
     @Test
     void offsetNeverDecreasesAcrossAResampleThatWouldMoveItBackward() {
-        MutableClock appClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
-        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        MutableClock appClock = new MutableClock(Instant.now(), UTC);
+        DatabaseClock clock = clockOver(dataSource, appClock);
 
         clock.sync();
         Duration offsetAfterFirstSync = clock.currentOffset();
@@ -132,12 +141,12 @@ class DatabaseClockTest {
     @Test
     void keepsThePreviouslyLearnedOffsetWhenAResyncFails() throws SQLException {
         Duration expected = Duration.ofSeconds(3);
-        MutableClock appClock = new MutableClock(Instant.now().minus(expected), ZoneId.of("UTC"));
+        MutableClock appClock = new MutableClock(Instant.now().minus(expected), UTC);
         DataSource flaky = Mockito.mock(DataSource.class);
         Mockito.when(flaky.getConnection())
                 .thenReturn(dataSource.getConnection())
                 .thenThrow(new SQLException("connection refused"));
-        DatabaseClock clock = new DatabaseClock(flaky, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        DatabaseClock clock = clockOver(flaky, appClock);
 
         clock.sync();
         Duration offsetAfterSuccess = clock.currentOffset();
@@ -150,8 +159,8 @@ class DatabaseClockTest {
 
     @Test
     void withZoneKeepsTheSameInstantAndDelegatesFutureSyncs() {
-        MutableClock appClock = new MutableClock(Instant.now(), ZoneId.of("UTC"));
-        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        MutableClock appClock = new MutableClock(Instant.now(), UTC);
+        DatabaseClock clock = clockOver(dataSource, appClock);
         clock.sync();
 
         var saoPaulo = clock.withZone(ZoneId.of("America/Sao_Paulo"));
@@ -160,10 +169,52 @@ class DatabaseClockTest {
         assertThat(saoPaulo.instant()).isEqualTo(clock.instant());
     }
 
+    /**
+     * The node the clamp used to lock out. A host whose local clock runs AHEAD of the database has a
+     * NEGATIVE offset, and a clamp anchored at {@code Duration.ZERO} compared every one of its samples
+     * against a value nobody measured — discarding all of them, forever, so {@code mode=database} was a
+     * silent no-op on exactly the host whose clock was not to be trusted. And that is the host that
+     * judges a peer's lease by its own fast clock and reaps a live one.
+     *
+     * <p>Monotonicity is a property of the SEQUENCE of samples; the seed is not a sample. Put the anchor
+     * back at zero and this is the only test in the reactor that turns red.
+     */
+    @Test
+    void adoptsTheFirstSampleEvenWhenItIsNegativeBecauseTheAppClockRunsAhead() {
+        Duration appClockIsAheadBy = Duration.ofSeconds(5);
+        MutableClock appClock = new MutableClock(Instant.now().plus(appClockIsAheadBy), UTC);
+        DatabaseClock clock = clockOver(dataSource, appClock);
+
+        clock.sync();
+
+        assertThat(clock.isSynchronised()).isTrue();
+        assertThat(clock.currentOffset()).isBetween(
+                appClockIsAheadBy.negated().minus(TOLERANCE), appClockIsAheadBy.negated().plus(TOLERANCE));
+    }
+
+    /**
+     * A discard is invisible unless it says so. The clamp is the right answer to a transient measurement
+     * error and the wrong one to a persistent disagreement — in the second case the samples keep
+     * arriving, keep being dropped, and the offset quietly stops converging with nothing in the log to
+     * say which node is refusing to move.
+     */
+    @Test
+    void warnsWhenASampleIsDiscardedByTheClamp() {
+        MutableClock appClock = new MutableClock(Instant.now(), UTC);
+        DatabaseClock clock = clockOver(dataSource, appClock);
+        clock.sync();
+
+        appClock.advance(Duration.ofHours(1));
+        clock.sync();
+
+        assertThat(logAppender.list)
+                .anyMatch(event -> event.getFormattedMessage().contains("would move this node's time backwards"));
+    }
+
     @Test
     void warnsWhenSkewExceedsTheThreshold() {
-        MutableClock appClock = new MutableClock(Instant.now().minus(Duration.ofMinutes(1)), ZoneId.of("UTC"));
-        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, ZoneId.of("UTC"), appClock);
+        MutableClock appClock = new MutableClock(Instant.now().minus(Duration.ofMinutes(1)), UTC);
+        DatabaseClock clock = clockOver(dataSource, appClock);
 
         clock.sync();
 

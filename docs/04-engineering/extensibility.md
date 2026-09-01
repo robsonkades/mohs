@@ -156,7 +156,7 @@ Not extension points in the SPI sense, but the way you extend Mohs' vocabulary:
 | --- | --- |
 | `Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`, `BatchBuilder`, `JobContext` | Non-sealed only because the implementation lives in another module and the project does not use a JPMS `permits` clause across them. **They may gain methods in minor releases.** Implementing them breaks with `AbstractMethodError` on the first new method |
 | `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `StoreTransactions` | Internal ports in `io.mohs.engine`. Not published as an SPI, and the auto-configuration registers concrete implementations with no `@ConditionalOnMissingBean` |
-| `JdbcDialect` | Internal. Adding a database is a change to the library, not a consumer extension |
+| `JdbcDelegate` | Internal, but a bean of your own replaces it: `mohsJdbcDelegate` is `@ConditionalOnMissingBean`. Adding a *supported* database is still a change to the library |
 | Any sealed type (`Schedule`, `ExecutionEvent`, `JobSpec`, `PolicySpec`, `ScheduleView`) | Not implementable at all — which is precisely why they can grow freely and stay binary-compatible |
 
 To test handlers, use `io.mohs.test` (`MutableClock`, `InMemoryJobStore`) rather than implementing
@@ -174,17 +174,23 @@ To test handlers, use `io.mohs.test` (`MutableClock`, `InMemoryJobStore`) rather
 
 Not a consumer extension, but the shape is worth recording because the design supports it cleanly:
 
-1. Implement `JdbcDialect`. Override only what genuinely differs — `migrationLocation()` is
-   mandatory; `topClause`/`limitClause`, `lockFreeReadHint`, `splitTimestamp`/`readSplitTimestamp`,
-   `selectReadyCandidates` and `claimReady` all have portable defaults.
-2. Add `src/main/resources/io/mohs/store/jdbc/migration/<dialect>/V1..Vn`, keeping every migration
-   **idempotent** so an existing hand-created schema can adopt Flyway by running V1 as a no-op.
-3. Add `src/main/resources/schema-<dialect>.sql` — the parallel hand-install path.
+1. Implement `JdbcDelegate`. **Every statement method is abstract**: write out all 66, even the ones
+   that will read the same as PostgreSQL's. That includes the clock — `nowQuery()` and `readNow()`
+   are a pair, and answering one without the other is the bug they exist to prevent: state whether
+   your server's `now` carries a zone, and if it does not, ask it for UTC outright.
+   `selectReadyCandidates` and `claimReady` carry defaults, but those are the claim *algorithm*,
+   not SQL.
+2. Add `src/main/resources/schema-<dialect>.sql` — the installer, idempotent, so re-running it against
+   an existing database is a no-op.
+3. Add `src/main/resources/io/mohs/store/jdbc/migration/<dialect>/V1..Vn` — the delta chain for an
+   operator upgrading a database that already has an older schema. Also idempotent.
 4. Add the enum value to `MohsProperties.Jdbc.Dialect` and the branch in
-   `MohsAutoConfiguration#mohsJdbcDialect`.
-5. Add a Testcontainers `*TestSupport`, a `MohsFlyway<Dialect>Test` (the structural guardian), a
-   `Schema<Dialect>RoundTripTest` (Flyway path versus hand-install path), and a
-   `JdbcWorkQueue<Dialect>Test`.
+   `MohsAutoConfiguration#mohsJdbcDelegate`.
+5. Add a Testcontainers `*TestSupport`, a `Schema<Dialect>RoundTripTest` (the stores against a real
+   database) and a `JdbcWorkQueue<Dialect>Test`. If the database gets a delta chain, add the
+   structural guardian too — `SchemaPostgresChainMatchesInstallerTest` is the model: it builds one
+   database from the installer and one from the chain and compares the structure, which is the only
+   thing keeping the two copies of the schema honest.
 
 The declared constraint is that **the claim's contract is identical in all dialects**: the returned
 list comes back in `(priority, visible_at)` order, and the queue-removal plus ownership-insert are

@@ -1,6 +1,6 @@
 # Dialects
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`io.mohs.store.jdbc.dialect`)
+Status: Active · Last Reviewed: 2026-08-30 · Source of Truth: Repository (`io.mohs.store.jdbc.delegate`)
 
 ## Support tiers
 
@@ -26,38 +26,57 @@ mohs:
 
 An unset dialect **fails the boot**, naming the four valid values.
 
-The reasoning, from `JdbcDialect`'s Javadoc: detecting through `Connection.getMetaData()` is fragile
+The reasoning, from `JdbcDelegate`'s Javadoc: detecting through `Connection.getMetaData()` is fragile
 across driver forks and versions. This is the same pattern Quartz uses with
 `org.quartz.jobStore.driverDelegateClass`.
 
-## What actually differs
+## Every statement lives in the delegate
 
-The interface is deliberately small — only the genuine divergences:
+`JdbcDelegate` declares **66 statement methods, all abstract**, and each of the four implementations
+spells out all 66. Nothing is assembled from fragments and nothing is inherited: reading
+`PostgresJdbcDelegate` top to bottom answers *what does Mohs send to PostgreSQL* without
+reconstructing a statement from a base class and an override.
 
-| Method | Default | Overridden by |
-| --- | --- | --- |
-| `migrationLocation()` | — (abstract in practice) | All four |
-| `topClause()` | `""` | SQL Server → `"TOP (:limit) "` |
-| `limitClause()` | `"LIMIT :limit"` | SQL Server → `""` |
-| `lockFreeReadHint()` | `""` | SQL Server → `"WITH (NOLOCK) "` |
-| `splitTimestamp(Instant)` | UTC `LocalDateTime` | PostgreSQL → UTC `OffsetDateTime` |
-| `readSplitTimestamp(rs, col)` | `LocalDateTime` | PostgreSQL → `OffsetDateTime` |
-| `selectReadyCandidates(...)` | ANSI `FOR UPDATE SKIP LOCKED` | SQL Server → `TOP` + table hint |
-| `claimReady(...)` | Three statements: select, delete, batched insert | PostgreSQL → one CTE statement |
+That is a deliberate trade. **59 of the 66 come out byte-identical across the four files**, and
+keeping them that way is duplication a base class would remove. What it buys:
 
-**Each implementation owns the claim's entire SQL template**, not concatenable fragments. SQL
-Server's `TOP` changes **position** in the query — right after `SELECT`, not at the end like `LIMIT`
-— so a composition of generic fragments does not close cleanly. This is how Hibernate actually
-implements `LimitHandler` underneath (it receives the SQL and returns rewritten SQL), and the shape
-Quartz's delegates use.
+- a divergence is *visible*, because it sits beside the 59 that agree, rather than implied by an
+  override somewhere else;
+- adding a database cannot half-inherit a statement that happens to be wrong for it — the compiler
+  demands all 66;
+- and the SQL a reader is debugging at 3 a.m. is the SQL in the file, not the SQL after inheritance.
 
-`JdbcDialect` is modelled on Hibernate's `LimitHandler`/`LockingStrategy` shape — small interfaces,
-one concern each — **without taking Hibernate as a dependency**: those two interfaces live inside
-`Dialect`, which only exists after initialising a `SessionFactory`/`ServiceRegistry`, so using them
-in isolation would mean adopting much of the framework anyway.
+`JdbcDelegateStatementDriftTest` is what keeps the duplication honest: it compares the named
+parameters of every statement across the four delegates, so a database whose statement quietly stops
+binding the same things fails the build.
 
-Each supported database gets its own implementation class **even where the SQL is identical today**,
-so as not to couple independent databases to a present-day coincidence of syntax.
+### The seven that genuinely differ
+
+| Statement | Why it diverges |
+| --- | --- |
+| `readyCandidates`, `readyCandidatesFiltered` | `TOP (:limit)` sits right after `SELECT` on SQL Server, where the others put `LIMIT` at the end, and the row-skipping hint is a table hint rather than a clause |
+| `findOrphanedLeases`, `findOrphanedLeasesExceptAlive` | Same limit-position problem |
+| `findExecutionPage` | Same, on the history page |
+| `visibleWorkExists`, `visibleWorkCount` | SQL Server carries `WITH (NOLOCK)` on the idle gate; the others need no hint |
+
+PostgreSQL additionally replaces the claim *algorithm* rather than a statement: `claimReady` becomes
+one CTE instead of the portable three.
+
+### What still carries a default
+
+Only `selectReadyCandidates` and `claimReady`, and those are the claim's sequence of steps rather
+than SQL. Every statement is abstract, and so is the clock: `nowQuery()` and `readNow()` are a pair,
+and both halves are abstract on purpose. The question they answer — does this server's `now` carry a
+zone, and how is it crossed back into an instant — used to be a boolean with a fail-safe `false`,
+which a delegate could answer by never thinking about it, at the cost of `mohs.time.mode=database`
+being refused. An abstract crossing cannot be inherited by accident: an implementation that never
+considered the zone does not compile, and one that did gets database time on any dialect.
+
+`JdbcDelegate` is named after Quartz's `StdJDBCDelegate`/`MSSQLDelegate` — one type per database,
+one concern each. The contrast with Quartz is the configuration: its
+`org.quartz.jobStore.driverDelegateClass` takes a class name, so the property *says* delegate. Mohs
+names a database instead (`mohs.jdbc.dialect: postgresql`), because that is what the operator knows;
+the delegate is what the library picks as a result.
 
 ## PostgreSQL
 
@@ -102,7 +121,7 @@ The dialect with the most divergences, all documented:
 | Parameter ceiling | ~2,100 per statement. `JdbcSupport.chunksOf` and the claim's `limit` bound (dispatch headroom, ≈1,000) keep every statement below it |
 | Lock-free read hint | `WITH (NOLOCK)` on the idle-gate probe only |
 | **Known open item** | `GET /overview`'s counts were rewritten over the split tables and **no longer use the hint**, so without RCSI they take shared locks on all three hot tables. Recorded in [technical debt](../technical-debt.md) |
-| `DatabaseClock` gap | `CURRENT_TIMESTAMP` is a zoneless `DATETIME` interpreted in the JVM's zone. Recorded, with the fix sketched, in `DatabaseClock#sync` |
+| `DatabaseClock` | Samples `SYSUTCDATETIME()`, not `CURRENT_TIMESTAMP`: the latter is a zoneless `DATETIME` the driver reads back in the JVM's zone, and it is only `datetime2` that resolves finer than ~3.3 ms |
 
 ### The `NOLOCK` decision, with its accepted errors
 
@@ -121,8 +140,9 @@ one lap, and error 601 falls into the fail-open fallback that returns the tick t
 A deployment with `READ_COMMITTED_SNAPSHOT ON` makes the hint redundant — **the operator's decision,
 not the library's**.
 
-The hint must **never** be used on a read that hydrates an entity, and today its only caller is the
-idle-gate probe — which is why the method is named `lockFreeReadHint` rather than `lockFreeCount`.
+The hint must **never** be used on a read that hydrates an entity. It appears in exactly two
+statements — `visibleWorkExists` and `visibleWorkCount`, both the idle-gate probe — and nowhere else
+in `SqlServerJdbcDelegate`.
 
 ## H2
 
@@ -143,7 +163,7 @@ Whatever the SQL shape, four properties hold everywhere:
 3. Only rows of the requested shard are considered.
 4. Rows locked by a concurrent claim are **skipped**, never waited on.
 
-## Adding a dialect
+## Adding a database
 
 See [extensibility](../04-engineering/extensibility.md#how-to-add-a-new-database-dialect) for the
 five-step recipe and the tests required.

@@ -46,21 +46,50 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 - `GET /batches/{id}` returned the host's 404: `BatchesController` was implemented, tested and
   documented, and no `@Bean` registered it. A test now asserts that every `@RestController` in
   `io.mohs.rest` has a registering bean.
-- `mohs.time.mode=database` on SQL Server now fails the boot naming the alternative. There,
-  `CURRENT_TIMESTAMP` is a zoneless `DATETIME` the driver reads in the JVM's zone, so the sampled
-  offset was the distance between two zones rather than between two clocks — silently, in the one
-  component whose job is knowing the time.
+- `mohs.time.mode=database` sampled the distance between two ZONES rather than between two clocks on
+  SQL Server and MySQL — silently, in the one component whose job is knowing the time. Both answer
+  `CURRENT_TIMESTAMP` without a zone, and reading it back as a `java.sql.Timestamp` had the driver
+  interpret it in the JVM's zone: measured at +10,800,059 ms on SQL Server and +10,799,407 ms on
+  MySQL from a JVM three hours away. The now-query and the crossing back are now one per-dialect
+  decision — `SYSUTCDATETIME()` and `UTC_TIMESTAMP(6)` state UTC and are read as a `LocalDateTime`
+  declared to be UTC, while PostgreSQL and H2 keep `CURRENT_TIMESTAMP` and are read as an
+  `OffsetDateTime`. The mode is supported on all four dialects; an interim build refused it on the
+  two zoneless ones.
+
+### Removed
+
+- **Flyway, and with it every line of DDL Mohs used to execute.** `MohsFlyway`, the
+  `mohs.jdbc.migrate` property, the `mohs_schema_history` table, `JdbcDelegate#migrationLocation()`
+  and the four Flyway artifacts are gone. **You now install the schema before starting the
+  application** — apply `schema-<dialect>.sql`, which still ships inside `mohs-store-jdbc`'s jar, and
+  apply the `V*.sql` deltas yourself when upgrading. An embedded library should not run DDL against a
+  database it does not own — and in most organisations that run one at scale, to a team that does
+  not accept an application changing the schema at startup, still less a third-party jar inside it.
+
+  **What this asks of you.** Starting against a database with no schema now fails at boot with the
+  driver's own message (`relation "mohs_rate_limits" does not exist` on PostgreSQL) rather than
+  creating anything. Nothing records which versions a database has already seen, so folding the
+  `V*.sql` files into the migration tooling you already run is the recommended path — see
+  [installing and upgrading the schema](docs/06-data/migrations.md). Delete `mohs.jdbc.migrate` from
+  your configuration: an unknown `mohs.*` property is ignored, so it will not fail your boot, and it
+  will not do anything either.
 
 ### Changed
 
+- `mohs.engine.node-lease-ttl` now has a validated floor of `12s`; anything shorter fails the boot
+  naming the property, the floor and what to type instead. The heartbeat goes out once per tick, and
+  the sleep plus the prune and the queue-depth count that follow it (`node-lease-ttl/3` + 5 s + 2 s)
+  have to fit inside the promise with room to spare — at 12 s a second is left for clock skew and the
+  heartbeat's own write latency. Below the floor a node loses the lease it is renewing while alive and
+  working, and its peers reap what it is still running.
 - `retries` defaults to `1` instead of `0`, so at-least-once delivery holds by default. Under a
   false positive of death detection this admits two **concurrent** invocations of the same
   execution, which `preventOverlap` does not stop.
-- The Flyway chain `V1`→`V4` is destructive to data from the single-table era.
-- **Applied migrations were rewritten before 1.0, and Flyway validates on migrate.** A database that
+- The `V1`→`V4` chain is destructive to data from the single-table era.
+- **Published deltas were rewritten before 1.0, and nothing detects that any more.** A database that
   already ran the previous `V5` (PostgreSQL) or `V3` (SQL Server, whose `VARCHAR` became `NVARCHAR`)
-  fails to boot with a checksum mismatch. Pre-1.0 databases are disposable: recreate the schema, or
-  run `flyway repair` against `mohs_schema_history` after confirming the schema matches
+  used to fail the boot on a checksum mismatch; with Flyway gone there is no checksum and no
+  complaint — it simply runs with the wrong schema. Pre-1.0 databases are disposable: recreate from
   `schema-<dialect>.sql`. On SQL Server the old `V3` is worse than a mismatch — its
   `IF OBJECT_ID(...) IS NULL` makes the new version a no-op there, so a fresh install gets `NVARCHAR`
   and an upgraded one keeps `VARCHAR`, and only the first satisfies `V8`'s 900-byte clustered-key

@@ -127,7 +127,7 @@ attempt.
 | A daily job ran once, not twice, on the DST fall-back day | **Deliberate**: the repetition is suppressed. A loss is worse than a delay, and duplicating a daily close is the worst outcome | Working as intended |
 | Cron times look wrong | The zone is mandatory in `CronSpec` and never the JVM default | Check the declared `zone` |
 | Timestamps look an hour off | This was a real defect in the `java.sql.Timestamp` path during the DST gap, fixed by the `LocalDateTime` crossing | If seen on a current version, report it |
-| SQL Server `database` mode drifts | **A recorded gap**: `CURRENT_TIMESTAMP` there is a zoneless `DATETIME` interpreted in the JVM's zone | Use `application` mode with NTP on SQL Server |
+| `database` mode drifts by a whole number of hours | The delegate's now-query is not stating UTC — the offset is the distance between the JVM's zone and the server's, not a clock difference | Only reachable through a delegate written outside this repository; the four shipped ones are covered by `DatabaseClockZoneTest` |
 
 ## The dashboard
 

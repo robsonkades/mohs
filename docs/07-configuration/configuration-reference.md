@@ -12,7 +12,7 @@ metadata is generated from the `@param` documentation.
 | --- | --- | --- | --- |
 | `mohs.enabled` | No | `true` | **Master gate.** `false` removes every Mohs bean from the context |
 | `mohs.jdbc.dialect` | **YES** | *(none)* | `h2` / `postgresql` / `mysql` / `sqlserver`. Never auto-detected; an unset value **fails the boot** |
-| `mohs.jdbc.migrate` | No | `true` | Run Mohs' own Flyway migrations at boot. `false` for an externally managed schema — the migrations stay in the jar as the source of truth |
+
 | `mohs.engine.poll-interval` | No | `25ms` | The **floor** of the tick interval |
 | `mohs.engine.max-poll-interval` | No | `2s` | The **ceiling** of the idle backoff. Must be `>= poll-interval` |
 | `mohs.engine.batch-size` | No | `50` | Maximum executions claimed per claim statement |
@@ -121,7 +121,6 @@ These are checked at boot and **fail the boot** when violated:
 | `watchdog-timeout > node-lease-ttl` | `EngineSettings` | That the bound sits **on top of** node liveness, not as a shorter lease |
 | `misfire-threshold > 0` | `EngineSettings` | That a non-positive threshold turns every normally-late fire into a misfire |
 | `idempotency-retention >= 0` | `EngineSettings` | That zero is the opt-out and negative is meaningless — the message says so rather than pruning by a cutoff in the future |
-| `time.mode != database` on SQL Server | `MohsAutoConfiguration` | That `CURRENT_TIMESTAMP` is zoneless there, so the sampled offset would be the JVM's zone rather than the database's clock |
 | every declared `retryPolicy` has a bean | `MohsEngineLifecycle` | That a missing bean would fail executions on the built-in backoff, indistinguishable from the custom policy having chosen it (ORPHANED definitions are exempt — their annotation is gone from the code, so the bean legitimately is too) |
 | A rate limit's `window >= max` nanoseconds | `RateLimit.requireRefillable` | That one token is issued every `window/max` |
 | A runner field matches its mode | `MohsRunners` | The property and the mode |
