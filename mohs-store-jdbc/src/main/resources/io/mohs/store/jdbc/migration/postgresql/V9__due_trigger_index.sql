@@ -1,0 +1,22 @@
+-- Codebase review of 2026-08-30 (no decision record of its own: this is a measured
+-- correction, not an architecture decision). mohs_job_definitions carried no index at
+-- all, and findDueRecurringJobs reads it on EVERY tick, on the engine loop thread, ahead
+-- of the firing and the claim:
+--
+--   WHERE retired = false AND paused = false AND orphaned = false
+--     AND next_fire_at IS NOT NULL AND next_fire_at <= ? ORDER BY next_fire_at
+--
+-- Without the index that is a full scan of every definition, per tick, per node, and the
+-- release criterion asks for 10M scheduled triggers. Measured on PostgreSQL 18, 100k
+-- definitions with 951 due:
+--   Seq Scan, "Rows Removed by Filter: 100173", 1822 buffers, 7.63 ms
+--   -> Bitmap Index Scan, 48 buffers, 0.229 ms
+-- The range column leads on its own: the three booleans are near-constant false, so they
+-- filter nothing an index could narrow, and next_fire_at first also serves the ORDER BY.
+--
+-- The write side is what has to justify it, and here it costs nothing measurable: this
+-- table is written once per FIRING (advanceTriggerByCas, armNextFire), never once per
+-- execution, and 100k trigger advances took 745 ms with the index against 752 ms without.
+-- Index size at 100k definitions: 760 kB against a 14 MB heap.
+
+CREATE INDEX IF NOT EXISTS idx_mohs_job_next_fire ON mohs_job_definitions (next_fire_at);
