@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mohs</groupId>
+        <groupId>io.github.robsonkades</groupId>
         <artifactId>mohs-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
@@ -13,5 +13,5 @@
     <packaging>jar</packaging>
 
     <name>Mohs :: Cron</name>
-    <description>Parsing e próxima ocorrência de expressões cron seconds-first (L/W/# do Quartz).</description>
+    <description>Parsing and next occurrence of seconds-first cron expressions, with Quartz's L, W and # extensions.</description>
 </project>

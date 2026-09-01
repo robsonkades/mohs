@@ -147,8 +147,8 @@ export function useLiveUpdates(): { status: StreamStatus; asOf: string | null } 
       heard();
       seedArray<NodeResponse>(queryClient, queryKeys.nodes(), event.data);
     });
-    // Node-local by contract (ADR-0063 §5, which reverses the call recorded in
-    // DASHBOARD-STREAM-REVIEW §5): `max`/`running` describe the process that answered this SSE,
+    // Node-local by contract, reversing an earlier call to keep node-local data out of a
+    // cluster-wide channel: `max`/`running` describe the process that answered this SSE,
     // not the cluster. It is here because concurrency without a denominator cannot say whether 59
     // is slack or saturation — the panel labels the scope, and never divides the cluster-wide
     // overview.RUNNING by this per-node max. Sole writer of this key: a page polling it in

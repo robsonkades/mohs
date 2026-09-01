@@ -13,8 +13,9 @@ name: Release
 #   MAVEN_GPG_PRIVATE_KEY  - ASCII-armored GPG private key used for signing
 #   MAVEN_GPG_PASSPHRASE   - passphrase of that key
 #
-# Required once, outside this file: the io.mohs namespace verified in the Central Portal
-# against the DNS of mohs.io, and the signing key published to a keyserver.
+# Required once, outside this file: the io.github.robsonkades namespace verified in the Central
+# Portal (automatic for an io.github.* namespace owned by the GitHub account), and the signing key
+# published to a keyserver.
 
 on:
   workflow_dispatch:

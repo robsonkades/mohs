@@ -14,7 +14,7 @@ import { UtilizationBar } from "../components/UtilizationBar";
 import type { RateLimitResponse } from "../types/api";
 
 /**
- * `available` is the bucket's balance right NOW, cluster-wide (ADR-0042) — the bar shows
+ * `available` is the bucket's balance right NOW, cluster-wide — the bar shows
  * consumption, which is what gets read at 3 a.m. ("is it saturated?"), not balance. A negative
  * balance is not in the contract, but the clamp keeps the bar from breaking if it ever is.
  */

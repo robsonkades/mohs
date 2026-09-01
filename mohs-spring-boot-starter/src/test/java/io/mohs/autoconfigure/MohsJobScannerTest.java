@@ -152,7 +152,7 @@ class MohsJobScannerTest {
         // The record built directly, with the same defaults as the binding — the scanner only reads registration()
         MohsProperties properties = new MohsProperties(
                 true,
-                new MohsProperties.Jdbc(null, true),
+                new MohsProperties.Jdbc(null),
                 new MohsProperties.Engine(Duration.ofSeconds(5), Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60), Duration.ofDays(7), 64, 16, false),
                 new MohsProperties.Lifecycle(MohsProperties.Lifecycle.StartMode.AUTO,
                         new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30))),
@@ -193,7 +193,7 @@ class MohsJobScannerTest {
     private void seedDivergedStoredDefinition() {
         JobDefinition existing = new JobDefinition(JobKey.of("welcome-email"), null, WelcomeEmailJob.class,
                 new IntervalSpec(Duration.ofMinutes(5), false),
-                null, null, Misfire.IGNORE, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
+                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
         jobStore.upsert(existing);
     }
 

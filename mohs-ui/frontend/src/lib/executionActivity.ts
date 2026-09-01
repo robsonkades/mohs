@@ -4,8 +4,8 @@ import { LIVE_STATES, type ExecutionState } from "../types/api";
 /**
  * One reading, as the server saw it at `asOf`: the three live gauges plus the RATE.
  *
- * <p>The rate is why this panel exists at all — ADR-0063 carries the measurement, and it is the one
- * place that number should be written down.
+ * <p>The rate is why this panel exists at all, and it is the one place that number should be
+ * written down.
  */
 export interface ActivitySample {
   /** Terminal executions per second over the server's short window — "is anything happening". */
@@ -55,8 +55,8 @@ export function recordActivitySample(
 
   const at = Date.parse(asOf);
   // The x axis is a time scale now, so `at` is a coordinate, not a label. An unparseable stamp
-  // (NaN) or one that moved backwards (the server's Clock may step back on an NTP resync — see
-  // REST-API-DESIGN on `asOf` informing freshness, not ordering) would either blank the series
+  // (NaN) or one that moved backwards (the server's Clock may step back on an NTP resync, and
+  // `asOf` informs freshness, not ordering) would either blank the series
   // through the cutoff or draw the line zig-zagging into the past.
   // The rate joins the same guard rather than falling back to 0: a zero in this series is not
   // "unknown", it is the claim "nothing is happening" — the exact false reading the panel exists

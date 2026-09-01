@@ -78,7 +78,7 @@ public class MohsRestAutoConfiguration {
     /**
      * The only active guardrail a user reads before exposing the API, which is why its wording
      * matters more than an ordinary log line's: it says what the API CAN do, and what to do about
-     * it ({@code REST-API-DESIGN.md} promises that guidance and the message was not delivering it).
+     * it — a warning that names the risk without naming the remedy only tells an operator to worry.
      */
     public MohsRestAutoConfiguration(MohsProperties properties) {
         String basePath = properties.api().basePath();

@@ -7,7 +7,7 @@ import { durationSeconds } from "../lib/format";
 import type { ScheduleType, ScheduleView } from "../types/api";
 
 /**
- * The body of PATCH /jobs/{jobKey}/schedule (ADR-0036). Three shapes, because the union is sealed
+ * The body of PATCH /jobs/{jobKey}/schedule. Three shapes, because the union is sealed
  * at three: cron, interval and on-demand — and picking ON_DEMAND is what disarms recurrence, not a
  * separate button.
  *

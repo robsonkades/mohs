@@ -448,9 +448,9 @@ class MohsJobsTest {
     @Test
     void diffReportsOnlyChangedFields() {
         JobDefinition original = new JobDefinition(JobKey.of("job"), null, AnnotatedFixtures.class, new OnDemandSpec(),
-                null, null, Misfire.IGNORE, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
+                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
         JobDefinition changed = new JobDefinition(JobKey.of("job"), null, AnnotatedFixtures.class, new OnDemandSpec(),
-                null, null, Misfire.IGNORE, true, 0, 5, null, null, DefinitionSource.ANNOTATION);
+                null, null, null, Misfire.IGNORE, false, true, 0, 5, null, null, DefinitionSource.ANNOTATION);
 
         String diff = MohsJobs.diff(original, changed);
 

@@ -78,8 +78,8 @@ function RunnerRow({ runner }: { runner: RunnerResponse }) {
  * has no reason to assume this one is different.
  */
 export function RunnersPage() {
-  // Fed by the stream's `runners` frame (ADR-0063 §5, which reverses the "node-local data stays
-  // out of a cluster-wide channel" call recorded in DASHBOARD-STREAM-REVIEW §5). No interval of
+  // Fed by the stream's `runners` frame, reversing an earlier "node-local data stays out of a
+  // cluster-wide channel" call. No interval of
   // its own: with both, an SSE pinned to one node and a poll round-robining across the load
   // balancer would write two different nodes' counters into one cache key twice a second.
   const runners = useQuery({

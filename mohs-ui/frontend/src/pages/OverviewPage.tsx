@@ -94,8 +94,8 @@ function ViewAllLink({ to, search, label }: { to: string; search?: Record<string
  * What pausing this job actually stopped.
  *
  * <p>Pause suspends the TRIGGER and nothing else: `POST /jobs/{key}/schedule` is still accepted
- * and still runs (REST-API-DESIGN, and `JobStore#findDueRecurring` — "pause bloqueia exatamente o
- * trigger; on-demand continua valendo mesmo pausado"). For a recurring job that reads the way an
+ * and still runs: pausing blocks the trigger and nothing else, and an on-demand invocation keeps
+ * working while paused — `JobStore#findDueRecurring` is where that holds. For a recurring job that reads the way an
  * operator expects. For an ON_DEMAND job there is no trigger to suspend, so the flag changes
  * nothing at all — and this row used to claim "will not fire" for exactly that job, which is the
  * opposite of what happens the next time anyone posts to it.
@@ -133,7 +133,7 @@ export function OverviewPage() {
   });
   const jobs = useQuery({ queryKey: queryKeys.jobs(), queryFn: fetchJobs });
   const nodes = useQuery({ queryKey: queryKeys.nodes(), queryFn: fetchNodes });
-  // Seeded by the stream's `runners` frame every 2s (ADR-0063); the fetch is the fallback for when
+  // Seeded by the stream's `runners` frame every 2s; the fetch is the fallback for when
   // SSE never comes up.
   const runners = useQuery({ queryKey: queryKeys.runners(), queryFn: fetchRunners });
   const failedRecent = useQuery({
@@ -150,7 +150,7 @@ export function OverviewPage() {
   const attentionEmpty =
     attentionLoaded && failedRecent.data!.items.length === 0 && pausedJobs.length === 0 && staleNodes.length === 0;
 
-  // Node-local by contract (ADR-0063): `max` is this process's cap and `/runners` answers for
+  // Node-local by contract: `max` is this process's cap and `/runners` answers for
   // whichever node served the request. overview.RUNNING is cluster-wide, so the two must not be
   // divided into each other — the tile says "this node" instead of implying a cluster ratio.
   //

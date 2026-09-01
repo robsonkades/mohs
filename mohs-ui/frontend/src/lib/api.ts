@@ -123,7 +123,7 @@ export function isOverview(data: unknown): data is OverviewResponse {
     executionCountsByStatus !== null &&
     isThroughput(throughput) &&
     // `recent` is required, not optional: it is what the activity panel plots, and a server older
-    // than ADR-0063 answers 200 without it. Failing the query here is what turns a TypeError three
+    // than the activity panel answers 200 without it. Failing the query here turns a TypeError three
     // components away into the retry button the page already knows how to draw.
     isThroughput(recent)
   );
@@ -134,7 +134,7 @@ export function isOverview(data: unknown): data is OverviewResponse {
  * `PT15M`; absent means 60s, and the server clamps to 1s–1h.
  *
  * <p>Validated rather than cast: the type is what the server PROMISES, and this is the one call
- * whose promise changed (ADR-0063 added `recent`). A cast would let a body without `recent` reach
+ * whose promise changed (`recent` was added). A cast would let a body without `recent` reach
  * the panel and throw inside the render.
  */
 export async function fetchOverview(window?: string): Promise<OverviewResponse> {
@@ -174,7 +174,7 @@ export function scheduleJob(
   return command<AcceptedExecutionResponse>(`/jobs/${encodeURIComponent(jobKey)}/schedule`, { body });
 }
 
-/** Changes the schedule at runtime (ADR-0036) — holds until the next boot, as the response `notice` says. */
+/** Changes the schedule at runtime — holds until the next boot, as the response `notice` says. */
 export function rescheduleJob(jobKey: string, schedule: ScheduleView) {
   return command<RuntimePatchResponse<JobResponse>>(`/jobs/${encodeURIComponent(jobKey)}/schedule`, {
     method: "PATCH",
@@ -203,7 +203,7 @@ export function cancelExecution(executionId: string) {
   return command<ExecutionResponse>(`/executions/${encodeURIComponent(executionId)}/cancel`);
 }
 
-/** Manual retry of a FAILED execution (ADR-0033): the SAME row is rearmed. State other than FAILED → 409. */
+/** Manual retry of a FAILED execution: the SAME row is rearmed. State other than FAILED → 409. */
 export function retryExecution(executionId: string) {
   return command<AcceptedExecutionResponse>(`/executions/${encodeURIComponent(executionId)}/retry`);
 }
@@ -214,7 +214,7 @@ export function fetchRateLimits() {
   return request<RateLimitResponse[]>("/rate-limits");
 }
 
-/** Cluster-wide throughput adjustment (ADR-0042). Undeclared limit → 404: declaring one is a boot-time act. */
+/** Cluster-wide throughput adjustment. Undeclared limit → 404: declaring one is a boot-time act. */
 export function patchRateLimit(name: string, body: { max: number; window: string }) {
   return command<RuntimePatchResponse<RateLimitResponse>>(`/rate-limits/${encodeURIComponent(name)}`, {
     method: "PATCH",

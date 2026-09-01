@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mohs</groupId>
+        <groupId>io.github.robsonkades</groupId>
         <artifactId>mohs-parent</artifactId>
         <version>0.0.1-SNAPSHOT</version>
     </parent>
@@ -13,7 +13,7 @@
     <packaging>jar</packaging>
 
     <name>Mohs :: UI</name>
-    <description>Dashboard operacional: Overview, Jobs, Executions e Rate Limits sobre a API REST do Mohs.</description>
+    <description>Operational dashboard: Overview, Jobs, Executions and Rate Limits over the Mohs REST API.</description>
 
     <properties>
         <skip.frontend>false</skip.frontend>

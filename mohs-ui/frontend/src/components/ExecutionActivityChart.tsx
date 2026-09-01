@@ -17,7 +17,7 @@ import type { ExecutionState } from "../types/api";
  *
  * <p>The gauges say `· cluster` because the Overview tile beside this chart says `· this node`, and
  * they are different numbers: measured under load, 59/64/61 cluster-wide against 55/57/59 on the
- * node (ADR-0063 §6). Labelling only one of the two leaves the operator reading a divergence as a
+ * node. Labelling only one of the two leaves the operator reading a divergence as a
  * bug.
  *
  * <p>The rate takes a color of its OWN, outside the state palette, because it is not a state —
@@ -68,7 +68,7 @@ function seriesWithWork(samples: ActivitySample[]): readonly ExecutionState[] {
  * right one.
  *
  * <p>The rate is the series that answers the question the panel is asked — "is anything
- * happening"; the gauges alone could not, and ADR-0063 carries the measurement that says why. They
+ * happening"; the gauges alone could not, and the measurement says why. They
  * stay because "how deep is the queue" is a real second question — on its own axis, because a
  * backlog of 13k and a concurrency of 64 share no scale.
  *

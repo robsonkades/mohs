@@ -41,7 +41,7 @@ class MohsRateLimitsTest {
     private static MohsProperties props(Map<String, MohsProperties.RateLimitSpec> rateLimits) {
         return new MohsProperties(
                 true,
-                new MohsProperties.Jdbc(null, true),
+                new MohsProperties.Jdbc(null),
                 new MohsProperties.Engine(Duration.ofSeconds(5), Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60), Duration.ofDays(7), 64, 16, false),
                 new MohsProperties.Lifecycle(MohsProperties.Lifecycle.StartMode.AUTO,
                         new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30))),

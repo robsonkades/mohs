@@ -96,7 +96,7 @@ export interface ThroughputView {
   succeeded: number;
   failed: number;
   /**
-   * Terminal executions per second over `window`, divided server-side (ADR-0063). The division is
+   * Terminal executions per second over `window`, divided server-side. The division is
    * trivial; parsing the ISO-8601 duration to do it here is not, and a client that gets it wrong
    * draws a wrong chart with no symptom. `window` stays in the payload so this can be checked.
    */
@@ -109,7 +109,7 @@ export interface OverviewResponse {
   throughput: ThroughputView;
   /**
    * A short fixed window (PT10S) that exists to become a rate, not to be read as a count
-   * (ADR-0063). It is NOT a slice of `throughput`: the long window is caller-chosen and may be
+   * It is NOT a slice of `throughput`: the long window is caller-chosen and may be
    * shorter than 10s, and the two counts are separate round trips — so subtracting or stacking one
    * from the other goes negative sooner or later.
    *
