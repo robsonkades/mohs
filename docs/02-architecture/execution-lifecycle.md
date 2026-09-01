@@ -53,7 +53,7 @@ Every transition, and the exact transaction that performs it:
 | --- | --- | --- | --- |
 | **Enqueue** (manual, batch member) | `INSERT mohs_idempotency` (when a key is present) → `INSERT mohs_execution` → `INSERT mohs_ready` | Inherited; `PROPAGATION_NESTED` (a savepoint inside the host's transaction) | `JdbcStoreTransactions`, `ScheduleCommandImpl` |
 | **Trigger firing** | `UPDATE mohs_job_definitions SET next_fire_at = :new WHERE next_fire_at = :observed AND retired = false` → on success, `INSERT mohs_execution` + `INSERT mohs_ready` for each occurrence | Explicit `READ COMMITTED` | `JdbcTriggerFirer` |
-| **Claim** | `SELECT … FOR UPDATE SKIP LOCKED` (or `TOP … WITH (UPDLOCK, ROWLOCK, READPAST)`) → `DELETE mohs_ready` → `INSERT mohs_lease` | Explicit `READ COMMITTED`, `REQUIRES_NEW` | `JdbcWorkQueue#claim` via `JdbcDialect#claimReady` |
+| **Claim** | `SELECT … FOR UPDATE SKIP LOCKED` (or `TOP … WITH (UPDLOCK, ROWLOCK, READPAST)`) → `DELETE mohs_ready` → `INSERT mohs_lease` | Explicit `READ COMMITTED`, `REQUIRES_NEW` | `JdbcWorkQueue#claim` via `JdbcDelegate#claimReady` |
 | **Completion** | `DELETE mohs_lease WHERE (execution_id, node_id, epoch)` → `INSERT mohs_attempt` → `UPDATE mohs_execution` (terminal) *or* `INSERT mohs_ready` (retry) → batch counter → fixed-delay rearm | Explicit `READ COMMITTED`, `REQUIRES_NEW` | `JdbcLeaseStore#complete` |
 | **Requeue** | `DELETE mohs_lease` fenced by `(node_id, epoch)` → `INSERT mohs_ready` with the *same* attempt | Explicit `READ COMMITTED`, `REQUIRES_NEW` | `JdbcWorkQueue#requeue` |
 | **Cancel a queued execution** | `DELETE mohs_ready` → `UPDATE mohs_execution SET state='CANCELLED'` → batch counter | Explicit `READ COMMITTED`, `REQUIRES_NEW` | `JdbcWorkQueue#cancelQueued` |

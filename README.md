@@ -58,7 +58,7 @@ boundary.
 <dependencyManagement>
   <dependencies>
     <dependency>
-      <groupId>io.mohs</groupId>
+      <groupId>io.github.robsonkades</groupId>
       <artifactId>mohs-bom</artifactId>
       <version>${mohs.version}</version>
       <type>pom</type>
@@ -69,13 +69,13 @@ boundary.
 
 <dependencies>
   <dependency>
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-spring-boot-starter</artifactId>
   </dependency>
 
   <!-- optional: the operational dashboard at /mohs-ui -->
   <dependency>
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-ui</artifactId>
   </dependency>
 </dependencies>
@@ -87,8 +87,18 @@ mohs:
     dialect: postgresql     # the ONE mandatory property — never auto-detected
 ```
 
-Mohs creates its own schema on boot, through **its own** Flyway instance and **its own** history
-table. Everything else has a default.
+Everything else has a default — but **you install the schema before starting the application.** Mohs
+executes no DDL: it never creates, alters or migrates a table. Apply `schema-<dialect>.sql`, which
+ships inside `mohs-store-jdbc`'s jar:
+
+```bash
+psql -U postgres -d yourdb -f schema-postgresql.sql
+```
+
+Without it, the first write fails at boot with the driver's own message
+(`relation "mohs_rate_limits" does not exist`). Upgrading an existing database means applying the
+`V*.sql` deltas yourself — see [installing and upgrading the schema](docs/06-data/migrations.md).
+An embedded library does not run DDL against a database it does not own.
 
 ## Architecture at a glance
 
@@ -97,7 +107,7 @@ flowchart TB
     subgraph app["Your application (one node)"]
         code["@MohsJob methods · the Mohs facade"]
         engine["io.mohs.engine — the poll loop, dispatch, retry, the reaper"]
-        store["io.mohs.store.jdbc — Data Mappers, dialects, Flyway"]
+        store["io.mohs.store.jdbc — Data Mappers, delegates"]
         rest["io.mohs.rest — REST v1 (opt-in)"]
         ui["mohs-ui — the dashboard (opt-in)"]
     end
@@ -121,7 +131,7 @@ cost** — measured flat between roughly 0 and 2 M history rows.
 | --- | --- |
 | Java 25, Spring Boot 4.1.0 (imported as a BOM, not inherited as a parent) | |
 | PostgreSQL · MySQL 8.0+ · SQL Server in production; H2 for dev, with a boot WARN | |
-| Flyway, Jackson 3, Micrometer, SLF4J, JSpecify, UUIDv7 | |
+| Jackson 3, Micrometer, SLF4J, JSpecify, UUIDv7 | |
 | React 19 + TanStack + Tailwind for the dashboard | |
 | **No** message broker, HTTP client, cloud SDK, cache or ORM | |
 
@@ -165,7 +175,7 @@ a regression.
 | New to the project | [Product overview](docs/01-overview/product-overview.md) |
 | Integrating Mohs | [Java API](docs/05-api/java-api.md) · [Configuration reference](docs/07-configuration/configuration-reference.md) |
 | Operating it | [Runbook](docs/13-operations/runbook.md) · [Troubleshooting](docs/13-operations/troubleshooting.md) · [Security](docs/08-security/security-overview.md) |
-| Reviewing the design | [Architecture overview](docs/02-architecture/architecture-overview.md) · [Execution lifecycle](docs/02-architecture/execution-lifecycle.md) · [Design decisions](docs/15-design-decisions/README.md) |
+| Reviewing the design | [Architecture overview](docs/02-architecture/architecture-overview.md) · [Execution lifecycle](docs/02-architecture/execution-lifecycle.md) |
 | Contributing | [Local development](docs/14-development/local-development.md) · [Contributing](docs/14-development/contributing.md) |
 
 ## Two things to read before production

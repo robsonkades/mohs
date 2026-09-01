@@ -36,13 +36,13 @@ mohs/
 | **The engine loop** | `mohs-engine/.../io/mohs/engine/Engine.java` |
 | The dispatch pipeline | `mohs-engine/.../io/mohs/engine/Dispatcher.java` |
 | The persistence ports | `mohs-engine/.../io/mohs/engine/{JobStore,WorkQueue,LeaseStore,HistoryStore,…}.java` |
-| **The claim SQL** | `mohs-store-jdbc/.../io/mohs/store/jdbc/dialect/` |
+| **The claim SQL** | `mohs-store-jdbc/.../io/mohs/store/jdbc/delegate/` |
 | **The schema** | `mohs-store-jdbc/src/main/resources/schema-*.sql` |
 | **The migrations** | `mohs-store-jdbc/src/main/resources/io/mohs/store/jdbc/migration/<dialect>/` |
 | **The properties** | `mohs-spring-boot-starter/.../io/mohs/autoconfigure/MohsProperties.java` |
 | **The bean wiring** | `mohs-spring-boot-starter/.../io/mohs/autoconfigure/MohsAutoConfiguration.java` |
 | The `@MohsJob` scanner | `mohs-spring-boot-starter/.../io/mohs/autoconfigure/MohsJobScanner.java` |
-| **The architecture rules** | `mohs-demo/src/test/java/io/mohs/ArchitectureTest.java` |
+| **The architecture rules** | The reactor's own module graph — see [boundaries and fitness functions](../02-architecture/boundaries-and-fitness-functions.md) |
 | **The chaos and load harnesses** | `mohs-benchmark/src/test/java/io/mohs/store/jdbc/*Scenario.java` |
 | The benchmark scripts | `mohs-benchmark/scripts/*.ps1` |
 | The dashboard source | `mohs-ui/frontend/src/` |
@@ -97,12 +97,12 @@ io/mohs/engine/
 main/java/io/mohs/store/jdbc/
 ├── Jdbc{Job,WorkQueue,Lease,History,Node,Batch,RateLimit}Store · JdbcTriggerFirer
 ├── JdbcStoreTransactions · JdbcSupport · JdbcTimestamps
-├── DatabaseClock · MohsFlyway
-└── dialect/  JdbcDialect · {H2,Postgres,MySql,SqlServer}JdbcDialect · ClaimedReady
+├── DatabaseClock
+└── delegate/ JdbcDelegate · {H2,Postgres,MySql,SqlServer}JdbcDelegate · ClaimedReady
 
 main/resources/
 ├── schema-{h2,postgresql,mysql,sqlserver}.sql        the hand-install path
-└── io/mohs/store/jdbc/migration/<dialect>/V1..Vn     the Flyway path
+└── io/mohs/store/jdbc/migration/<dialect>/V1..Vn     the upgrade path, applied by you
 ```
 
 Note: `src/test/java` also contains **`io.mohs.engine`** tests (`EngineTest`, `DispatcherTest`,
@@ -167,10 +167,11 @@ mohs-benchmark/
 Present on disk, absent from git: `*/target/`, `mohs-ui/frontend/node/`,
 `mohs-ui/frontend/node_modules/`, `mohs-ui/frontend/dist/`.
 
-## `docs/old/`
+## What `docs/` does not carry
 
-The previous documentation set, retained for provenance. It contains the earlier design documents,
-the historical decision records, the accumulated performance baselines and the previous plans.
+There is no decision log and no archive of superseded design documents. **The documentation in
+`docs/` was written from the source code**, and it is meant to be read against the source code: where
+a document and the code disagree, the code is authoritative and the document is a bug.
 
-**The documentation in `docs/` was written from the source code**, not from those files. Where the two
-disagree, the code — and therefore this documentation — is authoritative.
+An argument that explains why something is not the obvious thing lives in the document that owns the
+subject, or in a comment on the code itself — never behind a reference number a reader has to chase.

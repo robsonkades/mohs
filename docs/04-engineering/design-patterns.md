@@ -104,10 +104,10 @@ scheduling happens **outside** the constructor, eliminating the this-escape.
 
 | | |
 | --- | --- |
-| **Location** | `ActorResolver` (named as a Strategy in its Javadoc); `JdbcDialect` |
+| **Location** | `ActorResolver` (named as a Strategy in its Javadoc); `JdbcDelegate` |
 | **Intent (ActorResolver)** | With security plugged in, the authenticated principal; without it, the `X-Mohs-Actor` header |
-| **Intent (JdbcDialect)** | Isolate the few genuine SQL divergences |
-| **Design note** | Each dialect owns the claim's **entire** SQL template, not concatenable fragments — SQL Server's `TOP` changes *position* in the query, so a composition of generic fragments does not close cleanly. This is the same shape Quartz uses (`StdJDBCDelegate`/`MSSQLDelegate`) and how Hibernate actually implements `LimitHandler` underneath |
+| **Intent (JdbcDelegate)** | Hold the complete SQL for one database behind one type |
+| **Design note** | Each delegate spells out **all 66 statements** in full, not just the divergent ones — 59 come out byte-identical across the four and 7 genuinely differ. The duplication is deliberate: reading one file answers "what does Mohs send to this database" without reconstructing a statement from a base class and an override. SQL Server's `TOP` changes the *position* of the limit in the query, so fragment composition does not close cleanly anyway. This is the shape Quartz uses (`StdJDBCDelegate`/`MSSQLDelegate`), which is where the name comes from |
 | **Selection** | An **explicit choice, never auto-detection** — detecting through `Connection.getMetaData()` is fragile across driver forks and versions |
 
 ### State machine
@@ -121,8 +121,8 @@ scheduling happens **outside** the constructor, eliminating the this-escape.
 
 | | |
 | --- | --- |
-| **Location** | `JdbcDialect`'s default methods |
-| **Intent** | The portable three-statement claim is the default; PostgreSQL overrides the whole thing with a single statement, SQL Server overrides only the candidate sweep |
+| **Location** | `JdbcDelegate#selectReadyCandidates` and `#claimReady` |
+| **Intent** | The portable three-statement claim is the default *algorithm*; PostgreSQL overrides the whole thing with a single statement. It is the one place a default survives the rule that every statement is spelled out per database — because what is shared here is the sequence of steps, not the SQL |
 
 ## Distributed-systems patterns
 

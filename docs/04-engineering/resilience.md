@@ -121,7 +121,6 @@ flowchart TB
 | `SUSPEND` | Freeze one node longer than `node-lease-ttl`, then resume | Seed fully terminal; reclaim actually happened; **zero** executions with more than one `SUCCEEDED` attempt | 50,000 terminal; 244 reclaimed while frozen; **0 double completions**; 1 epoch-bump WARN on resume; resume→finish 14.6 s |
 | `S8` | `docker pause` the database for 30 s mid-drain | No loss, no exception storm, drain resumes, no self-reap | 50,000 terminal; **0 re-executions**; first completion 259 ms after unpause; 24,109 completions in the following 10 s; 0 exceptions |
 | `NodeChurnScenario` | A node leaves via `stop(grace)`; a new one joins mid-drain | No loss; redelivery bounded to what was in flight; the departed node's shards are claimed again | Asserted in-test |
-| `ConcurrentMigrationScenario` | N replicas call `migrate()` simultaneously against an empty database | Exactly one replica applies each version; none fails to boot; the schema matches a lone migration | Asserted in-test |
 | `RollingUpdateScenario` | A deploy adds a job; part of the cluster lacks the handler | (a) work survives when the rollout finishes within the budget; (b) the cost of a permanently blind node is asserted at the value it **has** | Asserted in-test |
 
 ### A declared limitation of the `SUSPEND` scenario

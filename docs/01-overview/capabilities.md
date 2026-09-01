@@ -87,7 +87,7 @@ The complete feature inventory, each row traceable to code. Status markers are d
 | Operational REST API v1 | Implemented, **off by default** | `mohs.api.enabled` |
 | React dashboard served at `/mohs-ui` | Implemented, **opt-in dependency** | `mohs-ui` plus `MohsUiAutoConfiguration` |
 | Server-sent snapshot stream for the dashboard | Implemented | `OverviewStreamBroadcaster` |
-| `GET /batches/{id}` route | **Implemented, not wired** | The controller exists and is contract-tested, but no bean registers it — see [technical debt TD-01](../technical-debt.md) |
+| `GET /batches/{id}` route | Implemented | `MohsRestAutoConfiguration#mohsBatchesController` |
 | Micrometer metrics under `mohs.*` | Implemented, always on | `EngineMetrics` |
 | Spring Boot Actuator health indicator | **Not present** | No `HealthIndicator` anywhere in the reactor |
 | OpenAPI / Swagger document | **Not present** | No springdoc dependency |
@@ -96,10 +96,10 @@ The complete feature inventory, each row traceable to code. Status markers are d
 
 | Capability | Status | Evidence |
 | --- | --- | --- |
-| PostgreSQL, MySQL 8.0+, SQL Server dialects | Implemented, production tiers | `io.mohs.store.jdbc.dialect` |
-| H2 dialect | Implemented, test/dev tier only, WARN at boot | `MohsAutoConfiguration#mohsJdbcDialect` |
-| Library-owned Flyway migrations in `mohs_schema_history` | Implemented | `MohsFlyway` |
+| PostgreSQL, MySQL 8.0+, SQL Server dialects | Implemented, production tiers | `io.mohs.store.jdbc.delegate` |
+| H2 dialect | Implemented, test/dev tier only, WARN at boot | `MohsAutoConfiguration#mohsJdbcDelegate` |
+| Schema installed by the operator, never by the library | By design | `schema-<dialect>.sql` and the `V*.sql` chain, both shipped in the jar |
 | Idempotent baseline that adopts an existing hand-created schema | Implemented | `V1__mohs_baseline.sql` per dialect |
-| Opt-out of migrations for externally managed schemas | Implemented | `mohs.jdbc.migrate=false` |
-| UUIDv7 primary keys everywhere; no sequences, no UUIDv4 | Implemented, enforced by ArchUnit | `ArchitectureTest.ids_are_generated_as_uuidv7_never_v4` |
+| Any externally managed schema | The only mode there is | Mohs executes no DDL at all |
+| UUIDv7 primary keys everywhere; no sequences, no UUIDv4 | Implemented; **convention, not enforced** | `io.github.robsonkades.uuidv7.UUIDv7` at every call site |
 | Automatic retention or purge of execution history | **Not present** | Only `mohs_idempotency` has a prune method and no caller schedules it — see [data lifecycle](../06-data/data-lifecycle.md) |

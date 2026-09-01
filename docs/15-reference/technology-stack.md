@@ -29,7 +29,6 @@ the tree is written in its shape with the stable API.
 | Spring Boot | **4.1.0** | Auto-configuration, lifecycle, the test slice | Imported as a BOM, not inherited as a parent |
 | Spring Framework | BOM-managed | `spring-core` (annotations), `spring-context`, `spring-tx`, `spring-jdbc` | Across the reactor |
 | Spring Web MVC | BOM-managed, **`<optional>`** | The REST API and the dashboard's static handler | `mohs-rest`, the starter |
-| Flyway | BOM-managed, plus the `postgresql` / `mysql` / `sqlserver` modules | Library-owned migrations | `mohs-store-jdbc` |
 | Jackson | BOM-managed (Jackson 3 — `tools.jackson.databind`) | Payload serialisation, REST bodies | `mohs-store-jdbc`, `mohs-rest` |
 | Micrometer | BOM-managed (`micrometer-core`) | The `mohs.*` metrics | `mohs-engine` |
 | SLF4J | BOM-managed | Logging façade | Everywhere |
@@ -115,7 +114,7 @@ no `lint`.**
 | **A raw `JsonMapper` for payloads**, not the context `ObjectMapper` | The persisted format belongs to Mohs; using the host's HTTP configuration would let it define a durable format shared between nodes and break already-written payloads the day it changed |
 | **Micrometer, always on** | With no registry in the host, a local `SimpleMeterRegistry` keeps the engine identical — no conditional path in hot code |
 | **JSpecify over Spring's or JetBrains' annotations** | The emerging standard, and already available transitively |
-| **Flyway over Liquibase** | SQL-first, which suits four hand-tuned dialects |
+| **No migration engine at all** | The operator installs the schema; an embedded library does not run DDL against a database it does not own |
 
 ## Absent tooling
 

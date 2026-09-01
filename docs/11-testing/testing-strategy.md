@@ -73,8 +73,9 @@ data migration, not a refactor, and this test is what makes that visible.
 | --- | --- |
 | Per-port stores | `JdbcJobStoreTest`, `JdbcWorkQueueTest`, `JdbcLeaseStoreTest`, `JdbcHistoryStoreTest`, `JdbcBatchStoreTest`, `JdbcRateLimitStoreTest`, `JdbcNodeStoreTest`, `JdbcTriggerFirerTest` |
 | Per-dialect | `JdbcWorkQueuePostgresTest`, `…MySqlTest`, `…SqlServerTest`; `JdbcLeaseStorePostgresTest`; `ScheduleCommandPostgresTest` |
-| Migrations | `MohsFlywayTest` plus one per dialect — the structural guardians of the chain |
-| Schema equivalence | `SchemaPostgresRoundTripTest`, `…MySql…`, `…SqlServer…` — the Flyway path versus the hand-install path |
+| Schema equivalence | `SchemaPostgresChainMatchesInstallerTest` — one database built from `schema-postgresql.sql`, one from the `V*.sql` chain, compared column by column and index by index |
+| Stores against a real database | `SchemaPostgresRoundTripTest`, `…MySql…`, `…SqlServer…` |
+| Statement drift | `JdbcDelegateStatementDriftTest` — the named parameters of all 66 statements, across the four delegates |
 | Source scans | `TerminalStateWriteScanTest`, `SqlServerUnicodeScanTest` |
 | Time | `JdbcTimestampsTest`, `DatabaseClockTest` |
 | **Engine tests needing a real store** | `EngineTest`, `DispatcherTest`, `CompletionBatcherTest`, `ScheduleCommandImplTest` — in `io.mohs.engine`, but living here |
@@ -92,9 +93,10 @@ failure, not a regression.
 
 `RestSliceConfiguration` is the shared slice; each controller has its own `*ContractTest`.
 
-Note that `BatchesControllerContractTest` constructs the controller itself with an explicit `@Bean`,
-which is exactly why the missing production registration went unnoticed — see
-[technical debt TD-01](../technical-debt.md).
+Note that a contract test constructs its controller with an explicit `@Bean`, so it cannot notice a
+missing *production* registration — a controller can be fully tested and never served. That is why
+`MohsRestAutoConfigurationTest#everyRestControllerIsRegistered` exists: it asserts the registration
+itself, which no contract test can.
 
 ### Auto-configuration — the wiring
 
@@ -113,13 +115,15 @@ which is exactly why the missing production registration went unnoticed — see
 
 ### End-to-end
 
-`mohs-demo`, 3 classes plus ArchUnit: a full context load, the UI integration, and the runners
-endpoint — exercising exactly the auto-configuration path a real consumer takes.
+**There is none, and this is the largest hole in the suite.** `mohs-demo` carries no tests: nothing
+loads the full auto-configuration the way a real consumer does, so a wiring defect that every unit
+test passes reaches the first application that tries the starter. The auto-configuration tests in
+`mohs-spring-boot-starter` cover the beans in isolation, not the assembled application.
 
-### Architecture — executable rules
+### Architecture — no longer executable
 
-`ArchitectureTest` in `mohs-demo`, because it is the only module that sees every other on one
-classpath. Twelve rules, listed in
+The ArchUnit suite lived in `mohs-demo` and went with it. What each rule now rests on — the reactor
+for the module boundaries, convention for the rest — is listed in
 [boundaries and fitness functions](../02-architecture/boundaries-and-fitness-functions.md).
 
 ### Load and chaos
@@ -207,8 +211,6 @@ Recommendations for consumers:
 | Recommendation | Gap it closes |
 | --- | --- |
 | JaCoCo with a per-module threshold | Coverage is unmeasurable today |
-| A CI pipeline running `./mvnw verify` on every push | Nothing gates a commit |
-| A test asserting every `io.mohs.rest` controller has a registering `@Bean` | Would have caught TD-01 |
 | A SQL scan for `IDENTITY`/`SERIAL`/`AUTO_INCREMENT`/`SEQUENCE` | The declared half of the UUIDv7 invariant |
 | Frontend tests (Vitest for `lib/`, Playwright for the pages) | The dashboard is entirely untested |
 | A nightly job running the chaos scripts | They are the strongest correctness evidence in the project and nothing runs them automatically |

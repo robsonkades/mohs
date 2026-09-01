@@ -81,12 +81,12 @@ flowchart TB
 | | |
 | --- | --- |
 | **Purpose** | JDBC implementation of every engine port, plus schema ownership. |
-| **Key types** | `JdbcJobStore`, `JdbcWorkQueue`, `JdbcLeaseStore`, `JdbcHistoryStore`, `JdbcNodeStore`, `JdbcBatchStore`, `JdbcRateLimitStore`, `JdbcTriggerFirer`, `JdbcStoreTransactions`, `DatabaseClock`, `MohsFlyway`, `JdbcTimestamps`, `JdbcSupport` |
-| **Dialect subpackage** | `JdbcDialect` plus `H2JdbcDialect`, `PostgresJdbcDialect`, `MySqlJdbcDialect`, `SqlServerJdbcDialect`, and the `ClaimedReady` row record |
-| **Dependencies** | `mohs-engine`, `spring-boot-starter-jdbc`, `spring-boot-starter-jackson`, `uuidv7`, `flyway-core` plus the postgresql/mysql/sqlserver Flyway modules, `slf4j-api` |
-| **Resources** | Per-dialect migrations under `io/mohs/store/jdbc/migration/{h2,mysql,postgresql,sqlserver}/`, plus four `schema-*.sql` files that are the parallel hand-install path |
-| **Tests** | 28 classes. Testcontainers for PostgreSQL, MySQL and SQL Server; H2 in-process. **Requires Docker**; without it the container-backed tests fail on `Could not initialize class *TestSupport`, which is an environment failure, not a regression. |
-| **Notable guards** | `TerminalStateWriteScanTest` scans this module's own source; `Schema*RoundTripTest` compares the Flyway path against the hand-install path; `SqlServerUnicodeScanTest` guards `NVARCHAR` usage. |
+| **Key types** | `JdbcJobStore`, `JdbcWorkQueue`, `JdbcLeaseStore`, `JdbcHistoryStore`, `JdbcNodeStore`, `JdbcBatchStore`, `JdbcRateLimitStore`, `JdbcTriggerFirer`, `JdbcStoreTransactions`, `DatabaseClock`, `JdbcTimestamps`, `JdbcSupport` |
+| **Delegate subpackage** | `JdbcDelegate` plus `H2JdbcDelegate`, `PostgresJdbcDelegate`, `MySqlJdbcDelegate`, `SqlServerJdbcDelegate`, and the `ClaimedReady` row record |
+| **Dependencies** | `mohs-engine`, `spring-boot-starter-jdbc`, `spring-boot-starter-jackson`, `uuidv7`, `slf4j-api`. **No migration engine** — the module executes no DDL |
+| **Resources** | Four `schema-*.sql` installers at the classpath root, plus the per-database delta chain under `io/mohs/store/jdbc/migration/{h2,mysql,postgresql,sqlserver}/`. Both ship in the jar for the operator to apply; nothing runs them |
+| **Tests** | 27 classes. Testcontainers for PostgreSQL, MySQL and SQL Server; H2 in-process. **Requires Docker**; without it the container-backed tests fail on `Could not initialize class *TestSupport`, which is an environment failure, not a regression. |
+| **Notable guards** | `TerminalStateWriteScanTest` scans this module's own source; `SchemaPostgresChainMatchesInstallerTest` compares the installer against the delta chain; `SqlServerUnicodeScanTest` guards `NVARCHAR` usage. |
 
 ### `mohs-rest`
 
@@ -138,7 +138,7 @@ flowchart TB
 | --- | --- |
 | **Purpose** | A development application. **Never published.** |
 | **Contents** | `MohsApplication` (Spring Boot bootstrap) and `Demo` (three sample jobs and one `RateLimit` bean). |
-| **Special role** | The only module that sees every other module on one classpath — which is why `ArchitectureTest` lives here. |
+| **Special role** | The only module that sees every other module on one classpath. It carries no tests: it is an example application, not a verification point. |
 | **Notes** | Deliberately has **no `src/main/resources/application.yaml`**: an `application.yaml` at a library jar's classpath root competes with the host's own. Local defaults are set via `SpringApplication#setDefaultProperties`, which loses to any external source. Its `@ComponentScan` excludes `io.mohs.rest` so the ordinary scan does not collide with the explicit controller beans. |
 
 ### `mohs-benchmark`

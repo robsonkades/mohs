@@ -7,16 +7,14 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 ```mermaid
 sequenceDiagram
     participant Spring
-    participant Fly as MohsFlyway
     participant Beans as Stores, queue, firer
     participant Scan as MohsJobScanner
     participant RL as Rate-limit registrar
     participant Life as MohsEngineLifecycle
     participant Loop as mohs-engine-loop
 
-    Spring->>Fly: create the bean → migrate()
-    Note over Fly: every bean touching a Mohs table<br/>takes MohsFlyway as a parameter,<br/>so the DEPENDENCY GRAPH orders this
-    Spring->>Beans: create (each depends on MohsFlyway)
+    Note over Spring: the schema is ALREADY THERE — applied by the operator<br/>before this process started; nothing here runs DDL
+    Spring->>Beans: create
     Note over Spring: mohs.time.mode=database?<br/>DatabaseClock.sync() blocks here — the engine<br/>must not start with an unsynchronised clock
     loop each singleton
         Spring->>Scan: postProcessAfterInitialization — accumulate @MohsJob
@@ -32,7 +30,7 @@ sequenceDiagram
 
 | Guarantee | Mechanism |
 | --- | --- |
-| Migrations run before anything writes | The **dependency graph** — every store takes `MohsFlyway` as a constructor parameter. A host bean that injects `Mohs` and writes in its own constructor forces the whole chain and still passes through here first |
+| The schema exists before anything writes | **Yours to guarantee.** No bean creates it. A store's constructor only builds a `JdbcTemplate`, so a missing table is not noticed at wiring time — it surfaces on the first statement, as the driver's own error, and the boot fails without corrupting anything |
 | Definitions are registered before the first claim | `afterSingletonsInstantiated` happens during `finishBeanFactoryInitialization`, always ahead of `finishRefresh`, where `SmartLifecycle.start()` fires |
 | The clock is synchronised before the engine starts | `DatabaseClock.sync()` is called synchronously in the bean method, deliberately blocking |
 | The engine starts last | `SmartLifecycle` at `DEFAULT_PHASE`, stated explicitly even though it matches the interface default — **the phase is a documented architectural guarantee, not a coincidence of defaults** |

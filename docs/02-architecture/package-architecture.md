@@ -8,7 +8,7 @@ ArchUnit test fails the build if a package lacks one.
 ## The public API: `io.mohs.core` and its six subpackages
 
 The subpackage graph is **acyclic**, and that is enforced
-(`ArchitectureTest.core_subpackages_are_free_of_cycles`). The cut is by cohesion, and the reason
+(a convention, no longer checked by a test). The cut is by cohesion, and the reason
 `job` exists as a package of its own is precisely to keep the graph acyclic.
 
 ```mermaid
@@ -134,10 +134,9 @@ One `Jdbc*` Data Mapper per port, plus infrastructure:
 | `JdbcJobStore` … `JdbcRateLimitStore` | Port implementations |
 | `JdbcStoreTransactions` | The enqueue unit, `PROPAGATION_NESTED` (a savepoint inside the host's transaction) |
 | `DatabaseClock` | `Clock` + `SyncableClock`; the one place reading the real clock is the purpose |
-| `MohsFlyway` | Library-owned migrations in `mohs_schema_history` |
 | `JdbcTimestamps` | The `Instant` ↔ column crossing, via `LocalDateTime`/`OffsetDateTime` (JDBC 4.2), never `java.sql.Timestamp` |
 | `JdbcSupport` | Shared SQL constants and helpers (`READY_INSERT`, `FENCED_LEASE_DELETE`, chunking, stream fetch size) |
-| `dialect/` | `JdbcDialect` and the four implementations |
+| `delegate/` | `JdbcDelegate` and the four implementations, each carrying the complete SQL for its database |
 
 ### `io.mohs.rest`
 

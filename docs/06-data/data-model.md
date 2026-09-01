@@ -201,10 +201,11 @@ last page (`PAGELATCH_EX`). The change was mandatory; the net balance has not ye
 | `total`, `succeeded`, `failed` | `pending` is **derived, never stored** |
 | `created_at` | |
 
-### `mohs_schema_history`
+### The table that is not there
 
-Flyway's own table, deliberately **not** `flyway_schema_history` — Mohs shares the database with a
-host application that may run its own Flyway. See [migrations](migrations.md).
+Mohs used to keep `mohs_schema_history` for its own migration engine. Both are gone: the library
+executes no DDL, so nothing records which schema versions a database has seen — **that is now yours
+to track**. See [installing and upgrading the schema](migrations.md).
 
 ## Key strategy
 

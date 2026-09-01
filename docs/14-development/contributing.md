@@ -84,14 +84,20 @@ The ones most likely to catch a newcomer:
 
 ## Documenting a decision
 
-Architecturally significant decisions are recorded as decision records under
-[`docs/15-design-decisions/`](../15-design-decisions/README.md), in the shape
-**context → decision → consequences → alternatives → evidence**.
-
 A decision is significant when it is expensive to reverse, when it constrains future work, or when a
 future reader would otherwise be tempted to "fix" it. The tell is simple: **if the code needs a
-paragraph of comment explaining why it is not the obvious thing, that paragraph belongs in a decision
-record.**
+paragraph of comment explaining why it is not the obvious thing, that paragraph is the decision.**
+
+Write it where the reader will meet it, in the shape **context → decision → consequences →
+alternatives**:
+
+- the **document that owns the subject** — a schema decision belongs in `06-data/`, a lifecycle one
+  in `13-operations/`, and so on, with the trade-off stated rather than only the outcome;
+- a **comment on the code** that would otherwise read as a mistake, giving the argument itself.
+
+Cite the argument, never a record number. A reader must be able to understand the line in front of
+them without opening a second file, and a number is exactly the kind of pointer that outlives what it
+pointed at.
 
 ## Updating this documentation
 

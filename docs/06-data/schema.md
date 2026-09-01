@@ -4,7 +4,7 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`moh
 
 The canonical DDL, shown for PostgreSQL. Type differences per dialect are listed at the end; the
 authoritative files are `schema-postgresql.sql`, `schema-h2.sql`, `schema-mysql.sql` and
-`schema-sqlserver.sql`, which are kept in step with the Flyway path by round-trip tests.
+`schema-sqlserver.sql`, which are kept in step with the `V*.sql` delta chain by a structural test.
 
 ## Control plane
 
@@ -181,10 +181,12 @@ CREATE CLUSTERED INDEX ix_mohs_idempotency_created ON mohs_idempotency (created_
 `2 × (255 × 2) = 1020` bytes exceeds the 900-byte ceiling for a clustered key. Measured: 225+225
 characters inserts, 256+255 fails with `Msg 1946` at enqueue time.
 
-## Flyway's own table
+## No history table
 
-`mohs_schema_history` — created and managed by Flyway. **Never `flyway_schema_history`**, which
-belongs to the host application.
+There is none. `mohs_schema_history` went away with the migration engine, and nothing replaced it:
+**nothing records which schema versions a database has already seen.** Tracking that is the
+operator's, and the options are in
+[installing and upgrading the schema](migrations.md#which-versions-have-you-applied).
 
 ## Dialect type map
 

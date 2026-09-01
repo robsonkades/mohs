@@ -36,7 +36,6 @@ noticed — which is exactly what WARN is for.
 | `io.mohs.engine.ExecutionWindowRegistry` | Unknown window names |
 | `io.mohs.engine.MohsImpl` | Manual retries |
 | `io.mohs.engine.RunnerRegistry` | Runner lifecycle |
-| `io.mohs.store.jdbc.MohsFlyway` | Migrations applied |
 | `io.mohs.store.jdbc.DatabaseClock` | Clock skew and sync failures |
 | `io.mohs.store.jdbc.JdbcRateLimitStore` | Unknown limit names |
 | `io.mohs.rest.error.RestExceptionHandler` | Contention and unhandled exceptions |

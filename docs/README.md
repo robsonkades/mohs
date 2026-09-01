@@ -20,7 +20,7 @@ repository.
 | New to the project | [Product overview](01-overview/product-overview.md) → [Architecture overview](02-architecture/architecture-overview.md) → [Local development](14-development/local-development.md) |
 | Integrating Mohs into an app | [Capabilities](01-overview/capabilities.md) → [Java API](05-api/java-api.md) → [Configuration reference](07-configuration/configuration-reference.md) |
 | Operating it in production | [Startup & shutdown](13-operations/startup-and-shutdown.md) → [Runbook](13-operations/runbook.md) → [Troubleshooting](13-operations/troubleshooting.md) → [Security](08-security/security-overview.md) |
-| Reviewing the design | [Module architecture](02-architecture/module-architecture.md) → [Design decisions](15-design-decisions/README.md) → [Technical debt](technical-debt.md) |
+| Reviewing the design | [Module architecture](02-architecture/module-architecture.md) → [Boundaries and fitness functions](02-architecture/boundaries-and-fitness-functions.md) → [Technical debt](technical-debt.md) |
 | Tuning performance | [Performance characteristics](10-performance/performance-characteristics.md) → [Tuning](10-performance/tuning.md) → [Benchmarks](10-performance/benchmarks.md) |
 
 ---
@@ -109,12 +109,9 @@ repository.
 - [Local development](14-development/local-development.md)
 - [Contributing](14-development/contributing.md)
 
-### 15. Design decisions
-- [Decision records](15-design-decisions/README.md) — reconstructed from code evidence
-
-### 16. Reference
-- [Technology stack](16-reference/technology-stack.md)
-- [Repository map](16-reference/repository-map.md)
+### 15. Reference
+- [Technology stack](15-reference/technology-stack.md)
+- [Repository map](15-reference/repository-map.md)
 
 ### Cross-cutting
 - [Technical debt](technical-debt.md)

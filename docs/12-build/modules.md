@@ -103,7 +103,6 @@ What a consumer inherits from the starter:
 | --- | --- |
 | Spring Boot | `spring-boot-starter`, `spring-boot-autoconfigure`, `spring-boot-starter-jdbc`, `spring-boot-starter-jackson` |
 | Spring Framework | `spring-core`, `spring-context`, `spring-tx`, `spring-jdbc` |
-| Flyway | `flyway-core` plus the postgresql / mysql / sqlserver modules |
 | Metrics | `micrometer-core` |
 | Logging | `slf4j-api` |
 | Annotations | `jspecify` |
@@ -165,7 +164,7 @@ the part a consumer needs:
 | `ExecutionListener`, `ExecutionInterceptor`, `ActorResolver` | Stable extension points |
 | Sealed types | May grow freely — nothing outside can implement them, so a new method is always binary-compatible |
 | The REST API | Versioned in the path (`/v1`) |
-| The database schema | Forward-migrated by Flyway; `V2` explicitly preserved a column to support rollback to the previous jar |
+| The database schema | Forward-only, applied by you. `V2` explicitly preserved a column to support rollback to the previous jar |
 | The shard hash | **Contract, pinned by literal values in a test.** Changing it requires a data migration |
 | Metric names **and label values** | Contract — the first saved dashboard freezes that vocabulary |
 

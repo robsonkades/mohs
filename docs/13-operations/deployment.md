@@ -127,21 +127,28 @@ startupProbe:
 [health and diagnostics](../09-observability/health-and-diagnostics.md) for one you can write in ten
 lines.
 
-## Migrations at deploy time
+## The schema at deploy time
 
-Two supported models:
+**It is a step of your deploy, not of the boot.** Mohs executes no DDL, so nothing happens
+automatically and no replica races another to apply anything.
 
-| Model | Configuration | Behaviour |
-| --- | --- | --- |
-| **Library-managed** (default) | `mohs.jdbc.migrate=true` | Every replica calls `migrate()` at boot; Flyway's locking makes exactly one apply each version. Asserted by `ConcurrentMigrationScenario` |
-| **Externally managed** | `mohs.jdbc.migrate=false` | A DBA applies `schema-<dialect>.sql` or the migrations by hand. The bean still exists; only `migrate()` is skipped |
+| You are | Do this, before the replicas start |
+| --- | --- |
+| Installing fresh | Apply `schema-<dialect>.sql` — the complete current schema, idempotent |
+| Upgrading | Apply the `V*.sql` deltas after the version this database is on |
 
-**One migration needs a maintenance window**: PostgreSQL's `V5`, which converts the partitioned
-history tables to normal ones by copying rows under an `ACCESS EXCLUSIVE` lock. Peak space is 2× the
-larger table plus indexes, and the tables are sealed — not even readable — for the duration. The
-recommended path is to run it by hand in a `READ COMMITTED` session during a window; the boot then
-passes over it, because the no-op guard exits before requiring anything. **Take a backup first: there
-is no undo.**
+Both ship inside `mohs-store-jdbc`'s jar. See
+[installing and upgrading the schema](../06-data/migrations.md) for how to extract and apply them,
+and for the part that is now yours: **nothing records which versions a database has already seen.**
+
+**Ordering matters and nothing enforces it.** A replica that starts against a database missing a
+column fails on its first statement with the driver's error and does not start — it corrupts
+nothing, but it also does not wait. Apply the schema first, then roll the replicas.
+
+**One delta needs a maintenance window**: PostgreSQL's `V5`, which converts the partitioned history
+tables to normal ones by copying rows under an `ACCESS EXCLUSIVE` lock. Peak space is 2× the larger
+table plus indexes, and the tables are sealed — not even readable — for the duration. Run it in a
+`READ COMMITTED` session during a window. **Take a backup first: there is no undo.**
 
 ## Multi-environment configuration
 

@@ -23,6 +23,7 @@ Every index in the schema, the query it serves, and the measurement behind it wh
 | `ix_mohs_idempotency_created` | `mohs_idempotency` | `created_at`, **CLUSTERED** | Same, plus the table's physical order | SQL Server only |
 | *(PK)* | `mohs_job_definitions` | `id` | | All |
 | *(UNIQUE)* | `mohs_job_definitions` | `job_key` | Every lookup by domain identity | All |
+| `idx_mohs_job_next_fire` | `mohs_job_definitions` | `next_fire_at` | The due-trigger read the engine performs on **every tick**, ahead of the firing and the claim | All |
 | *(PK)* | `mohs_rate_limits` | `name` | | All |
 | *(PK)* | `mohs_nodes` | `node_id` | The heartbeat upsert | All |
 | *(PK)* | `mohs_batches` | `id` | The counter increment and the read | All |
@@ -163,4 +164,4 @@ versus 6 buffers / 0.11 ms via the PK.
 | Changing an index predicate | Create the new one concurrently, drop the old concurrently, then rename |
 | Bloat on `mohs_ready` / `mohs_lease` | PostgreSQL storage parameters already set `fillfactor = 70` and aggressive autovacuum. If bloat still appears, the diagnosis is a long-running transaction holding back the xmin horizon |
 | SQL Server fragmentation | The clustered index on `mohs_idempotency` is `created_at` and therefore append-friendly; the rest of the hot tables are keyed on UUIDv7, which is also append-friendly |
-| Adding an index of your own | Nothing prevents it, but the round-trip schema tests compare the Flyway path against `schema-*.sql` — keep both in step if you fork |
+| Adding an index of your own | Nothing prevents it — Mohs never inspects the schema. If you fork, keep `schema-*.sql` and the `V*.sql` chain in step: the structural guardian compares them |

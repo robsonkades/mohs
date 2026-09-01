@@ -28,7 +28,7 @@ the host's `server.servlet.context-path`.
 | `PATCH` | `/rate-limits/{name}` | Adjust a limit at runtime | 200 |
 | `GET` | `/runners` | **This node's** runners and occupancy | 200 |
 | `GET` | `/nodes` | The cluster's nodes | 200 |
-| `GET` | `/batches/{id}` | Batch counters | 200 — **route not wired**, see [TD-01](../technical-debt.md) |
+| `GET` | `/batches/{id}` | Batch counters | 200 |
 
 ---
 
@@ -371,10 +371,6 @@ no pagination.
 ## Batches
 
 ### `GET /batches/{id}`
-
-> **Status: implemented, not wired.** The controller and its contract test exist, but
-> `MohsRestAutoConfiguration` registers no bean for it, so the route returns the host's default 404
-> at runtime. See [technical debt TD-01](../technical-debt.md).
 
 ```json
 { "batchId": "0198e...", "name": "nightly-invoices", "state": "RUNNING",

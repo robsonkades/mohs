@@ -13,7 +13,7 @@ flowchart TB
     subgraph host["Host application JVM (one node)"]
         code["Application code<br/>@MohsJob methods · Mohs facade"]
         engine["io.mohs.engine<br/>Engine loop · Dispatcher · CompletionBatcher"]
-        store["io.mohs.store.jdbc<br/>Data Mappers · dialect · Flyway"]
+        store["io.mohs.store.jdbc<br/>Data Mappers · one delegate per database"]
         rest["io.mohs.rest<br/>REST v1 (opt-in)"]
         ui["mohs-ui bundle<br/>served at /mohs-ui (opt-in)"]
     end
@@ -52,7 +52,7 @@ There is exactly **one** external dependency at runtime: the relational database
 
 | System | Protocol | Purpose | Configuration | Failure behaviour |
 | --- | --- | --- | --- | --- |
-| Relational database | JDBC (host's `DataSource`) | All durable state: definitions, queue, ownership, history, batches, rate-limit buckets, node registry | `mohs.jdbc.dialect` (mandatory, never auto-detected), `mohs.jdbc.migrate` | The tick logs and backs off; maintenance steps are isolated so one failing step does not stop the claim; ownership stands until a reaper reclaims it |
+| Relational database | JDBC (host's `DataSource`) | All durable state: definitions, queue, ownership, history, batches, rate-limit buckets, node registry | `mohs.jdbc.dialect` (mandatory, never auto-detected). The schema is installed by the operator; Mohs runs no DDL | The tick logs and backs off; maintenance steps are isolated so one failing step does not stop the claim; ownership stands until a reaper reclaims it |
 | Micrometer registry | In-process | `mohs.*` metrics | None; a local `SimpleMeterRegistry` is used when the host has no registry | Never affects execution |
 
 **No message broker, no HTTP client, no cloud SDK, no cache server** appears anywhere in the
@@ -98,9 +98,10 @@ What the code *does* assume about the runtime environment:
 - **Rolling updates are expected.** `MohsEngineLifecycle` is a `SmartLifecycle` that starts last and
   stops first; `Engine#stop(grace)` drains in-flight work; `RollingUpdateScenario` in
   `mohs-benchmark` exercises a deploy where part of the cluster lacks a handler.
-- **Parallel replica start is expected.** `ConcurrentMigrationScenario` asserts that N replicas
-  calling `MohsFlyway#migrate()` simultaneously against an empty database produce exactly one
-  application of each version.
+- **Parallel replica start is expected, and no longer races over the schema.** Replicas apply
+  nothing: the schema is in place before any of them starts. The ordering that used to need a
+  migration lock is now a step of your deploy — see
+  [installing and upgrading the schema](../06-data/migrations.md).
 - **`terminationGracePeriodSeconds` must exceed `mohs.lifecycle.shutdown.grace-period`** (default
   30 s) plus the web server's own graceful-shutdown phase. See
   [startup and shutdown](../13-operations/startup-and-shutdown.md).

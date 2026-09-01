@@ -68,7 +68,7 @@ docker run -d --name postgres -p 5432:5432 \
 --spring.datasource.password=postgres"
 ```
 
-Mohs' own Flyway creates the schema on boot.
+Apply `schema-<dialect>.sql` before starting — Mohs creates nothing.
 
 ## The dashboard development loop
 
@@ -191,8 +191,9 @@ Restart. The scanner registers it and the upsert arms its trigger.
    navigability rule.
 2. Use `${mohs.api.base-path:" + ApiPaths.V1 + "}` in `@RequestMapping`; an annotation cannot read a
    property binding, so the placeholder is the only mechanism there.
-3. **Register a `@Bean` in `MohsRestAutoConfiguration`** — a controller with no bean is never served.
-   (This is exactly the mistake recorded as [TD-01](../technical-debt.md).)
+3. **Register a `@Bean` in `MohsRestAutoConfiguration`** — a controller with no bean is never served,
+   and a contract test will not notice. `MohsRestAutoConfigurationTest#everyRestControllerIsRegistered`
+   fails the build if you forget.
 4. Write a `*ContractTest` over a mocked `Mohs`.
 5. Remember the boundary: `io.mohs.rest` may not see the engine or the store. If you need new data,
    add a read method to the `Mohs` facade.
@@ -213,9 +214,9 @@ Restart. The scanner registers it and the upsert arms its trigger.
    `io/mohs/store/jdbc/migration/<dialect>/`.
 2. Make it **idempotent**; guard by *shape* where a name would be ambiguous.
 3. Update the matching `schema-<dialect>.sql` — the round-trip tests compare the two paths.
-4. **Never edit an applied migration**; Flyway validates checksums.
+4. **Never edit a published migration.** Nothing validates checksums any more, so an edited delta does not fail a boot — it silently leaves databases with different schemas depending on when they were installed.
 5. State the operational cost in a header comment if it moves rows or takes a table-level lock.
-6. Extend the dialect's `MohsFlyway*Test`, which is the structural guardian.
+6. Extend `SchemaPostgresChainMatchesInstallerTest`, the structural guardian that compares the installer against the delta chain.
 
 ### Add a dialect
 

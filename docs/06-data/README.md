@@ -7,7 +7,7 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 | [data-model.md](data-model.md) | The nine tables, the four write profiles, column-by-column semantics, key strategy, the temporal contract |
 | [schema.md](schema.md) | The canonical DDL, the dialect type map, the constraints inventory |
 | [indexes.md](indexes.md) | Every index, the query it serves, and the measurement behind it |
-| [migrations.md](migrations.md) | Library-owned Flyway, the V1–V8 chain, parallel replica start, and the operational cost of `V5` |
+| [migrations.md](migrations.md) | **You install the schema**: the installer, the V1–V8 delta chain, and the operational cost of `V5` |
 | [dialects.md](dialects.md) | Support tiers and the exact divergences per database |
 | [data-lifecycle.md](data-lifecycle.md) | **Growth profiles and the missing retention policy.** Read before production |
 
@@ -28,7 +28,6 @@ HOT PATH (split by WRITE PROFILE)
   mohs_idempotency       DEDUP          — grows forever        — INSERT, PK conflict IS the check
 
 FLYWAY
-  mohs_schema_history    the LIBRARY's own history table
 ```
 
 **The consequence that matters**: the claim statement references only `mohs_ready` and `mohs_lease`,

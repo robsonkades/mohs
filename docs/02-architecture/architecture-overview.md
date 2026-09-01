@@ -51,8 +51,7 @@ flowchart TB
 
     subgraph driven["Driven adapters — io.mohs.store.jdbc"]
         mappers["JdbcJobStore · JdbcWorkQueue · JdbcLeaseStore<br/>JdbcHistoryStore · JdbcNodeStore · JdbcBatchStore<br/>JdbcRateLimitStore · JdbcTriggerFirer · DatabaseClock"]
-        dial["dialect: H2 · PostgreSQL · MySQL · SQL Server"]
-        fly["MohsFlyway + per-dialect migrations"]
+        dial["delegate: H2 · PostgreSQL · MySQL · SQL Server<br/>every statement, per database"]
     end
 
     cron["io.mohs.cron<br/><i>self-contained cron parser</i>"]
@@ -77,14 +76,15 @@ flowchart TB
 
 ## Dependency rules
 
-The rules are **executable in two independent ways**, which is the reason they hold:
+The module boundaries are **executable by the reactor itself**: `mohs-api` does not have
+`mohs-engine` on its compile classpath, so the public API physically cannot reference the engine, and
+`mohs-engine` likewise does not have `mohs-store-jdbc`. A violation is a compile error, not a review
+comment.
 
-1. **By the reactor.** `mohs-api` does not have `mohs-engine` on its compile classpath, so the
-   public API physically cannot reference the engine. Similarly `mohs-engine` does not have
-   `mohs-store-jdbc`.
-2. **By ArchUnit**, in `mohs-demo/src/test/java/io/mohs/ArchitectureTest.java` — `mohs-demo` is the
-   one module that sees every other module on a single classpath, which is what makes a
-   whole-system rule checkable at all.
+That is the only mechanism. The finer-grained rules below — the ones that need to see every module
+on one classpath — were checked by an ArchUnit suite in `mohs-demo/src/test`, which no longer exists;
+[boundaries and fitness functions](boundaries-and-fitness-functions.md) lists what each of them now
+rests on.
 
 | Rule | Statement |
 | --- | --- |

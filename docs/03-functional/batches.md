@@ -153,10 +153,6 @@ precisely the person who would be left without the notification of the real end.
 `GET /batches/{id}` returns `BatchResponse` with a derived `pending` and a derived
 `state` (`RUNNING` / `COMPLETED`), so a caller can poll before completion.
 
-> **Status: implemented, not wired.** `BatchesController` exists and has a contract test, but
-> `MohsRestAutoConfiguration` registers no bean for it, so the route is not served at runtime. See
-> [technical debt TD-01](../technical-debt.md).
-
 ## Limits
 
 | Limit | Value |

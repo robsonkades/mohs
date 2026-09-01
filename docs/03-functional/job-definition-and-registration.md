@@ -104,14 +104,12 @@ Note that `JobDefinition.of` always produces `source = PROGRAMMATIC` and `name =
 ```mermaid
 sequenceDiagram
     participant Spring as Spring context
-    participant Fly as MohsFlyway
     participant Scanner as MohsJobScanner
     participant Store as JobStore
     participant Reg as HandlerRegistry
     participant Life as MohsEngineLifecycle
 
-    Spring->>Fly: create mohsFlyway bean → migrate()
-    Note over Fly: every bean touching a Mohs table takes MohsFlyway<br/>as a parameter, so the dependency GRAPH orders this,<br/>not bean registration order
+    Note over Spring: the schema is ALREADY THERE — the operator applied it<br/>before the process started. A missing table surfaces here as<br/>the driver's own error, and the boot fails
     loop each singleton, as it initialises
         Spring->>Scanner: postProcessAfterInitialization(bean, name)
         Scanner->>Scanner: accumulate @MohsJob methods (synchronized)

@@ -49,9 +49,10 @@ CI runs `./mvnw clean verify` on every push, without `-Dskip.frontend=true`.
 - I/O-bound work uses virtual threads; CPU-bound work uses a bounded platform pool. Concurrency is
   limited with a `Semaphore`, never through pool size.
 - New prose in the code — Javadoc, comments, `package-info` — is written in English.
-- Architecture decisions are recorded in
-  [`docs/15-design-decisions/`](docs/15-design-decisions/README.md), and the code cites the
-  *argument*, never the record's number.
+- An architecturally significant decision is written down where a reader will meet it: the document
+  that owns the subject, and a comment on the code that would otherwise look wrong. Cite the
+  *argument*, never a record number — a reader must never have to open another file to understand
+  the line in front of them.
 
 ## Reporting a bug
 

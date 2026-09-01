@@ -213,7 +213,7 @@ one.
 
 | Property | Value |
 | --- | --- |
-| Runtime dependencies | Spring Boot 4.1.0 (BOM-managed), Flyway, Jackson, Micrometer, SLF4J, JSpecify, `io.github.robsonkades:uuidv7` |
+| Runtime dependencies | Spring Boot 4.1.0 (BOM-managed), Jackson, Micrometer, SLF4J, JSpecify, `io.github.robsonkades:uuidv7`. **No migration engine**, and therefore no code path that runs DDL |
 | Automated dependency scanning | **Not present** — no OWASP dependency-check, no Dependabot config, no CI at all |
 | Version pinning | Spring Boot's BOM plus explicit versions for the few non-managed artifacts |
 | Reflection | Used narrowly, in `MohsJobScanner`/`MohsJobs` (annotated methods) and `JdbcHistoryStore` (payload class resolution) |

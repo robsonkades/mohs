@@ -17,35 +17,28 @@ The strongest guarantee, because a violation does not compile.
 | The cron parser knows nothing of the domain | `mohs-cron` has no dependencies at all beyond JSpecify |
 | The test kit is not on the production path | `mohs-test` is a separate artifact, declared `test` scope by its consumers |
 
-## Mechanism 2 — ArchUnit
+## Mechanism 2 — the rules that are no longer executable
 
-`mohs-demo/src/test/java/io/mohs/ArchitectureTest.java`. `mohs-demo` is the only module that sees
-every other module on one classpath, which is what makes a whole-system rule checkable.
+**There is no ArchUnit suite.** It lived in `mohs-demo/src/test`, which no longer exists, and with
+it went every rule that needed a whole-system classpath to check. This section names them rather
+than quietly dropping them, because a convention nobody checks is worth less than one everybody
+knows is unchecked:
 
-| Rule | What it forbids | Notes |
-| --- | --- | --- |
-| `internal_packages_do_not_leak_into_public_api` | Any non-internal `io.mohs..` class depending on `io.mohs.engine..` or `io.mohs.store.jdbc..` | Lists the **internal** packages (stable) rather than the public ones (growing), so a new public subpackage cannot escape the rule by being forgotten |
-| `rest_only_sees_public_api` | `io.mohs.rest..` depending on the engine or the store | This is why `Mohs` carries read methods that exist for REST alone |
-| `test_kit_does_not_leak_into_production` | Anything outside `io.mohs.test..` depending on it | |
-| `engine_is_free_of_jdbc` | `java.sql..` / `javax.sql..` inside `io.mohs.engine..` | Catches the leak **by type** — a `ResultSet` in a port signature, for instance |
-| `only_the_starter_speaks_boot_autoconfigure` | `org.springframework.boot.autoconfigure..` outside `io.mohs.autoconfigure..` | One named exception: `MohsApplication`, the demo bootstrap, which is an application rather than a library |
-| `engine_never_reads_wall_clock_directly` | `Instant.now()` and `System.currentTimeMillis()` in the engine and the store | One named exception: `DatabaseClock`. `System.nanoTime()` is deliberately **out of scope** — it is monotonic time, which is what measuring an interval requires |
-| `no_synchronized_methods_in_concurrency_critical_code` | The `synchronized` **method modifier** in the engine and the store | |
-| `no_thread_local_in_concurrency_critical_code` | `ThreadLocal` / `InheritableThreadLocal` in the engine and the store | |
-| `ids_are_generated_as_uuidv7_never_v4` | Any call **or method reference** to `java.util.UUID.randomUUID` | Uses `accessTargetWhere` rather than `callMethod` precisely so `UUID::randomUUID` (a method *reference*) cannot slip through. Matching is by the target's owner, so `io.github.robsonkades.uuidv7.UUIDv7` legitimately returning a `java.util.UUID` does not trip it |
-| `all_production_packages_declare_null_marked` | A production package without a `@NullMarked package-info.java` | |
-| `core_subpackages_are_free_of_cycles` | A dependency cycle among `io.mohs.core.*` | Does not prescribe edge direction — only that no edge closes a cycle |
-| `rest_subpackages_are_free_of_cycles` | A dependency cycle among `io.mohs.rest.*` | |
-
-### Gaps the rules themselves declare
-
-These are recorded in the test's own Javadoc rather than hidden — the honest distance between a
-prose rule and an executable one:
-
-| Rule | Gap |
+| Rule | Still enforced by |
 | --- | --- |
-| `no_synchronized_methods_in_concurrency_critical_code` | Only the method **modifier** is caught. A `synchronized (lock) { … }` block is not modelled by ArchUnit, which has no instruction-level bytecode inspection in its public API |
-| `ids_are_generated_as_uuidv7_never_v4` | Covers Java only. The other half of the invariant — no `IDENTITY`/`SERIAL`/`AUTO_INCREMENT`/`SEQUENCE` in any schema — stays in prose, because ArchUnit does not read SQL |
+| Internal packages do not leak into the public API | **The reactor** (Mechanism 1) at module granularity. A leak *within* a module is no longer caught |
+| `io.mohs.rest` sees only the public API | **The reactor**. This is why `Mohs` carries read methods that exist for REST alone |
+| The engine is free of `java.sql`/`javax.sql` | **The reactor** — `mohs-engine` does not have `mohs-store-jdbc` on its classpath. A raw JDBC type reaching a port signature from elsewhere is not caught |
+| The test kit does not reach production code | **The reactor** — `mohs-test` is `test` scope for its consumers |
+| Only the starter speaks `spring-boot-autoconfigure` | **Nothing.** Convention |
+| The engine never reads the wall clock directly (`Instant.now()`, `System.currentTimeMillis()`) | **Nothing.** Convention — and the one most likely to be broken by accident, because the wrong call compiles and passes every test |
+| Ids are UUIDv7, never `UUID.randomUUID()` | **Nothing.** Convention |
+| No `synchronized` methods, no `ThreadLocal`, in the engine and the store | **Nothing.** Convention |
+| Every production package declares `@NullMarked` | **Nothing.** Convention |
+| `io.mohs.core.*` and `io.mohs.rest.*` are free of dependency cycles | **Nothing.** Convention |
+
+Restoring them means a module that sees every other on one classpath. `mohs-demo` was that module,
+and it is the only shape the reactor allows.
 
 ## Mechanism 3 — source and schema scans
 
@@ -53,8 +46,9 @@ prose rule and an executable one:
 | --- | --- | --- |
 | `TerminalStateWriteScanTest` | `mohs-store-jdbc/src/test/.../TerminalStateWriteScanTest.java` | Reads its own module's `src/main/java` to guard where terminal-state writes may appear. It lives in the module whose SQL it guards |
 | `SqlServerUnicodeScanTest` | `mohs-store-jdbc/src/test` | Guards `NVARCHAR` usage in the SQL Server dialect — `VARCHAR` is not Unicode there by default |
-| `SchemaPostgresRoundTripTest`, `SchemaMySqlRoundTripTest`, `SchemaSqlServerRoundTripTest` | `mohs-store-jdbc/src/test` | Assert that the **Flyway migration path** and the **hand-install `schema-*.sql` path** produce the same schema. Two installation routes that silently diverge would be a support nightmare |
-| `MohsFlyway*Test` per dialect | `mohs-store-jdbc/src/test` | Structural guardians of the migration chain against a real container |
+| `SchemaPostgresRoundTripTest`, `SchemaMySqlRoundTripTest`, `SchemaSqlServerRoundTripTest` | `mohs-store-jdbc/src/test` | Exercise every store against a real container on the schema an operator would install |
+| `SchemaPostgresChainMatchesInstallerTest` | `mohs-store-jdbc/src/test` | Builds one database from `schema-postgresql.sql` and one from the `V*.sql` chain, then compares columns and index definitions. With no migration engine running them, this is the only thing keeping the installer and the upgrade path from drifting apart |
+| `JdbcDelegateStatementDriftTest` | `mohs-store-jdbc/src/test` | Compares the named parameters of all 66 statements across the four delegates — the price of spelling every statement out per database |
 
 ## Runtime guardrails
 
@@ -93,7 +87,6 @@ Not present today; listed with the concrete gap each would close.
 
 | Proposed fitness function | Gap it closes |
 | --- | --- |
-| A SQL scan asserting no `IDENTITY`/`SERIAL`/`AUTO_INCREMENT`/`SEQUENCE` in any `schema-*.sql` or migration | The declared half of the UUIDv7 invariant that ArchUnit cannot see |
-| A byte-code or source scan for `synchronized (…) { }` blocks in the engine and the store | The declared gap in the `synchronized` rule |
-| A test asserting every controller in `io.mohs.rest` has a registering `@Bean` in `MohsRestAutoConfiguration` | Would have caught [TD-01](../technical-debt.md) — a working, tested controller that is never wired |
+| A SQL scan asserting no `IDENTITY`/`SERIAL`/`AUTO_INCREMENT`/`SEQUENCE` in any `schema-*.sql` or delta | The half of the UUIDv7 invariant that was never checked |
+| A source scan for `UUID.randomUUID` and for `synchronized (…) { }` in the engine and the store | Rules that used to be checked and no longer are |
 | A dependency-convergence or `maven-enforcer` rule | There is no enforcer plugin in the build today |
