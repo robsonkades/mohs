@@ -90,14 +90,14 @@ Things that genuinely could not be determined from the repository:
 
 Reported rather than fixed at the time, since the task was documentation. **Five of the seven have
 since been fixed**; the table is kept as the record of what a documentation pass found by reading
-the code against itself. The two still open are 3 and 5 — they are in
-[technical debt](technical-debt.md) as TD-06 and TD-12.
+the code against itself. The one still open is 5 — it is in
+[technical debt](technical-debt.md) as TD-12.
 
 | # | Inconsistency |
 | --- | --- |
 | 1 | **`BatchesController` is implemented and contract-tested, but no bean registers it.** `MohsRestAutoConfiguration`'s Javadoc still claims it "remains a contract with no implementation behind it" — stale. The route did not exist at runtime. **Fixed**: a bean registers it, and a test asserts every controller has one |
 | 2 | **`HistoryStore#pruneIdempotencyBefore` is described as "called by housekeeping"** and has an index added specifically for it — and had no production caller. **Fixed**: the engine prunes hourly |
-| 3 | **`OverviewStreamBroadcaster`'s Javadoc records that the overview counts dropped the lock-free read hint**, reintroducing shared locks on SQL Server without RCSI. Verified: the hint survives only on the idle-gate probe. **Open** — TD-06 |
+| 3 | **`OverviewStreamBroadcaster`'s Javadoc records that the overview counts dropped the lock-free read hint**, reintroducing shared locks on SQL Server without RCSI. Verified: the hint survives only on the idle-gate probe. **Fixed**: RCSI became a boot requirement of the SQL Server dialect and the hint was retired everywhere (DR-001) — TD-06, closed |
 | 4 | **`RuntimePatchResponse.BOOT_REVERSION_NOTICE` is in Portuguese** while every other user-facing API string is English — and it crossed the wire on every `PATCH`. **Fixed** |
 | 5 | **Mixed prose language inside single files**, against the project's own stated principle. **Partly fixed**: the Java is now English throughout; 30 of the 34 `.sql` files are still Portuguese — TD-12 |
 | 6 | **`NodeStore`'s Javadoc references `mohs.engine.node-heartbeat-interval`** as configuration "that does not exist yet" — it still does not; the cadence is derived from `node-lease-ttl` |

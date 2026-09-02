@@ -219,11 +219,11 @@ Internals and infrastructure (M0 skeleton, implementation lands in M3, except
   files came from Cadrix already in English, and one bilingual subtree is
   worse than either language (ADR-0045 §6).
 
-Public/internal boundaries are executable twice over: by the reactor itself
-(`mohs-api` has no `mohs-engine` on its compile classpath) and by
-`mohs-demo/src/test/java/io/mohs/ArchitectureTest.java` (ArchUnit) — the one
-module that sees every other on a single classpath. The ADR-0043 source scan
-lives apart, in
+Public/internal boundaries are executable through the reactor itself
+(`mohs-api` has no `mohs-engine` on its compile classpath). The ArchUnit
+suite that also enforced them went away with `mohs-demo/src/test`
+(2026-08-30) — the demo carries no tests by decision. The ADR-0043 source
+scan lives apart, in
 `mohs-store-jdbc/src/test/java/io/mohs/store/jdbc/TerminalStateWriteScanTest.java`: it
 reads `src/main/java` of the module it runs in, and the SQL it guards is
 there.
@@ -359,7 +359,8 @@ when it is exactly what the code does:
 ## Invariants
 **ALWAYS:**
 - Every "when" comes from the injected `Clock`; every duration uses monotonic
-  time (`System.nanoTime`). Verified by ArchUnit.
+  time (`System.nanoTime`). Convention since the ArchUnit suite went away with
+  `mohs-demo/src/test` (2026-08-30) — no build rule verifies it today.
 - Every generated PK is UUIDv7 (`io.github.robsonkades:uuidv7`), on every
   dialect — client-side generation (no allocation round trip), time-ordered
   (inserts stay localized at the index tail), lexicographically sortable as
