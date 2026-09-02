@@ -1,9 +1,10 @@
 # Data lifecycle and retention
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-01 · Source of Truth: Repository
 
-**Read this before running Mohs in production.** Two of the nine tables grow without bound and
-nothing in the codebase prunes them.
+**Read this before running Mohs in production.** History retention exists but is **opt-in**
+(`mohs.engine.history-retention`, DR-002): with the property unset, three tables grow without bound
+and pruning them is your responsibility.
 
 ## Growth profile per table
 
@@ -11,17 +12,17 @@ nothing in the codebase prunes them.
 | --- | --- | --- | --- |
 | `mohs_job_definitions` | Number of jobs | **Yes** — by declarations | Soft retire; rows never deleted |
 | `mohs_rate_limits` | Number of limits | **Yes** | None needed |
-| `mohs_batches` | Number of batches created | **No** | **None** |
+| `mohs_batches` | Number of batches created | **Only with `history-retention` set** | The hourly sweep, once no member remains |
 | `mohs_nodes` | Node incarnations (one per boot) | Effectively yes | **Yes** — the stale purge, on every tick |
 | `mohs_ready` | The current backlog | **Yes** — self-limiting: a claim deletes the row | Structural |
 | `mohs_lease` | Work executing across the cluster (`nodes × dispatch-concurrency`) | **Yes** — thousands, never millions | Structural: a completion deletes the row |
-| `mohs_execution` | **Every execution, forever** | **No** | **None** |
-| `mohs_attempt` | **Every attempt, forever** | **No** | **None** |
-| `mohs_idempotency` | Every idempotent enqueue | **No** | A prune method exists — **nothing calls it** |
+| `mohs_execution` | Every execution | **Only with `history-retention` set** | The hourly sweep, terminal rows outside the window |
+| `mohs_attempt` | Every attempt | **Only with `history-retention` set** | The hourly sweep, once the execution is gone |
+| `mohs_idempotency` | Every idempotent enqueue | **Yes** — by `idempotency-retention` (default 7d) | The hourly idempotency prune |
 
-## What is actually purged
+## What is purged automatically
 
-Exactly one thing, in `Engine#purgeStaleNodeRows`, riding along on the tick:
+The stale-node purge, in `Engine#purgeStaleNodeRows`, riding along on the tick:
 
 ```java
 Instant cutoff = clock.instant().minus(nodeLeaseTtl.multipliedBy(STALE_NODE_RETENTION_LEASES));
@@ -46,12 +47,22 @@ Two details worth knowing:
 - Every node issues the same `DELETE` on every tick, which is a classic deadlock candidate on SQL
   Server. That is precisely why the step is isolated.
 
-## The gap: history has no retention
+## Built-in history retention (`mohs.engine.history-retention`)
 
-`mohs_execution` and `mohs_attempt` are **append-only with a single terminal update**, and there is
-no policy, no scheduled task, and no property to purge them.
+Set a positive window and the engine sweeps history hourly, on the tick, on every node
+([DR-002](../15-design-decisions/records/DR-002-history-retention.md)):
 
-Consequences to plan for:
+| Property | Value |
+| --- | --- |
+| What goes | TERMINAL executions `finished_at` older than the window; attempts whose execution is gone; batches with no remaining member |
+| What never goes | Anything live (`PENDING`, queued, leased), an open batch (it always has a live member), and `mohs_idempotency` (its own window — below) |
+| Bounds | 1,000 rows per statement per pass; passes repeat only within a 2 s monotonic budget per hourly slot; 1 s query timeout per statement |
+| How it seeks | No index was added: ids are UUIDv7, so the sweep ranges the PRIMARY KEY below a bound synthesized from the cutoff instant |
+| Backlog | A months-deep backlog (a window enforced for the first time) drains across hourly slots, bounded every step |
+| Observability | An INFO line per sweeping slot; failures count into `mohs.tick.failed{step="history-prune"}` |
+| Consequence to accept | A `FAILED` row outside the window can no longer be manually retried — it is gone. That is what retention means |
+
+With the property **unset** (the default), nothing prunes history. Consequences to plan for:
 
 | Consequence | Detail |
 | --- | --- |
@@ -60,24 +71,18 @@ Consequences to plan for:
 | Read costs that *do* scale with history | The execution listing's index keeps it `O(limit)` per job, but a full-table scan of history is available to any query you write yourself |
 | Read costs that **do not** | The claim (references only `mohs_ready`/`mohs_lease`) and the throughput window (a range scan whose cost is the window's activity) |
 
-The `V5` migration's own header calls the removed partitioning "a benefit that does not yet exist —
-retention by partition drop was a later phase". That later phase is **not in this repository**.
+### The idempotency window is its own contract
 
-### The idempotency window is the retention window
+`mohs_idempotency` answers to `mohs.engine.idempotency-retention` (default 7 days), pruned hourly by
+the engine — never to history retention. The two windows are deliberately independent, in both
+directions: a key must keep deduplicating for its whole window even after its execution's history is
+swept (deleting the key row with the execution would re-open the dedup window early), which also
+means the execution id a deduplicated enqueue returns may point at history that is already gone.
 
-`ScheduleCommand#idempotencyKey`'s contract says the key deduplicates "for as long as the execution
-exists — the window is that of execution retention, which is unbounded while no retention policy
-exists". So **reusing an old key returns the old execution**, indefinitely.
+## Operating with the sweep off
 
-`HistoryStore#pruneIdempotencyBefore(cutoff)` exists, is described as "called by housekeeping, never
-on the hot path", and is properly indexed (`V7` measured 83.2 ms → 0.97 ms on 2 M rows). But a
-repository-wide search finds **no production caller and no scheduled invocation**. See
-[technical debt](../technical-debt.md).
-
-## Operating without a retention policy
-
-Until a policy exists, retention is the **operator's** responsibility. What the schema supports
-today:
+With `history-retention` unset, retention is the **operator's** responsibility. What the schema
+supports today:
 
 ### Deleting old history
 
@@ -134,36 +139,11 @@ unresolvable from history.
 
 ## Recommended retention design
 
-Not implemented; this is what the schema is shaped for.
-
-| Element | Recommendation |
-| --- | --- |
-| Trigger | A recurring Mohs job of your own — the tool schedules its own housekeeping perfectly well |
-| Batching | Delete in chunks of a few thousand, with a bounded loop and a time budget |
-| Windows | Separate windows for successes (short) and failures (long) — failures are the forensic record |
-| Idempotency | A window matched to your business retry horizon, typically far shorter than history |
-| Verification | `mohs.execution.total` versus row counts, to confirm the prune keeps up with ingest |
-| Ordering | Attempts, then executions, then batches, then idempotency |
-
-A worked starting point:
-
-```java
-@RecurringJob(id = "mohs-retention", cron = "0 30 3 * * *", zone = "UTC")
-void prune() {
-    Instant cutoff = clock.instant().minus(Duration.ofDays(30));
-    int deleted;
-    do {
-        deleted = jdbc.update("""
-            DELETE FROM mohs_attempt WHERE finished_at < ? LIMIT 5000
-            """, Timestamp.from(cutoff));           // dialect-specific LIMIT syntax
-    } while (deleted == 5000);
-    // ... then mohs_execution, then mohs_batches, then mohs_idempotency
-}
-```
-
-Note that the exact `DELETE … LIMIT` syntax differs per dialect (`DELETE … LIMIT` on MySQL, a
-`ctid`/`TOP` form on PostgreSQL/SQL Server), which is one of the reasons a portable implementation
-inside the library is a real piece of work rather than a small addition.
+Set `mohs.engine.history-retention` and let the built-in sweep do this. The manual route above
+remains for the one shape the property does not cover: **separate windows for successes (short) and
+failures (long)** — failures are the forensic record, and the built-in window is deliberately one
+knob, not a policy language. A deployment that needs the split runs its own recurring job with the
+batched, terminal-only `DELETE`s shown above, and leaves the property unset.
 
 ## Backup and restore considerations
 

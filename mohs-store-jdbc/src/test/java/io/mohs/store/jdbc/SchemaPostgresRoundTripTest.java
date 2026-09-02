@@ -28,6 +28,7 @@ import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import tools.jackson.databind.json.JsonMapper;
 
@@ -172,5 +173,32 @@ class SchemaPostgresRoundTripTest {
         assertThat(store.charge("smtp", 1, clock.instant())).isTrue();
 
         assertThat(store.available("smtp", clock.instant())).isEqualTo(50);
+    }
+
+    /** The sweep's three statements in the dialect's real shape — the {@code IN (subquery LIMIT)} form parses, ranges the primary key, and deletes exactly the window. */
+    @Test
+    void historySweepRoundTripsTheDialectShapes() {
+        PostgresJdbcDelegate delegate = new PostgresJdbcDelegate();
+        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), delegate);
+        JdbcTemplate raw = new JdbcTemplate(dataSource);
+        Instant old = clock.instant().minus(Duration.ofDays(60));
+        long ms = old.toEpochMilli();
+        String executionId = "%08x-%04x-7fff-8fff-000000000001".formatted(ms >>> 16, ms & 0xFFFF);
+        String batchId = "%08x-%04x-7fff-8fff-000000000002".formatted(ms >>> 16, ms & 0xFFFF);
+        raw.update("INSERT INTO mohs_batches (id, name, total, succeeded, failed, created_at) VALUES (?, 'nightly', 1, 1, 0, ?)",
+                batchId, delegate.splitTimestamp(old));
+        raw.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, shard, priority, state, scheduled_at, created_at,
+                    finished_at, actor, correlation_id, payload, payload_type)
+                VALUES (?, 'welcome-email', 0, 20, 'SUCCEEDED', ?, ?, ?, 'test', ?, '{}', 'x')
+                """, executionId, delegate.splitTimestamp(old), delegate.splitTimestamp(old),
+                delegate.splitTimestamp(old), batchId);
+        raw.update("""
+                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
+                VALUES (?, 1, 'node-a', ?, ?, 'SUCCEEDED')
+                """, executionId, delegate.splitTimestamp(old), delegate.splitTimestamp(old));
+
+        assertThat(store.pruneHistoryBefore(clock.instant().minus(Duration.ofDays(30)), 100))
+                .isEqualTo(new HistoryStore.PrunedHistory(1, 1, 1));
     }
 }

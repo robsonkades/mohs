@@ -26,6 +26,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -83,8 +85,10 @@ import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -2262,5 +2266,47 @@ class EngineTest {
                 INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at)
                 VALUES ('welcome-email', ?, ?, ?)
                 """, key, "exec-" + key, JdbcTimestamps.toUtcLocalDateTime(createdAt));
+    }
+
+    /**
+     * The sweep's loop decision, pinned with a scripted store: passes CHAIN while any table comes
+     * back full and STOP on the first pass that came back under the batch everywhere. The budget
+     * path stays untested on purpose — forcing it would need an injected monotonic clock for no
+     * decision the drained path does not already exercise; and retention left at {@code ZERO} never
+     * constructs the cadence, which the constructor makes unrepresentable rather than testable.
+     */
+    @Test
+    void historySweepChainsPassesUntilEveryTableComesBackUnderTheBatch() {
+        Queue<HistoryStore.PrunedHistory> script = new ConcurrentLinkedQueue<>(List.of(
+                new HistoryStore.PrunedHistory(1000, 1000, 1000),
+                new HistoryStore.PrunedHistory(1000, 4, 0),
+                new HistoryStore.PrunedHistory(3, 2, 1)));
+        List<Instant> cutoffs = new CopyOnWriteArrayList<>();
+        HistoryStore scripted = mock(HistoryStore.class, delegatesTo(historyStore));
+        doAnswer(invocation -> {
+            cutoffs.add(invocation.getArgument(0));
+            HistoryStore.PrunedHistory next = script.poll();
+            return next != null ? next : new HistoryStore.PrunedHistory(0, 0, 0);
+        }).when(scripted).pruneHistoryBefore(any(), anyInt());
+        Engine engine = assembleEngine(workQueue, leaseStore, scripted, nodeStore, List.of(),
+                defaultRunnerRegistry(), settingsWithHistoryRetention(Duration.ofDays(30)));
+
+        engine.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).until(() -> cutoffs.size() >= 3);
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+
+        // Exactly three: the third pass ended the slot — a fourth call only comes on the next
+        // hourly cadence, which this test never reaches.
+        assertThat(cutoffs).hasSize(3);
+        assertThat(script).isEmpty();
+        assertThat(cutoffs).allSatisfy(cutoff -> assertThat(cutoff).isEqualTo(NOW.minus(Duration.ofDays(30))));
+    }
+
+    private EngineSettings settingsWithHistoryRetention(Duration retention) {
+        return new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, BATCH_SIZE, BATCH_SIZE, 1, LEASE_TTL, LEASE_TTL, null,
+                EngineSettings.DEFAULT_MISFIRE_THRESHOLD, EngineSettings.DEFAULT_IDEMPOTENCY_RETENTION, retention);
     }
 }

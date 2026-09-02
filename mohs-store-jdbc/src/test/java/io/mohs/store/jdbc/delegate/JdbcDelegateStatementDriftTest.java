@@ -55,6 +55,28 @@ class JdbcDelegateStatementDriftTest {
     /** The filters {@code JdbcHistoryStore#findPage} assembles — the caller's half of the page statement. */
     private static final String SAMPLE_WHERE = "WHERE e.job_key = :jobKey AND e.execution_id < :cursor\n";
 
+    /**
+     * The one textual assertion this class allows itself, because parameters cannot see it: in the
+     * subquery-shaped sweep delete (H2/PostgreSQL), the terminal-state guard must ALSO sit in the
+     * OUTER {@code WHERE} — a predicate inside the subquery evaluates against a snapshot and
+     * serialises nothing, so only the outer copy, re-evaluated under the row lock, spares a row a
+     * concurrent manual retry just rearmed. The guard is made of literals, no {@code :param}, so the
+     * parameter comparison above would wave through a well-meaning "dedup" that deletes rearmed
+     * executions. The race itself is pinned against a real database by
+     * {@code HistorySweepRearmRacePostgresTest}; this pins the H2 twin, which has no container test.
+     */
+    @Test
+    void theSubqueryShapedSweepKeepsItsOuterTerminalGuard() {
+        for (JdbcDelegate delegate : List.of(new H2JdbcDelegate(), new PostgresJdbcDelegate())) {
+            String sql = delegate.pruneTerminalExecutionsBefore();
+            // Everything after the subquery's LIMIT is the outer WHERE's tail — the guard lives there.
+            assertThat(sql.substring(sql.indexOf("LIMIT :limit")))
+                    .as("%s lost the OUTER terminal guard — only the outer predicate is re-evaluated under the row lock",
+                            delegate.getClass().getSimpleName())
+                    .contains("state IN");
+        }
+    }
+
     @Test
     void everyDelegateBindsTheSameParametersForTheSameStatement() {
         List<String> drift = new ArrayList<>();

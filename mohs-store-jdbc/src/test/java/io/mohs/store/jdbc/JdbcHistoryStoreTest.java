@@ -15,6 +15,7 @@
  */
 package io.mohs.store.jdbc;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -162,5 +163,163 @@ class JdbcHistoryStoreTest {
         assertThat(pruned).isEqualTo(1);
         assertThat(store.findByIdempotencyKey(JobKey.of("job-a"), "old-key")).isEmpty();
         assertThat(store.findByIdempotencyKey(JobKey.of("job-a"), "fresh-key")).contains(ExecutionId.of("exec-2"));
+    }
+
+    // --- the history sweep -------------------------------------------------------------------------
+    // These fixtures carry realistic UUIDv7-shaped ids, unlike the 'exec-1' ones above: the sweep's
+    // candidate read is a range of the primary key derived from the id's time prefix, so an id that
+    // does not encode its birth instant would silently fall outside every window.
+
+    private static final Instant CUTOFF = NOW.minus(Duration.ofDays(30));
+    private static final Instant OLD = NOW.minus(Duration.ofDays(60));
+    private static final Instant RECENT = NOW.minus(Duration.ofDays(1));
+
+    /** A UUIDv7-shaped id born at {@code instant} — above the sweep's lower bound for the same millisecond, below any later one. */
+    private static String v7At(Instant instant, int sequence) {
+        long ms = instant.toEpochMilli();
+        return "%08x-%04x-7fff-8fff-%012x".formatted(ms >>> 16, ms & 0xFFFF, sequence);
+    }
+
+    private void insertExecution(String id, String state, @Nullable Instant finishedAt, @Nullable String correlationId) {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, finished_at,
+                    actor, correlation_id, payload, payload_type)
+                VALUES (?, 'job-a', ?, ?, ?, ?, 'test', ?, '{}', ?)
+                """, id, state, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW),
+                finishedAt == null ? null : JdbcTimestamps.toUtcLocalDateTime(finishedAt), correlationId,
+                WelcomeEmail.class.getName());
+    }
+
+    private void insertAttempt(String executionId, int number, Instant finishedAt) {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
+                VALUES (?, ?, 'node-a', ?, ?, 'SUCCEEDED')
+                """, executionId, number, JdbcTimestamps.toUtcLocalDateTime(finishedAt),
+                JdbcTimestamps.toUtcLocalDateTime(finishedAt));
+    }
+
+    private void insertBatch(String id, Instant createdAt) {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_batches (id, name, total, succeeded, failed, created_at)
+                VALUES (?, 'nightly', 1, 1, 0, ?)
+                """, id, JdbcTimestamps.toUtcLocalDateTime(createdAt));
+    }
+
+    private int countRows(String table, String id) {
+        String column = table.equals("mohs_batches") ? "id" : "execution_id";
+        Integer count = rawJdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM " + table + " WHERE " + column + " = ?", Integer.class, id);
+        return count == null ? 0 : count;
+    }
+
+    @Test
+    void sweepDeletesTerminalHistoryOutsideTheWindowAndSparesEverythingElse() {
+        String oldDone = v7At(OLD, 1);
+        insertExecution(oldDone, "SUCCEEDED", OLD, null);
+        insertAttempt(oldDone, 1, OLD);
+        String oldPending = v7At(OLD, 2);
+        insertExecution(oldPending, "PENDING", null, null);
+        // Born long ago, finished yesterday — a long retry. Its finish decides, not its birth.
+        String longRetry = v7At(OLD, 3);
+        insertExecution(longRetry, "FAILED", RECENT, null);
+        insertAttempt(longRetry, 1, RECENT);
+        String recent = v7At(RECENT, 4);
+        insertExecution(recent, "SUCCEEDED", RECENT, null);
+
+        HistoryStore.PrunedHistory pruned = store.pruneHistoryBefore(CUTOFF, 100);
+
+        assertThat(pruned.executions()).isEqualTo(1);
+        assertThat(pruned.attempts()).isEqualTo(1);
+        assertThat(pruned.drained(100)).isTrue();
+        assertThat(countRows("mohs_execution", oldDone)).isZero();
+        assertThat(countRows("mohs_attempt", oldDone)).isZero();
+        assertThat(countRows("mohs_execution", oldPending)).isOne();
+        assertThat(countRows("mohs_execution", longRetry)).isOne();
+        assertThat(countRows("mohs_attempt", longRetry)).isOne();
+        assertThat(countRows("mohs_execution", recent)).isOne();
+    }
+
+    @Test
+    void sweepIsBoundedPerStatementAndReportsWhenNotDrained() {
+        for (int i = 1; i <= 3; i++) {
+            String id = v7At(OLD, i);
+            insertExecution(id, "SUCCEEDED", OLD, null);
+            insertAttempt(id, 1, OLD);
+        }
+
+        HistoryStore.PrunedHistory firstPass = store.pruneHistoryBefore(CUTOFF, 2);
+        assertThat(firstPass.executions()).isEqualTo(2);
+        assertThat(firstPass.drained(2)).isFalse();
+
+        HistoryStore.PrunedHistory secondPass = store.pruneHistoryBefore(CUTOFF, 2);
+        assertThat(secondPass.executions()).isEqualTo(1);
+        assertThat(firstPass.attempts() + secondPass.attempts()).isEqualTo(3);
+        assertThat(store.pruneHistoryBefore(CUTOFF, 2).drained(2)).isTrue();
+    }
+
+    /** A batch lives exactly as long as its last visible member — open batches keep a live member by construction, and closed ones stay readable while any member's history does. */
+    @Test
+    void sweepCollectsABatchOnlyWhenNoMemberRemains() {
+        String goneBatch = v7At(OLD, 10);
+        insertBatch(goneBatch, OLD);
+        String goneMember = v7At(OLD, 11);
+        insertExecution(goneMember, "SUCCEEDED", OLD, goneBatch);
+        String keptBatch = v7At(OLD, 12);
+        insertBatch(keptBatch, OLD);
+        String keptMember = v7At(OLD, 13);
+        insertExecution(keptMember, "FAILED", RECENT, keptBatch);
+
+        HistoryStore.PrunedHistory pruned = store.pruneHistoryBefore(CUTOFF, 100);
+
+        assertThat(pruned.batches()).isEqualTo(1);
+        assertThat(countRows("mohs_batches", goneBatch)).isZero();
+        assertThat(countRows("mohs_batches", keptBatch)).isOne();
+    }
+
+    /** The dedup window is {@code idempotency-retention}'s contract: the key row outlives its execution's history, and that is correct — reusing the key still deduplicates. */
+    @Test
+    void sweepLeavesIdempotencyRowsToTheirOwnWindow() {
+        String id = v7At(OLD, 20);
+        insertExecution(id, "SUCCEEDED", OLD, null);
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at)
+                VALUES ('job-a', 'key-old', ?, ?)
+                """, id, JdbcTimestamps.toUtcLocalDateTime(OLD));
+
+        store.pruneHistoryBefore(CUTOFF, 100);
+
+        assertThat(countRows("mohs_execution", id)).isZero();
+        assertThat(store.findByIdempotencyKey(JobKey.of("job-a"), "key-old")).contains(ExecutionId.of(id));
+    }
+
+    /**
+     * The id bound is deliberately conservative: an id born AT the cutoff millisecond compares
+     * {@code >=} the synthesized lower bound and is spared, whatever the rest of the row says — the
+     * next hourly slot collects that one-millisecond sliver. The row is synthetic on purpose (its
+     * {@code finished_at} alone would qualify it), so only the bound can be doing the sparing; this
+     * pins the boundary against a future "correction" of {@code <} to {@code <=}.
+     */
+    @Test
+    void anExecutionBornAtTheCutoffMillisecondIsSpared() {
+        String atCutoff = v7At(CUTOFF, 40);
+        insertExecution(atCutoff, "SUCCEEDED", OLD, null);
+
+        HistoryStore.PrunedHistory pruned = store.pruneHistoryBefore(CUTOFF, 100);
+
+        assertThat(pruned.executions()).isZero();
+        assertThat(countRows("mohs_execution", atCutoff)).isOne();
+    }
+
+    /** A crash between the sweep's statements leaves orphans; the next sweep's own predicate collects them without any carried state. */
+    @Test
+    void sweepCollectsOrphanedAttemptsLeftBehind() {
+        String vanished = v7At(OLD, 30);
+        insertAttempt(vanished, 1, OLD);
+
+        HistoryStore.PrunedHistory pruned = store.pruneHistoryBefore(CUTOFF, 100);
+
+        assertThat(pruned.executions()).isZero();
+        assertThat(pruned.attempts()).isEqualTo(1);
+        assertThat(countRows("mohs_attempt", vanished)).isZero();
     }
 }

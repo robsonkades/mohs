@@ -137,11 +137,13 @@ public class MohsAutoConfiguration {
     /**
      * The floor of {@code mohs.engine.node-lease-ttl}. The heartbeat goes out ONCE per tick, at the top
      * of it, and everything after it spends the promise it just made: the idempotency prune (5s), the
-     * queue-depth count (2s), the claim sweep's own budget ({@code node-lease-ttl/4}, reachable across
-     * up to 64 shard probes even with a single round, and reachable while claiming nothing), and last
-     * the sleep ({@code node-lease-ttl/3}).
+     * history sweep when the operator enabled one (its 2s budget plus a pass tail of up to THREE
+     * 1s-capped statements — the budget is checked between passes, so the worst slot is ~5s, hourly),
+     * the queue-depth count (2s), the claim sweep's own budget ({@code node-lease-ttl/4}, reachable
+     * across up to 64 shard probes even with a single round, and reachable while claiming nothing),
+     * and last the sleep ({@code node-lease-ttl/3}).
      *
-     * <p>Summing every ceiling demands 17s and outlaws the 15s default this library ships — which is
+     * <p>Summing every ceiling demands 17s — 22s with the opt-in sweep on — and outlaws the 15s default this library ships — which is
      * the sign that the additive model is not a floor. Those ceilings only bite on a degraded database,
      * and there the same tick's UNBOUNDED queries (definitions, nodes, the reaper, the firing sweep,
      * each claim) blow the lease long before any minimum could help. So twelve is a SANITY floor,
@@ -420,7 +422,8 @@ public class MohsAutoConfiguration {
         EngineSettings settings = new EngineSettings(engineProperties.pollInterval(), engineProperties.maxPollInterval(),
                 engineProperties.batchSize(), engineProperties.dispatchConcurrency(), engineProperties.claimRounds(),
                 engineProperties.leaseTtl(), engineProperties.nodeLeaseTtl(), engineProperties.watchdogTimeout(),
-                engineProperties.misfireThreshold(), engineProperties.idempotencyRetention());
+                engineProperties.misfireThreshold(), engineProperties.idempotencyRetention(),
+                engineProperties.historyRetention());
         return new Engine(mohsWorkQueue, mohsDispatcher, mohsHistoryStore, mohsLeaseStore, mohsJobStore, mohsNodeStore,
                 mohsTriggerFirer, mohsExecutionWindowRegistry, mohsRateLimitStore, mohsClock, settings,
                 mohsRunnerRegistry, mohsEngineMetrics, mohsRetryPolicyRegistry);

@@ -174,6 +174,21 @@ final class CommunityDelegate implements JdbcDelegate {
     }
 
     @Override
+    public String pruneTerminalExecutionsBefore() {
+        return delegate.pruneTerminalExecutionsBefore();
+    }
+
+    @Override
+    public String pruneOrphanedAttemptsBefore() {
+        return delegate.pruneOrphanedAttemptsBefore();
+    }
+
+    @Override
+    public String pruneEmptyBatchesBefore() {
+        return delegate.pruneEmptyBatchesBefore();
+    }
+
+    @Override
     public String findExecutionById() {
         return delegate.findExecutionById();
     }

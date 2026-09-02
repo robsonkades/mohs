@@ -22,6 +22,7 @@ metadata is generated from the `@param` documentation.
 | `mohs.engine.watchdog-timeout` | No | *(none — off)* | The Watchdog Bound. When present it **must be greater than `node-lease-ttl`** |
 | `mohs.engine.misfire-threshold` | No | `60s` | Separates a late firing from a missed one |
 | `mohs.engine.idempotency-retention` | No | `7d` | **The deduplication window**: a key deduplicates for exactly as long as its row lives in `mohs_idempotency`, and the tick prunes older rows hourly, under a 5s query timeout so a prune can never hold the claim hostage. `0s` keeps every key forever, and the unbounded table that comes with it |
+| `mohs.engine.history-retention` | No | `0s` *(off)* | **The history window, opt-in**: with a positive value, terminal executions finished longer ago than this — plus their attempts and member-less batches — are swept hourly, in bounded batches (1,000 rows/statement, 2s of budget per slot). `0s` keeps all history forever: deleting history is the operator's decision, never the scheduler's surprise. Does not touch `mohs_idempotency` (see the row above). [Data lifecycle](../06-data/data-lifecycle.md) carries the semantics |
 | `mohs.engine.dispatch-concurrency` | No | `64` | The node's ceiling on in-flight executions. **Also bounds the claim**, and sizes the built-in `io` runner |
 | `mohs.engine.event-concurrency` | No | `16` | The event publisher's concurrency ceiling |
 | `mohs.engine.completion-flush-on-every-result` | No | `false` | `true` turns off group commit, returning to a synchronous commit per result |
@@ -121,6 +122,7 @@ These are checked at boot and **fail the boot** when violated:
 | `watchdog-timeout > node-lease-ttl` | `EngineSettings` | That the bound sits **on top of** node liveness, not as a shorter lease |
 | `misfire-threshold > 0` | `EngineSettings` | That a non-positive threshold turns every normally-late fire into a misfire |
 | `idempotency-retention >= 0` | `EngineSettings` | That zero is the opt-out and negative is meaningless — the message says so rather than pruning by a cutoff in the future |
+| `history-retention >= 0` | `EngineSettings` | Same shape as its sibling above: zero is the opt-out, negative is meaningless |
 | every declared `retryPolicy` has a bean | `MohsEngineLifecycle` | That a missing bean would fail executions on the built-in backoff, indistinguishable from the custom policy having chosen it (ORPHANED definitions are exempt — their annotation is gone from the code, so the bean legitimately is too) |
 | A rate limit's `window >= max` nanoseconds | `RateLimit.requireRefillable` | That one token is issued every `window/max` |
 | A runner field matches its mode | `MohsRunners` | The property and the mode |

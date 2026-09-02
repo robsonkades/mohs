@@ -32,31 +32,32 @@ across driver forks and versions. This is the same pattern Quartz uses with
 
 ## Every statement lives in the delegate
 
-`JdbcDelegate` declares **66 statement methods, all abstract**, and each of the four implementations
-spells out all 66. Nothing is assembled from fragments and nothing is inherited: reading
+`JdbcDelegate` declares **69 statement methods, all abstract**, and each of the four implementations
+spells out all 69. Nothing is assembled from fragments and nothing is inherited: reading
 `PostgresJdbcDelegate` top to bottom answers *what does Mohs send to PostgreSQL* without
 reconstructing a statement from a base class and an override.
 
-That is a deliberate trade. **61 of the 66 come out byte-identical across the four files**, and
+That is a deliberate trade. **61 of the 69 come out byte-identical across the four files**, and
 keeping them that way is duplication a base class would remove. What it buys:
 
 - a divergence is *visible*, because it sits beside the 61 that agree, rather than implied by an
   override somewhere else;
 - adding a database cannot half-inherit a statement that happens to be wrong for it — the compiler
-  demands all 66;
+  demands all 69;
 - and the SQL a reader is debugging at 3 a.m. is the SQL in the file, not the SQL after inheritance.
 
 `JdbcDelegateStatementDriftTest` is what keeps the duplication honest: it compares the named
 parameters of every statement across the four delegates, so a database whose statement quietly stops
 binding the same things fails the build.
 
-### The five that genuinely differ
+### The eight that genuinely differ
 
 | Statement | Why it diverges |
 | --- | --- |
 | `readyCandidates`, `readyCandidatesFiltered` | `TOP (:limit)` sits right after `SELECT` on SQL Server, where the others put `LIMIT` at the end, and the row-skipping hint is a table hint rather than a clause |
 | `findOrphanedLeases`, `findOrphanedLeasesExceptAlive` | Same limit-position problem |
 | `findExecutionPage` | Same, on the history page |
+| `pruneTerminalExecutionsBefore`, `pruneOrphanedAttemptsBefore`, `pruneEmptyBatchesBefore` | The retention sweep's bounded `DELETE`s: `DELETE TOP (:limit)` on SQL Server, a bare `DELETE … LIMIT` on MySQL (which forbids a subquery on the deleted table), and `id IN (subquery LIMIT)` on PostgreSQL/H2 — same named parameters everywhere, so the drift test still compares them |
 
 They were seven until 2026-09-01: `visibleWorkExists` and `visibleWorkCount` carried `WITH (NOLOCK)`
 on SQL Server, and became byte-identical to the other three when the RCSI requirement retired the
@@ -91,7 +92,7 @@ the delegate is what the library picks as a result.
 | Split-table timestamps | `TIMESTAMPTZ`, crossed as UTC `OffsetDateTime`. A `LocalDateTime` would be interpreted in the **session's** zone |
 | Partial indexes | Used (`WHERE correlation_id IS NOT NULL`) |
 | Storage tuning | `fillfactor = 70` and aggressive autovacuum on `mohs_ready` and `mohs_lease` |
-| PK ordering | `mohs_execution(created_at, execution_id)` and `mohs_attempt(finished_at, execution_id, number)` — a preserved partitioning artefact, compensated by two extra indexes |
+| PK ordering | Plain `mohs_execution(execution_id)` and `mohs_attempt(execution_id, number)` since `V5` rebuilt them — `V3`'s partition-key-led composites went with the partitioning. The UUIDv7-ranged retention sweep relies on the id leading the PK |
 | Streaming caveat | A `Stream` over a cursor only streams **inside a transaction** (autocommit off). Outside one, the driver materialises the whole result before the first item, regardless of `fetchSize` |
 | Unique migration | `V5` — the partitioning removal. See [migrations](migrations.md#v5--the-one-migration-that-moves-rows) |
 

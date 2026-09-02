@@ -57,6 +57,7 @@ public final class JdbcHistoryStore implements HistoryStore {
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final NamedParameterJdbcTemplate pruneTemplate;
+    private final NamedParameterJdbcTemplate sweepTemplate;
     private final JsonMapper objectMapper;
     private final JdbcDelegate delegate;
 
@@ -67,14 +68,25 @@ public final class JdbcHistoryStore implements HistoryStore {
      */
     private static final int PRUNE_TIMEOUT_SECONDS = 5;
 
+    /**
+     * Tighter than the prune's, because the history sweep issues THREE statements per pass and may
+     * loop passes within the caller's budget: at five seconds each, one lock-bound pass alone could
+     * outspend the node lease. One second is still two orders of magnitude above what a bounded,
+     * primary-key-ranged delete of cold rows costs — a statement that hits it is waiting, not working.
+     */
+    private static final int SWEEP_TIMEOUT_SECONDS = 1;
+
     public JdbcHistoryStore(DataSource dataSource, JsonMapper objectMapper, JdbcDelegate delegate) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
-        // A template of its own: the timeout must not reach the read model or the payload read, which
-        // run on the hot path and have no business being cancelled mid-flight
+        // Templates of their own: the timeouts must not reach the read model or the payload read,
+        // which run on the hot path and have no business being cancelled mid-flight
         JdbcTemplate pruneOperations = new JdbcTemplate(dataSource);
         pruneOperations.setQueryTimeout(PRUNE_TIMEOUT_SECONDS);
         this.pruneTemplate = new NamedParameterJdbcTemplate(pruneOperations);
+        JdbcTemplate sweepOperations = new JdbcTemplate(dataSource);
+        sweepOperations.setQueryTimeout(SWEEP_TIMEOUT_SECONDS);
+        this.sweepTemplate = new NamedParameterJdbcTemplate(sweepOperations);
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
@@ -220,6 +232,38 @@ public final class JdbcHistoryStore implements HistoryStore {
         Objects.requireNonNull(cutoff, "cutoff");
         return pruneTemplate.update(delegate.pruneIdempotencyBefore(),
                 new MapSqlParameterSource("cutoff", delegate.splitTimestamp(cutoff)));
+    }
+
+    /**
+     * Bounded twice over: in ROWS ({@code :limit} per statement — history is the biggest thing in
+     * the schema, and an unbounded first sweep over a never-enforced window would hold locks past
+     * any timeout's mercy) and in WAITING ({@link #SWEEP_TIMEOUT_SECONDS} per statement). Each
+     * statement commits alone; the ORDER makes that safe (see the interface contract).
+     */
+    @Override
+    public PrunedHistory pruneHistoryBefore(Instant cutoff, int limit) {
+        Objects.requireNonNull(cutoff, "cutoff");
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("cutoff", delegate.splitTimestamp(cutoff))
+                .addValue("cutoffId", uuidV7LowerBound(cutoff))
+                .addValue("limit", limit);
+        int executions = sweepTemplate.update(delegate.pruneTerminalExecutionsBefore(), params);
+        int attempts = sweepTemplate.update(delegate.pruneOrphanedAttemptsBefore(), params);
+        int batches = sweepTemplate.update(delegate.pruneEmptyBatchesBefore(), params);
+        return new PrunedHistory(executions, attempts, batches);
+    }
+
+    /**
+     * The smallest UUIDv7 an id created at {@code instant} could be: the 48-bit millisecond prefix
+     * with every random bit at zero (version nibble 7, minimal RFC variant 8). Ids are stored as
+     * lowercase hex strings and UUIDv7 sorts lexicographically in time order, so
+     * {@code execution_id < } this bound selects exactly the rows born before the instant — the
+     * primary-key range scan the sweep's statements rely on instead of a new index on
+     * {@code finished_at}.
+     */
+    private static String uuidV7LowerBound(Instant instant) {
+        long ms = instant.toEpochMilli();
+        return "%08x-%04x-7000-8000-000000000000".formatted(ms >>> 16, ms & 0xFFFF);
     }
 
     @Override

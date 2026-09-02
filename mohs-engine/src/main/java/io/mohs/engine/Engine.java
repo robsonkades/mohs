@@ -147,6 +147,23 @@ public final class Engine implements MohsLifecycle {
      */
     private static final Duration IDEMPOTENCY_PRUNE_INTERVAL = Duration.ofHours(1);
 
+    /** The history sweep's cadence — hourly for the same reason as the idempotency prune's: the window it enforces is measured in days. */
+    private static final Duration HISTORY_PRUNE_INTERVAL = Duration.ofHours(1);
+
+    /**
+     * Rows per statement of one sweep pass. Bounded so a pass never escalates row locks into a table
+     * lock on SQL Server (the escalation threshold sits near five thousand) and never holds any lock
+     * long: history rows are cold, but the tables are the schema's largest.
+     */
+    private static final int HISTORY_PRUNE_BATCH = 1_000;
+
+    /**
+     * The monotonic ceiling on ONE tick's sweeping. The tick carries the heartbeat, so a backlog
+     * (a window enforced for the first time over months of history) must drain across many hourly
+     * slots rather than inside one long tick — after the budget, whatever remains waits.
+     */
+    private static final Duration HISTORY_PRUNE_BUDGET = Duration.ofSeconds(2);
+
     private final WorkQueue workQueue;
     private final Dispatcher dispatcher;
     private final HistoryStore historyStore;
@@ -171,6 +188,7 @@ public final class Engine implements MohsLifecycle {
     private final Cadence queueDepthSample = new Cadence(QUEUE_DEPTH_SAMPLE_INTERVAL);
     /** {@code null} when {@code mohs.engine.idempotency-retention} is zero: the operator opted out of pruning. */
     private final @Nullable Cadence idempotencyPrune;
+    private final @Nullable Cadence historyPrune;
 
     private final AtomicReference<EngineState> state = new AtomicReference<>(EngineState.CREATED);
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
@@ -293,6 +311,7 @@ public final class Engine implements MohsLifecycle {
         metrics.bindQueueDepthGauge(queueDepth::get);
         Duration retention = settings.idempotencyRetention();
         this.idempotencyPrune = retention.isPositive() ? new Cadence(IDEMPOTENCY_PRUNE_INTERVAL) : null;
+        this.historyPrune = settings.historyRetention().isPositive() ? new Cadence(HISTORY_PRUNE_INTERVAL) : null;
     }
 
     @Override
@@ -501,6 +520,39 @@ public final class Engine implements MohsLifecycle {
         if (pruned > 0) {
             log.info("pruned {} idempotency key(s) older than {} — reusing one of those keys now starts a new execution",
                     pruned, retention);
+        }
+    }
+
+    /**
+     * The history retention window ({@code mohs.engine.history-retention}), enforced in bounded
+     * passes: batches of {@link #HISTORY_PRUNE_BATCH} per table, repeated only while a table keeps
+     * coming back full and the monotonic {@link #HISTORY_PRUNE_BUDGET} lasts — the same
+     * budget-on-top-of-a-counter shape as the claim rounds, and for the same reason: the tick
+     * already spent its heartbeat, and sweeping must never outspend the promise. Whatever the budget
+     * leaves stays for the next hourly slot; a months-deep backlog drains in hours, invisibly.
+     *
+     * <p>Every node issues the same sweep, exactly like {@link #pruneIdempotencyKeys} — isolated by
+     * {@code runMaintenance}, and the loser of any row race merely deletes nothing.
+     */
+    private void pruneHistory(Instant now) {
+        Duration retention = settings.historyRetention();
+        Instant cutoff = now.minus(retention);
+        long deadlineNanos = System.nanoTime() + HISTORY_PRUNE_BUDGET.toNanos();
+        int executions = 0;
+        int attempts = 0;
+        int batches = 0;
+        while (true) {
+            HistoryStore.PrunedHistory pruned = historyStore.pruneHistoryBefore(cutoff, HISTORY_PRUNE_BATCH);
+            executions += pruned.executions();
+            attempts += pruned.attempts();
+            batches += pruned.batches();
+            if (pruned.drained(HISTORY_PRUNE_BATCH) || System.nanoTime() - deadlineNanos >= 0) {
+                break;
+            }
+        }
+        if (executions > 0 || attempts > 0 || batches > 0) {
+            log.info("pruned history older than {} — {} execution(s), {} attempt(s), {} member-less batch(es)",
+                    retention, executions, attempts, batches);
         }
     }
 
@@ -768,6 +820,9 @@ public final class Engine implements MohsLifecycle {
             }
             if (idempotencyPrune != null && idempotencyPrune.due()) {
                 runMaintenance("idempotency-prune", () -> pruneIdempotencyKeys(now));
+            }
+            if (historyPrune != null && historyPrune.due()) {
+                runMaintenance("history-prune", () -> pruneHistory(now));
             }
             if (current != EngineState.RUNNING) {
                 // No trigger horizon outside RUNNING: what does not fire has no deadline to honour —

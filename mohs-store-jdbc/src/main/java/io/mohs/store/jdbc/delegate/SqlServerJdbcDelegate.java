@@ -238,6 +238,33 @@ public final class SqlServerJdbcDelegate implements JdbcDelegate {
     }
 
     @Override
+    public String pruneTerminalExecutionsBefore() {
+        return """
+                DELETE TOP (:limit) FROM mohs_execution
+                WHERE execution_id < :cutoffId AND finished_at < :cutoff
+                  AND state IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+                """;
+    }
+
+    @Override
+    public String pruneOrphanedAttemptsBefore() {
+        return """
+                DELETE TOP (:limit) FROM mohs_attempt
+                WHERE finished_at < :cutoff
+                  AND NOT EXISTS (SELECT 1 FROM mohs_execution e WHERE e.execution_id = mohs_attempt.execution_id)
+                """;
+    }
+
+    @Override
+    public String pruneEmptyBatchesBefore() {
+        return """
+                DELETE TOP (:limit) FROM mohs_batches
+                WHERE id < :cutoffId
+                  AND NOT EXISTS (SELECT 1 FROM mohs_execution e WHERE e.correlation_id = mohs_batches.id)
+                """;
+    }
+
+    @Override
     public String findExecutionById() {
         return """
                 SELECT e.execution_id, e.job_key, e.state, e.scheduled_at, e.created_at, e.actor, e.priority,

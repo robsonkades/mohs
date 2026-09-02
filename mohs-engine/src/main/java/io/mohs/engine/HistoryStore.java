@@ -166,4 +166,27 @@ public interface HistoryStore {
 
     /** Pruning of {@code mohs_idempotency} by the idempotency window — called by housekeeping, never on the hot path. */
     int pruneIdempotencyBefore(Instant cutoff);
+
+    /**
+     * One bounded sweep of the history retention window — called by housekeeping, never on the hot
+     * path. Deletes, in this order and at most {@code limit} rows per table: TERMINAL executions
+     * finished before {@code cutoff}, attempts whose execution no longer exists, and batches with no
+     * remaining member. The order is what makes each statement safe on its own: an execution is only
+     * deleted in a state a concurrent manual retry can no longer rearm, an attempt only once its
+     * execution is gone (so a live execution's attempt count is never corrupted), and a batch only
+     * once no member can still count into it. A crash between statements leaves rows the NEXT sweep's
+     * own predicates collect — no cross-statement transaction to lose.
+     *
+     * <p>{@code mohs_idempotency} is deliberately untouched: its window is the deduplication
+     * contract, not history — see {@link #pruneIdempotencyBefore}.
+     */
+    PrunedHistory pruneHistoryBefore(Instant cutoff, int limit);
+
+    /** What one sweep removed, per table — {@link #drained(int)} says whether every table came back under the batch, i.e. the window is clean. */
+    record PrunedHistory(int executions, int attempts, int batches) {
+
+        public boolean drained(int limit) {
+            return executions < limit && attempts < limit && batches < limit;
+        }
+    }
 }

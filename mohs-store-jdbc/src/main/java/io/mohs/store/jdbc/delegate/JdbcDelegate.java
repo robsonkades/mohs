@@ -269,6 +269,49 @@ public interface JdbcDelegate {
     String pruneIdempotencyBefore();
 
     /**
+     * The history sweep's first statement: at most {@code :limit} TERMINAL executions finished before
+     * {@code :cutoff}, and born before {@code :cutoffId}. The id bound is the load-bearing part —
+     * ids are UUIDv7, time-ordered and lexicographically sortable, so {@code execution_id < :cutoffId}
+     * (the smallest id an execution created at the cutoff could have) turns the candidate read into a
+     * range scan of the PRIMARY KEY, on every dialect, with no index added to the hottest history
+     * table. {@code finished_at} then refines: an old execution that finished recently (a long retry)
+     * stays until its finish leaves the window. The terminal-state predicate sits in the DELETE's
+     * OWN {@code WHERE} — in the subquery shapes (PostgreSQL/H2) that means it appears twice, because
+     * a predicate inside a subquery evaluates against a snapshot and serialises nothing; only the
+     * outer predicate is re-evaluated under the row lock, and it is what spares a row a concurrent
+     * manual retry rearmed to {@code PENDING} between read and write.
+     */
+    String pruneTerminalExecutionsBefore();
+
+    /**
+     * The sweep's second statement: at most {@code :limit} attempts finished before {@code :cutoff}
+     * whose execution no longer exists. Orphanhood, not a carried id list, is the predicate on
+     * purpose: it makes the statement self-sufficient across crashes (whatever the previous sweep
+     * deleted, this one's own predicate finds the leftover attempts) and race-free (an execution that
+     * survived the guarded delete keeps its attempts, and the attempt COUNT a rearm derives from
+     * stays correct).
+     *
+     * <p>The measured cost of that self-sufficiency: on PostgreSQL and SQL Server the planner answers
+     * this with a hash ANTI-JOIN over both tables — the {@code finished_at} predicate matches nearly
+     * every attempt, so no index makes it selective — which is a pass proportional to the tables'
+     * TOTAL size, not to {@code :limit} (~80 ms at half a million rows; MySQL probes the parent PK
+     * per row and is O(limit) already). That fits the 1s statement timeout until the tables reach the
+     * low millions; the O(limit) redesign for beyond that — the executions delete returning its ids,
+     * this one probing them, orphanhood kept as the crash backstop — is recorded with its measured
+     * trigger in the retention decision record.
+     */
+    String pruneOrphanedAttemptsBefore();
+
+    /**
+     * The sweep's last statement: at most {@code :limit} batches born before {@code :cutoffId} with
+     * no remaining member. No closed-counter check: an open batch always has a live (non-terminal,
+     * therefore unpruned) member, so "no member remains" already spares it — and it spares equally
+     * the closed batch whose members' history is still inside the window, keeping
+     * {@code GET /batches/{id}} consistent with the members a reader can still see.
+     */
+    String pruneEmptyBatchesBefore();
+
+    /**
      * The read model by id: the advisory joined to the queue and to the ownership, from which
      * {@code JdbcHistoryStore} derives the state (terminal lives in the column; RUNNING lives in the
      * ownership; ENQUEUED/RETRY_WAITING live in the queue, separated by the visibility rule).

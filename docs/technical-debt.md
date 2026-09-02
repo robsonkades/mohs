@@ -7,6 +7,11 @@ Status: Active · Last Reviewed: 2026-09-01 · Source of Truth: Repository
 > have been removed rather than kept as an archive — what was fixed is visible in the code and the
 > changelog. **Numbers are never reused**, so a gap in the sequence means an item that is gone.
 >
+> **Changed on 2026-09-01 (later).** **TD-02 is closed** — history retention shipped as
+> `mohs.engine.history-retention` (DR-002): opt-in with no default window, swept hourly on the tick
+> in bounded batches, seeking by the UUIDv7 primary-key range instead of a new index.
+> `mohs_idempotency` stays on its own window by design. No High item remains.
+>
 > **Changed on 2026-09-01.** **TD-15 is closed** — `KeyGenerationScanTest` in `mohs-store-jdbc`
 > now checks both halves of the UUIDv7 invariant: no `randomUUID` outside the UUIDv7 library in
 > `src/main/java`, and no `IDENTITY`/`SERIAL`/`AUTO_INCREMENT`/`SEQUENCE` in any `.sql`. Store
@@ -52,23 +57,10 @@ neglect. Where the code already names a gap, this document quotes it.
 | Severity | Count | Items |
 | --- | --- | --- |
 | **Critical** | 0 | — |
-| **High** | 1 | TD-02 |
+| **High** | 0 | — |
 | **Medium** | 3 | TD-09, TD-11, TD-12 |
 | **Low** | 2 | TD-18, TD-19 |
-| **Total open** | **6** | |
-
-## High
-
-### TD-02 — Nothing prunes execution history
-
-| | |
-| --- | --- |
-| **Problem** | `mohs_execution`, `mohs_attempt`, `mohs_batches` and `mohs_idempotency` grow forever. There is no policy, no scheduled task and no property |
-| **Evidence** | The only purge in the tree is `Engine#purgeStaleNodeRows`, for `mohs_nodes`. `V3__table_split.sql`'s header names retention as a later phase; `V5__drop_partitioning.sql` removed the partitioning that would have served it |
-| **Impact** | Unbounded storage growth; payloads retained indefinitely, which may be a data-protection obligation |
-| **Fix** | Ship a retention policy, or document the operator's obligation prominently. **The second is done** — see [data lifecycle](06-data/data-lifecycle.md) |
-
----
+| **Total open** | **5** | |
 
 ## Medium
 
@@ -140,8 +132,7 @@ Deliberate decisions with recorded reasoning. Listed here so nobody files them a
 
 | Priority | Item | Effort |
 | --- | --- | --- |
-| 1 | **TD-02** — a retention policy | Medium; needs per-dialect batched deletes |
-| 2 | **TD-19** — frontend tests | Medium |
-| 3 | **TD-11** — a `node` label on the `mohs.node.*` gauges, or a loud failure on the second bind | Small |
-| 4 | **TD-09** — deliver `JobContext#progress`, or remove it | Small |
-| 5 | **TD-12** — finish the prose translation, now that the SQL is what an operator reads | Large, mechanical |
+| 1 | **TD-19** — frontend tests | Medium |
+| 2 | **TD-11** — a `node` label on the `mohs.node.*` gauges, or a loud failure on the second bind | Small |
+| 3 | **TD-09** — deliver `JobContext#progress`, or remove it | Small |
+| 4 | **TD-12** — finish the prose translation, now that the SQL is what an operator reads | Large, mechanical |

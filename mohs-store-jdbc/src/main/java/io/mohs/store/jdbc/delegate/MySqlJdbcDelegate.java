@@ -230,6 +230,38 @@ public final class MySqlJdbcDelegate implements JdbcDelegate {
         return "DELETE FROM mohs_idempotency WHERE created_at < :cutoff";
     }
 
+    // The three sweep statements bound with a bare LIMIT: MySQL forbids a subquery on the table being
+    // deleted from (error 1093), and needs none — DELETE ... LIMIT is native here.
+    @Override
+    public String pruneTerminalExecutionsBefore() {
+        return """
+                DELETE FROM mohs_execution
+                WHERE execution_id < :cutoffId AND finished_at < :cutoff
+                  AND state IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+                LIMIT :limit
+                """;
+    }
+
+    @Override
+    public String pruneOrphanedAttemptsBefore() {
+        return """
+                DELETE FROM mohs_attempt
+                WHERE finished_at < :cutoff
+                  AND NOT EXISTS (SELECT 1 FROM mohs_execution e WHERE e.execution_id = mohs_attempt.execution_id)
+                LIMIT :limit
+                """;
+    }
+
+    @Override
+    public String pruneEmptyBatchesBefore() {
+        return """
+                DELETE FROM mohs_batches
+                WHERE id < :cutoffId
+                  AND NOT EXISTS (SELECT 1 FROM mohs_execution e WHERE e.correlation_id = mohs_batches.id)
+                LIMIT :limit
+                """;
+    }
+
     @Override
     public String findExecutionById() {
         return """

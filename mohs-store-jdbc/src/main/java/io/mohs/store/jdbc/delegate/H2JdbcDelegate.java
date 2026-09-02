@@ -225,6 +225,45 @@ public final class H2JdbcDelegate implements JdbcDelegate {
         return "DELETE FROM mohs_idempotency WHERE created_at < :cutoff";
     }
 
+    // The doubled terminal guard mirrors the Postgres shape, and for the same reason: in a
+    // DELETE ... WHERE pk IN (self-subquery), only the OUTER predicate is re-evaluated against the
+    // current row under the lock — the subquery's copy saw a snapshot.
+    @Override
+    public String pruneTerminalExecutionsBefore() {
+        return """
+                DELETE FROM mohs_execution WHERE execution_id IN (
+                    SELECT execution_id FROM mohs_execution
+                    WHERE execution_id < :cutoffId AND finished_at < :cutoff
+                      AND state IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+                    LIMIT :limit
+                ) AND state IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+                """;
+    }
+
+    @Override
+    public String pruneOrphanedAttemptsBefore() {
+        return """
+                DELETE FROM mohs_attempt WHERE (execution_id, number) IN (
+                    SELECT execution_id, number FROM mohs_attempt a
+                    WHERE a.finished_at < :cutoff
+                      AND NOT EXISTS (SELECT 1 FROM mohs_execution e WHERE e.execution_id = a.execution_id)
+                    LIMIT :limit
+                )
+                """;
+    }
+
+    @Override
+    public String pruneEmptyBatchesBefore() {
+        return """
+                DELETE FROM mohs_batches WHERE id IN (
+                    SELECT id FROM mohs_batches b
+                    WHERE b.id < :cutoffId
+                      AND NOT EXISTS (SELECT 1 FROM mohs_execution e WHERE e.correlation_id = b.id)
+                    LIMIT :limit
+                )
+                """;
+    }
+
     @Override
     public String findExecutionById() {
         return """

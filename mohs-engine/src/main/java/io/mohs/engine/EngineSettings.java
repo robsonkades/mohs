@@ -49,6 +49,13 @@ import org.jspecify.annotations.Nullable;
  * contract — it is the contract's duration. {@code ZERO} keeps every key forever, which also means
  * the table grows forever.
  *
+ * <p>{@code historyRetention} is how long a TERMINAL execution's history (its row, its attempts, and
+ * a batch none of whose members remain) survives after finishing. {@code ZERO} — the default — keeps
+ * everything forever: deleting history is the operator's call, never a scheduler's surprise, so the
+ * sweep is strictly opt-in. It is retention of history, not of the dedup contract:
+ * {@code mohs_idempotency} answers only to {@code idempotencyRetention}, so a key may deduplicate
+ * against an execution whose history is already gone — that is correct, not a leak.
+ *
  * <p>{@code maxPollInterval} is the adaptive backoff's ceiling: the interval between ticks starts at
  * {@code pollInterval} (the floor), doubles on every tick that found no work, and returns to the
  * floor on the first that did. {@code maxPollInterval == pollInterval} disables the backoff (a fixed
@@ -75,7 +82,7 @@ import org.jspecify.annotations.Nullable;
  */
 public record EngineSettings(Duration pollInterval, Duration maxPollInterval, int batchSize, int dispatchConcurrency,
         int claimRounds, Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout,
-        Duration misfireThreshold, Duration idempotencyRetention) {
+        Duration misfireThreshold, Duration idempotencyRetention, Duration historyRetention) {
 
     /**
      * The same default as {@code mohs.engine.idempotency-retention} ({@code MohsProperties}). Seven
@@ -100,6 +107,7 @@ public record EngineSettings(Duration pollInterval, Duration maxPollInterval, in
         Objects.requireNonNull(nodeLeaseTtl, "nodeLeaseTtl");
         Objects.requireNonNull(misfireThreshold, "misfireThreshold");
         Objects.requireNonNull(idempotencyRetention, "idempotencyRetention");
+        Objects.requireNonNull(historyRetention, "historyRetention");
         if (batchSize <= 0) {
             throw new IllegalArgumentException("batchSize must be positive");
         }
@@ -139,6 +147,22 @@ public record EngineSettings(Duration pollInterval, Duration maxPollInterval, in
             throw new IllegalArgumentException("mohs.engine.idempotency-retention must not be negative, got "
                     + idempotencyRetention + " — zero turns pruning off and keeps every key forever, which is as far as it goes");
         }
+        if (historyRetention.isNegative()) {
+            throw new IllegalArgumentException("mohs.engine.history-retention must not be negative, got "
+                    + historyRetention + " — zero turns the sweep off and keeps every terminal execution forever, which is as far as it goes");
+        }
+    }
+
+    /**
+     * Every parameter but the history sweep, which stays off — history retention is opt-in
+     * (an embedded scheduler must not delete history nobody asked it to), so only the caller that
+     * binds the operator's property passes it explicitly.
+     */
+    public EngineSettings(Duration pollInterval, Duration maxPollInterval, int batchSize, int dispatchConcurrency,
+            int claimRounds, Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout,
+            Duration misfireThreshold, Duration idempotencyRetention) {
+        this(pollInterval, maxPollInterval, batchSize, dispatchConcurrency, claimRounds, leaseTtl, nodeLeaseTtl,
+                watchdogTimeout, misfireThreshold, idempotencyRetention, Duration.ZERO);
     }
 
     /** Every parameter but the deduplication window, which takes its default — the convenience for callers that do not exercise pruning. */
