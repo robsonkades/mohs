@@ -76,7 +76,7 @@ data migration, not a refactor, and this test is what makes that visible.
 | Schema equivalence | `SchemaPostgresChainMatchesInstallerTest` — one database built from `schema-postgresql.sql`, one from the `V*.sql` chain, compared column by column and index by index |
 | Stores against a real database | `SchemaPostgresRoundTripTest`, `…MySql…`, `…SqlServer…` |
 | Statement drift | `JdbcDelegateStatementDriftTest` — the named parameters of all 66 statements, across the four delegates |
-| Source scans | `TerminalStateWriteScanTest`, `SqlServerUnicodeScanTest` |
+| Source scans | `TerminalStateWriteScanTest`, `SqlServerUnicodeScanTest`, `KeyGenerationScanTest` |
 | Time | `JdbcTimestampsTest`, `DatabaseClockTest` |
 | **Engine tests needing a real store** | `EngineTest`, `DispatcherTest`, `CompletionBatcherTest`, `ScheduleCommandImplTest` — in `io.mohs.engine`, but living here |
 

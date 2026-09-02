@@ -46,6 +46,7 @@ and it is the only shape the reactor allows.
 | --- | --- | --- |
 | `TerminalStateWriteScanTest` | `mohs-store-jdbc/src/test/.../TerminalStateWriteScanTest.java` | Reads its own module's `src/main/java` to guard where terminal-state writes may appear. It lives in the module whose SQL it guards |
 | `SqlServerUnicodeScanTest` | `mohs-store-jdbc/src/test` | Guards `NVARCHAR` usage in the SQL Server dialect — `VARCHAR` is not Unicode there by default |
+| `KeyGenerationScanTest` | `mohs-store-jdbc/src/test` | Both halves of the UUIDv7 invariant: no `randomUUID` outside the UUIDv7 library in the module's `src/main/java`, and no `IDENTITY`/`SERIAL`/`AUTO_INCREMENT`/`SEQUENCE` in any `.sql` |
 | `SchemaPostgresRoundTripTest`, `SchemaMySqlRoundTripTest`, `SchemaSqlServerRoundTripTest` | `mohs-store-jdbc/src/test` | Exercise every store against a real container on the schema an operator would install |
 | `SchemaPostgresChainMatchesInstallerTest` | `mohs-store-jdbc/src/test` | Builds one database from `schema-postgresql.sql` and one from the `V*.sql` chain, then compares columns and index definitions. With no migration engine running them, this is the only thing keeping the installer and the upgrade path from drifting apart |
 | `JdbcDelegateStatementDriftTest` | `mohs-store-jdbc/src/test` | Compares the named parameters of all 66 statements across the four delegates — the price of spelling every statement out per database |
@@ -87,6 +88,5 @@ Not present today; listed with the concrete gap each would close.
 
 | Proposed fitness function | Gap it closes |
 | --- | --- |
-| A SQL scan asserting no `IDENTITY`/`SERIAL`/`AUTO_INCREMENT`/`SEQUENCE` in any `schema-*.sql` or delta | The half of the UUIDv7 invariant that was never checked |
-| A source scan for `UUID.randomUUID` and for `synchronized (…) { }` in the engine and the store | Rules that used to be checked and no longer are |
+| A source scan for `synchronized (…) { }` in the engine and the store, and for `randomUUID` in the engine | Rules that used to be checked and no longer are — `KeyGenerationScanTest` restored the UUIDv7 invariant for the store, where ids become rows, but the engine is outside its reach |
 | A dependency-convergence or `maven-enforcer` rule | There is no enforcer plugin in the build today |

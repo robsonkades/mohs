@@ -86,7 +86,7 @@ flowchart TB
 | **Dependencies** | `mohs-engine`, `spring-boot-starter-jdbc`, `spring-boot-starter-jackson`, `uuidv7`, `slf4j-api`. **No migration engine** — the module executes no DDL |
 | **Resources** | Four `schema-*.sql` installers at the classpath root, plus the per-database delta chain under `io/mohs/store/jdbc/migration/{h2,mysql,postgresql,sqlserver}/`. Both ship in the jar for the operator to apply; nothing runs them |
 | **Tests** | 27 classes. Testcontainers for PostgreSQL, MySQL and SQL Server; H2 in-process. **Requires Docker**; without it the container-backed tests fail on `Could not initialize class *TestSupport`, which is an environment failure, not a regression. |
-| **Notable guards** | `TerminalStateWriteScanTest` scans this module's own source; `SchemaPostgresChainMatchesInstallerTest` compares the installer against the delta chain; `SqlServerUnicodeScanTest` guards `NVARCHAR` usage. |
+| **Notable guards** | `TerminalStateWriteScanTest` scans this module's own source; `SchemaPostgresChainMatchesInstallerTest` compares the installer against the delta chain; `SqlServerUnicodeScanTest` guards `NVARCHAR` usage; `KeyGenerationScanTest` guards the UUIDv7 invariant in source and schema. |
 
 ### `mohs-rest`
 
