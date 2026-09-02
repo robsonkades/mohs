@@ -110,7 +110,7 @@ attempt.
 | --- | --- | --- |
 | `Could not initialize class *TestSupport` in tests | **Docker is not running** | Start Docker. An environment failure, not a regression |
 | Deadlocks on SQL Server | Every node issues the same purge `DELETE` each tick | It is isolated by `runMaintenance` and does not stop the claim. Watch `mohs.tick.failed{step="stale-node-purge"}` |
-| Error 601 on SQL Server reads | `NOLOCK` on the idle-gate probe under a page split | Within the probe's declared tolerance; falls into the fail-open fallback. Enabling RCSI removes it |
+| Boot refuses with `READ_COMMITTED_SNAPSHOT is OFF` on SQL Server | RCSI is a requirement of the dialect (DR-001) — without it reads block against the claim's locks | Run the `ALTER DATABASE … SET READ_COMMITTED_SNAPSHOT ON` the message carries. Azure SQL has it ON by default |
 | `Msg 1946 ... exceeds the maximum length of 900 bytes` on SQL Server enqueue | The `mohs_idempotency` clustered-key limit | Apply `V8`, which makes the PK `NONCLUSTERED` |
 | Slow `GET /overview` | The backlog `COUNT(*)`, not history | Measured ~13.2 ms at a 500 k backlog. Reduce the backlog |
 | The idle probe is slow | A large **non-visible** backlog turns it into a sequential scan (5.5 ms at 200 k, 27.5 ms at 1 M) | Expected. Dead tuples make it much worse — check autovacuum |

@@ -149,7 +149,7 @@ one statement instead of 64:
 
 ```sql
 SELECT CASE WHEN EXISTS (
-    SELECT 1 FROM mohs_ready /* WITH (NOLOCK) on SQL Server */
+    SELECT 1 FROM mohs_ready
      WHERE shard IN (:shards) AND visible_at <= :now
 ) THEN 1 ELSE 0 END
 ```

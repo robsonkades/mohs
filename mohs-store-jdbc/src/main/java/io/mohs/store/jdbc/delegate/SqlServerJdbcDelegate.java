@@ -26,11 +26,14 @@ import io.mohs.store.jdbc.JdbcTimestamps;
 
 /**
  * SQL Server's SQL. The rationale for each statement is on {@link JdbcDelegate}; what is here is the
- * T-SQL — including the three places where T-SQL is not merely different text but a different
- * STRUCTURE: {@code TOP} sits right after {@code SELECT} (never at the end, like {@code LIMIT}),
+ * T-SQL — including the two places where T-SQL is not merely different text but a different
+ * STRUCTURE: {@code TOP} sits right after {@code SELECT} (never at the end, like {@code LIMIT}), and
  * {@code FOR UPDATE SKIP LOCKED} does not exist and is emulated by
- * {@code WITH (UPDLOCK, ROWLOCK, READPAST)} (the emulation jOOQ confirms), and a read that must not
- * take locks needs an explicit hint under the default {@code READ COMMITTED} without RCSI.
+ * {@code WITH (UPDLOCK, ROWLOCK, READPAST)} (the emulation jOOQ confirms).
+ *
+ * <p>What is deliberately NOT here is any read hint. Plain reads are non-blocking and correct only
+ * under row versioning, so {@code READ_COMMITTED_SNAPSHOT} is a boot requirement of this dialect —
+ * {@link SqlServerRcsiRequirement} refuses to start without it, and carries the measured argument.
  */
 public final class SqlServerJdbcDelegate implements JdbcDelegate {
 
@@ -155,31 +158,23 @@ public final class SqlServerJdbcDelegate implements JdbcDelegate {
     }
 
     /**
-     * {@code NOLOCK} (read uncommitted), not {@code READPAST}: skipping a locked row systematically
-     * undercounts under load.
-     *
-     * <p>The accepted error is the mechanism's worst case, not merely "±1 in transition": with no
-     * required order the optimiser may choose an allocation-order scan, which under a concurrent page
-     * split reads a row twice or loses it; and the scan may fail with error 601 ("data movement"), which
-     * here becomes a transient read failure that falls into the {@code Engine}'s fail-open fallback.
-     *
-     * <p>A deployment with RCSI ({@code READ_COMMITTED_SNAPSHOT ON}) makes the hint redundant — the
-     * operator's decision, not the library's.
+     * No {@code NOLOCK}, on purpose: the boot-required RCSI makes the plain read non-blocking AND
+     * correct, where the hint was non-blocking and wrong (it once counted a claim's uncommitted
+     * {@code DELETE} that then rolled back) — see {@link SqlServerRcsiRequirement}.
      */
     @Override
     public String visibleWorkExists() {
         return """
                 SELECT CASE WHEN EXISTS (
-                    SELECT 1 FROM mohs_ready WITH (NOLOCK) WHERE shard IN (:shards) AND visible_at <= :now
+                    SELECT 1 FROM mohs_ready WHERE shard IN (:shards) AND visible_at <= :now
                 ) THEN 1 ELSE 0 END
                 """;
     }
 
-    /** The same {@code NOLOCK} as the probe, with the anomalies costing an approximate gauge rather than a lap — see {@link #visibleWorkExists()}. */
     @Override
     public String visibleWorkCount() {
         return """
-                SELECT COUNT(*) FROM mohs_ready WITH (NOLOCK) WHERE visible_at <= :now
+                SELECT COUNT(*) FROM mohs_ready WHERE visible_at <= :now
                 """;
     }
 

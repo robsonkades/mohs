@@ -62,9 +62,10 @@ import io.mohs.rest.runner.RunnerResponse;
  * <p>One tick is shared by every subscriber (Observer, GoF): the READS cost the same as one
  * {@code GET /overview} plus the lists per interval, regardless of how many dashboards are
  * connected — and zero with no subscriber, since the tick returns before touching the database. The
- * reads inherit whatever the counts do, which is no longer the lock-free contract: they were
- * rewritten over the split tables and stopped carrying a lock-free read hint (which now lives inside {@code SqlServerJdbcDelegate}'s probe statements), so on SQL
- * Server without RCSI they take shared locks again — tracked, not forgotten.
+ * reads block no writer and take no shared lock on any dialect, and the guarantee comes from row
+ * versioning rather than hints: natively on PostgreSQL and MySQL, and on SQL Server because
+ * {@code READ_COMMITTED_SNAPSHOT} is a boot requirement of that dialect — without it, one
+ * uncommitted claim was measured blocking these counts to a lock timeout at this very cadence.
  *
  * <p>The SENDS are per subscriber, on a virtual thread (blocking network I/O — the house rule), with
  * <em>conflation</em>: if a client's previous frame has not finished writing (a slow client, a

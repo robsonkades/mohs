@@ -85,14 +85,15 @@ import io.mohs.store.jdbc.delegate.JdbcDelegate;
 import io.mohs.store.jdbc.delegate.MySqlJdbcDelegate;
 import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
 import io.mohs.store.jdbc.delegate.SqlServerJdbcDelegate;
+import io.mohs.store.jdbc.delegate.SqlServerRcsiRequirement;
 
 /**
  * Wires the engine ({@code io.mohs.engine}/{@code io.mohs.store.jdbc}) to a real Spring Boot
  * {@link DataSource}.
  *
- * <p>This package is free to depend on internals — {@code ArchitectureTest.PUBLIC_API} excludes
- * {@code io.mohs.autoconfigure} from the packages barred from seeing {@code io.mohs.engine} and
- * {@code io.mohs.store.jdbc}, because that is precisely this package's job. Scanning for
+ * <p>This package is free to depend on internals — seeing {@code io.mohs.engine} and
+ * {@code io.mohs.store.jdbc} is precisely this package's job, where the public-API packages must
+ * not (the reactor enforces that: they compile without the internals on the classpath). Scanning for
  * {@code @MohsJob} ({@link MohsJobScanner}) and named runners ({@link RunnerRegistry}) are assembled
  * here.
  *
@@ -166,10 +167,17 @@ public class MohsAutoConfiguration {
      * {@code driverDelegateClass} shape — because in a Spring application the container already builds
      * and injects it: reflection would buy nothing, and would cost a boot failure that arrives as a
      * stack trace instead of a compiler error.
+     *
+     * <p>Selecting {@code sqlserver} also verifies the dialect's one database requirement,
+     * {@code READ_COMMITTED_SNAPSHOT} — here, at the earliest bean that knows the dialect, because the
+     * failure mode is otherwise silent: without row versioning the deployment passes every test and
+     * degrades only under concurrent load ({@link SqlServerRcsiRequirement} carries the argument and
+     * the actionable message). A substituted delegate bean skips the check, deliberately — a database
+     * this repository does not ship owns its own trade-offs.
      */
     @Bean
     @ConditionalOnMissingBean
-    public JdbcDelegate mohsJdbcDelegate(MohsProperties properties) {
+    public JdbcDelegate mohsJdbcDelegate(MohsProperties properties, DataSource dataSource) {
         MohsProperties.Jdbc.Dialect configuredDialect = properties.jdbc().dialect();
         if (configuredDialect == null) {
             throw new IllegalStateException(
@@ -188,7 +196,10 @@ public class MohsAutoConfiguration {
             case H2 -> new H2JdbcDelegate();
             case POSTGRESQL -> new PostgresJdbcDelegate();
             case MYSQL -> new MySqlJdbcDelegate();
-            case SQLSERVER -> new SqlServerJdbcDelegate();
+            case SQLSERVER -> {
+                SqlServerRcsiRequirement.verify(dataSource);
+                yield new SqlServerJdbcDelegate();
+            }
         };
     }
 

@@ -168,7 +168,6 @@ dead — a result still in the queue would be reclaimed as an orphan.
 | --- | --- | --- |
 | **Read skew** between the counts in `GET /overview` | `Mohs#overview` performs independent reads rather than one transactional cut | Executions transitioning during the query may disagree between the numbers. Acceptable for polling; a serialisable cut here would be cost without benefit |
 | The two throughput readings are **not nested** | `OverviewSnapshot` | They are separate round trips in distinct snapshots — measured at ~19 rows of asymmetry per call at a 4 k/s operating point. Adding, subtracting or stacking one on the other produces a negative number sooner or later |
-| `NOLOCK` on SQL Server's idle-gate probe | `SqlServerJdbcDelegate#visibleWorkExists` and `#visibleWorkCount` | Under a concurrent page split an allocation-order scan can count a row twice or lose it, and can fail with error 601. All three are within the probe's declared tolerance: a missed row costs one poll, a dirty row costs one lap, and 601 falls into the fail-open fallback |
 | Advisory `state` staleness | The derived read model | A `PENDING` row with neither queue nor lease reads as `ENQUEUED` — the bounded window of a completion flush in progress |
 
 ## Connection usage

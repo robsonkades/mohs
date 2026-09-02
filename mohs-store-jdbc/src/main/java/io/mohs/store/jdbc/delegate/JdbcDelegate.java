@@ -221,21 +221,20 @@ public interface JdbcDelegate {
      * The idle gate's probe: is there anything visible in THIS node's shards?
      *
      * <p>{@code EXISTS} rather than {@code LIMIT 1}/{@code TOP 1}: it short-circuits the same way and is
-     * the same shape in all four delegates. What is not the same shape is the locking — on SQL Server a
-     * plain {@code SELECT} under the default {@code READ COMMITTED} (without RCSI) takes shared locks on
-     * the system's hottest table, and what would block is the tick's thread, which carries the
-     * heartbeat. The anomalies of reading uncommitted are exactly the error the probe's contract already
-     * declares acceptable (a missed row costs one poll; a dirty row costs one lap).
+     * the same shape in all four delegates — including the locking, which is the load-bearing part. The
+     * probe must never take shared locks on the system's hottest table, because what would block is the
+     * tick's thread, which carries the heartbeat. All four get that from row versioning, not from a
+     * hint: PostgreSQL and MySQL natively, SQL Server because {@code READ_COMMITTED_SNAPSHOT} is a boot
+     * requirement of the dialect (see {@code SqlServerRcsiRequirement}).
      */
     String visibleWorkExists();
 
     /**
      * The backlog gauge. No shard predicate: the backlog is the queue's, not this node's.
      *
-     * <p>The lock-free read is here for the same reason as the probe above — a metric must never take a
-     * shared lock on the hot path it is measuring — with one difference worth naming: a probe tolerates
-     * the anomalies because a wrong answer costs a lap, while a COUNT under them is simply approximate.
-     * That is what a gauge is.
+     * <p>The non-blocking read matters here for the same reason as the probe above — a metric must
+     * never take a shared lock on the hot path it is measuring — and versioned reads keep the number
+     * CORRECT besides: the last committed state, not an uncommitted delete's.
      *
      * <p>No index leads with {@code visible_at}, and none is added: a second index on the system's
      * hottest table, paid by every enqueue, claim and requeue, is a bad trade for a number sampled once

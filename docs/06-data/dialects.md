@@ -1,6 +1,6 @@
 # Dialects
 
-Status: Active · Last Reviewed: 2026-08-30 · Source of Truth: Repository (`io.mohs.store.jdbc.delegate`)
+Status: Active · Last Reviewed: 2026-09-01 · Source of Truth: Repository (`io.mohs.store.jdbc.delegate`)
 
 ## Support tiers
 
@@ -8,7 +8,7 @@ Status: Active · Last Reviewed: 2026-08-30 · Source of Truth: Repository (`io.
 | --- | --- | --- | --- |
 | PostgreSQL | 1 | Yes | Silent |
 | MySQL 8.0+ | 2 | Yes | Silent |
-| SQL Server | 2 | Yes | Silent |
+| SQL Server | 2 | Yes | **Refuses to boot without `READ_COMMITTED_SNAPSHOT ON`** — see [the RCSI requirement](#the-rcsi-requirement) |
 | H2 | **3 — test/dev only** | **No** | **WARN**: `mohs.jdbc.dialect=h2: H2 is Tier 3 — a test/dev backend, NOT supported in production` |
 
 The H2 warning is a warning rather than an error because the demo and the development loop depend on
@@ -37,10 +37,10 @@ spells out all 66. Nothing is assembled from fragments and nothing is inherited:
 `PostgresJdbcDelegate` top to bottom answers *what does Mohs send to PostgreSQL* without
 reconstructing a statement from a base class and an override.
 
-That is a deliberate trade. **59 of the 66 come out byte-identical across the four files**, and
+That is a deliberate trade. **61 of the 66 come out byte-identical across the four files**, and
 keeping them that way is duplication a base class would remove. What it buys:
 
-- a divergence is *visible*, because it sits beside the 59 that agree, rather than implied by an
+- a divergence is *visible*, because it sits beside the 61 that agree, rather than implied by an
   override somewhere else;
 - adding a database cannot half-inherit a statement that happens to be wrong for it — the compiler
   demands all 66;
@@ -50,14 +50,17 @@ keeping them that way is duplication a base class would remove. What it buys:
 parameters of every statement across the four delegates, so a database whose statement quietly stops
 binding the same things fails the build.
 
-### The seven that genuinely differ
+### The five that genuinely differ
 
 | Statement | Why it diverges |
 | --- | --- |
 | `readyCandidates`, `readyCandidatesFiltered` | `TOP (:limit)` sits right after `SELECT` on SQL Server, where the others put `LIMIT` at the end, and the row-skipping hint is a table hint rather than a clause |
 | `findOrphanedLeases`, `findOrphanedLeasesExceptAlive` | Same limit-position problem |
 | `findExecutionPage` | Same, on the history page |
-| `visibleWorkExists`, `visibleWorkCount` | SQL Server carries `WITH (NOLOCK)` on the idle gate; the others need no hint |
+
+They were seven until 2026-09-01: `visibleWorkExists` and `visibleWorkCount` carried `WITH (NOLOCK)`
+on SQL Server, and became byte-identical to the other three when the RCSI requirement retired the
+hint (DR-001).
 
 PostgreSQL additionally replaces the claim *algorithm* rather than a statement: `claimReady` becomes
 one CTE instead of the portable three.
@@ -119,30 +122,34 @@ The dialect with the most divergences, all documented:
 | Conditional DDL | No `IF NOT EXISTS`; uses `IF OBJECT_ID(...) IS NULL` / `IF NOT EXISTS (SELECT … FROM sys.indexes)` guarding a **single statement without `BEGIN/END`**, because `ResourceDatabasePopulator` splits scripts on `;` and would break a block in half |
 | `mohs_idempotency` | PK `NONCLUSTERED`, clustered on `created_at` — a hard 900-byte limit on clustered keys, not a preference |
 | Parameter ceiling | ~2,100 per statement. `JdbcSupport.chunksOf` and the claim's `limit` bound (dispatch headroom, ≈1,000) keep every statement below it |
-| Lock-free read hint | `WITH (NOLOCK)` on the idle-gate probe only |
-| **Known open item** | `GET /overview`'s counts were rewritten over the split tables and **no longer use the hint**, so without RCSI they take shared locks on all three hot tables. Recorded in [technical debt](../technical-debt.md) |
+| **RCSI** | **A boot requirement.** `SqlServerRcsiRequirement` refuses to start unless `READ_COMMITTED_SNAPSHOT` is ON — see below |
+| Read hints | **None.** The `WITH (NOLOCK)` the idle-gate probe used to carry was retired by the RCSI requirement |
 | `DatabaseClock` | Samples `SYSUTCDATETIME()`, not `CURRENT_TIMESTAMP`: the latter is a zoneless `DATETIME` the driver reads back in the JVM's zone, and it is only `datetime2` that resolves finer than ~3.3 ms |
 
-### The `NOLOCK` decision, with its accepted errors
+### The RCSI requirement
 
-`NOLOCK` (read uncommitted), **not** `READPAST`: skipping a locked row systematically undercounts
-under load.
+`READ_COMMITTED_SNAPSHOT ON` is a **stated requirement** of the SQL Server dialect, verified at
+boot and refused loudly with the exact command to run
+([DR-001](../15-design-decisions/records/DR-001-rcsi-required-on-sql-server.md)):
 
-The accepted error is stated as the mechanism's worst case rather than "±1 in transition": with no
-required order (`COUNT`/`GROUP BY`) the optimiser may choose an allocation-order scan, which under a
-concurrent page split **counts a row twice or loses it** — an error proportional to write churn —
-and the scan may fail with **error 601** ("data movement"), which here becomes a transient read
-failure.
+```sql
+ALTER DATABASE [your_database] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE
+```
 
-All three are within the probe's declared tolerance: a missed row costs one poll, a dirty row costs
-one lap, and error 601 falls into the fail-open fallback that returns the tick to the full lap.
+Azure SQL Database ships with it ON; on-premises servers default to OFF.
 
-A deployment with `READ_COMMITTED_SNAPSHOT ON` makes the hint redundant — **the operator's decision,
-not the library's**.
+Both sides of the requirement were measured. Without RCSI, one uncommitted claim holding X locks
+blocked the overview counts to a lock timeout (`Msg 1222`) — and the dashboard's stream runs them
+every 2 s. The lock-free alternative, `WITH (NOLOCK)`, read a queue depth of 49,000 against 50,000
+committed (it saw a claim's uncommitted `DELETE` that then rolled back), admits double-counted or
+lost rows under page splits, and can fail with error 601 — a wrong number a dashboard cannot
+distinguish from a right one. Row versioning is the only answer that is both non-blocking and
+correct, so the dialect requires it and carries **no read hints at all**.
 
-The hint must **never** be used on a read that hydrates an entity. It appears in exactly two
-statements — `visibleWorkExists` and `visibleWorkCount`, both the idle-gate probe — and nowhere else
-in `SqlServerJdbcDelegate`.
+There is no opt-out property: a deployment that cannot enable RCSI substitutes its own
+`JdbcDelegate` bean (the check belongs to the shipped dialect, not to substitutes) and owns the
+trade-offs. The version store RCSI keeps in `tempdb` is the operator's to monitor, as in any RCSI
+deployment.
 
 ## H2
 

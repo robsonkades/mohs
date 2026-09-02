@@ -178,5 +178,5 @@ es.onerror = () => { /* the browser reconnects; the next frame is the whole snap
 | No per-client filtering | Every subscriber receives all five events |
 | Fixed 2 s cadence | Not configurable today |
 | Frames may arrive out of order across a reconnect | `asOf` exists so a client can discard a stale frame; the server also avoids producing the reorder on the initial-snapshot path |
-| SQL Server without RCSI | The overview counts were rewritten over the split tables and no longer use the lock-free read hint, so they take shared locks on all three hot tables. Recorded as an open item |
+| SQL Server needs RCSI | `READ_COMMITTED_SNAPSHOT ON` is a boot requirement of the dialect (DR-001), so a running system already has it — the counts read the last committed version without blocking |
 | The reads inherit whatever `GET /overview` costs | On an idle database the throughput count costs the window (≈1.6 ms at 2 M rows); the backlog scan is what costs (≈13.2 ms at 500 k). Measured 2026-08-23 by `OverviewLatencyScenario`. **The number that still does not exist is the endpoint under load with a subscriber attached** |

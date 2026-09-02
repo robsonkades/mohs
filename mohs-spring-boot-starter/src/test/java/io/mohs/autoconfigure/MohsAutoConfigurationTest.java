@@ -40,8 +40,6 @@ import ch.qos.logback.core.read.ListAppender;
 
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
@@ -184,30 +182,48 @@ class MohsAutoConfigurationTest {
 
     /**
      * The combination that used to be refused at boot. It was refused because {@code CURRENT_TIMESTAMP}
-     * is zoneless on both, and the offset sampled from it was the distance between two zones; now each
-     * asks for UTC explicitly and reads the answer as a {@code LocalDateTime} stated to be UTC, so
-     * there is nothing left to refuse and {@code mohs.time.mode=application} is a preference rather
-     * than the only way to boot.
-     *
-     * <p>Both databases, for the reason the guard covered both: a change that opens one and forgets its
-     * twin reads as if the subject was handled.
+     * is zoneless on both MySQL and SQL Server, and the offset sampled from it was the distance between
+     * two zones; now each asks for UTC explicitly and reads the answer as a {@code LocalDateTime}
+     * stated to be UTC, so there is nothing left to refuse and {@code mohs.time.mode=application} is a
+     * preference rather than the only way to boot.
      *
      * <p>The boot still stops here, and the reason is now the honest one. The DataSource stays H2 while
-     * the dialect is declared, so {@code SELECT SYSUTCDATETIME()} does not even parse: the FIRST clock
+     * the dialect is declared, so {@code SELECT UTC_TIMESTAMP(6)} does not even parse: the FIRST clock
      * sample fails. What used to be refused for being a zoneless dialect is now refused for the only
      * thing that actually matters — the engine would otherwise start on the local clock the operator
      * said not to trust, with one WARN as the only sign. That the offset is real on a server of the
      * declared kind is {@code DatabaseClockZoneTest}'s subject, against real containers.
+     *
+     * <p>MySQL only, though the zoneless twins were both opened: SQL Server's boot now stops one bean
+     * earlier, at the dialect's RCSI requirement — the test below.
      */
-    @ParameterizedTest
-    @ValueSource(strings = {"sqlserver", "mysql"})
-    void databaseTimeModeStopsTheBootWhenTheFirstSampleFails(String dialect) {
-        runnerWith(freshH2DataSource(), "mohs.time.mode=database", "mohs.jdbc.dialect=" + dialect).run(context -> {
+    @Test
+    void databaseTimeModeStopsTheBootWhenTheFirstSampleFails() {
+        runnerWith(freshH2DataSource(), "mohs.time.mode=database", "mohs.jdbc.dialect=mysql").run(context -> {
             assertThat(context).hasFailed();
             assertThat(context.getStartupFailure())
                     .rootCause()
                     .hasMessageContaining("the first clock sample against the database failed")
                     .hasMessageContaining("mohs.time.mode=application");
+        });
+    }
+
+    /**
+     * The SQL Server dialect's boot requirement, seen from the starter: selecting {@code sqlserver}
+     * inspects {@code READ_COMMITTED_SNAPSHOT} before anything else touches the database, and a boot
+     * that cannot confirm the setting stops naming it. The DataSource here is H2, so the inspection
+     * itself fails — which is the same refusal an unreachable SQL Server earns. That a real server
+     * with the setting OFF is refused with the {@code ALTER DATABASE} to run is
+     * {@code SqlServerRcsiRequirementTest}'s subject, against a real container.
+     */
+    @Test
+    void sqlServerDialectStopsTheBootWhenRcsiCannotBeConfirmed() {
+        runnerWith(freshH2DataSource(), "mohs.jdbc.dialect=sqlserver").run(context -> {
+            assertThat(context).hasFailed();
+            // Not rootCause(): the refusal deliberately keeps the SQLException as its cause, so the
+            // deepest exception is the driver's, and the named refusal sits one level above it.
+            assertThat(context.getStartupFailure())
+                    .hasStackTraceContaining("could not inspect READ_COMMITTED_SNAPSHOT");
         });
     }
 

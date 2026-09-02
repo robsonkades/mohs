@@ -212,7 +212,7 @@ the schema, because they are pure insert/delete churn. Beyond that:
 
 | Setting | Note |
 | --- | --- |
-| `READ_COMMITTED_SNAPSHOT ON` | **Recommended.** It makes the `NOLOCK` hint redundant and, more importantly, removes the shared locks the overview counts currently take on all three hot tables |
+| `READ_COMMITTED_SNAPSHOT ON` | **Required — the boot refuses without it** (DR-001). It is what keeps every read non-blocking and correct on the hot tables; monitor the `tempdb` version store it introduces |
 | `idle_in_transaction`-equivalent timeouts | Relevant to the frozen-node scenario documented in [resilience](../04-engineering/resilience.md) |
 
 ### MySQL

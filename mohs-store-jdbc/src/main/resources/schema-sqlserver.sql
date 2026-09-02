@@ -11,6 +11,14 @@
 -- usa NVARCHAR em tudo.
 -- DBTUNE-1: toda coluna DATETIME2 guarda wall-clock em UTC, gravado/lido
 -- só via io.mohs.store.jdbc.JdbcTimestamps — ver schema-h2.sql para o porquê.
+--
+-- REQUIREMENT: the database must have READ_COMMITTED_SNAPSHOT ON, and the
+-- application refuses to boot without it. Under locking READ COMMITTED,
+-- plain reads take shared locks against the claim's exclusive ones and the
+-- dashboard's counts block to lock timeouts; reading uncommitted instead
+-- (NOLOCK) reports wrong numbers. Run once, as an administrator
+-- (Azure SQL Database already ships with it ON):
+--   ALTER DATABASE [your_database] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE;
 
 IF OBJECT_ID('mohs_job_definitions', 'U') IS NULL
 CREATE TABLE mohs_job_definitions (

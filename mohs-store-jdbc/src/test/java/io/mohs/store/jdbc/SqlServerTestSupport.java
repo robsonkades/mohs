@@ -29,6 +29,11 @@ import org.testcontainers.mssqlserver.MSSQLServerContainer;
  * with the schema applied only once when the container starts. Isolation through {@code DELETE} (T-SQL
  * forbids {@code TRUNCATE} on a table referenced by a foreign key, even when the child table is empty —
  * it is not merely a bypassable check as in MySQL).
+ *
+ * <p>The schema lives in a dedicated {@code mohs} database with {@code READ_COMMITTED_SNAPSHOT ON} —
+ * the dialect's boot requirement — so every SQL Server test runs the configuration a supported
+ * deployment actually has, not the container's locking default. {@code master}, which cannot enable
+ * the setting, stays reachable through {@link #dataSourceFor(String)} as the permanent negative case.
  */
 final class SqlServerTestSupport {
 
@@ -38,6 +43,10 @@ final class SqlServerTestSupport {
 
     static {
         CONTAINER.start();
+        JdbcTemplate master = new JdbcTemplate(dataSourceFor("master"));
+        master.execute("CREATE DATABASE mohs");
+        // No other session exists yet, so the exclusive access the switch demands is free here.
+        master.execute("ALTER DATABASE mohs SET READ_COMMITTED_SNAPSHOT ON");
         new ResourceDatabasePopulator(new ClassPathResource("schema-sqlserver.sql")).execute(dataSource());
     }
 
@@ -45,10 +54,15 @@ final class SqlServerTestSupport {
     }
 
     private static DataSource dataSource() {
+        return dataSourceFor("mohs");
+    }
+
+    static DataSource dataSourceFor(String databaseName) {
         SQLServerDataSource dataSource = new SQLServerDataSource();
         dataSource.setURL(CONTAINER.getJdbcUrl());
         dataSource.setUser(CONTAINER.getUsername());
         dataSource.setPassword(CONTAINER.getPassword());
+        dataSource.setDatabaseName(databaseName);
         return dataSource;
     }
 

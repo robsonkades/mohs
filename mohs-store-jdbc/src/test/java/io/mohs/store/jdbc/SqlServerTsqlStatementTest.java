@@ -43,7 +43,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * The statements SQL Server writes DIFFERENTLY, executed against a real SQL Server.
  *
- * <p>Four of the seven T-SQL divergences had no test that ran them anywhere: {@code findExecutionPage},
+ * <p>Four of the then-seven T-SQL divergences had no test that ran them anywhere (the count among
+ * them has since gone portable — RCSI became the dialect's boot requirement and retired its hint):
+ * {@code findExecutionPage},
  * {@code findOrphanedLeases}, {@code findOrphanedLeasesExceptAlive} and {@code visibleWorkCount}. The
  * claim's sweep and the idle-gate probe were covered ({@code JdbcWorkQueueSqlServerTest}); these were
  * not, in this era or the one before it — {@code topClause()} was consumed only by the page and the
@@ -89,16 +91,13 @@ class SqlServerTsqlStatementTest {
     }
 
     /**
-     * {@code visibleWorkCount}: {@code WITH (NOLOCK)} sits between the table and the {@code WHERE},
-     * where no other delegate puts anything — a hint moved past the {@code WHERE} is a syntax error,
-     * and that is what this pins.
-     *
-     * <p>It does NOT pin the hint's PRESENCE: deleting it leaves this green, because on a table with
-     * no concurrent writer the isolation level changes no count. That the hint is there at all stays a
-     * review invariant, not a test one.
+     * {@code visibleWorkCount}: it used to carry {@code WITH (NOLOCK)} — the hint-placement parse was
+     * what this pinned — until RCSI became the dialect's boot requirement and retired the hint. The
+     * statement is portable text now; what remains worth pinning against a real SQL Server is that the
+     * count still answers there, so a future hint that comes back malformed fails here first.
      */
     @Test
-    void countVisibleParsesWithTheHintWhereOnlySqlServerPutsOne() {
+    void countVisibleAnswersOnSqlServer() {
         queue.offer(List.of(
                 entry("exec-due-1", 20, 1, NOW.minusSeconds(2)),
                 entry("exec-due-2", 20, 1, NOW.minusSeconds(1)),

@@ -29,7 +29,7 @@ about its runtime.
 | --- | --- |
 | JRE | **Java 25** (`maven.compiler.release=25`) |
 | Spring Boot | 4.1.0 in the host, or a compatible version |
-| Database | PostgreSQL, MySQL 8.0+ or SQL Server. **H2 is dev/test only** and warns at boot |
+| Database | PostgreSQL, MySQL 8.0+ or SQL Server (which **requires `READ_COMMITTED_SNAPSHOT ON`** — the boot refuses without it). **H2 is dev/test only** and warns at boot |
 | JDBC driver | Supplied by the host — Mohs declares none at compile scope |
 | Web server | Only if the REST API or the dashboard is enabled (`spring-boot-starter-webmvc`) |
 | Network | Database connectivity only. Nodes never talk to each other directly |

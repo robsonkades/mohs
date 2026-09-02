@@ -204,7 +204,6 @@ Per tick, regardless of load:
 | The rate-limit bucket row | One row per limit, serialised at charge time | Shorter transaction tail (already done — measured 2.3× at 4 clients, 3.5× at 8); split the limit if it becomes the wall |
 | `GET /overview` backlog count | `COUNT(*)` over the whole queue | Nothing today; the endpoint's cost tracks the backlog |
 | The 64-shard ceiling | A hard cap on claiming nodes | Not configurable |
-| SQL Server without RCSI | The overview counts take shared locks on the hot tables | Enable `READ_COMMITTED_SNAPSHOT` |
 | Priority starvation | `BACKGROUND` can starve under sustained higher-priority load | None — a documented risk |
 | MySQL claim throughput | Historically well below PostgreSQL and SQL Server in the single-table era (a `UNION ALL` rewrite was measured and **rejected**: p99 improved but throughput fell 32%) | The split-table design removed the `IN`-predicate problem that caused it; not re-measured per dialect since |
 
