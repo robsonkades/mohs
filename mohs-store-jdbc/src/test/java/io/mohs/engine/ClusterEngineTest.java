@@ -18,6 +18,7 @@ package io.mohs.engine;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -61,6 +62,9 @@ import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 /**
  * Two engines over ONE database — the cluster contract the single-engine suite cannot state: work
@@ -126,9 +130,23 @@ class ClusterEngineTest {
     }
 
     private void offer(String id) {
-        historyStore.record(List.of(new HistoryStore.NewExecution(ExecutionId.of(id), WELCOME, 0, 20,
+        int shard = Shards.of(ExecutionId.of(id));
+        historyStore.record(List.of(new HistoryStore.NewExecution(ExecutionId.of(id), WELCOME, shard, 20,
                 NOW.minusSeconds(1), NOW, "test", null, null, id)));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), WELCOME, 0, 20, 1, NOW.minusSeconds(1))));
+        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), WELCOME, shard, 20, 1, NOW.minusSeconds(1))));
+    }
+
+    /** Observe each engine's own membership read before offering work, avoiding a startup overlap. */
+    private NodeStore observingMembership(CompletableFuture<Void> joined) {
+        NodeStore observing = mock(NodeStore.class, delegatesTo(nodeStore));
+        doAnswer(_ -> {
+            List<StoredNode> nodes = nodeStore.findAll();
+            if (nodes.size() == 2 && nodes.stream().allMatch(node -> node.state() == EngineState.RUNNING)) {
+                joined.complete(null);
+            }
+            return nodes;
+        }).when(observing).findAll();
+        return observing;
     }
 
     private static ExecutionListener countDownOnSucceeded(CountDownLatch succeeded) {
@@ -172,26 +190,32 @@ class ClusterEngineTest {
     }
 
     /**
-     * Competing Consumers: forty rows, two live nodes polling the same queue at the same cadence, and
-     * every execution runs exactly once — one attempt row, one handler call, on one of the two nodes.
-     * Which node takes which row is the claim's business, not the test's.
+     * Competing Consumers: one execution per shard after both nodes see the cluster. Both nodes must
+     * finish work, and every execution has exactly one attempt row and one handler call.
      */
     @Test
     void everyExecutionRunsExactlyOnceAcrossTwoLiveNodes() throws Exception {
         jobStore.upsert(JobDefinition.of(WELCOME.value(), Handler.class, spec -> spec.onDemand().retries(0)));
-        int executions = 40;
-        for (int i = 1; i <= executions; i++) {
-            offer("exec-" + i);
+        Map<Integer, String> executionByShard = new HashMap<>();
+        for (int i = 1; i <= 10_000 && executionByShard.size() < Shards.SHARD_COUNT; i++) {
+            String id = "exec-" + i;
+            executionByShard.putIfAbsent(Shards.of(ExecutionId.of(id)), id);
         }
+        assertThat(executionByShard).hasSize(Shards.SHARD_COUNT);
+        int executions = executionByShard.size();
         Map<String, Integer> handlerCalls = new ConcurrentHashMap<>();
         handlerRegistry.register(WELCOME, (payload, ctx) -> handlerCalls.merge((String) payload, 1, Integer::sum));
         CountDownLatch succeeded = new CountDownLatch(executions);
-        Engine nodeA = node(nodeStore, List.of(countDownOnSucceeded(succeeded)));
-        Engine nodeB = node(nodeStore, List.of(countDownOnSucceeded(succeeded)));
+        CompletableFuture<Void> joinedA = new CompletableFuture<>();
+        CompletableFuture<Void> joinedB = new CompletableFuture<>();
+        Engine nodeA = node(observingMembership(joinedA), List.of(countDownOnSucceeded(succeeded)));
+        Engine nodeB = node(observingMembership(joinedB), List.of(countDownOnSucceeded(succeeded)));
 
         nodeA.start();
         nodeB.start();
         try {
+            CompletableFuture.allOf(joinedA, joinedB).get(10, TimeUnit.SECONDS);
+            executionByShard.values().forEach(this::offer);
             assertThat(succeeded.await(10, TimeUnit.SECONDS)).isTrue();
         } finally {
             nodeA.stop(Duration.ofSeconds(5));
@@ -204,7 +228,7 @@ class ClusterEngineTest {
                 "SELECT execution_id FROM mohs_attempt GROUP BY execution_id HAVING COUNT(*) <> 1", String.class))
                 .as("an execution with more or less than one attempt").isEmpty();
         assertThat(rawJdbcTemplate.queryForList("SELECT DISTINCT node_id FROM mohs_attempt", String.class))
-                .isSubsetOf(nodeA.nodeId(), nodeB.nodeId());
+                .containsExactlyInAnyOrder(nodeA.nodeId(), nodeB.nodeId());
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_execution WHERE state = 'SUCCEEDED'", Integer.class))
                 .isEqualTo(executions);
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isZero();
