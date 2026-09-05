@@ -15,8 +15,11 @@
  */
 package io.mohs.rest.error;
 
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.dao.TransientDataAccessException;
@@ -27,11 +30,11 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.core.Ordered;
-import org.springframework.core.annotation.Order;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
+
+import tools.jackson.databind.exc.ValueInstantiationException;
 
 import io.mohs.core.job.JobKey;
 
@@ -64,20 +67,18 @@ import io.mohs.core.job.JobKey;
 public class RestExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(RestExceptionHandler.class);
+    private static final int MAX_CAUSE_DEPTH = 64;
 
     @ExceptionHandler(RateLimitNotFoundException.class)
     public ProblemDetail handleRateLimitNotFound(RateLimitNotFoundException ex) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND,
-                ex.getMessage() + " — declare it with mohs.rate-limits." + ex.rateLimitName()
-                        + ".max/.window (or a @Bean RateLimit) and restart; PATCH only adjusts what boot declared");
-        problem.setTitle("Rate limit not found");
-        return problem;
+        return problem(HttpStatus.NOT_FOUND, "Rate limit not found",
+                "Declare the rate limit with mohs.rate-limits.<name>.max/.window (or a @Bean RateLimit) "
+                        + "and restart; PATCH only adjusts what boot declared");
     }
 
     @ExceptionHandler(JobNotFoundException.class)
     public ProblemDetail handleJobNotFound(JobNotFoundException ex) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
-        problem.setTitle("Job not found");
+        ProblemDetail problem = problem(HttpStatus.NOT_FOUND, "Job not found", "The requested job was not found");
         if (!ex.nearbyJobKeys().isEmpty()) {
             problem.setProperty("nearbyJobKeys", ex.nearbyJobKeys().stream().map(JobKey::value).toList());
         }
@@ -86,36 +87,27 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(BatchNotFoundException.class)
     public ProblemDetail handleBatchNotFound(BatchNotFoundException ex) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
-        problem.setTitle("Batch not found");
-        return problem;
+        return problem(HttpStatus.NOT_FOUND, "Batch not found", "The requested batch was not found");
     }
 
     @ExceptionHandler(ExecutionNotFoundException.class)
     public ProblemDetail handleExecutionNotFound(ExecutionNotFoundException ex) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
-        problem.setTitle("Execution not found");
-        return problem;
+        return problem(HttpStatus.NOT_FOUND, "Execution not found", "The requested execution was not found");
     }
 
     @ExceptionHandler(ExecutionNotRetryableException.class)
     public ProblemDetail handleExecutionNotRetryable(ExecutionNotRetryableException ex) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
-        problem.setTitle("Execution not retryable");
-        return problem;
+        return problem(HttpStatus.CONFLICT, "Execution not retryable", ex.getMessage());
     }
 
     @ExceptionHandler(InvalidActorException.class)
     public ProblemDetail handleInvalidActor(InvalidActorException ex) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
-        problem.setTitle("Invalid actor");
-        return problem;
+        return problem(HttpStatus.BAD_REQUEST, "Invalid actor", ex.getMessage());
     }
 
     @ExceptionHandler(PayloadValidationException.class)
     public ProblemDetail handlePayloadValidation(PayloadValidationException ex) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, ex.getMessage());
-        problem.setTitle("Request validation failed");
+        ProblemDetail problem = problem(HttpStatus.UNPROCESSABLE_CONTENT, "Request validation failed", ex.getMessage());
         problem.setProperty("field", ex.field());
         return problem;
     }
@@ -127,26 +119,38 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
      * {@link io.mohs.rest.ratelimit.RateLimitPatchRequest}) already perform in their compact
      * constructors, thrown during Jackson's deserialisation.
      *
-     * <p>When the root cause is an {@link IllegalArgumentException} (domain validation, not
-     * malformed JSON), it returns a 422 with the original message — the same shape as
+     * <p>When Jackson identifies a Mohs request constructor whose cause is an
+     * {@link IllegalArgumentException}, it returns a 422 with the validation message — the same shape as
      * {@link #handlePayloadValidation}, without a structured {@code field} because that exception
      * does not carry one (the message already names the field by convention, e.g. "max must be at
-     * least 1"). Genuinely malformed JSON, with no {@link IllegalArgumentException} in the cause
-     * chain, keeps falling through to Spring's default behaviour.
+     * least 1"). Malformed JSON and conversion failures outside those constructors retain Spring's
+     * default response rather than exposing an arbitrary exception message.
      */
     @Override
     protected ResponseEntity<Object> handleHttpMessageNotReadable(
             HttpMessageNotReadableException ex, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
-        Throwable cause = ex;
-        while (cause != null && !(cause instanceof IllegalArgumentException)) {
-            cause = cause.getCause();
-        }
-        if (cause == null) {
+        IllegalArgumentException validation = validationCause(ex);
+        if (validation == null) {
             return super.handleHttpMessageNotReadable(ex, headers, status, request);
         }
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, cause.getMessage());
-        problem.setTitle("Request validation failed");
+        ProblemDetail problem = problem(HttpStatus.UNPROCESSABLE_CONTENT, "Request validation failed", validation.getMessage());
         return new ResponseEntity<>(problem, HttpStatus.UNPROCESSABLE_CONTENT);
+    }
+
+    /**
+     * Only our own request constructors produce public validation text. The bound also terminates
+     * cyclic cause chains; an unrecognised or deeper chain keeps the generic response.
+     */
+    private static @Nullable IllegalArgumentException validationCause(Throwable failure) {
+        Throwable cause = failure;
+        for (int depth = 0; cause != null && depth < MAX_CAUSE_DEPTH; depth++, cause = cause.getCause()) {
+            if (cause instanceof ValueInstantiationException instantiation
+                    && instantiation.getType().getRawClass().getPackageName().startsWith("io.mohs.rest.")
+                    && instantiation.getCause() instanceof IllegalArgumentException validation) {
+                return validation;
+            }
+        }
+        return null;
     }
 
     /**
@@ -162,10 +166,8 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler({QueryTimeoutException.class, PessimisticLockingFailureException.class})
     public ProblemDetail handleContention(TransientDataAccessException ex) {
         log.warn("a database row is under contention — the requested change did not apply", ex);
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+        return problem(HttpStatus.SERVICE_UNAVAILABLE, "Resource busy",
                 "A database row is under contention and nothing changed — retry in a few seconds");
-        problem.setTitle("Resource busy");
-        return problem;
     }
 
     /**
@@ -177,10 +179,8 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
      */
     @ExceptionHandler(UnsupportedOperationException.class)
     public ProblemDetail handleNotImplemented(UnsupportedOperationException ex) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_IMPLEMENTED,
+        return problem(HttpStatus.NOT_IMPLEMENTED, "Not implemented",
                 "This operation is part of the v1 contract but is not implemented yet");
-        problem.setTitle("Not implemented");
-        return problem;
     }
 
     /**
@@ -193,5 +193,12 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     public ProblemDetail handleUnexpected(Exception ex) {
         log.error("unhandled exception reaching the REST layer", ex);
         return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred");
+    }
+
+    /** The shape the 4xx/5xx translations above share: a status, a title naming the problem and a detail that teaches — {@link #handleUnexpected} alone keeps the status's reason phrase as its title, on purpose. */
+    private static ProblemDetail problem(HttpStatus status, String title, @Nullable String detail) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
+        problem.setTitle(title);
+        return problem;
     }
 }

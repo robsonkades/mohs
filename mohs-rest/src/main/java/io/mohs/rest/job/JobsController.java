@@ -43,14 +43,16 @@ import tools.jackson.databind.ObjectMapper;
 import io.mohs.core.Mohs;
 import io.mohs.core.JobSnapshot;
 import io.mohs.core.ExecutionQuery;
+import io.mohs.core.ScheduleCommand;
 import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.job.JobKey;
 import io.mohs.rest.AcceptedExecutionResponse;
-import io.mohs.rest.ExecutionLocations;
 import io.mohs.rest.ActorResolver;
 import io.mohs.rest.ApiPaths;
 import io.mohs.rest.CursorPage;
+import io.mohs.rest.ExecutionLocations;
+import io.mohs.rest.RequestIdentifiers;
 import io.mohs.rest.RuntimePatchResponse;
 import io.mohs.rest.error.JobNotFoundException;
 import io.mohs.rest.error.PayloadValidationException;
@@ -98,7 +100,7 @@ public class JobsController {
     @PostMapping("/{jobKey}/schedule")
     public ResponseEntity<AcceptedExecutionResponse> schedule(@PathVariable String jobKey, @RequestBody ScheduleJobRequest body,
             @RequestHeader(value = "Idempotency-Key", required = false) @Nullable String idempotencyKey, HttpServletRequest request) {
-        JobKey key = requireJob(jobKey).definition().key();
+        JobKey key = requireJobKey(jobKey);
         Object payload = convertPayload(key, body.payload());
 
         var command = mohs.schedule(key.value(), payload).as(actorResolver.resolve(request));
@@ -106,27 +108,35 @@ public class JobsController {
             command = command.priority(body.priority());
         }
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-            command = command.idempotencyKey(idempotencyKey);
+            command = withIdempotencyKeyOrReject(command, idempotencyKey);
         }
-        // ScheduleCommand's three terminals — at and delay were already validated as exclusive in the record
-        Enqueued enqueued = body.at() != null ? command.at(body.at())
-                : body.delay() != null ? command.after(body.delay())
-                : command.now();
-
-        AcceptedExecutionResponse accepted = AcceptedExecutionResponse.from(enqueued);
+        AcceptedExecutionResponse accepted = AcceptedExecutionResponse.from(enqueue(command, body));
         URI location = ExecutionLocations.ofExecution(request, basePath, accepted.executionId());
         return ResponseEntity.accepted().location(location).body(accepted);
     }
 
+    /** {@code ScheduleCommand}'s three terminals — {@code at} and {@code delay} were already validated as exclusive by the request record. */
+    private static Enqueued enqueue(ScheduleCommand command, ScheduleJobRequest body) {
+        if (body.at() != null) {
+            return command.at(body.at());
+        }
+        if (body.delay() != null) {
+            return command.after(body.delay());
+        }
+        return command.now();
+    }
+
+    /** Answers with the snapshot re-read AFTER the write: {@code paused} is state the definition does not carry, and the pre-write snapshot would say the opposite of what just happened. */
     @PostMapping("/{jobKey}/pause")
     public JobResponse pause(@PathVariable String jobKey) {
-        mohs.pause(requireJob(jobKey).definition().key());
+        mohs.pause(requireJobKey(jobKey));
         return JobResponse.from(requireJob(jobKey));
     }
 
+    /** See {@link #pause} — the same post-write re-read. */
     @PostMapping("/{jobKey}/resume")
     public JobResponse resume(@PathVariable String jobKey) {
-        mohs.resume(requireJob(jobKey).definition().key());
+        mohs.resume(requireJobKey(jobKey));
         return JobResponse.from(requireJob(jobKey));
     }
 
@@ -141,7 +151,7 @@ public class JobsController {
     @PatchMapping("/{jobKey}/schedule")
     public RuntimePatchResponse<JobResponse> reschedule(@PathVariable String jobKey, @RequestBody ScheduleView body,
             HttpServletRequest request) {
-        JobKey key = requireJob(jobKey).definition().key();
+        JobKey key = requireJobKey(jobKey);
         // The actor is validated BEFORE the mutation: a 4xx is a contract of "nothing changed" —
         // resolving it afterwards left the schedule altered with a 400 in the client's hand and NO
         // audit trail (an actor is non-negotiable on a mutation)
@@ -156,6 +166,15 @@ public class JobsController {
     }
 
     /**
+     * The command owns the key's ceiling (the column's width); here its refusal is only translated
+     * into the 422 the validation error model promises, as {@link RequestIdentifiers} does for the
+     * path ids.
+     */
+    private static ScheduleCommand withIdempotencyKeyOrReject(ScheduleCommand command, String idempotencyKey) {
+        return PayloadValidationException.validating("Idempotency-Key", () -> command.idempotencyKey(idempotencyKey));
+    }
+
+    /**
      * Every IAE in this scope is schedule validation by construction ({@code jobKey} has already
      * passed {@code requireJob}): the compact constructors of the specs in {@code toSchedule()} (a
      * non-positive interval, a blank cron) and {@code NextFireCalculator} (an unrealisable cron).
@@ -163,27 +182,28 @@ public class JobsController {
      * translated.
      */
     private Optional<JobSnapshot> rescheduleOrReject(JobKey key, ScheduleView body) {
-        try {
-            return mohs.reschedule(key, body.toSchedule());
-        } catch (IllegalArgumentException e) {
-            throw new PayloadValidationException("schedule", Objects.requireNonNullElse(e.getMessage(), e.toString()));
-        }
+        return PayloadValidationException.validating("schedule", () -> mohs.reschedule(key, body.toSchedule()));
     }
 
-    /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view. */
+    /** {@code size} — see {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view. */
     @GetMapping("/{jobKey}/executions")
     public CursorPage<ExecutionSummaryResponse> executions(
             @PathVariable String jobKey, @RequestParam(required = false) @Nullable String cursor, @RequestParam(required = false) @Nullable Integer size) {
-        JobKey key = requireJob(jobKey).definition().key();
+        JobKey key = requireJobKey(jobKey);
         int pageSize = CursorPage.clampSize(size);
         List<Execution> fetched = mohs.executions(new ExecutionQuery(key, null, null, null, cursor, pageSize + 1));
         List<ExecutionSummaryResponse> responses = fetched.stream().map(ExecutionSummaryResponse::from).toList();
         return CursorPage.of(responses, pageSize, ExecutionSummaryResponse::executionId);
     }
 
+    /** Every route under {@code /{jobKey}} starts here: the registered job, or the 404 with neighbouring suggestions. */
     private JobSnapshot requireJob(String jobKeyValue) {
-        JobKey key = JobKey.of(jobKeyValue);
+        JobKey key = RequestIdentifiers.jobKey(jobKeyValue);
         return mohs.findJob(key).orElseThrow(() -> new JobNotFoundException(key, nearbyJobKeys(key)));
+    }
+
+    private JobKey requireJobKey(String jobKeyValue) {
+        return requireJob(jobKeyValue).definition().key();
     }
 
     private List<JobKey> nearbyJobKeys(JobKey key) {
@@ -194,21 +214,31 @@ public class JobsController {
                 .toList();
     }
 
+    /** Explicit rather than {@code Optional.map}: a mapper that answered {@code null} must stay a null payload, not fall through to the "no payload" refusal. */
     private Object convertPayload(JobKey key, Map<String, Object> rawPayload) {
         Optional<Class<?>> payloadType = mohs.payloadType(key);
         if (payloadType.isEmpty()) {
-            if (!rawPayload.isEmpty()) {
-                throw new PayloadValidationException("payload", "job '" + key.value() + "' does not accept a payload");
-            }
-            return rawPayload;
+            return requireNoPayload(key, rawPayload);
         }
+        return convertTo(payloadType.get(), rawPayload);
+    }
+
+    /** A job that declares no payload type accepts no payload — an empty body is the only one that passes. */
+    private static Map<String, Object> requireNoPayload(JobKey key, Map<String, Object> rawPayload) {
+        if (!rawPayload.isEmpty()) {
+            throw new PayloadValidationException("payload", "job '" + key.value() + "' does not accept a payload");
+        }
+        return rawPayload;
+    }
+
+    private Object convertTo(Class<?> payloadType, Map<String, Object> rawPayload) {
         try {
-            return objectMapper.convertValue(rawPayload, payloadType.get());
+            return objectMapper.convertValue(rawPayload, payloadType);
         } catch (DatabindException e) {
             // Jackson 3: a databind failure propagates DatabindException directly — it is no longer
             // wrapped in IllegalArgumentException as it was in Jackson 2.
             throw new PayloadValidationException("payload",
-                    "payload incompatible with " + payloadType.get().getSimpleName() + ": " + e.getMessage());
+                    "payload does not match the job's declared input schema");
         }
     }
 

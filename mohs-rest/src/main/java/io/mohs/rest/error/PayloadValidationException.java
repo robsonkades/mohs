@@ -17,6 +17,7 @@ package io.mohs.rest.error;
 
 import java.io.Serial;
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * A payload incompatible with the type the job's definition expects — it names the offending field
@@ -32,6 +33,20 @@ public final class PayloadValidationException extends RuntimeException {
     public PayloadValidationException(String field, String message) {
         super(Objects.requireNonNull(message, "message"));
         this.field = Objects.requireNonNull(field, "field");
+    }
+
+    /**
+     * Runs a validation that refuses with an {@code IllegalArgumentException} (a value object's
+     * constructor, a command's guard) and turns that refusal into this 422 naming {@code field}.
+     * Only an IAE thrown INSIDE {@code validation} is translated — the caller keeps the scope of the
+     * supplier tight enough that every IAE in it is validation by construction.
+     */
+    public static <T> T validating(String field, Supplier<T> validation) {
+        try {
+            return validation.get();
+        } catch (IllegalArgumentException e) {
+            throw new PayloadValidationException(field, Objects.requireNonNullElse(e.getMessage(), e.toString()));
+        }
     }
 
     public String field() {

@@ -42,14 +42,13 @@ public class BatchesController {
      * this route being cheap.
      *
      * <p>{@code pending} and {@code state} are derived from the three counters by
-     * {@link BatchResponse#of} rather than stored: one more column could drift from the others, and
+     * {@link BatchResponse#from} rather than stored: one more column could drift from the others, and
      * there is no question it would answer any faster.
      */
     @GetMapping("/{id}")
     public BatchResponse get(@PathVariable String id) {
         return mohs.findBatch(id)
-                .map(batch -> BatchResponse.of(batch.batchId(), batch.name(), batch.total(), batch.succeeded(),
-                        batch.failed()))
+                .map(BatchResponse::from)
                 .orElseThrow(() -> new BatchNotFoundException(id));
     }
 }

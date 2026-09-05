@@ -116,7 +116,7 @@ class RateLimitsControllerContractTest {
                         .content("{\"max\":10,\"window\":\"PT1M\"}"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.title").value("Rate limit not found"))
-                .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("mohs.rate-limits.ghost.max")));
+                .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("mohs.rate-limits.<name>.max")));
     }
 
     /** An actor is non-negotiable on a mutation — the declared header reaches the resolver before the write. */

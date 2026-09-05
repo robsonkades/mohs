@@ -26,6 +26,8 @@ import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -149,6 +151,19 @@ class MohsRestAutoConfigurationTest {
                     assertThat(context).doesNotHaveBean(RestExceptionHandler.class);
                     assertThat(logAppender.list).isEmpty();
                 });
+    }
+
+    /** The prefix is concatenated into every route and every 202's Location: a value that would build a wrong one fails the boot naming the property. */
+    @ParameterizedTest
+    @ValueSource(strings = {"", "custom", "/custom/"})
+    void aBasePathThatCannotPrefixARouteFailsTheBoot(String basePath) {
+        runnerWith(freshH2DataSource(), "mohs.api.enabled=true", "mohs.api.base-path=" + basePath).run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure())
+                    .rootCause()
+                    .hasMessageContaining("mohs.api.base-path")
+                    .hasMessageContaining("'" + basePath + "'");
+        });
     }
 
     @Test

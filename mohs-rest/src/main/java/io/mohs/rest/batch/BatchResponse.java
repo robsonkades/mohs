@@ -17,6 +17,8 @@ package io.mohs.rest.batch;
 
 import java.util.Objects;
 
+import io.mohs.core.BatchSnapshot;
+
 /**
  * A batch's aggregate counters — a superset of {@link io.mohs.core.event.BatchCompleted}, which only
  * exists once the batch has finished: here {@code pending = total - succeeded - failed} and the batch
@@ -47,5 +49,10 @@ public record BatchResponse(String batchId, String name, BatchState state, int t
         int pending = total - succeeded - failed;
         BatchState state = pending == 0 ? BatchState.COMPLETED : BatchState.RUNNING;
         return new BatchResponse(batchId, name, state, total, succeeded, failed, pending);
+    }
+
+    /** The read model's counters through {@link #of} — the one source that cannot disagree with {@code pending}. */
+    static BatchResponse from(BatchSnapshot batch) {
+        return of(batch.batchId(), batch.name(), batch.total(), batch.succeeded(), batch.failed());
     }
 }

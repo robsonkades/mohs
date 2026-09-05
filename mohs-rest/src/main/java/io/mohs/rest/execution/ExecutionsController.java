@@ -24,6 +24,8 @@ import java.util.Optional;
 import jakarta.servlet.http.HttpServletRequest;
 
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -39,27 +41,38 @@ import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 import io.mohs.rest.AcceptedExecutionResponse;
-import io.mohs.rest.ExecutionLocations;
+import io.mohs.rest.ActorResolver;
 import io.mohs.rest.ApiPaths;
 import io.mohs.rest.CursorPage;
+import io.mohs.rest.ExecutionLocations;
+import io.mohs.rest.RequestIdentifiers;
 import io.mohs.rest.error.ExecutionNotFoundException;
 import io.mohs.rest.error.ExecutionNotRetryableException;
 
 /**
- * The "executions" resource area. A lookup
- * global (cursor), detalhe, cancelamento cooperativo e retry manual.
+ * The "executions" resource area: a global lookup (cursor), the detail, cooperative cancellation
+ * and the manual retry.
+ *
+ * <p>The two mutations resolve the actor BEFORE mutating, like every mutation in this API: a 4xx is
+ * a contract of "nothing changed". Neither {@code Mohs.cancel} nor {@code Mohs.retry} takes an
+ * actor — the execution keeps its original invoker — so the attribution lives in the log line, the
+ * audit trail an operator has for "who cancelled this at 3 a.m.".
  */
 @RestController
 @RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/executions")
 public class ExecutionsController {
 
-    private final Mohs mohs;
+    private static final Logger log = LoggerFactory.getLogger(ExecutionsController.class);
 
-    public ExecutionsController(Mohs mohs) {
+    private final Mohs mohs;
+    private final ActorResolver actorResolver;
+
+    public ExecutionsController(Mohs mohs, ActorResolver actorResolver) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
+        this.actorResolver = Objects.requireNonNull(actorResolver, "actorResolver");
     }
 
-    /** {@code size} — ver {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view. */
+    /** {@code size} — see {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view. */
     @GetMapping
     public CursorPage<ExecutionSummaryResponse> search(
             @RequestParam(required = false) @Nullable ExecutionState status,
@@ -69,7 +82,8 @@ public class ExecutionsController {
             @RequestParam(required = false) @Nullable String cursor,
             @RequestParam(required = false) @Nullable Integer size) {
         int pageSize = CursorPage.clampSize(size);
-        JobKey key = jobKey == null ? null : JobKey.of(jobKey);
+        // A blank filter is no filter; only a present, non-blank one is turned into a key
+        JobKey key = jobKey == null || jobKey.isBlank() ? null : RequestIdentifiers.jobKey(jobKey);
         List<Execution> fetched = mohs.executions(new ExecutionQuery(key, status, from, to, cursor, pageSize + 1));
         List<ExecutionSummaryResponse> responses = fetched.stream().map(ExecutionSummaryResponse::from).toList();
         return CursorPage.of(responses, pageSize, ExecutionSummaryResponse::executionId);
@@ -77,8 +91,9 @@ public class ExecutionsController {
 
     @GetMapping("/{id}")
     public ExecutionResponse get(@PathVariable String id) {
-        return mohs.findExecution(ExecutionId.of(id)).map(ExecutionResponse::from)
-                .orElseThrow(() -> new ExecutionNotFoundException(ExecutionId.of(id)));
+        ExecutionId executionId = RequestIdentifiers.executionId(id);
+        return mohs.findExecution(executionId).map(ExecutionResponse::from)
+                .orElseThrow(() -> new ExecutionNotFoundException(executionId));
     }
 
     /**
@@ -92,10 +107,12 @@ public class ExecutionsController {
      */
     @PostMapping("/{id}/cancel")
     public ResponseEntity<ExecutionResponse> cancel(@PathVariable String id, HttpServletRequest request) {
-        ExecutionId executionId = ExecutionId.of(id);
+        ExecutionId executionId = RequestIdentifiers.executionId(id);
+        String actor = actorResolver.resolve(request);
         Execution execution = mohs.cancel(executionId)
                 .orElseThrow(() -> new ExecutionNotFoundException(executionId));
-        URI location = executionDetailLocation(request, "/cancel");
+        log.info("execution {} cancellation requested by '{}' — state after the request: {}", executionId.value(), actor, execution.state());
+        URI location = ExecutionLocations.ofAction(request, "/cancel");
         return ResponseEntity.accepted().location(location).body(ExecutionResponse.from(execution));
     }
 
@@ -110,20 +127,13 @@ public class ExecutionsController {
      */
     @PostMapping("/{id}/retry")
     public ResponseEntity<AcceptedExecutionResponse> retry(@PathVariable String id, HttpServletRequest request) {
-        ExecutionId executionId = ExecutionId.of(id);
+        ExecutionId executionId = RequestIdentifiers.executionId(id);
+        String actor = actorResolver.resolve(request);
         Execution rearmed = retryOrConflict(executionId)
                 .orElseThrow(() -> new ExecutionNotFoundException(executionId));
-        URI location = executionDetailLocation(request, "/retry");
+        log.info("execution {} manually retried by '{}'", executionId.value(), actor);
+        URI location = ExecutionLocations.ofAction(request, "/retry");
         return ResponseEntity.accepted().location(location).body(AcceptedExecutionResponse.from(rearmed));
-    }
-
-    /**
-     * {@code Location: /executions/{id}} is derived from the request's own URI (whose prefix already
-     * honours {@code mohs.api.base-path}), simply dropping the action suffix ({@code /cancel},
-     * {@code /retry}).
-     */
-    private static URI executionDetailLocation(HttpServletRequest request, String actionSuffix) {
-        return ExecutionLocations.ofAction(request, actionSuffix);
     }
 
     /**

@@ -44,7 +44,6 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.Mohs;
 import io.mohs.core.event.ExecutionInterceptor;
@@ -276,15 +275,10 @@ public class MohsAutoConfiguration {
         return new JdbcJobStore(dataSource, mohsClock, delegate);
     }
 
-    /**
-     * The raw {@code JsonMapper} is deliberate: the persisted payload format belongs to Mohs, not
-     * to the host's web configuration. Switching to the context's {@code ObjectMapper} would let
-     * the application's HTTP configuration define a durable format shared between nodes, and would
-     * break reading already-written payloads the day it changed.
-     */
+    /** The payload mapper is Mohs' own, shared with the REST layer — {@link PayloadMapper} says why it is not the context's. */
     @Bean
     public HistoryStore mohsHistoryStore(DataSource dataSource, JdbcDelegate delegate) {
-        return new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), delegate);
+        return new JdbcHistoryStore(dataSource, PayloadMapper.SHARED, delegate);
     }
 
     @Bean

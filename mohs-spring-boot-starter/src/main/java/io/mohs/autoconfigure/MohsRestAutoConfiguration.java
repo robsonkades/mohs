@@ -28,8 +28,6 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.web.servlet.DispatcherServlet;
 
-import tools.jackson.databind.ObjectMapper;
-
 import io.mohs.core.Mohs;
 import io.mohs.rest.ActorResolver;
 import io.mohs.rest.HeaderActorResolver;
@@ -82,9 +80,18 @@ public class MohsRestAutoConfiguration {
      */
     public MohsRestAutoConfiguration(MohsProperties properties) {
         String basePath = properties.api().basePath();
-        log.warn("mohs.api.enabled=true: the operational API is served at {} with NO authentication. It can cancel,"
-                + " retry and pause jobs, drain nodes and change rate limits. Restrict it to an internal network,"
-                + " or put a gateway/mTLS in front of {} and /mohs-ui before exposing this instance.",
+        // The value is concatenated into every route and into the Location of every 202 receipt: an
+        // empty prefix mounts the API at the host's root, outside the securityMatcher the docs
+        // recommend, and a stray slash builds a Location that points at a 404 — the one outcome a
+        // receipt must never produce, because the client resends
+        if (!basePath.startsWith("/") || basePath.endsWith("/")) {
+            throw new IllegalStateException("mohs.api.base-path must start with '/' and must not end with one, got '"
+                    + basePath + "' — it is the prefix of every route and of the Location header on every 202");
+        }
+        log.warn("mohs.api.enabled=true: the operational API is served at {} with NO authentication. It can trigger"
+                + " any registered job with a caller-supplied payload, cancel and retry executions, pause, resume"
+                + " and reschedule jobs, and change rate limits. Restrict it to an internal network, or put a"
+                + " gateway/mTLS in front of {} and /mohs-ui before exposing this instance.",
                 basePath, basePath);
     }
 
@@ -100,13 +107,15 @@ public class MohsRestAutoConfiguration {
     }
 
     @Bean
-    public JobsController mohsJobsController(Mohs mohs, ActorResolver mohsActorResolver, ObjectMapper objectMapper, MohsProperties properties) {
-        return new JobsController(mohs, mohsActorResolver, objectMapper, properties.api().basePath());
+    public JobsController mohsJobsController(Mohs mohs, ActorResolver mohsActorResolver, MohsProperties properties) {
+        // The request body is converted with Mohs' own mapper, the one the store reads with — never
+        // the context's ObjectMapper — in its strict variant (PayloadMapper says why for both)
+        return new JobsController(mohs, mohsActorResolver, PayloadMapper.STRICT, properties.api().basePath());
     }
 
     @Bean
-    public ExecutionsController mohsExecutionsController(Mohs mohs) {
-        return new ExecutionsController(mohs);
+    public ExecutionsController mohsExecutionsController(Mohs mohs, ActorResolver mohsActorResolver) {
+        return new ExecutionsController(mohs, mohsActorResolver);
     }
 
     @Bean

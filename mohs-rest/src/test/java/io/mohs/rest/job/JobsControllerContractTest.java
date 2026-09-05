@@ -29,7 +29,8 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
-import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.JobSnapshot;
 import io.mohs.core.Mohs;
@@ -86,8 +87,11 @@ class JobsControllerContractTest {
     static class ControllerConfig {
 
         @Bean
-        JobsController jobsController(Mohs mohs, ActorResolver actorResolver, ObjectMapper objectMapper) {
-            return new JobsController(mohs, actorResolver, objectMapper, ApiPaths.V1);
+        JobsController jobsController(Mohs mohs, ActorResolver actorResolver) {
+            // Mirrors the starter's PayloadMapper.STRICT: the raw mapper refusing unknown properties,
+            // never the slice's auto-configured one
+            return new JobsController(mohs, actorResolver,
+                    JsonMapper.builder().enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build(), ApiPaths.V1);
         }
 
         @Bean
@@ -117,6 +121,38 @@ class JobsControllerContractTest {
         mockMvc.perform(get(ApiPaths.V1 + "/jobs"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].jobKey").value("welcome-email"));
+    }
+
+    /** A whitespace-only key used to reach {@code JobKey.of} and come back as a 500 with a stack trace in the log — reachable by anyone, so an error alarm on demand. */
+    @Test
+    void getWithABlankJobKeyIsAValidationErrorNotA500() throws Exception {
+        mockMvc.perform(get(ApiPaths.V1 + "/jobs/{jobKey}", " "))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.field").value("jobKey"))
+                .andExpect(jsonPath("$.detail").value(containsString("must not be blank")));
+    }
+
+    /** The ceiling is the command's (the column is 255 wide on every dialect); the controller only turns its refusal into the 422 the validation model promises. */
+    @Test
+    void scheduleRejectsAnIdempotencyKeyWiderThanTheColumn() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
+        when(mohs.payloadType(key)).thenReturn(Optional.empty());
+        when(actorResolver.resolve(any())).thenReturn("tester");
+        ScheduleCommand command = mock(ScheduleCommand.class);
+        when(mohs.schedule(eq("welcome-email"), any())).thenReturn(command);
+        when(command.as("tester")).thenReturn(command);
+        when(command.idempotencyKey("k".repeat(256)))
+                .thenThrow(new IllegalArgumentException("idempotency key must be at most 255 characters, got 256"));
+
+        mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("Idempotency-Key", "k".repeat(256))
+                        .content("{\"payload\":{}}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.field").value("Idempotency-Key"))
+                .andExpect(jsonPath("$.detail").value(containsString("255")));
+        verify(command, never()).now();
     }
 
     @Test
@@ -271,6 +307,23 @@ class JobsControllerContractTest {
     record CountPayload(int count) {
     }
 
+    /** A misspelt field is refused, never a silent null the job runs with — the strict mapper is the REST layer's, not the store's. */
+    @Test
+    void scheduleRejectsAPayloadWithAnUnknownPropertyAs422() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
+        when(mohs.payloadType(key)).thenReturn(Optional.of(CountPayload.class));
+
+        mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"payload\":{\"count\":1,\"cuont\":2}}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.field").value("payload"))
+                .andExpect(jsonPath("$.detail").value("payload does not match the job's declared input schema"))
+                .andExpect(result -> assertThat(result.getResponse().getContentAsString())
+                        .doesNotContain("CountPayload", "cuont", "tools.jackson"));
+    }
+
     /** The convertValue branch: in Jackson 3 a databind failure is NOT an IllegalArgumentException — without the right catch this was a 500, not the contract's 422. */
     @Test
     void scheduleRejectsAPayloadIncompatibleWithTheDeclaredTypeAs422() throws Exception {
@@ -285,7 +338,7 @@ class JobsControllerContractTest {
                 .andExpect(jsonPath("$.field").value("payload"))
                 .andExpect(result -> {
                     String body = result.getResponse().getContentAsString();
-                    assertThat(body).contains("CountPayload");
+                    assertThat(body).doesNotContain("CountPayload", "not-a-number", "tools.jackson");
                 });
     }
 

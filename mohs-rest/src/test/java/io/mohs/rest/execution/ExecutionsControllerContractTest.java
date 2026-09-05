@@ -32,11 +32,16 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import io.mohs.rest.ActorResolver;
 import io.mohs.rest.ApiPaths;
+import io.mohs.rest.error.InvalidActorException;
 import io.mohs.rest.error.RestExceptionHandler;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -54,8 +59,8 @@ class ExecutionsControllerContractTest {
     static class ControllerConfig {
 
         @Bean
-        ExecutionsController executionsController(Mohs mohs) {
-            return new ExecutionsController(mohs);
+        ExecutionsController executionsController(Mohs mohs, ActorResolver actorResolver) {
+            return new ExecutionsController(mohs, actorResolver);
         }
 
         @Bean
@@ -69,6 +74,30 @@ class ExecutionsControllerContractTest {
 
     @MockitoBean
     private Mohs mohs;
+
+    @MockitoBean
+    private ActorResolver actorResolver;
+
+    /** An invalid actor is rejected BEFORE any effect — a 4xx is a contract of "nothing changed", on cancel as on every mutation. */
+    @Test
+    void cancelWithAnInvalidActorMutatesNothing() throws Exception {
+        when(actorResolver.resolve(any())).thenThrow(new InvalidActorException("X-Mohs-Actor must not be 'scheduler'"));
+
+        mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/cancel").header("X-Mohs-Actor", "scheduler"))
+                .andExpect(status().isBadRequest());
+
+        verify(mohs, never()).cancel(any());
+    }
+
+    @Test
+    void retryWithAnInvalidActorMutatesNothing() throws Exception {
+        when(actorResolver.resolve(any())).thenThrow(new InvalidActorException("X-Mohs-Actor must not be 'scheduler'"));
+
+        mockMvc.perform(post(ApiPaths.V1 + "/executions/exec-1/retry").header("X-Mohs-Actor", "scheduler"))
+                .andExpect(status().isBadRequest());
+
+        verify(mohs, never()).retry(any());
+    }
 
     @Test
     void searchSignalsANextPageViaCursorWhenThereAreMoreRows() throws Exception {
@@ -114,6 +143,28 @@ class ExecutionsControllerContractTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.executionId").value("exec-1"))
                 .andExpect(jsonPath("$.state").value("SUCCEEDED"));
+    }
+
+    /** A whitespace-only id used to reach {@code ExecutionId.of} and come back as a 500 with a stack trace in the log — reachable by anyone, on every route that takes an id. */
+    @Test
+    void aBlankIdIsAValidationErrorNotA500() throws Exception {
+        mockMvc.perform(get(ApiPaths.V1 + "/executions/{id}", " "))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.field").value("id"));
+        mockMvc.perform(post(ApiPaths.V1 + "/executions/{id}/cancel", " "))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.field").value("id"));
+    }
+
+    /** A blank filter is no filter: {@code ?jobKey=} lists everything instead of failing on an empty key. */
+    @Test
+    void aBlankJobKeyFilterIsIgnored() throws Exception {
+        when(mohs.executions(any())).thenReturn(List.of());
+
+        mockMvc.perform(get(ApiPaths.V1 + "/executions").param("jobKey", ""))
+                .andExpect(status().isOk());
+
+        verify(mohs).executions(argThat(query -> query.jobKey() == null));
     }
 
     @Test
