@@ -20,16 +20,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
 
 import javax.sql.DataSource;
 
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
@@ -64,25 +62,26 @@ class SchemaPostgresChainMatchesInstallerTest {
      * understands dollar quoting, so the whole file goes over as it was written.
      */
     private static void applyChain(DataSource dataSource) throws IOException {
-        Resource[] deltas = new PathMatchingResourcePatternResolver()
-                .getResources("classpath:io/mohs/store/jdbc/migration/postgresql/V*.sql");
-        Arrays.sort(deltas, Comparator.comparingInt(delta -> versionOf(delta.getFilename())));
-
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-        for (Resource delta : deltas) {
+        for (Resource delta : MigrationChain.deltasOf("postgresql")) {
             jdbc.execute(delta.getContentAsString(StandardCharsets.UTF_8));
         }
     }
 
-    private static int versionOf(String filename) {
-        return Integer.parseInt(filename.substring(1, filename.indexOf("__")));
-    }
-
-    /** Columns plus the complete {@code indexdef} — the partial predicate included — of the {@code mohs_*} tables. */
+    /**
+     * Columns — type with its length, precision and scale, nullability, default and collation — plus
+     * the complete {@code indexdef}, the partial predicate included, of the {@code mohs_*} tables.
+     */
     private static List<String> mohsStructure(DataSource dataSource) {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         List<String> structure = new ArrayList<>(jdbc.query("""
-                SELECT table_name || '.' || column_name || ':' || data_type || ':' || is_nullable
+                SELECT table_name || '.' || column_name || ':' || data_type
+                       || '(' || COALESCE(character_maximum_length::text, '') || ','
+                               || COALESCE(numeric_precision::text, '') || ','
+                               || COALESCE(numeric_scale::text, '') || ')'
+                       || ':' || is_nullable
+                       || ':' || COALESCE(column_default, '<none>')
+                       || ':' || COALESCE(collation_name, '-')
                 FROM information_schema.columns
                 WHERE table_name LIKE 'mohs\\_%'
                 ORDER BY 1

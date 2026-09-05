@@ -59,6 +59,26 @@ final class MySqlTestSupport {
         return dataSource;
     }
 
+    /**
+     * A NEW, empty database in the same container — for the structural guardian (the installer versus the
+     * delta chain), which needs two schemas built from scratch by different paths. As {@code root}: the
+     * container's application user only owns the shared database, and its root password is the same one.
+     */
+    static DataSource freshEmptyDatabase(String name) {
+        new JdbcTemplate(rootDataSource(CONTAINER.getDatabaseName()))
+                .execute("DROP DATABASE IF EXISTS " + name + "; CREATE DATABASE " + name);
+        return rootDataSource(name);
+    }
+
+    private static DataSource rootDataSource(String databaseName) {
+        MysqlDataSource dataSource = new MysqlDataSource();
+        dataSource.setUrl("jdbc:mysql://" + CONTAINER.getHost() + ":" + CONTAINER.getMappedPort(3306) + "/"
+                + databaseName + "?allowMultiQueries=true");
+        dataSource.setUser("root");
+        dataSource.setPassword(CONTAINER.getPassword());
+        return dataSource;
+    }
+
     /** Clears every table — the schema was applied once, when the container started. */
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();

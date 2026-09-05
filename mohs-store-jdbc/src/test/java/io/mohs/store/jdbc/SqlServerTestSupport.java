@@ -66,6 +66,17 @@ final class SqlServerTestSupport {
         return dataSource;
     }
 
+    /**
+     * A NEW, empty database in the same container — for the structural guardian (the installer versus the
+     * delta chain), which needs two schemas built from scratch by different paths.
+     */
+    static DataSource freshEmptyDatabase(String name) {
+        JdbcTemplate master = new JdbcTemplate(dataSourceFor("master"));
+        master.execute("IF DB_ID('" + name + "') IS NOT NULL DROP DATABASE " + name);
+        master.execute("CREATE DATABASE " + name);
+        return dataSourceFor(name);
+    }
+
     /** Clears every table — the schema was applied once, when the container started. */
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();
