@@ -44,7 +44,8 @@ export function ConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
-        {error && <p className="text-sm text-critical">{error}</p>}
+        {error && <p role="alert" className="rounded-md border border-critical/20 bg-critical/5 p-3 text-sm text-critical">{error}</p>}
+        {pending && <p role="status" className="text-sm text-muted-foreground">Sending request…</p>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={pending} onClick={onCancel}>
             Cancel

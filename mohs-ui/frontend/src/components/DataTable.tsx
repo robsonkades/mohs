@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { flexRender, useTable, type ColumnDef, type RowData, type Table as TableInstance } from "@tanstack/react-table";
-import { ChevronLeftIcon, ChevronRightIcon, Columns3Icon } from "lucide-react";
+import { ArrowUpRightIcon, ChevronLeftIcon, ChevronRightIcon, Columns3Icon } from "lucide-react";
 import { features, type AppFeatures } from "../lib/table";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
@@ -70,6 +70,7 @@ export function DataTable<T extends RowData>({
   getRowId,
   rowAccent,
   footer,
+  selectedId,
 }: {
   title: string;
   description?: string;
@@ -80,6 +81,7 @@ export function DataTable<T extends RowData>({
   /** A CSS color for the 3px bar on the row's edge — typically tied to its state. */
   rowAccent?: (row: T) => string | undefined;
   footer?: ReactNode;
+  selectedId?: string;
 }) {
   const table = useTable({ features, data, columns, getRowId });
 
@@ -91,21 +93,23 @@ export function DataTable<T extends RowData>({
         re-measures the content — a relative timestamp growing by one character is enough to
         shove every column sideways.
       */}
-      <div className={cn("overflow-auto", TABLE_MAX_HEIGHT)}>
+      <div className={cn("overflow-auto", TABLE_MAX_HEIGHT)} role="region" aria-label={`${title} table`} tabIndex={0}>
         <Table className="table-fixed">
           <colgroup>
             {table.getVisibleLeafColumns().map((column) => (
               <col key={column.id} style={{ width: `${column.getSize()}px` }} />
             ))}
+            {onRowClick && <col style={{ width: "48px" }} />}
           </colgroup>
           <TableHeader className="sticky top-0 z-10 bg-card">
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id} className="hover:bg-transparent">
                 {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id} className="mono-label h-9 font-mono text-muted-foreground">
+                  <TableHead key={header.id} className="mono-label h-9 font-mono text-muted-foreground first:sticky first:left-0 first:z-20 first:bg-card">
                     {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
                   </TableHead>
                 ))}
+                {onRowClick && <TableHead><span className="sr-only">Details</span></TableHead>}
               </TableRow>
             ))}
           </TableHeader>
@@ -117,15 +121,22 @@ export function DataTable<T extends RowData>({
                   key={row.id}
                   onClick={() => onRowClick?.(row.original)}
                   style={accent ? { boxShadow: `inset 3px 0 0 0 ${accent}` } : undefined}
-                  className={cn(onRowClick && "cursor-pointer")}
+                  data-state={row.id === selectedId ? "selected" : undefined}
+                  className={cn("transition-colors focus-within:bg-primary/5", onRowClick && "cursor-pointer")}
                 >
                   {row.getVisibleCells().map((cell) => (
                     // Fixed widths mean content can no longer push a column wider, so it has to
                     // be told what to do instead: clip, with the full value one hover away.
-                    <TableCell key={cell.id} className="truncate">
+                    <TableCell key={cell.id} className="truncate first:sticky first:left-0 first:z-10 first:bg-card">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </TableCell>
                   ))}
+                  {onRowClick && <TableCell className="px-1">
+                    <Button variant="ghost" size="icon-sm" aria-label={`Open details for ${row.id}`}
+                      onClick={(event) => { event.stopPropagation(); onRowClick(row.original); }}>
+                      <ArrowUpRightIcon className="size-4 text-muted-foreground" />
+                    </Button>
+                  </TableCell>}
                 </TableRow>
               );
             })}

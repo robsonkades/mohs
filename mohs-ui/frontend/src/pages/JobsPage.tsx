@@ -9,6 +9,7 @@ import { DataTable } from "../components/DataTable";
 import { PageStack, Section } from "../components/Layout";
 import { Panel } from "../components/Panel";
 import { FilterBar } from "../components/Form";
+import { ActiveFilters, type ActiveFilter } from "../components/ActiveFilters";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -74,7 +75,7 @@ const columns = [
     enableHiding: false, // the identity column — hiding it would leave the table looking unrecoverable
     cell: (info) => (
       <div className="flex flex-col">
-        <span className="font-medium">{info.getValue()}</span>
+        <span className="truncate font-medium" title={info.getValue()}>{info.getValue()}</span>
         <span className="truncate text-xs text-muted-foreground">{info.row.original.name}</span>
       </div>
     ),
@@ -163,6 +164,7 @@ export function JobsPage() {
   );
 
   const [pendingAction, setPendingAction] = useState<JobAction | null>(null);
+  const [feedback, setFeedback] = useState<{ jobKey: string; message: string } | null>(null);
   const jobActionMutation = useMutation({
     mutationFn: (action: JobAction): Promise<JobResponse | AcceptedExecutionResponse> => {
       const jobKey = search.jobKey!;
@@ -170,7 +172,8 @@ export function JobsPage() {
       if (action === "resume") return resumeJob(jobKey);
       return scheduleJob(jobKey, { payload: {} });
     },
-    onSuccess: (result) => {
+    onSuccess: (result, action) => {
+      setFeedback({ jobKey: search.jobKey!, message: action === "pause" ? "Job paused. Manual runs remain available." : action === "resume" ? "Job resumed." : "Execution accepted." });
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs() });
       void queryClient.invalidateQueries({ queryKey: queryKeys.job(search.jobKey!) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.executions({}) });
@@ -196,15 +199,21 @@ export function JobsPage() {
   }
 
   function startAction(action: JobAction) {
+    setFeedback(null);
     jobActionMutation.reset();
     setPendingAction(action);
   }
 
   function closeDrawer() {
+    setFeedback(null);
     setNotice(null);
     rescheduleMutation.reset();
     patchSearch({ jobKey: undefined });
   }
+
+  const activeFilters: ActiveFilter[] = [];
+  if (search.search) activeFilters.push({ id: "search", label: `Search: ${search.search}`, onRemove: () => patchSearch({ search: undefined }) });
+  if (search.paused) activeFilters.push({ id: "state", label: search.paused === "true" ? "Paused" : "Active", onRemove: () => patchSearch({ paused: undefined }) });
 
   return (
     <PageStack>
@@ -214,7 +223,8 @@ export function JobsPage() {
           <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             placeholder="Search jobs…"
-            className="w-56 pl-8"
+            aria-label="Search jobs"
+            className="w-full pl-8 sm:w-64"
             value={search.search ?? ""}
             onChange={(event) => patchSearch({ search: event.target.value || undefined })}
           />
@@ -225,7 +235,7 @@ export function JobsPage() {
             patchSearch({ paused: value === ALL ? undefined : (value as JobsSearch["paused"]) })
           }
         >
-          <SelectTrigger className="w-36">
+          <SelectTrigger aria-label="Job state" className="w-36">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -235,6 +245,7 @@ export function JobsPage() {
           </SelectContent>
         </Select>
         </FilterBar>
+        <ActiveFilters filters={activeFilters} onClear={() => patchSearch({ search: undefined, paused: undefined })} />
 
         {jobsQuery.isPending && (
           <Panel title="Jobs">
@@ -265,6 +276,7 @@ export function JobsPage() {
             data={rows}
             columns={columns}
             getRowId={(row) => row.jobKey}
+            selectedId={search.jobKey}
             onRowClick={(row) => patchSearch({ jobKey: row.jobKey })}
             rowAccent={(row) => TONE_COLOR_VAR[row.paused ? "warning" : "good"]}
           />
@@ -276,6 +288,11 @@ export function JobsPage() {
         {jobDetail.error && <ErrorState message={jobDetail.error.message} />}
         {jobDetail.data && (
           <div className="flex flex-col gap-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <h2 className="min-w-0 text-xl font-semibold tracking-tight [overflow-wrap:anywhere]">{jobDetail.data.name}</h2>
+              <JobPausedBadge paused={jobDetail.data.paused} />
+            </div>
+            {feedback && feedback.jobKey === search.jobKey && <p role="status" className="rounded-md border border-good/20 bg-good/5 px-3 py-2 text-sm text-good">{feedback.message}</p>}
             <Button asChild>
               <Link to="/executions" search={{ jobKey: jobDetail.data.jobKey }}>
                 View executions for this job
@@ -308,12 +325,8 @@ export function JobsPage() {
                   <CopyButton value={jobDetail.data.jobKey} label="Copy job key" />
                 </span>
               </Field>
-              <Field label="Name">{jobDetail.data.name}</Field>
               <Field label="Handler">
                 <span className="font-mono text-xs">{jobDetail.data.handlerType}</span>
-              </Field>
-              <Field label="State">
-                <JobPausedBadge paused={jobDetail.data.paused} />
               </Field>
               <Field label="Schedule">
                 <span className="font-mono text-xs">{scheduleLabel(jobDetail.data.schedule)}</span>
@@ -341,7 +354,7 @@ export function JobsPage() {
                 error={rescheduleMutation.error?.message}
                 onSubmit={(schedule) => rescheduleMutation.mutate(schedule)}
               />
-              {notice && <p className="pt-2 text-xs text-warning">{notice}</p>}
+              {notice && <p role="status" className="pt-2 text-xs text-warning">{notice}</p>}
             </div>
           </div>
         )}

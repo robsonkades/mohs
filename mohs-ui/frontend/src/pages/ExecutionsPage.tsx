@@ -11,6 +11,9 @@ import { CursorPager, DataTable } from "../components/DataTable";
 import { PageStack, Section } from "../components/Layout";
 import { Panel } from "../components/Panel";
 import { FilterBar } from "../components/Form";
+import { ActiveFilters, type ActiveFilter } from "../components/ActiveFilters";
+import { AttemptTimeline } from "../components/AttemptTimeline";
+import { useIsMobile } from "../hooks/use-mobile";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -219,6 +222,7 @@ function CustomRangeFilter({
   onClear: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const isMobile = useIsMobile();
   const selected: DateRange = { from, to };
 
   return (
@@ -230,7 +234,7 @@ function CustomRangeFilter({
             {active ? rangeLabel(from, to) : <span>Pick a date range</span>}
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="start" className="w-auto p-0">
+        <PopoverContent align="start" className="max-h-[80svh] w-auto max-w-[calc(100vw-2rem)] overflow-auto p-0">
           {/*
             Anchored intervals, which the toggle group above cannot express: every preset there is
             a rolling window ending NOW, so "yesterday" — a bounded interval in the past — had no
@@ -254,14 +258,13 @@ function CustomRangeFilter({
             ))}
           </div>
           {/*
-            Two months side by side: a range that crosses a month boundary — most of the useful
-            ones do — costs a click through the pager with one, and none with two. Only the DAY
+            Two months side by side on desktop, one on narrow screens. Only the DAY
             is taken from the calendar; the time-of-day inputs below keep whatever was set, so
             picking a new day never silently resets a narrowed window back to midnight.
           */}
           <Calendar
             mode="range"
-            numberOfMonths={2}
+            numberOfMonths={isMobile ? 1 : 2}
             selected={selected}
             defaultMonth={from}
             onSelect={(range: DateRange | undefined) => {
@@ -274,6 +277,7 @@ function CustomRangeFilter({
           <div className="flex items-center justify-center gap-2 border-t p-3">
             <Input
               type="time"
+              aria-label="Range start time"
               value={timeInputValue(from)}
               onChange={(event) => event.target.value && onChange({ from: withTime(from, event.target.value), to })}
               className="w-auto"
@@ -281,6 +285,7 @@ function CustomRangeFilter({
             <span className="text-muted-foreground">→</span>
             <Input
               type="time"
+              aria-label="Range end time"
               value={timeInputValue(to)}
               onChange={(event) => event.target.value && onChange({ from, to: withTime(to, event.target.value) })}
               className="w-auto"
@@ -359,10 +364,12 @@ export function ExecutionsPage() {
   });
 
   const [pendingAction, setPendingAction] = useState<ExecutionAction | null>(null);
+  const [feedback, setFeedback] = useState<{ executionId: string; message: string } | null>(null);
   const executionActionMutation = useMutation({
     mutationFn: ({ action, executionId }: { action: ExecutionAction; executionId: string }) =>
       action === "cancel" ? cancelExecution(executionId) : retryExecution(executionId),
-    onSuccess: (_result, { executionId }) => {
+    onSuccess: (_result, { executionId, action }) => {
+      setFeedback({ executionId, message: action === "retry" ? "Retry accepted. Another attempt was requested." : "Cancellation request processed. Running work stops cooperatively." });
       void queryClient.invalidateQueries({ queryKey: EXECUTIONS_KEY_PREFIX });
       void queryClient.invalidateQueries({ queryKey: queryKeys.execution(executionId) });
       setPendingAction(null);
@@ -372,6 +379,7 @@ export function ExecutionsPage() {
   const actionCopy = pendingAction === null ? null : ACTION_COPY[pendingAction];
 
   function startAction(action: ExecutionAction) {
+    setFeedback(null);
     executionActionMutation.reset();
     setPendingAction(action);
   }
@@ -390,6 +398,11 @@ export function ExecutionsPage() {
   const detail = executionDetail.data;
 
   const executions = executionsQuery.data;
+  const activeFilters: ActiveFilter[] = [];
+  if (search.jobKey) activeFilters.push({ id: "job", label: `Job: ${search.jobKey}`, onRemove: () => patchSearch({ jobKey: undefined }) });
+  if (search.status) activeFilters.push({ id: "state", label: EXECUTION_STATE_LABEL[search.status], onRemove: () => patchSearch({ status: undefined }) });
+  if (search.from || search.to) activeFilters.push({ id: "range", label: "Custom date range", onRemove: () => patchSearch({ from: undefined, to: undefined, window: "all" }) });
+  else if (search.window !== "all") activeFilters.push({ id: "window", label: `Scheduled within ${TIME_WINDOW_LABEL[search.window ?? "1h"]}`, onRemove: () => patchSearch({ window: "all" }) });
 
   return (
     <PageStack>
@@ -429,7 +442,7 @@ export function ExecutionsPage() {
           value={search.status ?? "all"}
           onValueChange={(value) => patchSearch({ status: value === "all" ? undefined : (value as ExecutionState) })}
         >
-          <SelectTrigger className="w-40">
+          <SelectTrigger aria-label="Execution state" className="w-40">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -447,6 +460,7 @@ export function ExecutionsPage() {
             className="ml-auto gap-1.5"
             onClick={() => setExecutionsLive(!live)}
             aria-pressed={live}
+            aria-label={live ? "Pause list updates" : "Resume list updates"}
             title={
               live
                 ? "Following the stream — new executions appear as they happen"
@@ -456,17 +470,19 @@ export function ExecutionsPage() {
             {live ? (
               <>
                 <span className="live-dot size-1.5 rounded-full bg-good" />
-                Live
+                Live list
                 <PauseIcon className="size-3.5" />
               </>
             ) : (
               <>
                 <PlayIcon className="size-3.5" />
-                Paused
+                Resume list
               </>
             )}
           </Button>
         </FilterBar>
+        {!live && <p role="status" className="text-xs text-muted-foreground">List updates paused. Jobs continue running; resume the list or refresh to update these rows.</p>}
+        <ActiveFilters filters={activeFilters} onClear={() => patchSearch({ jobKey: undefined, status: undefined, from: undefined, to: undefined, window: "all" })} />
 
         {executionsQuery.isPending && <Panel title="Executions"><Spinner label="Loading executions" /></Panel>}
         {executionsQuery.error && (
@@ -490,6 +506,8 @@ export function ExecutionsPage() {
               data={executions.items}
               columns={columns}
               getRowId={(row) => row.executionId}
+              selectedId={selectedId}
+              description={`${executions.items.length} on this page · ${live ? "Live updates" : "Updates paused"}`}
               onRowClick={(row) => patchSearch({ executionId: row.executionId })}
               rowAccent={(row) => TONE_COLOR_VAR[EXECUTION_STATE_TONE[row.state]]}
               footer={
@@ -509,12 +527,17 @@ export function ExecutionsPage() {
       <Drawer
         open={!!search.executionId}
         title="Execution details"
-        onClose={() => patchSearch({ executionId: undefined })}
+        onClose={() => { setFeedback(null); patchSearch({ executionId: undefined }); }}
       >
         {executionDetail.isPending && <Spinner />}
         {executionDetail.error && <ErrorState message={executionDetail.error.message} />}
         {detail && (
           <div className="flex flex-col gap-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="font-mono text-base font-medium">{shortId(detail.executionId)}</h2>
+              <ExecutionStateBadge state={detail.state} />
+            </div>
+            {feedback && feedback.executionId === selectedId && <p role="status" className="rounded-md border border-good/20 bg-good/5 px-3 py-2 text-sm text-good">{feedback.message}</p>}
             {(detail.state === "FAILED" || CANCELLABLE.includes(detail.state)) && (
               <div className="flex flex-wrap items-center gap-2">
                 {detail.state === "FAILED" && (
@@ -551,9 +574,6 @@ export function ExecutionsPage() {
                   {detail.jobKey}
                 </button>
               </Field>
-              <Field label="State">
-                <ExecutionStateBadge state={detail.state} />
-              </Field>
               <Field label="Actor">
                 <span className="font-mono text-xs">{detail.actor}</span>
               </Field>
@@ -561,39 +581,7 @@ export function ExecutionsPage() {
               <Field label="Fired at">{detail.firedAt ? absoluteTime(detail.firedAt) : "—"}</Field>
             </div>
 
-            <div>
-              <h3 className="mono-label mb-3 text-muted-foreground">Attempts</h3>
-              {detail.attempts.length === 0 && (
-                <p className="text-xs text-muted-foreground">
-                  Not attempted yet — this execution has not been claimed by any node.
-                </p>
-              )}
-              {detail.attempts.length > 0 && (
-                <ol className="flex flex-col gap-3 border-l pl-4">
-                  {detail.attempts.map((attempt) => (
-                    <li key={attempt.number} className="relative">
-                      <span
-                        className="absolute -left-[21px] top-1 size-2 rounded-full ring-4 ring-background"
-                        style={{ backgroundColor: TONE_COLOR_VAR[EXECUTION_STATE_TONE[attempt.outcome]] }}
-                      />
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="font-medium">Attempt {attempt.number}</span>
-                        <ExecutionStateBadge state={attempt.outcome} />
-                      </div>
-                      <div className="text-xs text-muted-foreground">
-                        {absoluteTime(attempt.startedAt)}
-                        {attempt.finishedAt ? ` → ${absoluteTime(attempt.finishedAt)}` : " · still running"}
-                      </div>
-                      {attempt.error && (
-                        <div className="mt-1 break-all rounded-sm border border-critical/20 bg-critical/10 p-2 font-mono text-xs text-critical">
-                          {attempt.error}
-                        </div>
-                      )}
-                    </li>
-                  ))}
-                </ol>
-              )}
-            </div>
+            <AttemptTimeline attempts={detail.attempts} />
           </div>
         )}
       </Drawer>
