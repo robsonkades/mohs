@@ -1,0 +1,7 @@
+<!-- Stub do bundle de mohs-ui, presente SÓ no classpath de teste.
+     Sem ele, o @ConditionalOnResource de MohsUiAutoConfiguration barrava tudo
+     e os outros dois gates (@ConditionalOnProperty e @ConditionalOnClass) nunca
+     eram exercitados: apagá-los da produção mantinha os testes verdes. Também é
+     o que permite testar o SpaFallbackResourceResolver, a única classe do módulo
+     que faz containment de path. -->
+<!doctype html><title>mohs-ui stub</title>

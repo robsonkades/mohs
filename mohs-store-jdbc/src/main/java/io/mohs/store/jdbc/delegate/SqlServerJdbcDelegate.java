@@ -1,0 +1,757 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.mohs.store.jdbc.delegate;
+
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Objects;
+
+import org.jspecify.annotations.Nullable;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+
+import io.mohs.store.jdbc.JdbcTimestamps;
+
+/**
+ * SQL Server's SQL. The rationale for each statement is on {@link JdbcDelegate}; what is here is the
+ * T-SQL — including the three places where T-SQL is not merely different text but a different
+ * STRUCTURE: {@code TOP} sits right after {@code SELECT} (never at the end, like {@code LIMIT}),
+ * {@code FOR UPDATE SKIP LOCKED} does not exist and is emulated by
+ * {@code WITH (UPDLOCK, ROWLOCK, READPAST)} (the emulation jOOQ confirms), and the claim's queue side
+ * is one self-joined {@code DELETE … OUTPUT} rather than a SELECT followed by a DELETE
+ * ({@link #CLAIM_READY}).
+ *
+ * <p>What is deliberately NOT here is any read hint. Plain reads are non-blocking and correct only
+ * under row versioning, so {@code READ_COMMITTED_SNAPSHOT} is a boot requirement of this dialect —
+ * {@link SqlServerRcsiRequirement} refuses to start without it, and carries the measured argument.
+ */
+public final class SqlServerJdbcDelegate implements JdbcDelegate {
+
+    /**
+     * Creates a {@code SqlServerJdbcDelegate} instance.
+     */
+    public SqlServerJdbcDelegate() {
+    }
+
+    /**
+     * {@code CURRENT_TIMESTAMP} is a zoneless {@code DATETIME} read back in the JVM's zone, so it
+     * measured the distance between two zones rather than between two clocks. {@code SYSUTCDATETIME}
+     * states UTC, and is a {@code datetime2} besides — {@code DATETIME} rounds to about 3.3 ms.
+     */
+    @Override
+    public String nowQuery() {
+        return "SELECT SYSUTCDATETIME()";
+    }
+
+    @Override
+    public Instant readNow(ResultSet rs) throws SQLException {
+        return JdbcTimestamps.fromUtcLocalDateTime(rs.getObject(1, LocalDateTime.class));
+    }
+
+    @Override
+    public Object splitTimestamp(Instant instant) {
+        return JdbcTimestamps.toUtcLocalDateTime(instant);
+    }
+
+    @Override
+    public @Nullable Instant readSplitTimestamp(ResultSet rs, String column) throws SQLException {
+        return JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject(column, LocalDateTime.class));
+    }
+
+    // --- the claim ---------------------------------------------------------------------------------
+
+    @Override
+    public String readyCandidates() {
+        return """
+                SELECT TOP (:limit) execution_id, job_key, attempt, priority
+                FROM mohs_ready WITH (UPDLOCK, ROWLOCK, READPAST)
+                WHERE shard = :shard AND visible_at <= :now
+                ORDER BY priority, visible_at
+                """;
+    }
+
+    @Override
+    public String readyCandidatesFiltered() {
+        return """
+                SELECT TOP (:limit) execution_id, job_key, attempt, priority
+                FROM mohs_ready WITH (UPDLOCK, ROWLOCK, READPAST)
+                WHERE shard = :shard AND visible_at <= :now AND job_key NOT IN (:inadmissible)
+                ORDER BY priority, visible_at
+                """;
+    }
+
+    @Override
+    public String readyDelete() {
+        return "DELETE FROM mohs_ready WHERE execution_id IN (:ids)";
+    }
+
+    @Override
+    public String leaseInsert() {
+        return """
+                INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at)
+                VALUES (:executionId, :jobKey, :nodeId, :epoch, :attempt, :priority, :now)
+                """;
+    }
+
+    /**
+     * The queue side of the claim as ONE statement: the derived table picks under exactly the hints,
+     * predicate, {@code TOP} and {@code ORDER BY} of {@link #readyCandidates()}, and the {@code DELETE}
+     * consumes those rows and nothing else — it is driven by the seek that locked them, so it never
+     * touches a key another transaction holds.
+     *
+     * <p>That is what the separate {@code DELETE … WHERE execution_id IN (…)} could not promise. Its
+     * plan depends on statistics, and a queue table's are empty or stale by nature: compiled against
+     * them, the optimizer fell back to its no-histogram guess for an equality list (the cached plan
+     * estimated 141 rows for 10 ids over 200 — {@code n × √rows}) and walked {@code idx_mohs_ready_claim}
+     * with an Index Scan, taking a U lock on every key on the way — the keys a peer had just locked with
+     * {@code UPDLOCK} included. Two nodes on one shard then deadlocked on that index, or blocked past the
+     * tick's statement timeout (both measured; the deadlock graph shows the two DELETEs waiting on each
+     * other's {@code idx_mohs_ready_claim} keys). A hint could not pin the seek: {@code FORCESEEK} is
+     * refused on a DML target.
+     *
+     * <p>Why a self-join and not an updatable CTE: the CTE form deletes straight off the claim index and
+     * has no clustered-key access of its own, so a row another transaction holds ONLY at the clustered
+     * key (a cancel's {@code DELETE … WHERE execution_id = ?}, mid-flight) made it block until the
+     * statement timeout — where the old key lookup, under {@code READPAST}, skipped it. Here the target
+     * carries {@code READPAST} itself and keeps that skip, and {@code LOOP JOIN} pins the direction
+     * (picked rows outer, one clustered seek per row inner) so the shape cannot fall back to a scan.
+     * The plan carries an Eager Spool between the pick and the delete — Halloween protection, because
+     * the derived table reads the index the delete modifies; it materialises at most {@code limit}
+     * rows and is part of the correct shape, not something to optimise away.
+     *
+     * <p>{@code OUTPUT} returns rows in no guaranteed order, so {@code visible_at} comes back too and
+     * {@link #claimReady} restores the {@code (priority, visible_at)} order the port promises. The three
+     * statements this folds ({@link #readyCandidates()}, {@link #readyCandidatesFiltered()},
+     * {@link #readyDelete()}) stay, as on Postgres: the text this database would run if the single
+     * statement ever had to be backed out. {@link #leaseInsert()} is not among them — it is still the
+     * ownership side, batched by {@link #insertLeases}.
+     */
+    public static final String CLAIM_READY = """
+            DELETE r
+            OUTPUT deleted.execution_id, deleted.job_key, deleted.attempt, deleted.priority, deleted.visible_at
+              FROM (SELECT TOP (:limit) execution_id
+                      FROM mohs_ready WITH (UPDLOCK, ROWLOCK, READPAST)
+                     WHERE shard = :shard AND visible_at <= :now
+                     ORDER BY priority, visible_at) p
+              INNER LOOP JOIN mohs_ready r WITH (ROWLOCK, READPAST) ON r.execution_id = p.execution_id
+            """;
+
+    /** {@link #CLAIM_READY} with the inadmissible keys excluded — written out in full, as on Postgres, and guarded by {@code JdbcDelegateStatementDriftTest}. */
+    public static final String CLAIM_READY_FILTERED = """
+            DELETE r
+            OUTPUT deleted.execution_id, deleted.job_key, deleted.attempt, deleted.priority, deleted.visible_at
+              FROM (SELECT TOP (:limit) execution_id
+                      FROM mohs_ready WITH (UPDLOCK, ROWLOCK, READPAST)
+                     WHERE shard = :shard AND visible_at <= :now AND job_key NOT IN (:inadmissible)
+                     ORDER BY priority, visible_at) p
+              INNER LOOP JOIN mohs_ready r WITH (ROWLOCK, READPAST) ON r.execution_id = p.execution_id
+            """;
+
+    /** One {@code OUTPUT} row: the claimed entry plus the sort key {@code OUTPUT} does not preserve. */
+    private record Picked(ClaimedReady row, Instant visibleAt) {
+
+        int priority() {
+            return row.priority();
+        }
+    }
+
+    @Override
+    public List<ClaimedReady> claimReady(NamedParameterJdbcTemplate jdbcTemplate, int shard, String nodeId, long epoch,
+            int limit, Collection<String> inadmissibleJobKeys, Instant now) {
+        List<ClaimedReady> picked = deleteReadyCandidates(jdbcTemplate, shard, limit, inadmissibleJobKeys, now);
+        if (!picked.isEmpty()) {
+            insertLeases(jdbcTemplate, picked, nodeId, epoch, now);
+        }
+        return picked;
+    }
+
+    /** The queue side, executed: {@link #CLAIM_READY}'s {@code OUTPUT}, put back in the {@code (priority, visible_at)} order the pick took. */
+    private List<ClaimedReady> deleteReadyCandidates(NamedParameterJdbcTemplate jdbcTemplate, int shard, int limit,
+            Collection<String> inadmissibleJobKeys, Instant now) {
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("shard", shard)
+                .addValue("now", splitTimestamp(now))
+                .addValue("limit", limit);
+        List<Picked> deleted = inadmissibleJobKeys.isEmpty()
+                ? jdbcTemplate.query(CLAIM_READY, params, this::pickedRow)
+                : jdbcTemplate.query(CLAIM_READY_FILTERED, params.addValue("inadmissible", inadmissibleJobKeys), this::pickedRow);
+        return deleted.stream()
+                .sorted(Comparator.comparingInt(Picked::priority).thenComparing(Picked::visibleAt))
+                .map(Picked::row)
+                .toList();
+    }
+
+    private Picked pickedRow(ResultSet rs, int rowNum) throws SQLException {
+        return new Picked(ClaimedReady.fromReadyRow(rs, rowNum),
+                Objects.requireNonNull(readSplitTimestamp(rs, "visible_at"), "visible_at"));
+    }
+
+    // --- the queue ---------------------------------------------------------------------------------
+
+    @Override
+    public String readyInsert() {
+        return """
+                INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
+                VALUES (:executionId, :jobKey, :shard, :priority, :attempt, :visibleAt)
+                """;
+    }
+
+    @Override
+    public String fencedLeaseDelete() {
+        return """
+                DELETE FROM mohs_lease
+                WHERE execution_id = :executionId AND node_id = :nodeId AND epoch = :epoch AND attempt_number = :attemptNumber
+                """;
+    }
+
+    @Override
+    public String deleteReadyById() {
+        return "DELETE FROM mohs_ready WHERE execution_id = :executionId";
+    }
+
+    // batch-counted: incrementFailed, in the same transaction as this write
+    @Override
+    public String cancelExecution() {
+        return """
+                UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :finishedAt
+                WHERE execution_id = :executionId
+                """;
+    }
+
+    @Override
+    public String findBatchIdByExecution() {
+        return "SELECT correlation_id FROM mohs_execution WHERE execution_id = :executionId";
+    }
+
+    @Override
+    public String rearmExecutionByCas() {
+        return """
+                UPDATE mohs_execution SET state = 'PENDING', finished_at = NULL
+                WHERE execution_id = :executionId AND state = 'FAILED'
+                  AND correlation_id IS NULL
+                  AND EXISTS (SELECT 1 FROM mohs_job_definitions j
+                              WHERE j.job_key = mohs_execution.job_key AND j.retired = :retired)
+                """;
+    }
+
+    @Override
+    public String rearmReadyFromHistory() {
+        return """
+                INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
+                SELECT e.execution_id, e.job_key, e.shard, e.priority,
+                       (SELECT COUNT(*) + 1 FROM mohs_attempt a WHERE a.execution_id = e.execution_id),
+                       :visibleAt
+                FROM mohs_execution e WHERE e.execution_id = :executionId
+                """;
+    }
+
+    /**
+     * No {@code NOLOCK}, on purpose: the boot-required RCSI makes the plain read non-blocking AND
+     * correct, where the hint was non-blocking and wrong (it once counted a claim's uncommitted
+     * {@code DELETE} that then rolled back) — see {@link SqlServerRcsiRequirement}.
+     */
+    @Override
+    public String visibleWorkExists() {
+        return """
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM mohs_ready WHERE shard IN (:shards) AND visible_at <= :now
+                ) THEN 1 ELSE 0 END
+                """;
+    }
+
+    @Override
+    public String visibleWorkCount() {
+        return """
+                SELECT COUNT(*) FROM mohs_ready WHERE visible_at <= :now
+                """;
+    }
+
+    // --- history -----------------------------------------------------------------------------------
+
+    @Override
+    public String recordExecution() {
+        return """
+                INSERT INTO mohs_execution (
+                    execution_id, job_key, shard, priority, state, scheduled_at, created_at, actor,
+                    correlation_id, idempotency_key, payload, payload_type)
+                VALUES (:executionId, :jobKey, :shard, :priority, 'PENDING', :scheduledAt, :createdAt, :actor,
+                    :correlationId, :idempotencyKey, :payload, :payloadType)
+                """;
+    }
+
+    @Override
+    public String insertIdempotency() {
+        return """
+                INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at)
+                VALUES (:jobKey, :idempotencyKey, :executionId, :createdAt)
+                """;
+    }
+
+    @Override
+    public String findExecutionIdByIdempotencyKey() {
+        return """
+                SELECT execution_id FROM mohs_idempotency
+                WHERE job_key = :jobKey AND idempotency_key = :idempotencyKey
+                """;
+    }
+
+    @Override
+    public String findPayloads() {
+        return """
+                SELECT execution_id, job_key, scheduled_at, created_at, actor, priority, correlation_id,
+                       payload, payload_type
+                FROM mohs_execution WHERE execution_id IN (:ids)
+                """;
+    }
+
+    @Override
+    public String findHeads() {
+        return """
+                SELECT execution_id, job_key, scheduled_at, created_at, actor, priority, correlation_id
+                FROM mohs_execution WHERE execution_id IN (:ids)
+                """;
+    }
+
+    @Override
+    public String findAttempts() {
+        return """
+                SELECT number, started_at, finished_at, outcome, error FROM mohs_attempt
+                WHERE execution_id = :executionId ORDER BY number
+                """;
+    }
+
+    @Override
+    public String pruneIdempotencyBefore() {
+        return "DELETE FROM mohs_idempotency WHERE created_at < :cutoff";
+    }
+
+    @Override
+    public String pruneTerminalExecutionsBefore() {
+        return """
+                DELETE TOP (:limit) FROM mohs_execution
+                WHERE execution_id < :cutoffId AND finished_at < :cutoff
+                  AND state IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+                """;
+    }
+
+    @Override
+    public String pruneOrphanedAttemptsBefore() {
+        return """
+                DELETE TOP (:limit) FROM mohs_attempt
+                WHERE finished_at < :cutoff
+                  AND NOT EXISTS (SELECT 1 FROM mohs_execution e WHERE e.execution_id = mohs_attempt.execution_id)
+                """;
+    }
+
+    @Override
+    public String pruneEmptyBatchesBefore() {
+        return """
+                DELETE TOP (:limit) FROM mohs_batches
+                WHERE id < :cutoffId
+                  AND NOT EXISTS (SELECT 1 FROM mohs_execution e WHERE e.correlation_id = mohs_batches.id)
+                """;
+    }
+
+    @Override
+    public String findExecutionById() {
+        return """
+                SELECT e.execution_id, e.job_key, e.state, e.scheduled_at, e.created_at, e.actor, e.priority,
+                       e.correlation_id, e.idempotency_key,
+                       l.node_id AS lease_node, l.claimed_at AS lease_claimed_at,
+                       r.execution_id AS ready_id, r.attempt AS ready_attempt, r.visible_at AS ready_visible_at
+                FROM mohs_execution e
+                LEFT JOIN mohs_lease l ON l.execution_id = e.execution_id
+                LEFT JOIN mohs_ready r ON r.execution_id = e.execution_id
+                WHERE e.execution_id = :executionId
+                """;
+    }
+
+    @Override
+    public String findExecutionPage(String whereClause) {
+        return """
+                SELECT TOP (:limit) e.execution_id, e.job_key, e.state, e.scheduled_at, e.created_at, e.actor, e.priority,
+                       e.correlation_id, e.idempotency_key,
+                       l.node_id AS lease_node, l.claimed_at AS lease_claimed_at,
+                       r.execution_id AS ready_id, r.attempt AS ready_attempt, r.visible_at AS ready_visible_at
+                FROM mohs_execution e
+                LEFT JOIN mohs_lease l ON l.execution_id = e.execution_id
+                LEFT JOIN mohs_ready r ON r.execution_id = e.execution_id
+                """
+                + whereClause
+                + """
+                ORDER BY e.execution_id DESC
+                """;
+    }
+
+    @Override
+    public String countActiveInQueue() {
+        return """
+                SELECT COUNT(*) AS queued,
+                       SUM(CASE WHEN attempt > 1 AND visible_at > :now THEN 1 ELSE 0 END) AS waiting
+                FROM mohs_ready
+                """;
+    }
+
+    @Override
+    public String countRunning() {
+        return "SELECT COUNT(*) FROM mohs_lease";
+    }
+
+    @Override
+    public String countTerminalOutcomesSince() {
+        return """
+                SELECT outcome, COUNT(*) AS finished FROM mohs_attempt
+                WHERE finished_at >= :since AND outcome IN ('SUCCEEDED', 'FAILED')
+                GROUP BY outcome
+                """;
+    }
+
+    // --- ownership ---------------------------------------------------------------------------------
+
+    @Override
+    public String findLeasesByNodes() {
+        return """
+                SELECT execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested
+                FROM mohs_lease WHERE node_id IN (:nodeIds)
+                """;
+    }
+
+    @Override
+    public String findOrphanedLeases() {
+        return """
+                SELECT TOP (:limit) execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested
+                FROM mohs_lease
+                ORDER BY claimed_at
+                """;
+    }
+
+    @Override
+    public String findOrphanedLeasesExceptAlive() {
+        return """
+                SELECT TOP (:limit) execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested
+                FROM mohs_lease
+                WHERE node_id NOT IN (:aliveNodeIds)
+                ORDER BY claimed_at
+                """;
+    }
+
+    @Override
+    public String countLeasesByJob() {
+        return """
+                SELECT job_key, COUNT(*) AS leases FROM mohs_lease
+                WHERE job_key IN (:jobKeys) GROUP BY job_key
+                """;
+    }
+
+    @Override
+    public String requestLeaseCancellation() {
+        return "UPDATE mohs_lease SET cancel_requested = :flag WHERE execution_id = :executionId";
+    }
+
+    @Override
+    public String findCancelRequestedLeases() {
+        return """
+                SELECT execution_id FROM mohs_lease
+                WHERE execution_id IN (:ids) AND cancel_requested = :flag
+                """;
+    }
+
+    @Override
+    public String insertAttempt() {
+        return """
+                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome, error_type, error)
+                VALUES (:executionId, :number, :nodeId, :startedAt, :finishedAt, :outcome, :errorType, :error)
+                """;
+    }
+
+    // batch-counted: countIntoBatch, in the same transaction as the complete
+    @Override
+    public String terminalStateUpdate() {
+        return """
+                UPDATE mohs_execution SET state = :state, finished_at = :finishedAt
+                WHERE execution_id = :executionId
+                """;
+    }
+
+    // --- definitions -------------------------------------------------------------------------------
+
+    @Override
+    public String upsertJobUpdate(boolean writeNextFire) {
+        if (writeNextFire) {
+            return """
+                    UPDATE mohs_job_definitions SET
+                        name = :name, handler_type = :handlerType, schedule_type = :scheduleType,
+                        cron_expression = :cronExpression, cron_zone = :cronZone,
+                        interval_duration = :intervalDuration, interval_after_finish = :intervalAfterFinish,
+                        runner = :runner, window_name = :windowName, rate_limit = :rateLimit,
+                        misfire = :misfire, start_paused = :startPaused,
+                        allow_concurrent_executions = :allowConcurrentExecutions,
+                        max_concurrent_executions = :maxConcurrentExecutions,
+                        retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
+                        source = :source, orphaned = :orphaned, retired = :retired,
+                        next_fire_at = :nextFireAt, updated_at = :updatedAt
+                    WHERE job_key = :jobKey
+                    """;
+        }
+        return """
+                UPDATE mohs_job_definitions SET
+                    name = :name, handler_type = :handlerType, schedule_type = :scheduleType,
+                    cron_expression = :cronExpression, cron_zone = :cronZone,
+                    interval_duration = :intervalDuration, interval_after_finish = :intervalAfterFinish,
+                    runner = :runner, window_name = :windowName, rate_limit = :rateLimit,
+                    misfire = :misfire, start_paused = :startPaused,
+                    allow_concurrent_executions = :allowConcurrentExecutions,
+                    max_concurrent_executions = :maxConcurrentExecutions,
+                    retries = :retries, timeout = :timeout, retry_policy = :retryPolicy,
+                    source = :source, orphaned = :orphaned, retired = :retired,
+                    updated_at = :updatedAt
+                WHERE job_key = :jobKey
+                """;
+    }
+
+    @Override
+    public String insertJob() {
+        return """
+                INSERT INTO mohs_job_definitions (
+                    id, job_key, name, handler_type, schedule_type, cron_expression, cron_zone,
+                    interval_duration, interval_after_finish, runner, window_name, rate_limit,
+                    misfire, start_paused, allow_concurrent_executions, max_concurrent_executions, retries,
+                    timeout, retry_policy, source,
+                    orphaned, retired, paused, next_fire_at, created_at, updated_at)
+                VALUES (
+                    :id, :jobKey, :name, :handlerType, :scheduleType, :cronExpression, :cronZone,
+                    :intervalDuration, :intervalAfterFinish, :runner, :windowName, :rateLimit,
+                    :misfire, :startPaused, :allowConcurrentExecutions, :maxConcurrentExecutions, :retries,
+                    :timeout, :retryPolicy, :source,
+                    :orphaned, :retired, :paused, :nextFireAt, :createdAt, :updatedAt)
+                """;
+    }
+
+    @Override
+    public String rescheduleJob() {
+        return """
+                UPDATE mohs_job_definitions SET
+                    schedule_type = :scheduleType, cron_expression = :cronExpression, cron_zone = :cronZone,
+                    interval_duration = :intervalDuration, interval_after_finish = :intervalAfterFinish,
+                    next_fire_at = :nextFireAt, updated_at = :updatedAt
+                WHERE job_key = :jobKey AND retired = :retired
+                """;
+    }
+
+    @Override
+    public String countLiveSchedulerOccurrences() {
+        return """
+                SELECT COUNT(*) FROM mohs_execution
+                WHERE job_key = :jobKey AND actor = :actor AND state = 'PENDING'
+                """;
+    }
+
+    // batch-counted: countCancelledMembers, over the set that was ACTUALLY drained
+    @Override
+    public String cancelDrainedExecutions() {
+        return """
+                UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :now
+                WHERE execution_id IN (:ids)
+                """;
+    }
+
+    @Override
+    public String markJobOrphaned() {
+        return "UPDATE mohs_job_definitions SET orphaned = :orphaned WHERE job_key = :jobKey";
+    }
+
+    @Override
+    public String setJobPaused() {
+        return "UPDATE mohs_job_definitions SET paused = :paused WHERE job_key = :jobKey";
+    }
+
+    @Override
+    public String retireJob() {
+        return "UPDATE mohs_job_definitions SET retired = :retired, updated_at = :now WHERE job_key = :jobKey";
+    }
+
+    @Override
+    public String drainedBatchMembers() {
+        return """
+                SELECT correlation_id AS batch_id, COUNT(*) AS pending
+                FROM mohs_execution
+                WHERE execution_id IN (:ids) AND correlation_id IS NOT NULL
+                GROUP BY correlation_id
+                """;
+    }
+
+    @Override
+    public String countCancelledBatchMembers() {
+        return "UPDATE mohs_batches SET failed = failed + :pending WHERE id = :id";
+    }
+
+    @Override
+    public String findTriggerSnapshot() {
+        return """
+                SELECT schedule_type, cron_expression, cron_zone, interval_duration, interval_after_finish, next_fire_at
+                FROM mohs_job_definitions WHERE job_key = :jobKey
+                """;
+    }
+
+    @Override
+    public String findJobByKey() {
+        return "SELECT * FROM mohs_job_definitions WHERE job_key = :jobKey AND retired = :retired";
+    }
+
+    @Override
+    public String findAllJobs() {
+        return "SELECT * FROM mohs_job_definitions WHERE retired = :retired";
+    }
+
+    @Override
+    public String findAllAnnotationSourcedJobs() {
+        return "SELECT * FROM mohs_job_definitions WHERE source = :source AND retired = :retired";
+    }
+
+    @Override
+    public String findDueRecurringJobs() {
+        return """
+                SELECT TOP (:limit) * FROM mohs_job_definitions
+                WHERE retired = :retired AND paused = :paused AND orphaned = :orphaned
+                  AND next_fire_at IS NOT NULL AND next_fire_at <= :now
+                ORDER BY next_fire_at
+                """;
+    }
+
+    @Override
+    public String armNextFire() {
+        return "UPDATE mohs_job_definitions SET next_fire_at = :nextFireAt WHERE job_key = :jobKey AND next_fire_at IS NULL";
+    }
+
+    @Override
+    public String findQueuedExecutionIdsByJob() {
+        return "SELECT execution_id FROM mohs_ready WHERE job_key = :jobKey";
+    }
+
+    // --- nodes -------------------------------------------------------------------------------------
+
+    @Override
+    public String insertNode() {
+        return """
+                INSERT INTO mohs_nodes (node_id, state, last_heartbeat_at, epoch, expires_at)
+                VALUES (:nodeId, :state, :lastHeartbeatAt, :epoch, :expiresAt)
+                """;
+    }
+
+    @Override
+    public String findAllNodes() {
+        return "SELECT * FROM mohs_nodes";
+    }
+
+    @Override
+    public String deleteHeartbeatsBefore() {
+        return "DELETE FROM mohs_nodes WHERE last_heartbeat_at < :cutoff";
+    }
+
+    @Override
+    public String heartbeatUpdate() {
+        return """
+                UPDATE mohs_nodes SET state = :state, last_heartbeat_at = :lastHeartbeatAt,
+                    epoch = :epoch, expires_at = :expiresAt
+                WHERE node_id = :nodeId
+                """;
+    }
+
+    // --- rate limits -------------------------------------------------------------------------------
+
+    @Override
+    public String findRateLimitByName() {
+        return "SELECT * FROM mohs_rate_limits WHERE name = :name";
+    }
+
+    @Override
+    public String findAllRateLimits() {
+        return "SELECT * FROM mohs_rate_limits";
+    }
+
+    @Override
+    public String readRateLimitBucket() {
+        return "SELECT max_count, window_duration, tokens, refilled_at FROM mohs_rate_limits WHERE name = :name";
+    }
+
+    @Override
+    public String updateRateLimitSpec() {
+        return """
+                UPDATE mohs_rate_limits
+                   SET max_count = :maxCount, window_duration = :windowDuration,
+                       tokens = CASE WHEN tokens > :maxCount THEN :maxCount ELSE tokens END
+                 WHERE name = :name
+                """;
+    }
+
+    @Override
+    public String insertFullRateLimitBucket() {
+        return """
+                INSERT INTO mohs_rate_limits (name, max_count, window_duration, tokens, refilled_at)
+                VALUES (:name, :maxCount, :windowDuration, :maxCount, :refilledAt)
+                """;
+    }
+
+    @Override
+    public String chargeRateLimitByCas() {
+        return """
+                UPDATE mohs_rate_limits
+                   SET tokens = :tokens, refilled_at = :refilledAt
+                 WHERE name = :name AND tokens = :expectedTokens AND refilled_at = :expectedRefilledAt
+                   AND max_count = :expectedMax AND window_duration = :expectedWindow
+                """;
+    }
+
+    // --- batches -----------------------------------------------------------------------------------
+
+    @Override
+    public String insertBatch() {
+        return """
+                INSERT INTO mohs_batches (id, name, total, succeeded, failed, created_at)
+                VALUES (:id, :name, :total, 0, 0, :createdAt)
+                """;
+    }
+
+    @Override
+    public String findBatch() {
+        return "SELECT id, name, total, succeeded, failed FROM mohs_batches WHERE id = :id";
+    }
+
+    @Override
+    public String incrementBatchSucceeded() {
+        return "UPDATE mohs_batches SET succeeded = succeeded + 1 WHERE id = :id";
+    }
+
+    @Override
+    public String incrementBatchFailed() {
+        return "UPDATE mohs_batches SET failed = failed + 1 WHERE id = :id";
+    }
+
+    // --- the firing --------------------------------------------------------------------------------
+
+    @Override
+    public String advanceTriggerByCas() {
+        return """
+                UPDATE mohs_job_definitions SET next_fire_at = :newNextFireAt
+                WHERE job_key = :jobKey AND next_fire_at = :observedNextFireAt AND retired = :retired
+                """;
+    }
+}

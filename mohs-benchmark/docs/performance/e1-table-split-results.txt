@@ -1,0 +1,53 @@
+=== TableSplitExperimentHarness — E1 (executions=500000, claimers=8, batch=100, shards=64, dispatch<=256, flush=256, payload=491B, mediana de 3) ===
+
+Todas as rodadas:
+arm          phase            s      exec/s   WAL B/exec  WAL rec/exec      FPI
+current      enqueue       23.9     20950.4       1100.2          7.04       26
+current      drain         99.4      5031.2       2795.9         21.97       47
+current      enqueue       23.7     21056.5       1099.7          7.04        3
+current      drain         94.5      5291.1       2729.3         21.67       17
+current      enqueue       23.6     21159.0       1099.6          7.04        3
+current      drain         94.3      5300.9       2753.1         21.78       26
+split-sync   enqueue       63.5      7872.5       1234.2          8.08       21
+split-sync   drain         67.6      7399.0       1187.2         13.64        7
+split-sync   enqueue       62.9      7954.7       1232.9          8.06       31
+split-sync   drain         64.5      7746.3       1167.9         13.52        7
+split-sync   enqueue       63.4      7887.4       1237.2          8.13       40
+split-sync   drain         64.9      7707.1       1239.5         13.74        5
+split-group  enqueue       62.0      8066.9       1236.1          8.10       81
+split-group  drain          3.7    135008.2       1212.6         12.61        1
+split-group  enqueue       62.1      8052.0       1234.7          8.09       36
+split-group  drain          3.6    139418.9       1205.7         12.59        0
+split-group  enqueue       62.5      8002.5       1233.5          8.07       38
+split-group  drain          3.7    136583.2       1203.3         12.59        1
+
+Medianas (por vazão de drain):
+arm          phase            s      exec/s   WAL B/exec  WAL rec/exec      FPI
+current      enqueue       23.7     21056.5       1099.7          7.04        3
+current      drain         94.5      5291.1       2729.3         21.67       17
+split-sync   enqueue       63.4      7887.4       1237.2          8.13       40
+split-sync   drain         64.9      7707.1       1239.5         13.74        5
+split-group  enqueue       62.5      8002.5       1233.5          8.07       38
+split-group  drain          3.7    136583.2       1203.3         12.59        1
+
+Deltas de tabela (mediana, ciclo completo, por execução):
+  current:
+    mohs_attempts            ins 1.000  upd 0.000 (hot 0.000)  del 0.000  dead_tup 0
+    mohs_executions          ins 1.000  upd 3.000 (hot 0.551)  del 0.000  dead_tup 1119394
+  split-sync:
+    e1_execution_p0          ins 1.000  upd 1.000 (hot 0.791)  del 0.000  dead_tup 148152
+    e1_ready                 ins 1.000  upd 0.000 (hot 0.000)  del 1.000  dead_tup 119200
+    e1_attempt_p0            ins 1.000  upd 0.000 (hot 0.000)  del 0.000  dead_tup 0
+    e1_lease                 ins 1.000  upd 0.000 (hot 0.000)  del 1.000  dead_tup 119129
+  split-group:
+    e1_attempt_p0            ins 1.000  upd 0.000 (hot 0.000)  del 0.000  dead_tup 0
+    e1_lease                 ins 1.000  upd 0.000 (hot 0.000)  del 1.000  dead_tup 500000
+    e1_execution_p0          ins 1.000  upd 1.000 (hot 0.761)  del 0.000  dead_tup 195102
+    e1_ready                 ins 1.000  upd 0.000 (hot 0.000)  del 1.000  dead_tup 500000
+
+Vereditos E1 (kill: vazão < 1.5x OU queda de WAL < 40%):
+  vazão drain  split-group/current = 25.81x   (split-sync: 1.46x)
+  vazão fim a fim (enqueue+drain) split-group/current = 1.79x — o §20.3 lê end-to-end;
+    o enqueue do split é 2 INSERTs/commit por construção (§7.5), custo do chamador
+  WAL/execução ciclo completo: current 3829 B → split-group 2437 B (−36.4%; split-sync 2477 B, −35.3%)
+  tuple versions na tabela grande/execução (§3.3, falsifica se > 3): current 4.00 → split-group 2.00

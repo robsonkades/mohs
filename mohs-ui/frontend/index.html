@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en" translate="no" class="dark notranslate">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Opting out of machine translation is not cosmetic. This dashboard is deliberately English
+      (ADR-0045 §6) and its operators often are not, so Chrome offers to translate it — and page
+      translation replaces React's text nodes with its own <font> wrappers. React later tries to
+      remove a node that is no longer where it left it and throws "NotFoundError: Failed to
+      execute 'removeChild' on 'Node'", which unmounts the whole tree and leaves a blank page.
+      `translate="no"`, the `notranslate` class and the meta below are the three signals Chrome
+      honours; they also agree with the decision that this subtree stays in one language.
+    -->
+    <meta name="google" content="notranslate" />
+    <meta name="description" content="Mohs — dashboard for jobs, executions and rate limits." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Mohs Dashboard</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

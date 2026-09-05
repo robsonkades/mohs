@@ -1,0 +1,180 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.mohs.rest.execution;
+
+import java.net.URI;
+import java.time.Instant;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+
+import jakarta.servlet.http.HttpServletRequest;
+
+import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import io.mohs.core.ExecutionQuery;
+import io.mohs.core.Mohs;
+import io.mohs.core.execution.Execution;
+import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.job.JobKey;
+import io.mohs.rest.AcceptedExecutionResponse;
+import io.mohs.rest.ActorResolver;
+import io.mohs.rest.ApiPaths;
+import io.mohs.rest.CursorPage;
+import io.mohs.rest.ExecutionLocations;
+import io.mohs.rest.RequestIdentifiers;
+import io.mohs.rest.error.ExecutionNotFoundException;
+import io.mohs.rest.error.ExecutionNotRetryableException;
+
+/**
+ * The "executions" resource area: a global lookup (cursor), the detail, cooperative cancellation
+ * and the manual retry.
+ *
+ * <p>The two mutations resolve the actor BEFORE mutating, like every mutation in this API: a 4xx is
+ * a contract of "nothing changed". Neither {@code Mohs.cancel} nor {@code Mohs.retry} takes an
+ * actor — the execution keeps its original invoker — so the attribution lives in the log line, the
+ * audit trail an operator has for "who cancelled this at 3 a.m.".
+ */
+@RestController
+@RequestMapping("${mohs.api.base-path:" + ApiPaths.V1 + "}/executions")
+public class ExecutionsController {
+
+    private static final Logger log = LoggerFactory.getLogger(ExecutionsController.class);
+
+    private final Mohs mohs;
+    private final ActorResolver actorResolver;
+
+    /**
+     * Creates a {@code ExecutionsController} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param actorResolver the resolver that attributes HTTP operations to an actor
+     */
+    public ExecutionsController(Mohs mohs, ActorResolver actorResolver) {
+        this.mohs = Objects.requireNonNull(mohs, "mohs");
+        this.actorResolver = Objects.requireNonNull(actorResolver, "actorResolver");
+    }
+
+    /**
+     * {@code size} — see {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view.
+     *
+     * @param status the execution state filter, or {@code null} for all states
+     * @param jobKey the stable identity of the job
+     * @param from the inclusive lower bound on scheduled time, or {@code null}
+     * @param to the exclusive upper bound on scheduled time, or {@code null}
+     * @param cursor the last execution identity of the previous page, or {@code null}
+     * @param size the requested page size
+     * @return the matching summaries and optional continuation cursor
+     */
+    @GetMapping
+    public CursorPage<ExecutionSummaryResponse> search(
+            @RequestParam(required = false) @Nullable ExecutionState status,
+            @RequestParam(required = false) @Nullable String jobKey,
+            @RequestParam(required = false) @Nullable Instant from,
+            @RequestParam(required = false) @Nullable Instant to,
+            @RequestParam(required = false) @Nullable String cursor,
+            @RequestParam(required = false) @Nullable Integer size) {
+        int pageSize = CursorPage.clampSize(size);
+        // A blank filter is no filter; only a present, non-blank one is turned into a key
+        JobKey key = jobKey == null || jobKey.isBlank() ? null : RequestIdentifiers.jobKey(jobKey);
+        List<Execution> fetched = mohs.executions(new ExecutionQuery(key, status, from, to, cursor, pageSize + 1));
+        List<ExecutionSummaryResponse> responses = fetched.stream().map(ExecutionSummaryResponse::from).toList();
+        return CursorPage.of(responses, pageSize, ExecutionSummaryResponse::executionId);
+    }
+
+    /**
+     * Returns one execution with its attempt history.
+     *
+     * @param id the identity of the execution
+     * @return the execution detail with attempt history
+     */
+    @GetMapping("/{id}")
+    public ExecutionResponse get(@PathVariable String id) {
+        ExecutionId executionId = RequestIdentifiers.executionId(id);
+        return mohs.findExecution(executionId).map(ExecutionResponse::from)
+                .orElseThrow(() -> new ExecutionNotFoundException(executionId));
+    }
+
+    /**
+     * Cancellation is cooperative, not immediate — a 202 with the current state, not necessarily a
+     * terminal one: a pending execution already comes back {@code CANCELLED}, while a
+     * {@code RUNNING} one comes back as it is, with the request recorded.
+     *
+     * <p>It returns a {@code ResponseEntity} rather than a bare {@code ExecutionResponse} for the
+     * same reason as {@link #retry}: that is where the {@code Location: /executions/{id}} header
+     * required by the REST design is attached — {@code @ResponseStatus} would have no effect here.
+     *
+     * @param id the identity of the execution
+     * @param request the incoming HTTP request
+     * @return the cancellation result and its HTTP status
+     */
+    @PostMapping("/{id}/cancel")
+    public ResponseEntity<ExecutionResponse> cancel(@PathVariable String id, HttpServletRequest request) {
+        ExecutionId executionId = RequestIdentifiers.executionId(id);
+        String actor = actorResolver.resolve(request);
+        Execution execution = mohs.cancel(executionId)
+                .orElseThrow(() -> new ExecutionNotFoundException(executionId));
+        log.info("execution {} cancellation requested by '{}' — state after the request: {}", executionId.value(), actor, execution.state());
+        URI location = ExecutionLocations.ofAction(request, "/cancel");
+        return ResponseEntity.accepted().location(location).body(ExecutionResponse.from(execution));
+    }
+
+    /**
+     * A manual retry: it rearms the SAME {@code FAILED} execution as {@code RETRY_WAITING} due now,
+     * bypassing the retry budget; the new attempt competes for the claim like any other candidate.
+     *
+     * <p>Deliberately without an {@code Idempotency-Key}: a retry does not go through deduplication
+     * because nothing new is inserted. The idempotence is the CAS itself, and repeating the POST
+     * becomes a 409 naming the current state. The 202 comes through {@code ResponseEntity} —
+     * {@code @ResponseStatus} has no effect on one.
+     *
+     * @param id the identity of the execution
+     * @param request the incoming HTTP request
+     * @return the accepted retry receipt and its location
+     */
+    @PostMapping("/{id}/retry")
+    public ResponseEntity<AcceptedExecutionResponse> retry(@PathVariable String id, HttpServletRequest request) {
+        ExecutionId executionId = RequestIdentifiers.executionId(id);
+        String actor = actorResolver.resolve(request);
+        Execution rearmed = retryOrConflict(executionId)
+                .orElseThrow(() -> new ExecutionNotFoundException(executionId));
+        log.info("execution {} manually retried by '{}'", executionId.value(), actor);
+        URI location = ExecutionLocations.ofAction(request, "/retry");
+        return ResponseEntity.accepted().location(location).body(AcceptedExecutionResponse.from(rearmed));
+    }
+
+    /**
+     * Every ISE in this scope is the retry's state guard (the contract documented on
+     * {@code Mohs#retry}) — outside it, an unrelated ISE is never translated into a 409.
+     */
+    private Optional<Execution> retryOrConflict(ExecutionId executionId) {
+        try {
+            return mohs.retry(executionId);
+        } catch (IllegalStateException e) {
+            throw new ExecutionNotRetryableException(Objects.requireNonNullElse(e.getMessage(), e.toString()));
+        }
+    }
+}

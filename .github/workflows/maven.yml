@@ -1,0 +1,125 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      # The reactor pins maven.compiler.release=25 (see pom.xml) — javac's --release can't
+      # target a version newer than the JDK actually running it, so this can only build on 25+.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+
+      # The BUILT bundle, keyed on everything that decides its content: the frontend sources AND
+      # mohs-ui/pom.xml, which pins the Node version and the output directory. A hit means the
+      # cached bundle is what a build would have produced, so restoring it is not a shortcut past
+      # the dashboard's tests — MohsUiAutoConfigurationTest exercises the serving rules (immutable
+      # assets, 404 for a missing one, the SPA fallback) over the starter's stub bundle, and
+      # SchemaPostgresRoundTripTest & co. never touch the bundle at all.
+      #
+      # Restore and save are split on purpose (see the save step at the end): a single cache step
+      # would also save from a FAILED run, and a bundle-less save on this key would make every
+      # later run fail the guard below until someone evicted it by hand.
+      #
+      # This step comes BEFORE the toolchain cache below, and the order is load-bearing:
+      # mohs-ui/frontend/node lives inside the glob, so restoring it first would change the key's
+      # own hash on every run and the cache would never hit.
+      - name: Restore the dashboard bundle
+        id: bundle
+        uses: actions/cache/restore@v6
+        with:
+          path: mohs-ui/target/classes/mohs-ui-webapp
+          key: mohs-ui-bundle-${{ hashFiles('mohs-ui/frontend/**', 'mohs-ui/pom.xml') }}
+
+      # Node itself (frontend-maven-plugin installs it into the working directory) and npm's
+      # download cache — not node_modules, which `npm ci` deletes before installing anyway.
+      # restore-keys is safe HERE and deliberately absent above: a partial hit on the toolchain is
+      # revalidated by install-node-and-npm and npm ci, while a partial hit on the bundle would
+      # silently serve another commit's dashboard.
+      - name: Cache Node and the npm download cache
+        if: steps.bundle.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            mohs-ui/frontend/node
+            ~/.npm
+          key: mohs-ui-npm-${{ hashFiles('mohs-ui/frontend/package-lock.json') }}
+          restore-keys: mohs-ui-npm-
+
+      # -Dskip.frontend=true ONLY behind a bundle cache hit, and never in the release workflow,
+      # which always rebuilds the bundle from source. Skipping it without the cache would ship an
+      # empty mohs-ui jar — which is what the guard below refuses to let past.
+      #
+      # The image pulls run alongside the build rather than before it: the daemon fetches them
+      # while Maven is still compiling, so the Testcontainers suites find them warm. Keep these
+      # three tags in step with the containers in mohs-store-jdbc's *TestSupport classes — a stale
+      # tag here degrades CI time silently rather than failing.
+      #
+      # No -T: parallel modules were tried and pulled, because the gain was never measured on this
+      # runner and mohs-store-jdbc — which holds three database containers alive at once — already
+      # fails intermittently in a full reactor build. Contention during the SQL Server startup
+      # window is exactly the wrong thing to buy without a number.
+      #
+      # No -DexcludedGroups either: ubuntu-latest has Docker, which is the whole reason those
+      # suites can run here at all. Locally, without an engine, the same tests fail on
+      # "Could not initialize class *TestSupport".
+      #
+      # gpg.skip already defaults to true in pom.xml; explicit here for clarity — signing only
+      # ever happens in the release workflow.
+      - name: Build and test
+        run: |
+          docker pull -q postgres:16-alpine &
+          docker pull -q mysql:8.0 &
+          docker pull -q mcr.microsoft.com/mssql/server:2025-latest &
+          mvn -B -ntp verify -Dgpg.skip=true \
+            -Dskip.frontend=${{ steps.bundle.outputs.cache-hit == 'true' }}
+
+      # A cache hit that restored nothing would produce a silently empty dashboard jar, and the
+      # failure would only surface for whoever installed the release. Fail here instead, and say
+      # what to do about it — an error that does not name its remedy is half an error.
+      - name: Verify the dashboard bundle is present
+        run: |
+          bundle=mohs-ui/target/classes/mohs-ui-webapp
+          if [ ! -f "$bundle/index.html" ]; then
+            echo "::error::$bundle/index.html is missing — the bundle cache hit but restored nothing."
+            echo "::error::Evict it with: gh cache delete '${{ steps.bundle.outputs.cache-primary-key }}'"
+            exit 1
+          fi
+
+      # Only a bundle a green build produced is worth keeping. actions/cache saves in its post-job
+      # step even when the job failed, and a half-built bundle stored under this key would poison
+      # every later run on the same frontend hash.
+      - name: Save the dashboard bundle
+        if: success() && steps.bundle.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: mohs-ui/target/classes/mohs-ui-webapp
+          key: ${{ steps.bundle.outputs.cache-primary-key }}
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/*.xml'
+          retention-days: 7
+          if-no-files-found: ignore

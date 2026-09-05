@@ -1,0 +1,17 @@
+Mohs
+Copyright 2026 The Mohs Authors
+
+This product includes software developed by
+the Spring Framework project (https://spring.io), licensed under the
+Apache License, Version 2.0.
+
+The module `mohs-cron` (package io.mohs.cron) is adapted from
+org.springframework.scheduling.support of the Spring Framework. The
+adaptation moves the classes into io.mohs.cron, replaces the internal
+org.springframework.util helpers with the reduced Assert/StringUtils in
+the same package, and restores org.jspecify.annotations.Nullable. One
+functional divergence from upstream is documented in
+QuartzCronField#nextOrSame: the roll-forward is retried in a loop against
+the seed, so that next() cannot return its own argument for "L-n"
+day-of-month expressions. Every adapted file carries the original Apache
+License header plus a note describing its changes.

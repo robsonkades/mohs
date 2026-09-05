@@ -1,0 +1,230 @@
+/*
+ * Copyright 2026 The Mohs Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.mohs.store.jdbc;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import javax.sql.DataSource;
+
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+
+import org.jspecify.annotations.Nullable;
+
+import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.execution.ExecutionState;
+import io.mohs.core.job.JobKey;
+import io.mohs.engine.LeaseStore;
+import io.mohs.engine.WorkQueue;
+import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class JdbcLeaseStoreTest {
+
+    private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");
+    private static final Instant CREATED_AT = NOW.minusSeconds(60);
+
+    private JdbcTemplate rawJdbcTemplate;
+    private JdbcLeaseStore store;
+    private JdbcWorkQueue queue;
+    private JdbcJobStore jobStore;
+
+    @BeforeEach
+    void setUp() {
+        DataSource dataSource = freshH2DataSource();
+        rawJdbcTemplate = new JdbcTemplate(dataSource);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
+        store = new JdbcLeaseStore(dataSource, new H2JdbcDelegate(), batchStore);
+        queue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), batchStore);
+        jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
+    }
+
+    private static DataSource freshH2DataSource() {
+        JdbcDataSource h2 = new JdbcDataSource();
+        h2.setURL("jdbc:h2:mem:lease-store-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
+        h2.setUser("sa");
+        h2.setPassword("");
+        new ResourceDatabasePopulator(new ClassPathResource("schema-h2.sql")).execute(h2);
+        return h2;
+    }
+
+    /** Seeds the ownership through the real path (queue, then claim) plus the history row the advisory terminal UPDATE reaches. */
+    private void seedLeased(String id, String jobKey, String nodeId, long epoch, int attempt) {
+        rawJdbcTemplate.update("""
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                VALUES (?, ?, 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(CREATED_AT), JdbcTimestamps.toUtcLocalDateTime(CREATED_AT));
+        queue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, 20, attempt, NOW.minusSeconds(1))));
+        queue.claim(0, nodeId, epoch, 10, List.of(), NOW);
+    }
+
+    private LeaseStore.CompletionResult terminal(String id, String jobKey, String nodeId, long epoch, int attempt,
+            ExecutionState state, @Nullable String errorType, @Nullable String error) {
+        return new LeaseStore.CompletionResult(ExecutionId.of(id), JobKey.of(jobKey), nodeId, epoch, attempt,
+                NOW.minusSeconds(2), NOW, state, errorType, error, state, null);
+    }
+
+    @Test
+    void completeDeletesTheLeaseRecordsTheAttemptAndUpdatesTheAdvisoryState() {
+        seedLeased("exec-1", "job-a", "node-a", 1, 1);
+
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(
+                terminal("exec-1", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null)), jobStore);
+
+        assertThat(verdicts.get(ExecutionId.of("exec-1")).owned()).isTrue();
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isZero();
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT outcome FROM mohs_attempt WHERE execution_id = 'exec-1' AND number = 1", String.class))
+                .isEqualTo("SUCCEEDED");
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("SUCCEEDED");
+    }
+
+    /** The fence: a result with a stale epoch (a zombie) loses EVERYTHING — neither the attempt, nor the state, nor the new incarnation's lease. */
+    @Test
+    void completeWithAStaleEpochIsFencedOutEntirely() {
+        seedLeased("exec-1", "job-a", "node-a", 2, 1);
+
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(
+                terminal("exec-1", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null)), jobStore);
+
+        assertThat(verdicts.get(ExecutionId.of("exec-1"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isEqualTo(1);
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_attempt", Integer.class)).isZero();
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
+    }
+
+    /**
+     * The fence's third component. A healthy node's epoch never moves, so after a Watchdog Bound
+     * released attempt 1 the SAME node re-claims attempt 2 with the same {@code (node_id, epoch)} — and
+     * the zombie's completion, carrying attempt 1, must lose to the attempt number alone, leaving the
+     * new incarnation's lease untouched. Before the attempt joined the fence, only the attempt table's
+     * primary key stood in the way, aborting the whole group commit with a misleading error.
+     */
+    @Test
+    void completeWithAStaleAttemptIsFencedOutEvenFromTheSameNodeAndEpoch() {
+        seedLeased("exec-1", "job-a", "node-a", 1, 1);
+        store.complete(List.of(new LeaseStore.CompletionResult(
+                ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-a", 1, 1,
+                NOW.minusSeconds(2), NOW, ExecutionState.FAILED, "java.lang.IllegalStateException", "watchdog bound",
+                null,
+                new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("job-a"), 0, 20, 2, NOW))), jobStore);
+        queue.claim(0, "node-a", 1, 10, List.of(), NOW);
+
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(
+                terminal("exec-1", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null)), jobStore);
+
+        assertThat(verdicts.get(ExecutionId.of("exec-1"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT attempt_number FROM mohs_lease WHERE execution_id = 'exec-1'", Integer.class)).isEqualTo(2);
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_attempt", Integer.class)).isEqualTo(1);
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
+    }
+
+    /** A mixed batch: the zombie is discarded row by row and never contaminates its neighbours (the same discipline as completeAll's). */
+    @Test
+    void completePartitionsFenceWinnersFromLosersWithinOneBatch() {
+        seedLeased("exec-win", "job-a", "node-a", 1, 1);
+        seedLeased("exec-lose", "job-a", "node-b", 5, 1);
+
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(
+                terminal("exec-win", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null),
+                terminal("exec-lose", "job-a", "node-b", 4, 1, ExecutionState.SUCCEEDED, null, null)), jobStore);
+
+        assertThat(verdicts.get(ExecutionId.of("exec-win")).owned()).isTrue();
+        assertThat(verdicts.get(ExecutionId.of("exec-lose"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
+        assertThat(rawJdbcTemplate.queryForList("SELECT execution_id FROM mohs_lease", String.class))
+                .containsExactly("exec-lose");
+    }
+
+    /** A non-terminal retry: the queue rebirth is IN THE SAME transaction — no window for an orphaned execution (see CompletionResult.retry's Javadoc). */
+    @Test
+    void completeWithARetryRebirthsTheReadyEntryAtomically() {
+        seedLeased("exec-1", "job-a", "node-a", 1, 1);
+
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(new LeaseStore.CompletionResult(
+                ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-a", 1, 1,
+                NOW.minusSeconds(2), NOW, ExecutionState.FAILED, "java.lang.IllegalStateException", "boom",
+                null,
+                new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("job-a"), 0, 20, 2, NOW.plusSeconds(30)))), jobStore);
+
+        assertThat(verdicts.get(ExecutionId.of("exec-1")).owned()).isTrue();
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isZero();
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT error_type FROM mohs_attempt WHERE execution_id = 'exec-1'", String.class))
+                .isEqualTo("java.lang.IllegalStateException");
+        // History stays PENDING (non-terminal) and the queue holds the attempt-2 entry with its backoff
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT attempt FROM mohs_ready WHERE execution_id = 'exec-1'", Integer.class)).isEqualTo(2);
+    }
+
+    @Test
+    void countByJobCountsOnlyTheAskedJobs() {
+        seedLeased("exec-1", "job-a", "node-a", 1, 1);
+        seedLeased("exec-2", "job-a", "node-a", 1, 1);
+        seedLeased("exec-3", "job-b", "node-a", 1, 1);
+
+        Map<JobKey, Integer> counts = store.countByJob(List.of(JobKey.of("job-a")));
+
+        assertThat(counts).containsExactly(Map.entry(JobKey.of("job-a"), 2));
+    }
+
+    @Test
+    void findByNodesReturnsTheNodesLeases() {
+        seedLeased("exec-1", "job-a", "node-a", 1, 1);
+        seedLeased("exec-2", "job-a", "node-b", 3, 2);
+
+        List<LeaseStore.Lease> leases = store.findByNodes(List.of("node-b"));
+
+        assertThat(leases).singleElement().satisfies(lease -> {
+            assertThat(lease.executionId().value()).isEqualTo("exec-2");
+            assertThat(lease.epoch()).isEqualTo(3);
+            assertThat(lease.attemptNumber()).isEqualTo(2);
+            assertThat(lease.claimedAt()).isEqualTo(NOW);
+        });
+    }
+
+    /** Cooperative cancellation now lives on the ownership: a flag on the lease; an execution with no lease is not running — false. */
+    @Test
+    void requestCancellationFlagsOnlyALiveLease() {
+        seedLeased("exec-1", "job-a", "node-a", 1, 1);
+
+        assertThat(store.requestCancellation(ExecutionId.of("exec-1"))).isTrue();
+        assertThat(store.requestCancellation(ExecutionId.of("ghost"))).isFalse();
+        assertThat(store.findCancelRequested(List.of(ExecutionId.of("exec-1"), ExecutionId.of("ghost"))))
+                .containsExactly(ExecutionId.of("exec-1"));
+    }
+
+    @Test
+    void completeOfNothingIsANoOp() {
+        assertThat(store.complete(List.of(), jobStore)).isEmpty();
+    }
+}

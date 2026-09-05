@@ -1,0 +1,25 @@
+-- Revisão de codebase de 2026-08-29 (sem ADR própria: é correção medida, não
+-- decisão de arquitetura): dois índices que a medição corrige.
+--
+-- 1) mohs_idempotency não tinha índice em created_at, e pruneIdempotencyBefore
+--    é um DELETE ... WHERE created_at < ? — full scan numa tabela que cresce
+--    com TODO enqueue idempotente. No Postgres o scan ainda deixa tuplas
+--    mortas proporcionais, então a poda ficava progressivamente mais cara.
+--    Medido no Postgres 16, 2M linhas / 327 MB, podando 3.599:
+--    Seq Scan, "Rows Removed by Filter: 1996401", 24.689 buffers, 83,2 ms ->
+--    Index Scan, 55 buffers, 0,97 ms. O scan custava a tabela inteira a cada
+--    varredura, independente de quanto havia para podar.
+--
+-- 2) idx_mohs_execution_created existia em H2/MySQL/SQL Server e NENHUMA
+--    query filtra ou ordena por created_at sozinho (o Postgres, corretamente,
+--    nunca o teve): o único predicado que cita a coluna é o CAS de conclusão
+--    (execution_id = ? AND created_at = ?), que casa pela PK e rebaixa
+--    created_at a filtro. O custo NÃO estava na escrita terminal — o UPDATE
+--    não toca created_at, e índice secundário cuja chave não mudou não é
+--    mantido (medido no SQL Server 2025: 3 logical reads no UPDATE terminal
+--    com e sem o índice, e o plano é um Clustered Index Update sozinho).
+--    O custo é o INSERT, na tabela mais quente do sistema: 6 -> 3 logical
+--    reads por linha ao dropar o índice.
+
+CREATE INDEX IF NOT EXISTS idx_mohs_idempotency_created ON mohs_idempotency (created_at);
+DROP INDEX IF EXISTS idx_mohs_execution_created;

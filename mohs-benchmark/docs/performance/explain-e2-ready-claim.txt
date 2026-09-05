@@ -1,0 +1,64 @@
+=== EXPLAIN (ANALYZE, BUFFERS) — claim ANY(64 shards) — a forma §5.4 do plano ===
+Insert on e2_lease  (cost=3312.61..3314.61 rows=100 width=98) (actual time=3.753..4.041 rows=100 loops=1)
+  Buffers: shared hit=2239 read=1 dirtied=5 written=6
+  CTE picked
+    ->  Limit  (cost=2521.86..2523.11 rows=100 width=43) (actual time=3.574..3.614 rows=100 loops=1)
+          Buffers: shared hit=1425
+          ->  LockRows  (cost=2521.86..2679.24 rows=12590 width=43) (actual time=3.573..3.609 rows=100 loops=1)
+                Buffers: shared hit=1425
+                ->  Sort  (cost=2521.86..2553.34 rows=12590 width=43) (actual time=3.565..3.569 rows=100 loops=1)
+                      Sort Key: e2_ready.priority, e2_ready.visible_at
+                      Sort Method: quicksort  Memory: 1263kB
+                      Buffers: shared hit=1325
+                      ->  Bitmap Heap Scan on e2_ready  (cost=552.41..2040.68 rows=12590 width=43) (actual time=0.509..1.903 rows=12500 loops=1)
+                            Recheck Cond: ((shard = ANY ('{0,8,16,24,32,40,48,56}'::smallint[])) AND (visible_at <= '2026-08-21 09:00:00-03'::timestamp with time zone))
+                            Heap Blocks: exact=1205
+                            Buffers: shared hit=1325
+                            ->  Bitmap Index Scan on e2_ready_claim  (cost=0.00..549.26 rows=12590 width=0) (actual time=0.426..0.426 rows=12500 loops=1)
+                                  Index Cond: ((shard = ANY ('{0,8,16,24,32,40,48,56}'::smallint[])) AND (visible_at <= '2026-08-21 09:00:00-03'::timestamp with time zone))
+                                  Buffers: shared hit=120
+  CTE gone
+    ->  Delete on e2_ready r  (cost=0.42..789.50 rows=100 width=46) (actual time=3.605..3.771 rows=100 loops=1)
+          Buffers: shared hit=2025
+          ->  Nested Loop  (cost=0.42..789.50 rows=100 width=46) (actual time=3.601..3.735 rows=100 loops=1)
+                Buffers: shared hit=1825
+                ->  CTE Scan on picked p  (cost=0.00..2.00 rows=100 width=56) (actual time=3.585..3.642 rows=100 loops=1)
+                      Buffers: shared hit=1425
+                ->  Index Scan using e2_ready_pkey on e2_ready r  (cost=0.42..7.88 rows=1 width=22) (actual time=0.001..0.001 rows=1 loops=100)
+                      Index Cond: (execution_id = p.execution_id)
+                      Buffers: shared hit=400
+  ->  CTE Scan on gone  (cost=0.00..2.00 rows=100 width=98) (actual time=3.607..3.790 rows=100 loops=1)
+        Buffers: shared hit=2025
+Planning:
+  Buffers: shared hit=106
+Planning Time: 0.438 ms
+Execution Time: 4.213 ms
+
+=== EXPLAIN (ANALYZE, BUFFERS) — claim shard único (round-robin) — a correção candidata ===
+Insert on e2_lease  (cost=1037.45..1039.45 rows=100 width=98) (actual time=0.053..0.379 rows=100 loops=1)
+  Buffers: shared hit=987 dirtied=2 written=2
+  CTE picked
+    ->  Limit  (cost=0.42..247.95 rows=100 width=43) (actual time=0.030..0.093 rows=100 loops=1)
+          Buffers: shared hit=183
+          ->  LockRows  (cost=0.42..3943.67 rows=1593 width=43) (actual time=0.029..0.088 rows=100 loops=1)
+                Buffers: shared hit=183
+                ->  Index Scan using e2_ready_claim on e2_ready  (cost=0.42..3927.74 rows=1593 width=43) (actual time=0.025..0.064 rows=100 loops=1)
+                      Index Cond: ((shard = 7) AND (visible_at <= '2026-08-21 09:00:00-03'::timestamp with time zone))
+                      Buffers: shared hit=83
+  CTE gone
+    ->  Delete on e2_ready r  (cost=0.42..789.50 rows=100 width=46) (actual time=0.045..0.260 rows=100 loops=1)
+          Buffers: shared hit=783
+          ->  Nested Loop  (cost=0.42..789.50 rows=100 width=46) (actual time=0.042..0.225 rows=100 loops=1)
+                Buffers: shared hit=583
+                ->  CTE Scan on picked p  (cost=0.00..2.00 rows=100 width=56) (actual time=0.033..0.124 rows=100 loops=1)
+                      Buffers: shared hit=183
+                ->  Index Scan using e2_ready_pkey on e2_ready r  (cost=0.42..7.88 rows=1 width=22) (actual time=0.001..0.001 rows=1 loops=100)
+                      Index Cond: (execution_id = p.execution_id)
+                      Buffers: shared hit=400
+  ->  CTE Scan on gone  (cost=0.00..2.00 rows=100 width=98) (actual time=0.046..0.278 rows=100 loops=1)
+        Buffers: shared hit=783
+Planning:
+  Buffers: shared hit=5
+Planning Time: 0.109 ms
+Execution Time: 0.426 ms
+
