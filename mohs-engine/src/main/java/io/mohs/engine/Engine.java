@@ -332,25 +332,36 @@ public final class Engine implements MohsLifecycle {
         if (!state.compareAndSet(EngineState.CREATED, EngineState.RUNNING)) {
             throw new IllegalStateException("start() only valid from CREATED, was " + state.get());
         }
+        warnIfPollIntervalOutrunsHeartbeat();
         // ONE platform thread, never a scheduler or a virtual one: latency-critical, immune to carrier
         // starvation, and it appears with a name of its own in any profiler or thread dump — which is
         // what matters at 3 a.m. Daemon: a leaked engine never holds up the JVM's exit (a crash is
         // already covered semantics — the node's lease expires and the reaper reclaims).
-        Duration heartbeatCadence = settings.nodeLeaseTtl().dividedBy(3);
-        if (settings.pollInterval().compareTo(heartbeatCadence) > 0) {
-            // The liveness cap in awaitWork also swallows the FLOOR — the operator asked for ticks
-            // spaced further apart than the liveness promise allows; liveness wins, but doing so in
-            // silence would be a tuning mystery
-            log.warn("effective tick cadence is capped at node-lease-ttl/3 ({}) — mohs.engine.poll-interval ({}) "
-                    + "exceeds it; the heartbeat each tick carries is what keeps this node alive to its peers",
-                    heartbeatCadence, settings.pollInterval());
-        }
         Thread thread = Thread.ofPlatform().name("mohs-engine-loop").daemon(true).unstarted(this::runLoop);
         loopThread = thread;
         thread.start();
         if (state.get() == EngineState.STOPPED) { // stop() won the race during start-up — wake the loop it never saw
             wake();
         }
+    }
+
+    /**
+     * The liveness cap in {@link #awaitWork} also swallows the FLOOR — the operator asked for ticks
+     * spaced further apart than the liveness promise allows; liveness wins, but doing so in silence
+     * would be a tuning mystery.
+     */
+    private void warnIfPollIntervalOutrunsHeartbeat() {
+        Duration heartbeatCadence = heartbeatCadence();
+        if (settings.pollInterval().compareTo(heartbeatCadence) > 0) {
+            log.warn("effective tick cadence is capped at node-lease-ttl/3 ({}) — mohs.engine.poll-interval ({}) "
+                    + "exceeds it; the heartbeat each tick carries is what keeps this node alive to its peers",
+                    heartbeatCadence, settings.pollInterval());
+        }
+    }
+
+    /** {@code nodeLeaseTtl/3}: the ceiling on the loop's sleep — see {@link #runLoop} for why liveness caps the backoff. */
+    private Duration heartbeatCadence() {
+        return settings.nodeLeaseTtl().dividedBy(3);
     }
 
     @Override
@@ -748,7 +759,7 @@ public final class Engine implements MohsLifecycle {
     }
 
     private void awaitWork(Duration delay) {
-        Duration heartbeatCadence = settings.nodeLeaseTtl().dividedBy(3);
+        Duration heartbeatCadence = heartbeatCadence();
         Duration bounded = delay.compareTo(heartbeatCadence) > 0 ? heartbeatCadence : delay;
         wakeLock.lock();
         try {
@@ -1305,19 +1316,7 @@ public final class Engine implements MohsLifecycle {
      */
     private int claimAndDispatch(Map<JobKey, StoredJob> definitions, List<Integer> ownedShards) {
         if (ownedShards.isEmpty()) {
-            // Once per transition, not per tick: the condition is PERSISTENT (it only changes when the
-            // cluster shrinks or SHARD_COUNT rises), and at the 25ms floor it would be ~40 lines/s per
-            // node — the log that diagnoses the problem burying everything else
-            if (!warnedAboutOwningNoShard) {
-                warnedAboutOwningNoShard = true;
-            // Owning zero shards is NOT an empty queue — it is this node being outside the partition.
-            // Shards.ownedBy returns an empty list for an index >= SHARD_COUNT, and the inner lap then
-            // does not run: LapOutcome said "I swept everything and found nothing", armed
-            // queueLooksEmpty, and the node sat idle FOREVER announcing RUNNING and occupying a shard
-            // slice of its peers', with not one line of log
-                log.warn("this node owns no shard of {} — it will never claim. The cluster has more RUNNING nodes"
-                        + " than shards; reduce the node count or raise Shards.SHARD_COUNT.", Shards.SHARD_COUNT);
-            }
+            warnOnceAboutOwningNoShard();
             return 0;
         }
         warnedAboutOwningNoShard = false;
@@ -1330,6 +1329,26 @@ public final class Engine implements MohsLifecycle {
         // what it exists to do
         queueLooksEmpty = outcome.claimed() == 0 && outcome.sweptEveryOwnedShard();
         return outcome.claimed();
+    }
+
+    /**
+     * Owning zero shards is NOT an empty queue — it is this node being outside the partition.
+     * {@link Shards#ownedBy} returns an empty list for an index {@code >= SHARD_COUNT}, and the inner
+     * lap then does not run: {@link LapOutcome} said "I swept everything and found nothing", armed
+     * {@code queueLooksEmpty}, and the node sat idle FOREVER announcing RUNNING and occupying a shard
+     * slice of its peers', with not one line of log.
+     *
+     * <p>Once per transition, not per tick: the condition is PERSISTENT (it only changes when the
+     * cluster shrinks or SHARD_COUNT rises), and at the 25ms floor it would be ~40 lines/s per node —
+     * the log that diagnoses the problem burying everything else.
+     */
+    private void warnOnceAboutOwningNoShard() {
+        if (warnedAboutOwningNoShard) {
+            return;
+        }
+        warnedAboutOwningNoShard = true;
+        log.warn("this node owns no shard of {} — it will never claim. The cluster has more RUNNING nodes"
+                + " than shards; reduce the node count or raise Shards.SHARD_COUNT.", Shards.SHARD_COUNT);
     }
 
     /**
@@ -1388,15 +1407,7 @@ public final class Engine implements MohsLifecycle {
             // Admission ONCE per lap, never per statement: the over-admission bound stays "nodes x 1
             // lap", with the error in the same direction
             Admission admission = Admission.compute(definitions, windowRegistry, rateLimitStore, leaseStore, now);
-            // The SQL filter is a churn optimisation, not correctness — the post-claim admit() is the
-            // authority. Above the IN parameter ceiling (SQL Server breaks around 2100) the filter is
-            // TRUNCATED, never switched off: degradation has to be monotonic. Switching it off made the
-            // claim bring back jobs with a closed window and admit return them with visible_at = now,
-            // immediately re-claimable — 2,000 jobs with a business window closing at midnight became a
-            // requeue livelock consuming the claim budget of the admissible work
-            Collection<JobKey> inadmissibleFilter = admission.inadmissible().size() > MAX_INADMISSIBLE_FILTER
-                    ? admission.inadmissible().stream().limit(MAX_INADMISSIBLE_FILTER).toList()
-                    : admission.inadmissible();
+            Collection<JobKey> inadmissibleFilter = inadmissibleFilterOf(admission);
             // The LAP: one OWN shard per statement, round-robin with a cursor that persists between
             // ticks — a multi-shard predicate would kill the index's ordering (a measured lesson); a complete
             // empty pass ends it
@@ -1435,6 +1446,21 @@ public final class Engine implements MohsLifecycle {
             }
         }
         return new LapOutcome(totalClaimed, false);
+    }
+
+    /**
+     * The lap's {@code NOT IN} list. The SQL filter is a churn optimisation, not correctness — the
+     * post-claim {@link #admit} is the authority. Above the IN parameter ceiling (SQL Server breaks
+     * around 2100) the filter is TRUNCATED, never switched off: degradation has to be monotonic.
+     * Switching it off made the claim bring back jobs with a closed window and admit return them with
+     * {@code visible_at = now}, immediately re-claimable — 2,000 jobs with a business window closing at
+     * midnight became a requeue livelock consuming the claim budget of the admissible work.
+     */
+    private static Collection<JobKey> inadmissibleFilterOf(Admission admission) {
+        Set<JobKey> inadmissible = admission.inadmissible();
+        return inadmissible.size() > MAX_INADMISSIBLE_FILTER
+                ? inadmissible.stream().limit(MAX_INADMISSIBLE_FILTER).toList()
+                : inadmissible;
     }
 
     /**
