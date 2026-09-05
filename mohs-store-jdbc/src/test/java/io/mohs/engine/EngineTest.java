@@ -876,6 +876,60 @@ class EngineTest {
         }
     }
 
+    @Test
+    void jobsBeyondTheInadmissibleFilterAreDeferredWithoutBurningAnAttempt() throws Exception {
+        for (int i = 0; i <= Engine.MAX_INADMISSIBLE_FILTER; i++) {
+            String key = "closed-" + i;
+            jobStore.upsert(JobDefinition.of(key, Handler.class, spec -> spec.onDemand().window("closed")));
+            String id = "overflow-" + i;
+            recordAndOffer(id, key, "hello", NOW.minusSeconds(1), Shards.of(ExecutionId.of(id)));
+        }
+        // One admissible successor on every shard, so the omitted job cannot hide behind a lucky
+        // shard assignment. A single-row claim must get past it before that shard's successor runs.
+        jobStore.upsert(JobDefinition.of("admissible", Handler.class, spec -> spec.onDemand()));
+        handlerRegistry.register(JobKey.of("admissible"), (payload, ctx) -> {});
+        var successors = new java.util.HashMap<Integer, String>();
+        for (int i = 0; successors.size() < Shards.SHARD_COUNT; i++) {
+            String id = "successor-" + i;
+            successors.putIfAbsent(Shards.of(ExecutionId.of(id)), id);
+        }
+        for (String id : successors.values()) {
+            recordAndOffer(id, "admissible", "hello", NOW, Shards.of(ExecutionId.of(id)));
+        }
+        CountDownLatch succeeded = new CountDownLatch(successors.size());
+        ExecutionListener listener = event -> {
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
+            }
+        };
+        CompletableFuture<List<WorkQueue.Requeue>> returned = new CompletableFuture<>();
+        WorkQueue recording = mock(WorkQueue.class, delegatesTo(workQueue));
+        doAnswer(invocation -> {
+            List<WorkQueue.Requeue> orders = invocation.getArgument(0);
+            int changed = workQueue.requeue(orders);
+            returned.complete(List.copyOf(orders));
+            return changed;
+        }).when(recording).requeue(any());
+        ExecutionWindowRegistry windows = new ExecutionWindowRegistry(
+                List.of(new ExecutionWindow("closed", List.of(_ -> true))));
+        Engine engine = assembleEngine(jobStore, recording, leaseStore, historyStore, nodeStore, windows,
+                List.of(listener), defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL, 1, LEASE_TTL));
+
+        engine.start();
+        try {
+            assertThat(returned.get(10, TimeUnit.SECONDS)).isNotEmpty().allSatisfy(order -> {
+                assertThat(order.entry().visibleAt()).isEqualTo(NOW.plus(POLL_INTERVAL));
+                assertThat(order.entry().attempt()).isEqualTo(1);
+            });
+            assertThat(succeeded.await(10, TimeUnit.SECONDS)).as("admissible work progresses on every shard").isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM mohs_attempt WHERE execution_id LIKE 'overflow-%'", Integer.class)).isZero();
+        assertThat(leaseCount()).isZero();
+    }
+
     /**
      * The admission race resolved post-claim: a partial cap (headroom 1, the round brought 2) admits one
      * and returns the other to the queue with the SAME attempt and no synthetic attempt — an admission
@@ -1350,7 +1404,7 @@ class EngineTest {
 
     /**
      * Lost ownership (an external reclaim) has no active detection — the zombie finishes on its own and its
-     * late result is discarded by the {@code (node_id, epoch)} fence: the lease now belongs to the new
+     * late result is discarded by the {@code (node_id, epoch, attempt_number)} fence: the lease now belongs to the new
      * incarnation, and the zombie's completion neither deletes somebody else's ownership, nor writes an
      * attempt, nor touches the advisory. Without the fence, the zombie's completion would kill the healthy
      * new incarnation.

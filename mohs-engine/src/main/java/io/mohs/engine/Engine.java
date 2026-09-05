@@ -241,7 +241,7 @@ public final class Engine implements MohsLifecycle {
      */
     private final ReentrantLock wakeLock = new ReentrantLock();
     private final Condition wakeCondition = wakeLock.newCondition();
-    /** Guardado por {@code wakeLock}. */
+    /** Guarded by {@code wakeLock}. */
     private boolean wakeRequested;
 
     /** {@code volatile}: written by {@link #start} and read by {@link #stop}, which may come from different threads ({@code MohsLifecycle} is public API) — safe publication, JCIP 3.1. */
@@ -1476,8 +1476,10 @@ public final class Engine implements MohsLifecycle {
      * deliver without a token — the one unacceptable violation).
      *
      * <p>A loser goes back to the queue with the SAME attempt (nothing ran, the budget is intact) and
-     * {@code visible_at = now} — the next round of this or another node decides; the churn is bounded to
-     * one round per guard flip and is counted ({@code mohs.claim.requeued}).
+     * {@code visible_at = now} while the SQL filter can carry every inadmissible job. Above that
+     * ceiling, losers wait one maximum poll interval: otherwise an omitted job could immediately
+     * win the same claim again and consume the budget of admissible work. The delay also applies
+     * on peers, because it is stored in the queue; the attempt and retry budget are untouched.
      */
     private List<WorkQueue.ClaimedWork> admit(List<WorkQueue.ClaimedWork> claimed, Map<JobKey, StoredJob> definitions,
             Admission admission, Instant now) {
@@ -1487,6 +1489,8 @@ public final class Engine implements MohsLifecycle {
         }
         List<WorkQueue.ClaimedWork> admitted = new ArrayList<>(claimed.size());
         List<WorkQueue.Requeue> losers = new ArrayList<>();
+        Instant loserVisibleAt = admission.inadmissible().size() > MAX_INADMISSIBLE_FILTER
+                ? now.plus(settings.maxPollInterval()) : now;
         for (Map.Entry<JobKey, List<WorkQueue.ClaimedWork>> entry : byJob.entrySet()) {
             JobKey jobKey = entry.getKey();
             List<WorkQueue.ClaimedWork> ofJob = entry.getValue();
@@ -1503,7 +1507,7 @@ public final class Engine implements MohsLifecycle {
             for (WorkQueue.ClaimedWork loser : ofJob.subList(share.count(), ofJob.size())) {
                 losers.add(new WorkQueue.Requeue(loser.executionId(), nodeId, nodeEpoch, loser.attemptNumber(),
                         new WorkQueue.ReadyEntry(loser.executionId(), jobKey, Shards.of(loser.executionId()),
-                                loser.priority(), loser.attemptNumber(), now)));
+                                loser.priority(), loser.attemptNumber(), loserVisibleAt)));
             }
             if (!share.reason().isEmpty()) {
                 metrics.claimRequeued(share.reason(), ofJob.size() - share.count());
@@ -1529,8 +1533,8 @@ public final class Engine implements MohsLifecycle {
      * {@code reason}.
      *
      * <p>The window here is a second line of defence, not redundancy: the pre-claim filter is a snapshot
-     * (and is DISCARDED above {@link #MAX_INADMISSIBLE_FILTER}) — a newborn job, or a round with no
-     * filter, arrives here with this as the only barrier between the queue and a closed window.
+     * (and is truncated above {@link #MAX_INADMISSIBLE_FILTER}) — a newborn or omitted job arrives
+     * here with this as the only barrier between the queue and a closed window.
      */
     private Admitted admitFor(JobDefinition definition, int requested, Admission admission, Instant now) {
         if (windowRegistry.excludes(definition.window(), now)) {

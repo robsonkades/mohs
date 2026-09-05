@@ -21,9 +21,10 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -34,6 +35,8 @@ import org.h2.jdbcx.JdbcDataSource;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -66,6 +69,7 @@ import io.mohs.test.MutableClock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -84,6 +88,7 @@ class DispatcherTest {
     private static final Instant NOW = Instant.parse("2026-08-14T12:00:00Z");
     private static final String NODE = "node-a";
     private static final long EPOCH = 1;
+    private static final String FIXED_RETRY_POLICY = "fixed-test-backoff";
 
     private DataSource dataSource;
     private MutableClock clock;
@@ -123,6 +128,14 @@ class DispatcherTest {
     private Dispatcher newDispatcher(List<ExecutionInterceptor> interceptors) {
         return new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, interceptors, List.of(listener), eventExecutor,
                 new EngineMetrics(new SimpleMeterRegistry()));
+    }
+
+    /** Tests of cancellation/rearming control the delay; the built-in jitter has its own coverage. */
+    private Dispatcher newDispatcherWithRetryDelay(Duration delay) {
+        RetryPolicyRegistry policies = new RetryPolicyRegistry(Map.of(FIXED_RETRY_POLICY,
+                failure -> failure.failedAttempt() <= failure.retries() ? Optional.of(delay) : Optional.empty()));
+        return new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener), eventExecutor,
+                new EngineMetrics(new SimpleMeterRegistry()), null, policies);
     }
 
     /** The ownership the seeds' claim handed over — the same (NODE, EPOCH) fence as the written lease. */
@@ -188,7 +201,7 @@ class DispatcherTest {
         return JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand().retries(0));
     }
 
-    /** A failure with budget is reborn in the queue with backoff inside the bound (1s for the 1st failure) — a derived RETRY_WAITING — and publishes AttemptFailed plus RetryScheduled, never Failed. */
+    /** Full jitter includes zero: a retry is waiting only while its visibility is in the future. */
     @Test
     void failureWithRemainingBudgetSchedulesARetryWithBackoff() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
@@ -199,7 +212,6 @@ class DispatcherTest {
 
         newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
         Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
         assertThat(found.attempts()).hasSize(1);
         assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.FAILED);
@@ -209,12 +221,34 @@ class DispatcherTest {
         assertThat(rawJdbcTemplate.queryForObject(
                 "SELECT attempt FROM mohs_ready WHERE execution_id = 'exec-1'", Integer.class)).isEqualTo(2);
         assertThat(retryVisibleAt).isBetween(NOW, NOW.plusSeconds(1));
+        assertThat(found.state()).isEqualTo(
+                retryVisibleAt.isAfter(NOW) ? ExecutionState.RETRY_WAITING : ExecutionState.ENQUEUED);
 
         RetryScheduled retryScheduled = listener.awaitEvent(RetryScheduled.class);
         assertThat(retryScheduled.nextAttempt()).isEqualTo(2);
         assertThat(retryScheduled.retryAt()).isEqualTo(retryVisibleAt);
+        listener.awaitEvent(AttemptFailed.class);
         assertThat(listener.events().stream().filter(AttemptFailed.class::isInstance)).hasSize(1);
         assertThat(listener.events().stream().filter(Failed.class::isInstance)).isEmpty();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"0, ENQUEUED", "1, RETRY_WAITING"})
+    void retryVisibilityAtNowAndOneMillisecondLaterHasTheExpectedState(long delayMillis, ExecutionState expected)
+            throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class,
+                spec -> spec.onDemand().retries(1).retryPolicy(FIXED_RETRY_POLICY));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            throw new IllegalStateException("boom");
+        });
+
+        newDispatcherWithRetryDelay(Duration.ofMillis(delayMillis)).dispatch(execution, definition, "hello", grant(1));
+
+        assertThat(stateOf("exec-1")).isEqualTo(expected);
+        RetryScheduled scheduled = listener.awaitEvent(RetryScheduled.class);
+        assertThat(scheduled.retryAt()).isEqualTo(NOW.plusMillis(delayMillis));
+        assertThat(scheduled.nextAttempt()).isEqualTo(2);
     }
 
     /** The budget's last attempt failing is a terminal FAILED with Failed(exhausted=true) — the attemptNumber came from the lease, not from counting. */
@@ -278,9 +312,9 @@ class DispatcherTest {
 
     /** A failure with budget does not rearm — the chain stays alive through the retry; the rearm comes from the retry's terminal completion. */
     @Test
-    void aBudgetedFailureOfASchedulerOccurrenceDoesNotRearm() {
+    void aBudgetedFailureOfASchedulerOccurrenceDoesNotRearm() throws Exception {
         JobDefinition definition = JobDefinition.of("poll", Handler.class,
-                spec -> spec.everyAfterFinish(Duration.ofMinutes(5)).retries(2));
+                spec -> spec.everyAfterFinish(Duration.ofMinutes(5)).retries(2).retryPolicy(FIXED_RETRY_POLICY));
         jobStore.upsert(definition);
         Execution execution = seedRunningExecution("exec-1", "poll", 1, Execution.SCHEDULER_ACTOR);
         disarmTrigger("poll");
@@ -288,9 +322,10 @@ class DispatcherTest {
             throw new IllegalStateException("boom");
         });
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
+        newDispatcherWithRetryDelay(Duration.ofSeconds(1)).dispatch(execution, definition, "hello", grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
+        assertThat(listener.awaitEvent(RetryScheduled.class).retryAt()).isEqualTo(NOW.plusSeconds(1));
         assertThat(nextFireAtOf("poll")).isNull();
     }
 
@@ -479,16 +514,17 @@ class DispatcherTest {
     void timeoutSignalMapsTheFailureToTimeoutCauseAndKeepsTheRetryBudget() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
         JobDefinition definition = JobDefinition.of("welcome-email", Handler.class,
-                spec -> spec.onDemand().retries(1).timeout(Duration.ofMinutes(5)));
+                spec -> spec.onDemand().retries(1).timeout(Duration.ofMinutes(5)).retryPolicy(FIXED_RETRY_POLICY));
         CancellationSignal signal = new CancellationSignal();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             signal.requestCancellation(CancellationSignal.Reason.TIMEOUT, true);
             throw new InterruptedException("interrupted mid-await");
         });
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal, grant(1));
+        newDispatcherWithRetryDelay(Duration.ofSeconds(1)).dispatch(execution, definition, "hello", signal, grant(1));
 
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
+        assertThat(listener.awaitEvent(RetryScheduled.class).retryAt()).isEqualTo(NOW.plusSeconds(1));
         AttemptFailed failed = listener.awaitEvent(AttemptFailed.class);
         assertThat(failed.error().getMessage()).contains("exceeded job timeout PT5M");
         assertThat(Thread.currentThread().isInterrupted()).isFalse();
@@ -569,34 +605,33 @@ class DispatcherTest {
     @Test
     void aShutdownSignalRaisedBeforeTheHandlerStartsSkipsTheHandlerAndFollowsTheBudget() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
-        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1));
+        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class,
+                spec -> spec.onDemand().retries(1).retryPolicy(FIXED_RETRY_POLICY));
         CancellationSignal signal = new CancellationSignal();
         signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
         AtomicBoolean handlerRan = new AtomicBoolean();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerRan.set(true));
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal, grant(1));
+        newDispatcherWithRetryDelay(Duration.ofSeconds(1)).dispatch(execution, definition, "hello", signal, grant(1));
 
         assertThat(handlerRan).isFalse();
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
+        assertThat(listener.awaitEvent(RetryScheduled.class).retryAt()).isEqualTo(NOW.plusSeconds(1));
         AttemptFailed failed = listener.awaitEvent(AttemptFailed.class);
         assertThat(failed.error().getMessage()).contains("before attempt 1 started");
     }
 
     private static final class RecordingListener implements ExecutionListener {
         private final List<ExecutionEvent> events = new CopyOnWriteArrayList<>();
-        private final CountDownLatch latch = new CountDownLatch(1);
 
         @Override
         public void on(ExecutionEvent event) {
             events.add(event);
-            if (!(event instanceof Started)) {
-                latch.countDown();
-            }
         }
 
         <T extends ExecutionEvent> T awaitEvent(Class<T> type) throws InterruptedException {
-            assertThat(latch.await(5, TimeUnit.SECONDS)).as("terminal event within timeout").isTrue();
+            await().atMost(5, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(events).as("event of type %s within timeout", type.getSimpleName()).anyMatch(type::isInstance));
             return events.stream().filter(type::isInstance).map(type::cast).findFirst()
                     .orElseThrow(() -> new AssertionError("no event of type " + type + " among " + events));
         }
