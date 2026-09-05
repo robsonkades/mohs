@@ -22,9 +22,18 @@ import java.util.Objects;
  * An interval-based schedule: fixed-rate when {@code afterFinish} is {@code false} (anchored to the
  * scheduled firing time), fixed-delay when {@code true} (anchored to the end of the previous
  * execution).
+ *
+ * @param interval the positive interval between firings
+ * @param afterFinish whether the interval starts at completion rather than the scheduled firing instant
  */
 public record IntervalSpec(Duration interval, boolean afterFinish) implements Schedule {
 
+    /**
+     * Creates a {@code IntervalSpec} with the supplied values.
+     *
+     * @param interval the positive interval between firings
+     * @param afterFinish whether the interval starts at completion rather than the scheduled firing instant
+     */
     public IntervalSpec {
         Objects.requireNonNull(interval, "interval");
         if (interval.isZero() || interval.isNegative()) {

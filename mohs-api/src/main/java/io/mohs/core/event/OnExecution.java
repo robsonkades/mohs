@@ -42,9 +42,17 @@ import io.mohs.core.job.JobKey;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface OnExecution {
 
-    /** The {@link JobKey#value()} to observe; empty (the default) observes every job. */
+    /**
+     * The {@link JobKey#value()} to observe; empty (the default) observes every job.
+     *
+     * @return the observed job ID, or empty to observe all jobs
+     */
     String job() default "";
 
-    /** Which {@link ExecutionEvent} variant triggers this method. */
+    /**
+     * Which {@link ExecutionEvent} variant triggers this method.
+     *
+     * @return the event variant observed by the method
+     */
     ExecutionEventType event();
 }

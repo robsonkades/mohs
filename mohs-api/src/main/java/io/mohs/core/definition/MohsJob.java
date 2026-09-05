@@ -50,38 +50,76 @@ import io.mohs.core.schedule.Misfire;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface MohsJob {
 
-    /** The stable identity — it becomes the {@link JobKey}. Mandatory, upserted at boot. */
+    /**
+     * The stable identity — it becomes the {@link JobKey}. Mandatory, upserted at boot.
+     *
+     * @return the stable job identity
+     */
     String id();
 
-    /** A mutable display label. Defaults to the id when left empty. */
+    /**
+     * A mutable display label. Defaults to the id when left empty.
+     *
+     * @return the display label, or empty to use the ID
+     */
     String name() default "";
 
-    /** A Quartz-style, seconds-first cron expression. Requires {@link #zone()}. */
+    /**
+     * A Quartz-style, seconds-first cron expression. Requires {@link #zone()}.
+     *
+     * @return the cron expression, or empty when another schedule is selected
+     */
     String cron() default "";
 
-    /** The zone the cron expression is evaluated in. Mandatory when {@link #cron()} is set. */
+    /**
+     * The zone the cron expression is evaluated in. Mandatory when {@link #cron()} is set.
+     *
+     * @return the cron time-zone ID
+     */
     String zone() default "";
 
-    /** A fixed-rate interval (an ISO-8601 duration, e.g. {@code "PT30S"}), anchored to the scheduled firing time. */
+    /**
+     * A fixed-rate interval (an ISO-8601 duration, e.g. {@code "PT30S"}), anchored to the scheduled firing time.
+     *
+     * @return the fixed-rate ISO-8601 duration, or empty
+     */
     String every() default "";
 
-    /** A fixed-delay interval (an ISO-8601 duration), anchored to the end of the previous execution. */
+    /**
+     * A fixed-delay interval (an ISO-8601 duration), anchored to the end of the previous execution.
+     *
+     * @return the fixed-delay ISO-8601 duration, or empty
+     */
     String everyAfterFinish() default "";
 
-    /** The named {@link MohsRunner} this job runs on. */
+    /**
+     * The named {@link MohsRunner} this job runs on.
+     *
+     * @return the runner name, or empty for the default runner
+     */
     String runner() default "";
 
-    /** The named {@link ExecutionWindow} that excludes firing times. */
+    /**
+     * The named {@link ExecutionWindow} that excludes firing times.
+     *
+     * @return the exclusion-window name, or empty for no exclusion
+     */
     String window() default "";
 
     /**
      * The named {@link RateLimit} bounding this job's firing rate — cluster-wide, not per node. A
      * nonexistent name blocks the job on purpose: running without the limit somebody asked for is
      * worse than stopping.
+     *
+     * @return the rate-limit name, or empty for no rate limit
      */
     String rateLimit() default "";
 
-    /** The misfire policy. Defaults to {@link Misfire#IGNORE}. */
+    /**
+     * The misfire policy. Defaults to {@link Misfire#IGNORE}.
+     *
+     * @return the missed-firing policy
+     */
     Misfire misfire() default Misfire.IGNORE;
 
     /**
@@ -89,6 +127,8 @@ public @interface MohsJob {
      * disarmed until a {@code POST /jobs/{id}/resume} (or {@code Mohs.resume}); manual on-demand
      * execution still works while paused. After birth, {@code paused} is an operator decision — a
      * redeploy never re-pauses.
+     *
+     * @return whether the first registration starts paused
      */
     boolean startPaused() default false;
 
@@ -98,6 +138,8 @@ public @interface MohsJob {
      * <p>The default is to allow concurrency (see {@link PolicySpec#preventOverlap()} for the full
      * reasoning) — set {@code true} for the narrow case of a cron or interval job whose next firing
      * may occur before the previous one finishes.
+     *
+     * @return whether concurrent execution is unrestricted
      */
     boolean allowConcurrentExecutions() default true;
 
@@ -106,6 +148,8 @@ public @interface MohsJob {
      * {@link #allowConcurrentExecutions()} is {@code false} (see
      * {@link PolicySpec#maxConcurrentExecutions(int)}); in that case it must be at least 1 (the
      * default of {@code 0} fails the boot with a clear message rather than assuming a value).
+     *
+     * @return the concurrency ceiling when overlap is restricted
      */
     int maxConcurrentExecutions() default 0;
 
@@ -118,12 +162,22 @@ public @interface MohsJob {
      * exactly the event the product promises to survive. Anyone preferring at most one invocation
      * per execution declares {@code retries = 0} deliberately, and accepts the loss under node
      * failure.
+     *
+     * @return the number of retry attempts beyond the first
      */
     int retries() default 1;
 
-    /** The attempt's timeout (an ISO-8601 duration, e.g. {@code "PT5M"}). */
+    /**
+     * The attempt's timeout (an ISO-8601 duration, e.g. {@code "PT5M"}).
+     *
+     * @return the ISO-8601 attempt timeout, or empty for no job-specific timeout
+     */
     String timeout() default "";
 
-    /** The bean name of a custom retry policy, for cases {@link #retries()} cannot express. */
+    /**
+     * The bean name of a custom retry policy, for cases {@link #retries()} cannot express.
+     *
+     * @return the retry-policy bean name, or empty for the default policy
+     */
     String retryPolicy() default "";
 }

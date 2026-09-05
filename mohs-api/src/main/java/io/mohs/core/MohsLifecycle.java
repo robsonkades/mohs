@@ -23,17 +23,39 @@ import java.time.Duration;
  */
 public interface MohsLifecycle {
 
+    /**
+     * Returns the current state of this local engine.
+     *
+     * @return the current lifecycle state
+     */
     EngineState state();
 
+    /**
+     * Starts this engine from its created state.
+     */
     void start();
 
+    /**
+     * Suspends claiming new work while preserving node liveness.
+     */
     void pause();
 
+    /**
+     * Resumes claiming work after a pause.
+     */
     void resume();
 
-    /** Stops accepting claims and waits for in-flight work for up to {@code grace}. A drain is not a cancel. */
+    /**
+     * Stops accepting claims and waits for in-flight work for up to {@code grace}. A drain is not a cancel.
+     *
+     * @param grace the maximum time allowed for in-flight work to finish
+     */
     void drain(Duration grace);
 
-    /** {@link #drain} followed by shutting the runners down. */
+    /**
+     * {@link #drain} followed by shutting the runners down.
+     *
+     * @param grace the maximum time allowed for in-flight work to finish
+     */
     void stop(Duration grace);
 }

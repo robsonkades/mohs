@@ -26,19 +26,44 @@ import io.mohs.core.schedule.Misfire;
  */
 public sealed interface PolicySpec permits JobSpecImpl {
 
+    /**
+     * Selects the named runner for this job.
+     *
+     * @param name the name of the declared runner
+     * @return this configuration stage for further customization
+     */
     PolicySpec runner(String name);
 
+    /**
+     * Applies the named firing exclusion window.
+     *
+     * @param name the name of the declared execution window
+     * @return this configuration stage for further customization
+     */
     PolicySpec window(String name);
 
-    /** The name of the {@code RateLimit} bounding this job's firing rate, cluster-wide. */
+    /**
+     * The name of the {@code RateLimit} bounding this job's firing rate, cluster-wide.
+     *
+     * @param name the name of the declared rate limit
+     * @return this configuration stage for further customization
+     */
     PolicySpec rateLimit(String name);
 
+    /**
+     * Selects how missed automatic firings are handled.
+     *
+     * @param policy the policy for handling missed firings
+     * @return this configuration stage for further customization
+     */
     PolicySpec misfire(Misfire policy);
 
     /**
      * Born paused on the FIRST registration of the definition: the schedule is declared but
      * disarmed until a {@code resume}; manual on-demand execution still works while paused. After
      * birth, {@code paused} is an operator decision — a redeploy never re-pauses.
+     *
+     * @return this configuration stage for further customization
      */
     PolicySpec startPaused();
 
@@ -54,6 +79,8 @@ public sealed interface PolicySpec permits JobSpecImpl {
      * interval, say) — there the two "executions" are the same task overlapping, not independent
      * work. This matches Quartz's {@code @DisallowConcurrentExecution} default, which is likewise
      * opt-in rather than opt-out.
+     *
+     * @return this configuration stage for further customization
      */
     PolicySpec preventOverlap();
 
@@ -61,14 +88,33 @@ public sealed interface PolicySpec permits JobSpecImpl {
      * Like {@link #preventOverlap()}, but with an explicit ceiling above 1 rather than full mutual
      * exclusion — a report whose handler shares an external resource with its own per-{@code job_key}
      * capacity, and may run up to N instances at once but never N+1.
+     *
+     * @param max the positive ceiling on concurrent executions of this job
+     * @return this configuration stage for further customization
      */
     PolicySpec maxConcurrentExecutions(int max);
 
-    /** Attempts BEYOND the first. Defaults to 1 — see {@link MohsJob#retries()} for why it is not zero. */
+    /**
+     * Attempts BEYOND the first. Defaults to 1 — see {@link MohsJob#retries()} for why it is not zero.
+     *
+     * @param max the nonnegative retry count beyond the first attempt
+     * @return this configuration stage for further customization
+     */
     PolicySpec retries(int max);
 
+    /**
+     * Sets the per-attempt execution timeout.
+     *
+     * @param timeout the maximum duration allowed for an attempt
+     * @return this configuration stage for further customization
+     */
     PolicySpec timeout(Duration timeout);
 
-    /** The bean name of a custom retry policy, for cases {@link #retries(int)} cannot express. */
+    /**
+     * The bean name of a custom retry policy, for cases {@link #retries(int)} cannot express.
+     *
+     * @param beanName the name of the custom retry-policy bean
+     * @return this configuration stage for further customization
+     */
     PolicySpec retryPolicy(String beanName);
 }

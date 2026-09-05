@@ -27,9 +27,22 @@ import io.mohs.core.ScheduleCommand;
  * ({@code now}/{@code at}/{@code after}) and the corresponding {@link ExecutionEvent} variant —
  * "the return value is a receipt, never a {@code Future} of the result" already describes both
  * roles with the same data.
+ *
+ * @param executionId the identity of the execution
+ * @param jobKey the stable identity of the job
+ * @param scheduledAt the intended firing instant
+ * @param actor the identity attributed to the operation
  */
 public record Enqueued(ExecutionId executionId, JobKey jobKey, Instant scheduledAt, String actor) implements ExecutionEvent {
 
+    /**
+     * Creates a {@code Enqueued} with the supplied values.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param scheduledAt the intended firing instant
+     * @param actor the identity attributed to the operation
+     */
     public Enqueued {
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");

@@ -26,9 +26,16 @@ import io.mohs.core.resource.RateLimit;
  *
  * @param available tokens available at the instant of the read — how many firings fit NOW, not how
  *        many were used; a full bucket equals {@code rateLimit.max()}
+ * @param rateLimit the declared cluster-wide throughput limit
  */
 public record RateLimitSnapshot(RateLimit rateLimit, int available) {
 
+    /**
+     * Creates a {@code RateLimitSnapshot} with the supplied values.
+     *
+     * @param rateLimit the declared cluster-wide throughput limit
+     * @param available tokens available at the instant of the read — how many firings fit NOW, not how many were used; a full bucket equals {@code rateLimit.max()}
+     */
     public RateLimitSnapshot {
         Objects.requireNonNull(rateLimit, "rateLimit");
         if (available < 0) {

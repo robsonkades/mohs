@@ -20,10 +20,25 @@ import java.util.Objects;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 
-/** An attempt failed; the retry, if the policy still has budget, follows in {@link RetryScheduled}. */
+/**
+ * An attempt failed; the retry, if the policy still has budget, follows in {@link RetryScheduled}.
+ *
+ * @param executionId the identity of the execution
+ * @param jobKey the stable identity of the job
+ * @param attempt the one-based attempt number
+ * @param error the failure that ended the attempt
+ */
 public record AttemptFailed(ExecutionId executionId, JobKey jobKey, int attempt, Throwable error)
         implements ExecutionEvent {
 
+    /**
+     * Creates a {@code AttemptFailed} with the supplied values.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param attempt the one-based attempt number
+     * @param error the failure that ended the attempt
+     */
     public AttemptFailed {
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");

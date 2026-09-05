@@ -40,12 +40,20 @@ import io.mohs.core.job.JobKey;
  */
 public interface ScheduleCommand {
 
+    /**
+     * Sets the claim priority for this invocation.
+     *
+     * @param priority the ordering priority used when claiming work
+     * @return this configuration stage for further customization
+     */
     @CheckReturnValue
     ScheduleCommand priority(Priority priority);
 
     /**
      * The execution's audit trail ({@code Execution.actor}).
      *
+     * @param actor the identity attributed to the operation
+     * @return this configuration stage for further customization
      * @throws IllegalArgumentException if {@code actor} is blank or {@link Execution#SCHEDULER_ACTOR}
      *         — the engine's reserved name: a manual schedule may never pass itself off as a trigger
      *         occurrence
@@ -68,10 +76,12 @@ public interface ScheduleCommand {
      * as an already recorded execution duplicates nothing and returns the original {@link Enqueued}
      * (the same receipt, the same {@code ExecutionId}).
      *
-     * <p>The key deduplicates for as long as the execution exists — the window is that of execution
-     * retention, which is unbounded while no retention policy exists — so reusing an old key returns
-     * the old execution.
+     * <p>The key deduplicates while its idempotency record is retained, independently of execution
+     * history retention. Reusing a retained key returns the original identity even if its history
+     * has been pruned; after the key is pruned, the same value can schedule a new execution.
      *
+     * @param key the deduplication key scoped to this job
+     * @return this configuration stage for further customization
      * @throws IllegalArgumentException if the key is blank, or longer than
      *         {@link #MAX_IDEMPOTENCY_KEY_LENGTH} — a blank key is never an intent to deduplicate,
      *         and accepted it would collapse every keyless-by-mistake schedule of the job into one
@@ -85,9 +95,26 @@ public interface ScheduleCommand {
     // whole library: "mohs.schedule(ref, payload).now();" is a correct statement, and a framework
     // whose hello world produces a warning teaches the user to suppress the inspection — at which
     // point they also lose the warnings that matter. Enqueued is a receipt, not a result to inspect.
+    /**
+     * Enqueues the invocation for immediate eligibility.
+     *
+     * @return the enqueue receipt, subject to commit of any enclosing transaction
+     */
     Enqueued now();
 
+    /**
+     * Enqueues the invocation for the supplied instant.
+     *
+     * @param when the instant at which the execution becomes eligible
+     * @return the enqueue receipt, subject to commit of any enclosing transaction
+     */
     Enqueued at(Instant when);
 
+    /**
+     * Enqueues the invocation after the supplied delay.
+     *
+     * @param delay the delay before the scheduled instant
+     * @return the enqueue receipt, subject to commit of any enclosing transaction
+     */
     Enqueued after(Duration delay);
 }

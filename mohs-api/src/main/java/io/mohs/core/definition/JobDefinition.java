@@ -68,6 +68,25 @@ public record JobDefinition(
         @Nullable String retryPolicy,
         DefinitionSource source) {
 
+    /**
+     * Creates a {@code JobDefinition} with the supplied values.
+     *
+     * @param key the job's stable identity — the upsert key, which never changes across redeploys of the same job
+     * @param name an optional human-readable label, with no role in identity or scheduling
+     * @param handlerType the class that processes each execution of this job
+     * @param schedule when the job fires — {@code CronSpec}/{@code IntervalSpec}/{@code OnDemandSpec}
+     * @param runner the name of the {@code MohsRunner} that runs the invocations; {@code null} uses the default runner
+     * @param window the name of the {@code ExecutionWindow} restricting when the job may run; {@code null} means unrestricted
+     * @param rateLimit the name of the {@code RateLimit} bounding this job's firing rate cluster-wide; {@code null} means no limit
+     * @param misfire the policy applied when a firing is missed
+     * @param startPaused born paused on the FIRST registration of the definition — the schedule is declared but disarmed until a {@code resume}; after birth, {@code paused} is an operator decision and a redeploy never re-pauses
+     * @param allowConcurrentExecutions when {@code true}, there is no ceiling on concurrent executions of this job — {@code maxConcurrentExecutions} must then be {@code 0}
+     * @param maxConcurrentExecutions the ceiling on concurrent executions when {@code allowConcurrentExecutions} is {@code false} — at least {@code 1}
+     * @param retries the number of attempts beyond the first failure
+     * @param timeout the maximum time per attempt; {@code null} means no timeout of its own (the cluster-wide Watchdog Bound, if configured, still applies)
+     * @param retryPolicy the name of a Spring bean holding a custom retry policy, for cases {@code retries} cannot express; {@code null} uses the default policy
+     * @param source {@code ANNOTATION} (through {@link MohsJob}) or {@code PROGRAMMATIC} (through {@link #of})
+     */
     public JobDefinition {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(handlerType, "handlerType");
@@ -102,6 +121,11 @@ public record JobDefinition(
     /**
      * Builds a {@code PROGRAMMATIC} definition through the staged {@link JobSpec} builder, e.g.
      * {@code JobDefinition.of("id", Handler.class, spec -> spec.cron(expr, zone).runner("io"))}.
+     *
+     * @param id the stable identity used to upsert the definition
+     * @param handlerType the class that declares the job handler
+     * @param configurer the callback that selects a schedule and configures its policies
+     * @return the validated programmatic definition
      */
     public static JobDefinition of(String id, Class<?> handlerType, Consumer<JobSpec> configurer) {
         Objects.requireNonNull(id, "id");

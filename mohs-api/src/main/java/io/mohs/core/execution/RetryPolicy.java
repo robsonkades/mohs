@@ -67,6 +67,9 @@ public interface RetryPolicy {
      *
      * <p>A negative delay is rejected as a programming error, and a zero delay is honoured — it
      * means "as soon as a claim can take it", not "immediately on this thread".
+     *
+     * @param failure the failed attempt and its retry-policy context
+     * @return the retry delay, or empty to fail terminally
      */
     Optional<Duration> nextDelay(Failure failure);
 
@@ -80,6 +83,14 @@ public interface RetryPolicy {
      */
     record Failure(JobKey jobKey, int failedAttempt, int retries, @Nullable Throwable error) {
 
+        /**
+         * Creates a {@code Failure} with the supplied values.
+         *
+         * @param jobKey the job whose execution failed
+         * @param failedAttempt which attempt just failed, 1-based
+         * @param retries the budget the definition declares — informative here, since the policy is what decides
+         * @param error what the handler threw, or {@code null} when the failure is a dead node's reclaimed lease
+         */
         public Failure {
             Objects.requireNonNull(jobKey, "jobKey");
             if (failedAttempt < 1) {

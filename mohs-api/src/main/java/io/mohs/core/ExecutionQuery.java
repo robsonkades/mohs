@@ -34,6 +34,11 @@ import io.mohs.core.job.JobKey;
  * {@link Execution}s with {@code id < cursor} are returned when it is present.
  *
  * @param limit the ceiling on items returned, at least 1
+ * @param jobKey the job filter, or {@code null} for all jobs
+ * @param status the state filter, or {@code null} for all states
+ * @param from the inclusive lower bound on the scheduled instant, or {@code null}
+ * @param to the exclusive upper bound on the scheduled instant, or {@code null}
+ * @param cursor the last execution ID of the previous page, or {@code null} for the first page
  */
 public record ExecutionQuery(
         @Nullable JobKey jobKey,
@@ -43,6 +48,16 @@ public record ExecutionQuery(
         @Nullable String cursor,
         int limit) {
 
+    /**
+     * Creates a {@code ExecutionQuery} with the supplied values.
+     *
+     * @param jobKey the job filter, or {@code null} for all jobs
+     * @param status the state filter, or {@code null} for all states
+     * @param from the inclusive lower bound on the scheduled instant, or {@code null}
+     * @param to the exclusive upper bound on the scheduled instant, or {@code null}
+     * @param cursor the last execution ID of the previous page, or {@code null} for the first page
+     * @param limit the ceiling on items returned, at least 1
+     */
     public ExecutionQuery {
         if (limit < 1) {
             throw new IllegalArgumentException("limit must be at least 1");

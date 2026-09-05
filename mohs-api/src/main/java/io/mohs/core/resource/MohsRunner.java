@@ -38,9 +38,28 @@ import java.util.Objects;
  * to an effectively unbounded pool and queue because it cannot know whether the work is CPU- or
  * I/O-bound; here we know it is CPU-bound, and "backpressure at every boundary, never an unbounded
  * wait" is already a project rule.
+ *
+ * @param name the stable name used by jobs to select this runner
+ * @param mode the runner workload mode
+ * @param maxConcurrent the maximum concurrent IO executions
+ * @param coreSize the number of core CPU worker threads
+ * @param maxSize the maximum CPU worker thread count
+ * @param queueCapacity the capacity of the CPU runner waiting queue
+ * @param keepAlive how long excess CPU workers may remain idle
  */
 public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int coreSize, int maxSize, int queueCapacity, Duration keepAlive) {
 
+    /**
+     * Creates a {@code MohsRunner} with the supplied values.
+     *
+     * @param name the stable name used by jobs to select this runner
+     * @param mode the runner workload mode
+     * @param maxConcurrent the maximum concurrent IO executions
+     * @param coreSize the number of core CPU worker threads
+     * @param maxSize the maximum CPU worker thread count
+     * @param queueCapacity the capacity of the CPU runner waiting queue
+     * @param keepAlive how long excess CPU workers may remain idle
+     */
     public MohsRunner {
         Fields.requireNotBlank(name, "name");
         Objects.requireNonNull(mode, "mode");
@@ -79,12 +98,22 @@ public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int co
         }
     }
 
-    /** An IO runner; it defaults to {@code maxConcurrent = 64}. */
+    /**
+     * An IO runner; it defaults to {@code maxConcurrent = 64}.
+     *
+     * @param name the stable name used by jobs to select this runner
+     * @return the builder for the named resource
+     */
     public static IoBuilder io(String name) {
         return new IoBuilder(name);
     }
 
-    /** A CPU runner; its defaults are sized from the available processors. */
+    /**
+     * A CPU runner; its defaults are sized from the available processors.
+     *
+     * @param name the stable name used by jobs to select this runner
+     * @return the builder for the named resource
+     */
     public static CpuBuilder cpu(String name) {
         return new CpuBuilder(name);
     }
@@ -98,11 +127,22 @@ public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int co
             this.name = name;
         }
 
+        /**
+         * Sets the maximum number of concurrent IO executions.
+         *
+         * @param max the positive ceiling on concurrent IO executions
+         * @return this configuration stage for further customization
+         */
         public IoBuilder maxConcurrent(int max) {
             this.maxConcurrent = max;
             return this;
         }
 
+        /**
+         * Builds the validated runner configuration.
+         *
+         * @return the validated {@code MohsRunner}
+         */
         public MohsRunner build() {
             return new MohsRunner(name, RunnerMode.IO, maxConcurrent, 0, 0, 0, Duration.ZERO);
         }
@@ -129,26 +169,55 @@ public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int co
             this.name = name;
         }
 
+        /**
+         * Sets the number of core CPU worker threads.
+         *
+         * @param coreSize the number of core CPU worker threads
+         * @return this configuration stage for further customization
+         */
         public CpuBuilder coreSize(int coreSize) {
             this.coreSize = coreSize;
             return this;
         }
 
+        /**
+         * Sets the maximum CPU worker thread count.
+         *
+         * @param maxSize the maximum CPU worker thread count
+         * @return this configuration stage for further customization
+         */
         public CpuBuilder maxSize(int maxSize) {
             this.maxSize = maxSize;
             return this;
         }
 
+        /**
+         * Sets the capacity of the CPU runner waiting queue.
+         *
+         * @param queueCapacity the capacity of the CPU runner waiting queue
+         * @return this configuration stage for further customization
+         */
         public CpuBuilder queueCapacity(int queueCapacity) {
             this.queueCapacity = queueCapacity;
             return this;
         }
 
+        /**
+         * Sets how long excess CPU workers may remain idle.
+         *
+         * @param keepAlive how long excess CPU workers may remain idle
+         * @return this configuration stage for further customization
+         */
         public CpuBuilder keepAlive(Duration keepAlive) {
             this.keepAlive = keepAlive;
             return this;
         }
 
+        /**
+         * Builds the validated runner configuration.
+         *
+         * @return the validated {@code MohsRunner}
+         */
         public MohsRunner build() {
             return new MohsRunner(name, RunnerMode.CPU, 0, coreSize, maxSize, queueCapacity, keepAlive);
         }

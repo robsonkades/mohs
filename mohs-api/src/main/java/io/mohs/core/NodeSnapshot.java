@@ -25,9 +25,20 @@ import java.util.Objects;
  * <p>Death is deliberately NOT a field — a crash writes nothing. Alive versus suspect is derived
  * from the age of {@code lastHeartbeatAt} at read time, {@code STOPPED} is the only self-reported
  * outcome (a clean shutdown), and the purge keeps this list to recent nodes.
+ *
+ * @param nodeId the identity of the engine node
+ * @param state the current lifecycle state
+ * @param lastHeartbeatAt the instant of the last recorded heartbeat
  */
 public record NodeSnapshot(String nodeId, EngineState state, Instant lastHeartbeatAt) {
 
+    /**
+     * Creates a {@code NodeSnapshot} with the supplied values.
+     *
+     * @param nodeId the identity of the engine node
+     * @param state the current lifecycle state
+     * @param lastHeartbeatAt the instant of the last recorded heartbeat
+     */
     public NodeSnapshot {
         Objects.requireNonNull(nodeId, "nodeId");
         Objects.requireNonNull(state, "state");

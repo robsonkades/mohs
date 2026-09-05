@@ -39,10 +39,24 @@ import io.mohs.core.schedule.Schedule;
  */
 public interface Mohs {
 
+    /**
+     * Prepares an invocation of a job with its compile-time payload type.
+     *
+     * @param <T> the payload type
+     * @param ref the typed reference identifying the job and its payload contract
+     * @param payload the input passed to the job handler
+     * @return the command whose terminal method enqueues the invocation
+     */
     @CheckReturnValue
     <T> ScheduleCommand schedule(JobRef<T> ref, T payload);
 
-    /** The string overload; the payload type is checked at runtime against the definition (a clear error, not a ClassCastException). */
+    /**
+     * The string overload; the payload type is checked at runtime against the definition (a clear error, not a ClassCastException).
+     *
+     * @param jobId the stable identity of the job
+     * @param payload the input passed to the job handler
+     * @return the command whose terminal method enqueues the invocation
+     */
     @CheckReturnValue
     ScheduleCommand schedule(String jobId, Object payload);
 
@@ -61,6 +75,8 @@ public interface Mohs {
      * its members enter in a single transaction. An exception from here guarantees nothing was
      * persisted — the call can be repeated with no risk of a partial batch.
      *
+     * @param name the human-readable name
+     * @param configurer the callback that adds the members to the batch
      * @return the batch's receipt, with {@code batchId} already durable
      * @throws IllegalArgumentException if the batch is empty (it would never complete) or if any
      *         member references an undefined job — no write occurred in either case
@@ -72,6 +88,8 @@ public interface Mohs {
      * Registers (or updates) a job definition. An upsert by {@link JobDefinition#key()}: redefining
      * the same job replaces the definitional part and NEVER touches the operational one
      * ({@code paused}/{@code orphaned}/{@code next_fire_at}).
+     *
+     * @param definition the registered job definition
      */
     void define(JobDefinition definition);
 
@@ -82,6 +100,8 @@ public interface Mohs {
      * <p>Only for programmatic definitions — for a {@code @MohsJob} job, remove the annotation and
      * the scanner marks it {@code ORPHANED} on the next boot; calling this on one throws
      * {@link IllegalArgumentException}. An unknown job is a no-op.
+     *
+     * @param jobKey the stable identity of the job
      */
     void remove(JobKey jobKey);
 
@@ -97,6 +117,7 @@ public interface Mohs {
      * <p>It is never immediate nor guaranteed: a completion may win the race, and in that case it
      * stands.
      *
+     * @param executionId the identity of the execution
      * @return the execution in its current state right after the request — not necessarily
      *         terminal; empty if the id does not exist
      */
@@ -113,6 +134,7 @@ public interface Mohs {
      * itself — repeating the call finds the execution already rearmed and fails with the state
      * exception.
      *
+     * @param executionId the identity of the execution
      * @return the execution already rearmed ({@code RETRY_WAITING}); empty if the id does not exist
      * @throws IllegalStateException if the execution exists but is not {@code FAILED} (a cancelled
      *         one was an explicit decision; the other states have an owner — the engine), belongs to
@@ -122,9 +144,19 @@ public interface Mohs {
      */
     Optional<Execution> retry(ExecutionId executionId);
 
+    /**
+     * Looks up a definition and its current operational state.
+     *
+     * @param jobKey the stable identity of the job
+     * @return the job snapshot, or empty when the job does not exist
+     */
     Optional<JobSnapshot> findJob(JobKey jobKey);
 
-    /** Every registered job — bounded cardinality (a definition, not an execution), so no pagination. */
+    /**
+     * Every registered job — bounded cardinality (a definition, not an execution), so no pagination.
+     *
+     * @return the registered job snapshots
+     */
     List<JobSnapshot> jobs();
 
     /**
@@ -134,6 +166,8 @@ public interface Mohs {
      *
      * <p>Death is not a field: it is derived from the age of {@link NodeSnapshot#lastHeartbeatAt()}
      * at read time. {@code STOPPED} is the only self-reported outcome (a clean shutdown).
+     *
+     * @return the heartbeat snapshots, most recent first
      */
     List<NodeSnapshot> nodes();
 
@@ -144,6 +178,8 @@ public interface Mohs {
      * <p>Unlike {@link #nodes()} and {@link #jobs()}, this read touches no database and does not see
      * the cluster: a thread pool belongs to the process. Consumers must say which node they are
      * talking about — see {@link RunnerSnapshot}.
+     *
+     * @return the configurations and occupancy of this node's runners
      */
     List<RunnerSnapshot> runners();
 
@@ -151,6 +187,8 @@ public interface Mohs {
      * The declared rate limits and each one's current bucket balance, by name — bounded
      * cardinality, no pagination, like {@link #jobs()}. A pure read: checking the balance consumes
      * no token.
+     *
+     * @return the declared limits and current bucket balances, ordered by name
      */
     List<RateLimitSnapshot> rateLimits();
 
@@ -162,14 +200,26 @@ public interface Mohs {
      * <p>The bucket survives the adjustment (its balance clamped to the new ceiling): lowering the
      * limit cuts future throughput, it does not give back what was already consumed.
      *
+     * @param name the human-readable name
+     * @param max the maximum permitted count
+     * @param window the positive window over which the rate is limited
      * @return the adjusted limit, or empty if {@code name} does not exist — declaring a new limit is
      *         an act of boot, not of emergency
      */
     Optional<RateLimitSnapshot> adjustRateLimit(String name, int max, Duration window);
 
-    /** Suspends automatic firings; manual scheduling is still allowed (mirroring the engine). No effect if {@code jobKey} does not exist. */
+    /**
+     * Suspends automatic firings; manual scheduling is still allowed (mirroring the engine). No effect if {@code jobKey} does not exist.
+     *
+     * @param jobKey the stable identity of the job
+     */
     void pause(JobKey jobKey);
 
+    /**
+     * Resumes automatic firings; an unknown job has no effect.
+     *
+     * @param jobKey the stable identity of the job
+     */
     void resume(JobKey jobKey);
 
     /**
@@ -182,6 +232,8 @@ public interface Mohs {
      * <p>The trigger is recomputed from the clock in the same write — {@code ON_DEMAND} disarms the
      * recurrence.
      *
+     * @param jobKey the stable identity of the job
+     * @param schedule the replacement firing schedule
      * @return the snapshot already carrying the new schedule; empty if the job does not exist (or is
      *         retired)
      * @throws IllegalArgumentException if the schedule is unrealisable (a syntactically valid cron
@@ -199,14 +251,26 @@ public interface Mohs {
      * {@code @MohsJob} scanner knows the type: a handler registered manually (the
      * {@code HandlerRegistry}'s internal or test path) without declaring a {@code payloadType} is
      * treated by REST as a job that accepts no payload.
+     *
+     * @param jobKey the stable identity of the job
+     * @return the handler payload class, or empty when it declares no payload parameter
      */
     Optional<Class<?>> payloadType(JobKey jobKey);
 
+    /**
+     * Looks up an execution and its recorded attempts.
+     *
+     * @param executionId the identity of the execution
+     * @return the execution with its attempts, or empty when it does not exist
+     */
     Optional<Execution> findExecution(ExecutionId executionId);
 
     /**
      * The batch by the id returned from {@link #batch}. A cheap read, flat in the batch's size: the
      * counter is maintained rather than aggregated from the members.
+     *
+     * @param batchId the identity of the batch
+     * @return the batch counters, or empty if the batch does not exist
      */
     Optional<BatchSnapshot> findBatch(String batchId);
 
@@ -219,6 +283,9 @@ public interface Mohs {
      * <p>The counts come from independent reads rather than one transactional cut, so executions
      * transitioning during the query may disagree between the numbers (read skew, DDIA ch. 7). That
      * is acceptable for polling, and a serialisable cut here would be cost without benefit.
+     *
+     * @param throughputWindow the duration of the terminal-count window
+     * @return live-work counts and the two independent throughput readings
      */
     OverviewSnapshot overview(Duration throughputWindow);
 
@@ -229,8 +296,16 @@ public interface Mohs {
      * <p>A SUMMARY: {@code attempts()} comes back empty in a listing (a dashboard read — one query,
      * without the arbitrarily large {@code error} column); the detail with attempts is
      * {@link #findExecution}.
+     *
+     * @param query the execution filters and page limit
+     * @return up to the requested limit of executions, ordered by descending ID
      */
     List<Execution> executions(ExecutionQuery query);
 
+    /**
+     * Returns the lifecycle controls for this local engine.
+     *
+     * @return the lifecycle controls for this node
+     */
     MohsLifecycle lifecycle();
 }

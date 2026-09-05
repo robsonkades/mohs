@@ -30,5 +30,10 @@ package io.mohs.core.event;
  */
 @FunctionalInterface
 public interface ExecutionListener {
+    /**
+     * Observes an execution event delivered by the event executor.
+     *
+     * @param event the execution event to observe
+     */
     void on(ExecutionEvent event);
 }

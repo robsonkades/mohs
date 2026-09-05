@@ -27,12 +27,36 @@ package io.mohs.core.event;
  * two names for the same thing. An event and a state are different things; here the event governs.
  */
 public enum ExecutionEventType {
+    /**
+     * Matches scheduling receipts published after durable enqueue.
+     */
     ENQUEUED,
+    /**
+     * Matches the start of an execution attempt.
+     */
     STARTED,
+    /**
+     * Matches an attempt failure before its retry outcome.
+     */
     ATTEMPT_FAILED,
+    /**
+     * Matches a retry becoming scheduled.
+     */
     RETRY_SCHEDULED,
+    /**
+     * Matches terminal success.
+     */
     SUCCEEDED,
+    /**
+     * Matches terminal failure.
+     */
     FAILED,
+    /**
+     * Matches cooperative cancellation.
+     */
     CANCELLED,
+    /**
+     * Matches a batch whose members have all finished.
+     */
     BATCH_COMPLETED
 }

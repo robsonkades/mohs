@@ -30,6 +30,11 @@ import io.mohs.core.event.ExecutionListener;
  */
 public interface Batch {
 
+    /**
+     * Returns the identity used to look up this batch.
+     *
+     * @return the stable batch identity
+     */
     String batchId();
 
     /**
@@ -39,6 +44,9 @@ public interface Batch {
      * <p>Each call registers an independent listener without replacing those already registered:
      * {@code batch.onCompletion(a).onCompletion(b)} registers both, not just the last. The
      * {@link Batch} returned references the same batch, never a copy.
+     *
+     * @param callback the callback to invoke when the batch completes
+     * @return this batch receipt
      */
     Batch onCompletion(Consumer<BatchCompleted> callback);
 }

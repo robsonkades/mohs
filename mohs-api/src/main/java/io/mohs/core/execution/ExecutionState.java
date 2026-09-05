@@ -30,10 +30,28 @@ import io.mohs.core.event.ExecutionEvent;
  * "waiting" says what it is — a wait.
  */
 public enum ExecutionState {
+    /**
+     * Queued and eligible when its scheduled instant arrives.
+     */
     ENQUEUED,
+    /**
+     * Currently owned by an engine for an execution attempt.
+     */
     RUNNING,
+    /**
+     * Queued for a retry whose visibility instant is still in the future.
+     */
     RETRY_WAITING,
+    /**
+     * Finished successfully; no further attempt is scheduled.
+     */
     SUCCEEDED,
+    /**
+     * Failed terminally after the retry decision.
+     */
     FAILED,
+    /**
+     * Cancelled before dispatch or cooperatively by the handler.
+     */
     CANCELLED
 }

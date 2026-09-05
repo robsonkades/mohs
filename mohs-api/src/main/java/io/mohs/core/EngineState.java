@@ -23,9 +23,24 @@ package io.mohs.core;
  * per-job.
  */
 public enum EngineState {
+    /**
+     * Constructed but not yet started.
+     */
     CREATED,
+    /**
+     * Heartbeating and accepting new claims.
+     */
     RUNNING,
+    /**
+     * Heartbeating while new claims are suspended.
+     */
     PAUSED,
+    /**
+     * Waiting for in-flight work without accepting new claims.
+     */
     DRAINING,
+    /**
+     * Stopped after releasing local execution resources.
+     */
     STOPPED
 }

@@ -20,5 +20,12 @@ import io.mohs.core.job.JobRef;
 /** The accumulator of a flat batch — each {@link #add} schedules one job inside the same batch. */
 @FunctionalInterface
 public interface BatchBuilder {
+    /**
+     * Adds one invocation to the batch being assembled.
+     *
+     * @param <T> the payload type
+     * @param ref the typed reference identifying the job and its payload contract
+     * @param payload the input passed to the job handler
+     */
     <T> void add(JobRef<T> ref, T payload);
 }

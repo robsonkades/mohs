@@ -28,18 +28,39 @@ import io.mohs.core.job.JobKey;
  */
 public interface JobContext {
 
+    /**
+     * Identifies the job whose handler is running.
+     *
+     * @return the stable identity of the job
+     */
     JobKey jobKey();
 
+    /**
+     * Identifies the execution, unchanged across retries.
+     *
+     * @return the identity of the execution
+     */
     ExecutionId executionId();
 
-    /** 1-based; a retry increments this, while the execution's id stays the same. */
+    /**
+     * 1-based; a retry increments this, while the execution's id stays the same.
+     *
+     * @return the one-based attempt number
+     */
     int attempt();
 
+    /**
+     * Returns the intended firing instant of this execution.
+     *
+     * @return the intended firing instant
+     */
     Instant scheduledAt();
 
     /**
      * The instant THIS attempt began being dispatched — not {@code Execution}'s {@code fired_at}
      * column, which records the claim (tens of milliseconds earlier, under load).
+     *
+     * @return the instant this attempt began
      */
     Instant firedAt();
 
@@ -54,6 +75,8 @@ public interface JobContext {
      * execution as {@code CANCELLED}, while completing normally records {@code SUCCEEDED} —
      * finished work counts, even with a request pending. Timeout and shutdown additionally deliver
      * {@code Thread.interrupt()}; a manual cancel does not, being a pure flag.
+     *
+     * @return whether this attempt has received a cooperative cancellation request
      */
     boolean cancellationRequested();
 }

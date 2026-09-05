@@ -21,6 +21,12 @@ package io.mohs.core.resource;
  * fixed or cached pool for virtual threads.
  */
 public enum RunnerMode {
+    /**
+     * Runs blocking IO work on virtual threads with bounded concurrency.
+     */
     IO,
+    /**
+     * Runs CPU work on a bounded platform-thread executor.
+     */
     CPU
 }

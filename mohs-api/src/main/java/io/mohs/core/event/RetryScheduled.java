@@ -21,9 +21,24 @@ import java.util.Objects;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 
-/** A new attempt was scheduled after an {@link AttemptFailed}. */
+/**
+ * A new attempt was scheduled after an {@link AttemptFailed}.
+ *
+ * @param executionId the identity of the execution
+ * @param jobKey the stable identity of the job
+ * @param nextAttempt the one-based number of the scheduled retry
+ * @param retryAt the instant when the retry becomes visible to a claim
+ */
 public record RetryScheduled(ExecutionId executionId, JobKey jobKey, int nextAttempt, Instant retryAt) implements ExecutionEvent {
 
+    /**
+     * Creates a {@code RetryScheduled} with the supplied values.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param nextAttempt the one-based number of the scheduled retry
+     * @param retryAt the instant when the retry becomes visible to a claim
+     */
     public RetryScheduled {
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");

@@ -36,6 +36,18 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>{@code owner} answers "WHO is running this right now": the {@code node_id} holding ownership
  * while {@link ExecutionState#RUNNING}, and {@code null} otherwise.
+ *
+ * @param id the identity of the execution
+ * @param jobKey the stable identity of the job
+ * @param state the current derived execution state
+ * @param scheduledAt the intended firing instant
+ * @param firedAt the instant this attempt began
+ * @param attempts the recorded attempts of this execution
+ * @param actor the identity attributed to the operation
+ * @param priority the ordering priority used when claiming work
+ * @param idempotencyKey the optional key used to deduplicate scheduling requests
+ * @param batchId the identity of the batch
+ * @param owner the node currently owning the execution
  */
 public record Execution(
         ExecutionId id,
@@ -60,6 +72,21 @@ public record Execution(
      */
     public static final String SCHEDULER_ACTOR = "scheduler";
 
+    /**
+     * Creates a {@code Execution} with the supplied values.
+     *
+     * @param id the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param state the current derived execution state
+     * @param scheduledAt the intended firing instant
+     * @param firedAt the instant this attempt began
+     * @param attempts the recorded attempts of this execution
+     * @param actor the identity attributed to the operation
+     * @param priority the ordering priority used when claiming work
+     * @param idempotencyKey the optional key used to deduplicate scheduling requests
+     * @param batchId the identity of the batch
+     * @param owner the node currently owning the execution
+     */
     public Execution {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(jobKey, "jobKey");
@@ -73,7 +100,17 @@ public record Execution(
         attempts = List.copyOf(attempts); // a defensive copy (Effective Java, Item 50)
     }
 
-    /** {@link Priority#NORMAL}, no {@code idempotencyKey}, outside any batch and with no current owner — the same defaults as the schema (`DEFAULT 20`). */
+    /**
+     * {@link Priority#NORMAL}, no {@code idempotencyKey}, outside any batch and with no current owner — the same defaults as the schema (`DEFAULT 20`).
+     *
+     * @param id the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param state the current derived execution state
+     * @param scheduledAt the intended firing instant
+     * @param firedAt the instant this attempt began
+     * @param attempts the recorded attempts of this execution
+     * @param actor the identity attributed to the operation
+     */
     public Execution(ExecutionId id, JobKey jobKey, ExecutionState state, Instant scheduledAt,
             @Nullable Instant firedAt, List<Attempt> attempts, String actor) {
         this(id, jobKey, state, scheduledAt, firedAt, attempts, actor, Priority.NORMAL, null, null, null);
@@ -90,6 +127,13 @@ public record Execution(
      * {@code nodeId} into {@code batchId} — an execution declaring itself a member of a batch that
      * does not exist, with nothing to flag it. This type is a READ model: the user never constructs
      * it, and internal convenience did not justify publishing the trap.
+     *
+     * @param id the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param scheduledAt the intended firing instant
+     * @param actor the identity attributed to the operation
+     * @param priority the ordering priority used when claiming work
+     * @return the new execution with no attempts or owner
      */
     public static Execution enqueued(ExecutionId id, JobKey jobKey, Instant scheduledAt, String actor,
             Priority priority) {

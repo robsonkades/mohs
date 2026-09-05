@@ -45,23 +45,46 @@ import java.util.function.Predicate;
  * exclusions as sealed data ({@code Weekends}/{@code Dates}/{@code DailyRange}/{@code Custom})
  * rather than raw predicates: a larger change, out of scope while nothing depends on equality or
  * deduplication of this type.
+ *
+ * @param name the stable name used by job definitions to select this window
+ * @param exclusions predicates that exclude firing instants; the list is defensively copied
  */
 public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) {
 
+    /**
+     * Creates a {@code ExecutionWindow} with the supplied values.
+     *
+     * @param name the stable name used by job definitions to select this window
+     * @param exclusions predicates that exclude firing instants; the list is defensively copied
+     */
     public ExecutionWindow {
         Fields.requireNotBlank(name, "name");
         exclusions = List.copyOf(exclusions); // a defensive copy (Effective Java, Item 50)
     }
 
-    /** {@code true} if the instant falls inside any configured exclusion. */
+    /**
+     * {@code true} if the instant falls inside any configured exclusion.
+     *
+     * @param instant the instant to evaluate
+     * @return whether any configured exclusion matches the instant
+     */
     public boolean excludes(Instant instant) {
         return exclusions.stream().anyMatch(exclusion -> exclusion.test(instant));
     }
 
+    /**
+     * Starts an exclusion-window builder with the supplied name.
+     *
+     * @param name the stable name used by job definitions to select this window
+     * @return the builder for the named resource
+     */
     public static Builder named(String name) {
         return new Builder(name);
     }
 
+    /**
+     * Accumulates exclusions evaluated against UTC instants.
+     */
     public static final class Builder {
         private final String name;
         private final List<Predicate<Instant>> exclusions = new ArrayList<>();
@@ -70,6 +93,11 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
             this.name = name;
         }
 
+        /**
+         * Excludes Saturdays and Sundays in UTC.
+         *
+         * @return this configuration stage for further customization
+         */
         public Builder excludeWeekends() {
             exclusions.add(instant -> {
                 DayOfWeek day = inUtc(instant).getDayOfWeek();
@@ -78,6 +106,12 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
             return this;
         }
 
+        /**
+         * Excludes the supplied UTC dates using a defensive copy.
+         *
+         * @param dates the UTC calendar dates to exclude
+         * @return this configuration stage for further customization
+         */
         public Builder excludeDates(Collection<LocalDate> dates) {
             Set<LocalDate> copy = Set.copyOf(dates);
             exclusions.add(instant -> copy.contains(inUtc(instant).toLocalDate()));
@@ -92,6 +126,10 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
          * read as {@code [from, 24:00) union [00:00, to)} instead of silently becoming a no-op.
          * {@code from} equal to {@code to} remains empty by definition, as any half-open interval
          * {@code [t, t)} is.
+         *
+         * @param from the inclusive start of the excluded daily interval in UTC
+         * @param to the exclusive end of the excluded daily interval in UTC
+         * @return this configuration stage for further customization
          */
         public Builder excludeDaily(LocalTime from, LocalTime to) {
             Objects.requireNonNull(from, "from");
@@ -117,11 +155,22 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
             return instant.atZone(ZoneOffset.UTC);
         }
 
+        /**
+         * Adds an application-defined exclusion predicate.
+         *
+         * @param predicate an exclusion predicate returning true for instants that must not fire
+         * @return this configuration stage for further customization
+         */
         public Builder exclude(Predicate<Instant> predicate) {
             exclusions.add(Objects.requireNonNull(predicate, "predicate"));
             return this;
         }
 
+        /**
+         * Builds a window with an immutable copy of the exclusions.
+         *
+         * @return the validated {@code ExecutionWindow}
+         */
         public ExecutionWindow build() {
             return new ExecutionWindow(name, exclusions);
         }

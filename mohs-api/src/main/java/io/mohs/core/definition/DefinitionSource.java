@@ -25,6 +25,12 @@ import io.mohs.core.Mohs;
  * {@link Mohs#remove}.
  */
 public enum DefinitionSource {
+    /**
+     * A definition discovered from a job annotation at startup.
+     */
     ANNOTATION,
+    /**
+     * A definition registered through the Java API.
+     */
     PROGRAMMATIC
 }

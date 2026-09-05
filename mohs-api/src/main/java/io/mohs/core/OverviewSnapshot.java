@@ -58,6 +58,10 @@ import io.mohs.core.execution.ExecutionState;
  * the other — measured, about 19 rows of asymmetry per call at the 4k/s operating point. Adding,
  * subtracting or stacking one on the other produces a negative number sooner or later; each reading
  * answers its own question, on its own.
+ *
+ * @param executionCountsByState counts of live executions by state, including zero-valued states
+ * @param throughput the terminal counts over the requested window
+ * @param recent an independent short-window reading for the recent completion rate
  */
 public record OverviewSnapshot(Map<ExecutionState, Long> executionCountsByState, ThroughputReading throughput,
         ThroughputReading recent) {
@@ -66,6 +70,13 @@ public record OverviewSnapshot(Map<ExecutionState, Long> executionCountsByState,
     private static final Set<ExecutionState> ACTIVE_STATES =
             Set.of(ExecutionState.ENQUEUED, ExecutionState.RUNNING, ExecutionState.RETRY_WAITING);
 
+    /**
+     * Creates a {@code OverviewSnapshot} with the supplied values.
+     *
+     * @param executionCountsByState counts of live executions by state, including zero-valued states
+     * @param throughput the terminal counts over the requested window
+     * @param recent an independent short-window reading for the recent completion rate
+     */
     public OverviewSnapshot {
         Objects.requireNonNull(executionCountsByState, "executionCountsByState");
         Objects.requireNonNull(throughput, "throughput");

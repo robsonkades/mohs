@@ -22,9 +22,16 @@ import java.util.Objects;
  *
  * <p>Opaque by design — the engine decides the concrete format when it starts generating them in
  * {@code io.mohs.store.jdbc}; this contract only requires a non-empty value.
+ *
+ * @param value the serialized identity value
  */
 public record ExecutionId(String value) {
 
+    /**
+     * Creates a {@code ExecutionId} with the supplied values.
+     *
+     * @param value the serialized identity value
+     */
     public ExecutionId {
         Objects.requireNonNull(value, "value");
         if (value.isBlank()) {
@@ -32,6 +39,12 @@ public record ExecutionId(String value) {
         }
     }
 
+    /**
+     * Creates an execution identity from its serialized value.
+     *
+     * @param value the serialized identity value
+     * @return the validated execution identity
+     */
     public static ExecutionId of(String value) {
         return new ExecutionId(value);
     }

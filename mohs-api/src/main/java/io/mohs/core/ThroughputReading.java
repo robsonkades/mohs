@@ -28,9 +28,20 @@ import java.util.Objects;
  * and it is the window that lets the consumer derive a RATE
  * ({@code (succeeded + failed) / window}) instead of receiving an absolute number that only means
  * something if they know how long it was measured over.
+ *
+ * @param window the positive duration over which completions were counted
+ * @param succeeded the number of successful terminal executions
+ * @param failed the number of failed terminal executions
  */
 public record ThroughputReading(Duration window, long succeeded, long failed) {
 
+    /**
+     * Creates a {@code ThroughputReading} with the supplied values.
+     *
+     * @param window the positive duration over which completions were counted
+     * @param succeeded the number of successful terminal executions
+     * @param failed the number of failed terminal executions
+     */
     public ThroughputReading {
         Objects.requireNonNull(window, "window");
         if (!window.isPositive()) {
@@ -55,6 +66,8 @@ public record ThroughputReading(Duration window, long succeeded, long failed) {
      * REST that is unreachable (clamped to PT1S-PT1H), but {@code Mohs#overview} is a public facade
      * and accepts any duration — a record that promises to validate at construction cannot have a
      * partial method.
+     *
+     * @return successful plus failed completions divided by the window in seconds
      */
     public double perSecond() {
         double seconds = window.toSeconds() + window.toNanosPart() / 1_000_000_000.0;

@@ -24,6 +24,12 @@ import io.mohs.core.job.JobKey;
  * The execution failed for good. {@link #attemptsExhausted()} distinguishes "the retry policy ran
  * out" from other causes of terminal failure — the typical alerting hook, e.g.
  * {@code case Failed f when f.attemptsExhausted() -> alert(...)}.
+ *
+ * @param executionId the identity of the execution
+ * @param jobKey the stable identity of the job
+ * @param attempt the one-based attempt number
+ * @param error the failure that ended the attempt
+ * @param attemptsExhausted whether the retry policy refused further attempts because its budget was exhausted
  */
 /*
  * A contract note that applies to this record and to AttemptFailed:
@@ -43,6 +49,15 @@ import io.mohs.core.job.JobKey;
  */
 public record Failed(ExecutionId executionId, JobKey jobKey, int attempt, Throwable error, boolean attemptsExhausted) implements ExecutionEvent {
 
+    /**
+     * Creates a {@code Failed} with the supplied values.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param attempt the one-based attempt number
+     * @param error the failure that ended the attempt
+     * @param attemptsExhausted whether the retry policy refused further attempts because its budget was exhausted
+     */
     public Failed {
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");

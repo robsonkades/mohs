@@ -32,11 +32,35 @@ import java.time.ZoneId;
  */
 public sealed interface JobSpec permits JobSpecImpl {
 
+    /**
+     * Selects a cron schedule evaluated in the supplied zone.
+     *
+     * @param expression the Quartz-style, seconds-first cron expression
+     * @param zone the time zone used to evaluate the schedule
+     * @return this configuration stage for further customization
+     */
     PolicySpec cron(String expression, ZoneId zone);
 
+    /**
+     * Selects a fixed-rate schedule anchored to each scheduled firing instant.
+     *
+     * @param interval the positive interval between firings
+     * @return this configuration stage for further customization
+     */
     PolicySpec every(Duration interval);
 
+    /**
+     * Selects a fixed-delay schedule anchored to the previous completion.
+     *
+     * @param interval the positive interval between firings
+     * @return this configuration stage for further customization
+     */
     PolicySpec everyAfterFinish(Duration interval);
 
+    /**
+     * Selects a job that fires only when explicitly scheduled.
+     *
+     * @return this configuration stage for further customization
+     */
     PolicySpec onDemand();
 }

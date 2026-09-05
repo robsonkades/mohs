@@ -27,9 +27,24 @@ import io.mohs.core.Batch;
  * <p>It carries the batch's {@code name}: a batch-completion callback that does not know WHICH
  * batch finished is half a callback, and anyone registering {@link Batch#onCompletion} on more than
  * one batch had to match UUIDs by hand.
+ *
+ * @param batchId the identity of the batch
+ * @param name the human-readable name
+ * @param total the total number of batch members
+ * @param succeeded the number of successful terminal executions
+ * @param failed the number of failed terminal executions
  */
 public record BatchCompleted(String batchId, String name, int total, int succeeded, int failed) implements ExecutionEvent {
 
+    /**
+     * Creates a {@code BatchCompleted} with the supplied values.
+     *
+     * @param batchId the identity of the batch
+     * @param name the human-readable name
+     * @param total the total number of batch members
+     * @param succeeded the number of successful terminal executions
+     * @param failed the number of failed terminal executions
+     */
     public BatchCompleted {
         Objects.requireNonNull(batchId, "batchId");
         if (batchId.isBlank()) {

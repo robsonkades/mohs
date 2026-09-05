@@ -26,10 +26,23 @@ import io.mohs.core.job.JobKey;
  * the handler — is about to be invoked. An attempt that ends before the chain runs at all (no
  * handler registered for the job, or a cancellation that arrived before the start) publishes its
  * terminal event without a {@code Started}.
+ *
+ * @param executionId the identity of the execution
+ * @param jobKey the stable identity of the job
+ * @param attempt the one-based attempt number
+ * @param firedAt the instant this attempt began
  */
 public record Started(ExecutionId executionId, JobKey jobKey, int attempt, Instant firedAt)
         implements ExecutionEvent {
 
+    /**
+     * Creates a {@code Started} with the supplied values.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param attempt the one-based attempt number
+     * @param firedAt the instant this attempt began
+     */
     public Started {
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");

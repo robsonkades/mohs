@@ -46,11 +46,21 @@ public enum Priority {
         this.value = value;
     }
 
+    /**
+     * Returns the integer stored in the queue priority column.
+     *
+     * @return the database representation of this priority
+     */
     public int value() {
         return value;
     }
 
-    /** The inverse of {@link #value()} — used at the JDBC boundary, where only the {@code priority} column (an int) is written. Zero allocation: it runs per row mapped by the claim. */
+    /**
+     * The inverse of {@link #value()} — used at the JDBC boundary, where only the {@code priority} column (an int) is written. Zero allocation: it runs per row mapped by the claim.
+     *
+     * @param value the serialized identity value
+     * @return the priority represented by the stored integer
+     */
     public static Priority fromValue(int value) {
         for (Priority priority : VALUES) {
             if (priority.value == value) {

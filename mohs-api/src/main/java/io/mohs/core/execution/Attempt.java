@@ -27,9 +27,24 @@ import org.jspecify.annotations.Nullable;
  * between attempts. {@code finishedAt} is {@code null} while the attempt is still running, and
  * {@code error} is the failure message, present only when {@code outcome} is
  * {@link ExecutionState#FAILED}.
+ *
+ * @param number the one-based attempt number
+ * @param startedAt the instant this attempt began
+ * @param finishedAt the instant the attempt finished
+ * @param outcome the recorded outcome of the attempt
+ * @param error the recorded failure text, or {@code null} when unavailable
  */
 public record Attempt(int number, Instant startedAt, @Nullable Instant finishedAt, ExecutionState outcome, @Nullable String error) {
 
+    /**
+     * Creates a {@code Attempt} with the supplied values.
+     *
+     * @param number the one-based attempt number
+     * @param startedAt the instant this attempt began
+     * @param finishedAt the instant the attempt finished
+     * @param outcome the recorded outcome of the attempt
+     * @param error the recorded failure text, or {@code null} when unavailable
+     */
     public Attempt {
         if (number < 1) {
             throw new IllegalArgumentException("number is 1-based, must be >= 1");

@@ -31,11 +31,19 @@ import io.mohs.core.definition.JobDefinition;
  * {@code runningExecutionCount} (too operational to expose through the API yet, with no consumer
  * outside the engine needing them).
  *
- * @param nextFireAt {@code null} for an {@code OnDemandSpec} (it never fires by itself) or when the
- *        job is paused
+ * @param nextFireAt the next firing instant, or {@code null} when paused, on demand or disarmed
+ * @param definition the registered job definition
+ * @param paused whether automatic firing is suspended
  */
 public record JobSnapshot(JobDefinition definition, boolean paused, @Nullable Instant nextFireAt) {
 
+    /**
+     * Creates a {@code JobSnapshot} with the supplied values.
+     *
+     * @param definition the registered job definition
+     * @param paused whether automatic firing is suspended
+     * @param nextFireAt the next firing instant, or {@code null} when paused, on demand or disarmed
+     */
     public JobSnapshot {
         Objects.requireNonNull(definition, "definition");
     }

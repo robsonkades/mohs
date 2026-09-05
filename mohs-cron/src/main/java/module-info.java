@@ -20,6 +20,9 @@
  * the reactor guards the boundary in this repository and nothing guards it outside. Here the whole
  * package is exported on purpose: mohs-cron IS a cron parsing library, and has no internals to hide.
  */
+/**
+ * Self-contained parser for Quartz-style cron expressions.
+ */
 module io.mohs.cron {
     requires static org.jspecify;
 

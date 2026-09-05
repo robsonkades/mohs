@@ -20,6 +20,9 @@
  * value of a module-info here is the other side: the INTERNAL modules stop exporting what is
  * `public` today only because the language offered no alternative.
  */
+/**
+ * Public scheduling contracts, job definitions, execution events and resource policies.
+ */
 module io.mohs.core {
     requires static org.jspecify;
     requires spring.core;

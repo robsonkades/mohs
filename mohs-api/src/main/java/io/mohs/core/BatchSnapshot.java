@@ -29,9 +29,24 @@ import java.util.Objects;
  * and then discarded — whoever opened the dashboard at 3 a.m. found a UUID where they had written
  * {@code "nightly-invoices"}. It is persisted and derived from nothing: it is the only way for an
  * operator to tie the batch back to the intent.
+ *
+ * @param batchId the identity of the batch
+ * @param name the human-readable name
+ * @param total the total number of batch members
+ * @param succeeded the number of successful terminal executions
+ * @param failed the number of failed terminal executions
  */
 public record BatchSnapshot(String batchId, String name, int total, int succeeded, int failed) {
 
+    /**
+     * Creates a {@code BatchSnapshot} with the supplied values.
+     *
+     * @param batchId the identity of the batch
+     * @param name the human-readable name
+     * @param total the total number of batch members
+     * @param succeeded the number of successful terminal executions
+     * @param failed the number of failed terminal executions
+     */
     public BatchSnapshot {
         Objects.requireNonNull(batchId, "batchId");
         if (batchId.isBlank()) {
@@ -49,12 +64,20 @@ public record BatchSnapshot(String batchId, String name, int total, int succeede
         }
     }
 
-    /** Members that have not yet reached a terminal state. */
+    /**
+     * Members that have not yet reached a terminal state.
+     *
+     * @return the total minus successful and failed members
+     */
     public int pending() {
         return total - succeeded - failed;
     }
 
-    /** {@code true} when no member is pending — a batch does not reopen. */
+    /**
+     * {@code true} when no member is pending — a batch does not reopen.
+     *
+     * @return whether every member has reached a terminal state
+     */
     public boolean completed() {
         return pending() == 0;
     }

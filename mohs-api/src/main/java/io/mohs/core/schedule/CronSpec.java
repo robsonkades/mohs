@@ -21,9 +21,18 @@ import java.util.Objects;
 /**
  * A cron-based schedule: Quartz-style, seconds-first syntax, evaluated in the given {@link ZoneId}
  * — never in the JVM's default zone.
+ *
+ * @param expression the Quartz-style, seconds-first cron expression
+ * @param zone the time zone used to evaluate the schedule
  */
 public record CronSpec(String expression, ZoneId zone) implements Schedule {
 
+    /**
+     * Creates a {@code CronSpec} with the supplied values.
+     *
+     * @param expression the Quartz-style, seconds-first cron expression
+     * @param zone the time zone used to evaluate the schedule
+     */
     public CronSpec {
         Objects.requireNonNull(expression, "expression");
         Objects.requireNonNull(zone, "zone");
