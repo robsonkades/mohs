@@ -148,12 +148,10 @@ public final class EngineMetrics {
      * {@code strongReference}: the supplier is an ephemeral method reference — without it the gauge
      * would vanish at the first GC.
      *
-     * <p>A recorded limitation: with no {@code node} label, two engines in the same registry (one Mohs
-     * per datasource) collide on the id and the second bind is silently ignored by Micrometer. The
-     * trigger for adding the tag is the first real multi-engine scenario, paying the cardinality only
-     * then.
+     * <p>Per-node numbers with no {@code node} label — see {@link #rejectIfAlreadyBound}.
      */
     void bindNodeGauges(Supplier<Number> inFlight, int capacity) {
+        rejectIfAlreadyBound("mohs.node.inflight");
         Gauge.builder("mohs.node.inflight", inFlight)
                 .description("executions currently dispatched on this node")
                 .strongReference(true)
@@ -174,11 +172,34 @@ public final class EngineMetrics {
      *
      * <p>The number is cluster-wide, so every node publishes the same one: aggregate it with
      * {@code max} across instances, never {@code sum}.
+     *
+     * <p>No {@code node} label either — see {@link #rejectIfAlreadyBound}.
      */
     void bindQueueDepthGauge(Supplier<Number> depth) {
+        rejectIfAlreadyBound("mohs.queue.depth");
         Gauge.builder("mohs.queue.depth", depth)
                 .description("entries in the queue visible to a claim — the backlog, cluster-wide")
                 .strongReference(true)
                 .register(registry);
+    }
+
+    /**
+     * The gauges carry no {@code node} label, so two engines in the same registry (one Mohs per
+     * datasource) collide on the id. Micrometer keeps the FIRST meter behind one generic WARN that
+     * names neither the engine nor the fix, and a dashboard then shows one engine's number under the
+     * other's name — worse than no number. The bind refuses instead, naming the fix — today at engine
+     * construction, where both binds happen. The trigger for adding the label is the first real
+     * multi-engine scenario, paying the cardinality only then.
+     *
+     * <p>The check reads the registry by the meter's canonical name, so a {@code MeterFilter} that
+     * renames the id defeats it; a filter that denies the id makes both binds a no-op, harmless.
+     */
+    private void rejectIfAlreadyBound(String gaugeName) {
+        if (registry.find(gaugeName).gauge() != null) {
+            throw new IllegalStateException(gaugeName + " is already bound in this MeterRegistry: "
+                    + "Micrometer would keep the first engine's gauge and publish it under this one's name. "
+                    + "Give each engine its own MeterRegistry — the second one is not scraped by the actuator "
+                    + "endpoint, so wire its own exporter or accept that only the first engine publishes mohs.*");
+        }
     }
 }

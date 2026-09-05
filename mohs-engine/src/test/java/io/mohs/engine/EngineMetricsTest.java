@@ -28,6 +28,7 @@ import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@link EngineMetrics}'s contract: {@code mohs.*} names, bounded labels ({@code job},
@@ -106,5 +107,35 @@ class EngineMetricsTest {
         inFlight.set(7);
         assertThat(registry.get("mohs.node.inflight").gauge().value()).isEqualTo(7.0);
         assertThat(registry.get("mohs.node.capacity").gauge().value()).isEqualTo(1024.0);
+    }
+
+    /**
+     * Micrometer keeps the FIRST meter on a second registration of the same id, behind a generic WARN:
+     * a second engine in the same registry would publish the first one's saturation under its own
+     * name. The bind refuses instead, and the message names the fix.
+     */
+    @Test
+    void secondNodeBindInTheSameRegistryFailsLoudly() {
+        metrics.bindNodeGauges(() -> 3, 1024);
+
+        assertThatThrownBy(() -> new EngineMetrics(registry).bindNodeGauges(() -> 5, 8))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mohs.node.inflight")
+                .hasMessageContaining("own MeterRegistry");
+        assertThat(registry.get("mohs.node.inflight").gauge().value()).isEqualTo(3.0);
+    }
+
+    /**
+     * The backlog gauge has its own guard: one Mohs per datasource means one backlog per engine, and
+     * the guard must not depend on the node gauges having been bound first.
+     */
+    @Test
+    void secondQueueDepthBindInTheSameRegistryFailsLoudly() {
+        metrics.bindQueueDepthGauge(() -> 40);
+
+        assertThatThrownBy(() -> new EngineMetrics(registry).bindQueueDepthGauge(() -> 9))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mohs.queue.depth");
+        assertThat(registry.get("mohs.queue.depth").gauge().value()).isEqualTo(40.0);
     }
 }
