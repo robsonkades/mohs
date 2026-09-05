@@ -56,6 +56,8 @@ public final class JdbcWorkQueue implements WorkQueue {
     private static final int COUNT_TIMEOUT_SECONDS = 2;
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    /** The claim, the requeue and the idle-gate probe — the loop thread's statements. */
+    private final NamedParameterJdbcTemplate tickTemplate;
     private final NamedParameterJdbcTemplate countTemplate;
     private final TransactionTemplate claimTransaction;
     private final JdbcDelegate delegate;
@@ -63,7 +65,10 @@ public final class JdbcWorkQueue implements WorkQueue {
 
     public JdbcWorkQueue(DataSource dataSource, JdbcDelegate delegate, BatchStore batchStore) {
         Objects.requireNonNull(dataSource, "dataSource");
+        // The offer joins the caller's enqueue transaction, and cancel/rearm serve the API: none of
+        // them runs on the loop thread, so none of them gets the tick's ceiling
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
+        this.tickTemplate = JdbcSupport.tickTemplate(dataSource);
         this.claimTransaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         // A claim is ALWAYS its own transaction — REQUIRES_NEW makes that executable rather than merely
         // conventional: with the default REQUIRED, an outer transaction (an interceptor, a test) would
@@ -94,7 +99,7 @@ public final class JdbcWorkQueue implements WorkQueue {
         List<String> inadmissibleKeys = inadmissible.stream().map(JobKey::value).toList();
         // requireNonNull documents the invariant for @NullMarked — the callback never returns null
         List<ClaimedReady> claimed = Objects.requireNonNull(claimTransaction.execute(
-                _ -> delegate.claimReady(jdbcTemplate, shard, nodeId, epoch, limit, inadmissibleKeys, now)));
+                _ -> delegate.claimReady(tickTemplate, shard, nodeId, epoch, limit, inadmissibleKeys, now)));
         return claimed.stream()
                 .map(row -> new ClaimedWork(ExecutionId.of(row.executionId()), JobKey.of(row.jobKey()), row.attempt(), row.priority()))
                 .toList();
@@ -106,7 +111,7 @@ public final class JdbcWorkQueue implements WorkQueue {
         if (shards.isEmpty()) {
             return false;
         }
-        Integer found = jdbcTemplate.queryForObject(delegate.visibleWorkExists(), new MapSqlParameterSource()
+        Integer found = tickTemplate.queryForObject(delegate.visibleWorkExists(), new MapSqlParameterSource()
                 .addValue("shards", shards)
                 .addValue("now", delegate.splitTimestamp(now)), Integer.class);
         return found != null && found == 1;
@@ -158,11 +163,11 @@ public final class JdbcWorkQueue implements WorkQueue {
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
             int requeued = 0;
             for (Requeue order : ordered) {
-                int fenceWon = jdbcTemplate.update(delegate.fencedLeaseDelete(),
+                int fenceWon = tickTemplate.update(delegate.fencedLeaseDelete(),
                         JdbcSupport.fencedLeaseDeleteParams(order.executionId().value(), order.nodeId(), order.epoch(),
                                 order.attemptNumber()));
                 if (fenceWon == 1) {
-                    jdbcTemplate.update(delegate.readyInsert(), JdbcSupport.readyEntryParams(order.entry(), delegate));
+                    tickTemplate.update(delegate.readyInsert(), JdbcSupport.readyEntryParams(order.entry(), delegate));
                     requeued++;
                 }
             }

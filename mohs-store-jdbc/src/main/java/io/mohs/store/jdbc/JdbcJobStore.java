@@ -75,6 +75,12 @@ public final class JdbcJobStore implements JobStore {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcJobStore.class);
 
+    /**
+     * No tick ceiling here, on purpose: the loop thread's two statements against this table are the
+     * definition scans, and a scan's cost is rows transferred, not a lock — measured at 2.8 s for
+     * 1M definitions and 2.3 s for 1M due triggers, which a 3 s ceiling would turn into a tick that
+     * dies every cycle. The facade's listing and the boot reconcile share the same cursor helper.
+     */
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
     private final Clock clock;

@@ -137,6 +137,15 @@ public interface LeaseStore {
      */
     Map<ExecutionId, Completion> complete(List<CompletionResult> results, JobStore jobStore);
 
+    /**
+     * {@link #complete} as the reaper issues it — on the engine's loop thread, which carries the
+     * node lease. Same semantics, same transaction shape; the difference is a deadline: a reclaim
+     * that waits on a lock (a peer reaping the same orphan, a host transaction on the definition
+     * row the rearm touches) must give up before the node's own promise expires, where the flusher's
+     * completion may wait as long as it needs.
+     */
+    Map<ExecutionId, Completion> reclaim(List<CompletionResult> results, JobStore jobStore);
+
     /** These nodes' leases — the raw material of the drain visible in {@code GET /nodes}. */
     List<Lease> findByNodes(Collection<String> nodeIds);
 

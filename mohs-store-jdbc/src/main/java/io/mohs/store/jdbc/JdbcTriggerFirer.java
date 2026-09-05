@@ -60,7 +60,9 @@ public final class JdbcTriggerFirer implements TriggerFirer {
     public JdbcTriggerFirer(DataSource dataSource, HistoryStore historyStore, WorkQueue workQueue,
             JdbcDelegate delegate) {
         Objects.requireNonNull(dataSource, "dataSource");
-        this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
+        // The firing CAS runs on the engine's loop thread; the history record and the queue offer it
+        // is followed by keep their owners' templates
+        this.jdbcTemplate = JdbcSupport.tickTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         // The same reasoning as in JdbcWorkQueue: a guarded CAS assumes "last write wins"
         // (READ COMMITTED), and does not inherit the database's default.

@@ -24,15 +24,18 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.sql.DataSource;
@@ -202,12 +205,21 @@ class EngineTest {
             HistoryStore historyStoreOverride, NodeStore nodeStoreOverride, ExecutionWindowRegistry windowRegistry,
             List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings, Clock engineClock,
             MeterRegistry meterRegistry) {
+        return assembleEngine(jobStoreOverride, workQueueOverride, leaseStoreOverride, historyStoreOverride, nodeStoreOverride,
+                new JdbcTriggerFirer(dataSource, historyStore, workQueue, new H2JdbcDelegate()), windowRegistry, listeners,
+                runnerRegistry, settings, engineClock, meterRegistry);
+    }
+
+    /** The overload with the trigger firer in the caller's hands — for the tests that slow the firing down. */
+    private Engine assembleEngine(JobStore jobStoreOverride, WorkQueue workQueueOverride, LeaseStore leaseStoreOverride,
+            HistoryStore historyStoreOverride, NodeStore nodeStoreOverride, TriggerFirer triggerFirer,
+            ExecutionWindowRegistry windowRegistry, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry,
+            EngineSettings settings, Clock engineClock, MeterRegistry meterRegistry) {
         AsyncTaskExecutor eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
         EngineMetrics metrics = new EngineMetrics(meterRegistry);
         Dispatcher dispatcher = new Dispatcher(leaseStoreOverride, jobStoreOverride, handlerRegistry, engineClock, List.of(), listeners, eventExecutor, metrics);
         return new Engine(workQueueOverride, dispatcher, historyStoreOverride, leaseStoreOverride, jobStoreOverride, nodeStoreOverride,
-                new JdbcTriggerFirer(dataSource, historyStore, workQueue, new H2JdbcDelegate()), windowRegistry,
-                rateLimitStore, engineClock, settings, runnerRegistry, metrics);
+                triggerFirer, windowRegistry, rateLimitStore, engineClock, settings, runnerRegistry, metrics);
     }
 
     private static RunnerRegistry defaultRunnerRegistry() {
@@ -1572,6 +1584,15 @@ class EngineTest {
                 .containsExactly(1);
     }
 
+    /** A mass death one row wider than a reclaim chunk, with retry budget: the sweep needs two transactions to clear it. */
+    private void seedOrphanedLeasesSpanningTwoReclaimChunks() {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
+        for (int i = 1; i <= Engine.RECLAIM_CHUNK + 1; i++) {
+            seedOrphanedLease("exec-" + i, "welcome-email", false);
+        }
+    }
+
     /** A lease owned by a node ABSENT from mohs_nodes (dead by definition) — the raw material of the reaper tests. */
     private void seedOrphanedLease(String id, String jobKey, boolean cancelRequested) {
         recordAndOffer(id, jobKey, "hello", NOW.minusSeconds(60));
@@ -1608,6 +1629,42 @@ class EngineTest {
         }
         // The final state is not asserted: after the reclaim, the retry may be re-claimed within the same
         // test (the jitter can be about 0) — the contract under test is the events
+    }
+
+    /**
+     * A mass death is reclaimed in chunks of {@code RECLAIM_CHUNK}, each its own transaction under the
+     * tick's deadline: a chunk that fails loses only itself — the chunks after it still run in the same
+     * sweep, and what it lost is found again next tick. The sizes the store sees pin the order: the
+     * first chunk (50) throws, the second (1) is attempted anyway, the first comes back on the next tick.
+     */
+    @Test
+    void aFailingReclaimChunkDoesNotStopTheChunksAfterIt() {
+        seedOrphanedLeasesSpanningTwoReclaimChunks();
+        List<Integer> reclaimSizes = Collections.synchronizedList(new ArrayList<>());
+        LeaseStore firstChunkFails = mock(LeaseStore.class, delegatesTo(leaseStore));
+        doAnswer(invocation -> {
+            List<LeaseStore.CompletionResult> results = invocation.getArgument(0);
+            reclaimSizes.add(results.size());
+            if (reclaimSizes.size() == 1) {
+                throw new RuntimeException("simulated deadline on the first chunk");
+            }
+            return leaseStore.reclaim(results, invocation.getArgument(1));
+        }).when(firstChunkFails).reclaim(any(), any());
+        Engine engine = assembleEngine(workQueue, firstChunkFails, historyStore, nodeStore, List.of(), defaultRunnerRegistry(),
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+
+        engine.start();
+        try {
+            Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(rawJdbcTemplate.queryForObject(
+                            "SELECT COUNT(*) FROM mohs_lease WHERE node_id = 'dead-node'", Integer.class)).isZero());
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+
+        assertThat(reclaimSizes.subList(0, 2)).as("the second chunk ran in the same sweep the first one failed in")
+                .containsExactly(Engine.RECLAIM_CHUNK, 1);
+        assertThat(reclaimSizes.get(2)).as("the failed chunk came back on the next tick").isEqualTo(Engine.RECLAIM_CHUNK);
     }
 
     /** On the crash-recovery path: reclaiming a dead node's execution with a pending cancel publishes Cancelled — neither a retry nor a Failed; the operator's order survives the node's death. */
@@ -2149,6 +2206,36 @@ class EngineTest {
         }
     }
 
+    /** Numbers the ticks by their heartbeat, so a collaborator can record which tick it ran in. */
+    private static final class TickCountingNodeStore implements NodeStore {
+        private final NodeStore delegate;
+        private final AtomicInteger ticks = new AtomicInteger();
+
+        TickCountingNodeStore(NodeStore delegate) {
+            this.delegate = delegate;
+        }
+
+        int ticks() {
+            return ticks.get();
+        }
+
+        @Override
+        public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+            ticks.incrementAndGet();
+            delegate.heartbeat(nodeId, state, epoch, at, expiresAt);
+        }
+
+        @Override
+        public List<StoredNode> findAll() {
+            return delegate.findAll();
+        }
+
+        @Override
+        public int deleteHeartbeatsBefore(Instant cutoff) {
+            return delegate.deleteHeartbeatsBefore(cutoff);
+        }
+    }
+
     /** A decorator purely to give the test a deterministic way to wait for N real ticks, without Thread.sleep. */
     private static final class CountingNodeStore implements NodeStore {
         private final NodeStore delegate;
@@ -2210,6 +2297,130 @@ class EngineTest {
         try {
             Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                     assertThat(registry.get("mohs.queue.depth").gauge().value()).isEqualTo(3.0));
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+    }
+
+    /**
+     * The firing sweep has the claim laps' budget ({@code node-lease-ttl/4}, monotonic): each CAS is
+     * bounded by the tick's statement ceiling, but up to {@code FIRE_LIMIT} of them in a row would still
+     * outlast the node's lease when a host transaction holds a handful of definition rows. What does
+     * not fire in one tick fires in the next — and nothing is lost.
+     *
+     * <p>A real wait inside the firer, like the punctuality test's real clock: the budget IS elapsed
+     * time, and freezing it would erase the behaviour being measured. With a 120 ms node lease the
+     * budget is 30 ms, and a firer that takes 40 ms fires exactly one trigger per tick.
+     */
+    @Test
+    void theFiringSweepStopsAtTheTicksBudgetAndResumesNextTick() throws Exception {
+        for (int i = 1; i <= 4; i++) {
+            jobStore.upsert(JobDefinition.of("poll-" + i, Handler.class, spec -> spec.every(Duration.ofSeconds(10))));
+            handlerRegistry.register(JobKey.of("poll-" + i), (payload, ctx) -> { });
+        }
+        clock.advance(Duration.ofSeconds(15));
+        TickCountingNodeStore tickCounting = new TickCountingNodeStore(nodeStore);
+        TriggerFirer real = new JdbcTriggerFirer(dataSource, historyStore, workQueue, new H2JdbcDelegate());
+        Map<Integer, Integer> firesPerTick = new ConcurrentHashMap<>();
+        TriggerFirer slow = (key, observed, next, occurrences, payload, now) -> {
+            try {
+                Thread.sleep(40); // a slow CAS, deliberately — the budget is wall-clock
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted while simulating a slow CAS", e);
+            }
+            firesPerTick.merge(tickCounting.ticks(), 1, Integer::sum);
+            return real.fire(key, observed, next, occurrences, payload, now);
+        };
+        Engine engine = assembleEngine(jobStore, workQueue, leaseStore, historyStore, tickCounting, slow,
+                new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
+                settingsWithNodeLeaseTtl(Duration.ofMillis(120)), clock, new SimpleMeterRegistry());
+
+        engine.start();
+        try {
+            Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(firesPerTick.values().stream().mapToInt(Integer::intValue).sum()).isEqualTo(4));
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+
+        assertThat(firesPerTick.values()).as("one trigger per tick: the budget is spent after the first").allMatch(count -> count == 1);
+        assertThat(firesPerTick).hasSize(4);
+    }
+
+    /**
+     * The reaper's sweep has the claim laps' budget too: ten reclaim chunks each waiting out a 3 s
+     * deadline would outlast the node's lease. With a 120 ms node lease the budget is 30 ms, and a
+     * reclaim that takes 40 ms leaves the second chunk for the next tick — a real wait, like the
+     * firing-sweep test's, because the budget IS elapsed time.
+     */
+    @Test
+    void theReclaimSweepStopsAtTheTicksBudgetAndResumesNextTick() {
+        seedOrphanedLeasesSpanningTwoReclaimChunks();
+        TickCountingNodeStore tickCounting = new TickCountingNodeStore(nodeStore);
+        Map<Integer, Integer> reclaimsPerTick = new ConcurrentHashMap<>();
+        LeaseStore slowReclaim = mock(LeaseStore.class, delegatesTo(leaseStore));
+        doAnswer(invocation -> {
+            try {
+                Thread.sleep(40); // a slow reclaim, deliberately — the budget is wall-clock
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted while simulating a slow reclaim", e);
+            }
+            reclaimsPerTick.merge(tickCounting.ticks(), 1, Integer::sum);
+            return leaseStore.reclaim(invocation.getArgument(0), invocation.getArgument(1));
+        }).when(slowReclaim).reclaim(any(), any());
+        Engine engine = assembleEngine(jobStore, workQueue, slowReclaim, historyStore, tickCounting,
+                new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
+                settingsWithNodeLeaseTtl(Duration.ofMillis(120)), clock, new SimpleMeterRegistry());
+
+        engine.start();
+        try {
+            Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(rawJdbcTemplate.queryForObject(
+                            "SELECT COUNT(*) FROM mohs_lease WHERE node_id = 'dead-node'", Integer.class)).isZero());
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+
+        assertThat(reclaimsPerTick.values()).as("one chunk per tick: the budget is spent after the first")
+                .allMatch(count -> count == 1);
+        assertThat(reclaimsPerTick).hasSize(2);
+    }
+
+    /**
+     * A death outside the maintenance steps — the heartbeat here, but equally the definitions read,
+     * the firing or the claim — used to reach only the log: the alert on {@code mohs.tick.failed}
+     * never saw a node whose every tick died, which is the case that matters most.
+     */
+    @Test
+    void aTickThatDiesOutsideAMaintenanceStepIsCountedUnderItsOwnLabel() {
+        NodeStore heartbeatBroken = new NodeStore() {
+            @Override
+            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+                throw new RuntimeException("simulated database error on the heartbeat");
+            }
+
+            @Override
+            public List<StoredNode> findAll() {
+                return nodeStore.findAll();
+            }
+
+            @Override
+            public int deleteHeartbeatsBefore(Instant cutoff) {
+                return 0;
+            }
+        };
+        MeterRegistry registry = new SimpleMeterRegistry();
+        Engine engine = assembleEngine(jobStore, workQueue, leaseStore, historyStore, heartbeatBroken,
+                new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
+                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), clock, registry);
+
+        engine.start();
+        try {
+            Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(registry.get("mohs.tick.failed").tag("step", "tick").counter().count())
+                            .isGreaterThanOrEqualTo(1.0));
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
@@ -2303,6 +2514,11 @@ class EngineTest {
         assertThat(cutoffs).hasSize(3);
         assertThat(script).isEmpty();
         assertThat(cutoffs).allSatisfy(cutoff -> assertThat(cutoff).isEqualTo(NOW.minus(Duration.ofDays(30))));
+    }
+
+    private EngineSettings settingsWithNodeLeaseTtl(Duration nodeLeaseTtl) {
+        return new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, BATCH_SIZE, BATCH_SIZE, 1, LEASE_TTL, nodeLeaseTtl, null,
+                EngineSettings.DEFAULT_MISFIRE_THRESHOLD, EngineSettings.DEFAULT_IDEMPOTENCY_RETENTION, Duration.ZERO);
     }
 
     private EngineSettings settingsWithHistoryRetention(Duration retention) {

@@ -58,21 +58,40 @@ import io.mohs.store.jdbc.delegate.JdbcDelegate;
 public final class JdbcLeaseStore implements LeaseStore {
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    /** The reads the engine's loop thread issues — the reaper's, the reconcile's, the cancel poll's, the admission's. */
+    private final NamedParameterJdbcTemplate tickTemplate;
     private final TransactionTemplate transactionTemplate;
+    /**
+     * The reaper's completion — a TRANSACTION deadline rather than a statement one: Spring hands the
+     * remaining time to every statement inside it through the connection holder, so the rearm and
+     * the batch counters, other stores with their own templates, are bounded by it too.
+     */
+    private final TransactionTemplate reclaimTransaction;
     private final JdbcDelegate delegate;
     private final BatchStore batchStore;
 
     public JdbcLeaseStore(DataSource dataSource, JdbcDelegate delegate, BatchStore batchStore) {
         Objects.requireNonNull(dataSource, "dataSource");
+        // Two templates: the completion runs on the flusher thread inside its own transaction and a
+        // cancelled write there would fail a whole group commit, so the tick's ceiling stays off it
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
-        this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        // A completion is ALWAYS its own transaction — see the REQUIRES_NEW comment in JdbcWorkQueue
-        // (same reason, same hazard of silently inherited isolation)
-        this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
-        // The fence assumes "last write wins" under an explicit READ COMMITTED
-        this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        this.tickTemplate = JdbcSupport.tickTemplate(dataSource);
+        this.transactionTemplate = completionTransaction(dataSource);
+        this.reclaimTransaction = completionTransaction(dataSource);
+        this.reclaimTransaction.setTimeout(JdbcSupport.TICK_STATEMENT_TIMEOUT_SECONDS);
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
+    }
+
+    /** The transaction shape every completion shares — the flusher's and the reaper's differ only in the deadline. */
+    private static TransactionTemplate completionTransaction(DataSource dataSource) {
+        TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        // A completion is ALWAYS its own transaction — see the REQUIRES_NEW comment in JdbcWorkQueue
+        // (same reason, same hazard of silently inherited isolation)
+        transaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        // The fence assumes "last write wins" under an explicit READ COMMITTED
+        transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        return transaction;
     }
 
     @Override
@@ -83,6 +102,15 @@ public final class JdbcLeaseStore implements LeaseStore {
         }
         // requireNonNull documents the invariant for @NullMarked
         return Objects.requireNonNull(transactionTemplate.execute(_ -> completeWithinTransaction(results, jobStore)));
+    }
+
+    @Override
+    public Map<ExecutionId, Completion> reclaim(List<CompletionResult> results, JobStore jobStore) {
+        Objects.requireNonNull(jobStore, "jobStore");
+        if (results.isEmpty()) {
+            return Map.of();
+        }
+        return Objects.requireNonNull(reclaimTransaction.execute(_ -> completeWithinTransaction(results, jobStore)));
     }
 
     private Map<ExecutionId, Completion> completeWithinTransaction(List<CompletionResult> results, JobStore jobStore) {
@@ -203,7 +231,7 @@ public final class JdbcLeaseStore implements LeaseStore {
         }
         List<Lease> leases = new ArrayList<>();
         for (List<String> chunk : JdbcSupport.chunksOf(List.copyOf(nodeIds))) {
-            leases.addAll(jdbcTemplate.query(delegate.findLeasesByNodes(),
+            leases.addAll(tickTemplate.query(delegate.findLeasesByNodes(),
                     new MapSqlParameterSource("nodeIds", chunk), (rs, _) -> mapLease(rs)));
         }
         return leases;
@@ -219,7 +247,7 @@ public final class JdbcLeaseStore implements LeaseStore {
             sql = delegate.findOrphanedLeasesExceptAlive();
             params.addValue("aliveNodeIds", aliveNodeIds);
         }
-        return jdbcTemplate.query(sql, params, (rs, _) -> mapLease(rs));
+        return tickTemplate.query(sql, params, (rs, _) -> mapLease(rs));
     }
 
     @Override
@@ -233,7 +261,7 @@ public final class JdbcLeaseStore implements LeaseStore {
         // same try, the node stayed alive, heartbeating and claiming nothing
         Map<JobKey, Integer> counts = LinkedHashMap.newLinkedHashMap(jobKeys.size());
         for (List<String> chunk : JdbcSupport.chunksOf(jobKeys.stream().map(JobKey::value).toList())) {
-            jdbcTemplate.query(delegate.countLeasesByJob(), new MapSqlParameterSource("jobKeys", chunk),
+            tickTemplate.query(delegate.countLeasesByJob(), new MapSqlParameterSource("jobKeys", chunk),
                     rs -> {
                         counts.put(JobKey.of(rs.getString("job_key")), rs.getInt("leases"));
                     });
@@ -255,7 +283,7 @@ public final class JdbcLeaseStore implements LeaseStore {
         }
         Set<ExecutionId> flagged = new LinkedHashSet<>();
         for (List<String> chunk : JdbcSupport.chunksOf(ids.stream().map(ExecutionId::value).toList())) {
-            flagged.addAll(jdbcTemplate.query(delegate.findCancelRequestedLeases(),
+            flagged.addAll(tickTemplate.query(delegate.findCancelRequestedLeases(),
                     new MapSqlParameterSource().addValue("ids", chunk).addValue("flag", true),
                     (rs, _) -> ExecutionId.of(rs.getString("execution_id"))));
         }

@@ -85,9 +85,9 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     private final Set<String> unknownLimitsAlreadyWarned = ConcurrentHashMap.newKeySet();
 
     public JdbcRateLimitStore(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
-        // Its own template, not JdbcSupport.namedTemplateWithStreamFetchSize: it is the only store that
-        // needs a time ceiling (see BUCKET_LOCK_TIMEOUT). The convention's fetch size stays — findAll
-        // returns a Stream.
+        // Its own template, not JdbcSupport.namedTemplateWithStreamFetchSize: this store's ceiling is its
+        // own (BUCKET_LOCK_TIMEOUT, the one unconditional lock wait on the claim path), tighter than the
+        // tick's. The convention's fetch size stays — findAll returns a Stream.
         JdbcTemplate template = new JdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
         template.setFetchSize(JdbcSupport.STREAM_FETCH_SIZE);
         template.setQueryTimeout((int) BUCKET_LOCK_TIMEOUT.toSeconds());

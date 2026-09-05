@@ -52,7 +52,45 @@ final class JdbcSupport {
     /** Well below SQL Server's 2100-parameter ceiling for {@code IN (:ids)} — one node's in-flight work easily exceeds 1k ids. */
     static final int MAX_IDS_PER_QUERY = 1000;
 
+    /**
+     * A ceiling on WAITING for a statement the engine's loop thread issues — the heartbeat, the reads
+     * behind the reaper and the reconcile, the cancel poll, the firing CAS, the claim and the
+     * requeue. That thread also carries the node lease: a statement blocked on another node's locks
+     * is a node that is alive, RUNNING, owning its shards and claiming nothing, until the promise
+     * expires and its peers reap the work it is still running.
+     *
+     * <p>Three seconds is a quarter of the 12-second floor validated on {@code node-lease-ttl} at
+     * boot, and deliberately not derived from the configured TTL: every statement under it is bounded
+     * by the work in flight (a claim batch, one node's leases, the cluster's nodes), so one that has
+     * not answered in three seconds is waiting on a lock, not reading rows, and a longer promise
+     * would only loosen the ceiling. That is also why the definition scans are NOT under it: their
+     * cost is rows transferred (2.8 s measured for 1M definitions), and a ceiling on them would kill
+     * the tick every cycle. Statements a HOST thread issues — the enqueue, the completion flush, the
+     * execution history's reads — keep their own templates with no timeout: cancelling a caller's
+     * write mid-flight is not this ceiling's business. The one host read that shares a tick template
+     * is the facade's node listing, one row per node, which costs it nothing.
+     *
+     * <p>On H2 the timeout is session state ({@code SET QUERY_TIMEOUT}), so it outlives the
+     * statement and follows the pooled connection to the next template — accepted for the dev
+     * dialect. The three production drivers keep it per statement.
+     */
+    static final int TICK_STATEMENT_TIMEOUT_SECONDS = 3;
+
     private JdbcSupport() {
+    }
+
+    /** A {@code NamedParameterJdbcTemplate} with {@link #STREAM_FETCH_SIZE} — every store with a {@code queryForStream} method uses this constructor, not {@code new NamedParameterJdbcTemplate(dataSource)} directly. */
+    static NamedParameterJdbcTemplate namedTemplateWithStreamFetchSize(DataSource dataSource) {
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+        jdbcTemplate.setFetchSize(STREAM_FETCH_SIZE);
+        return new NamedParameterJdbcTemplate(jdbcTemplate);
+    }
+
+    /** The template for statements issued on the engine's loop thread — see {@link #TICK_STATEMENT_TIMEOUT_SECONDS}. */
+    static NamedParameterJdbcTemplate tickTemplate(DataSource dataSource) {
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+        jdbcTemplate.setQueryTimeout(TICK_STATEMENT_TIMEOUT_SECONDS);
+        return new NamedParameterJdbcTemplate(jdbcTemplate);
     }
 
     /** Chunks of at most {@link #MAX_IDS_PER_QUERY} ids for {@code IN (:ids)} — {@code subList} views, with no copying. */
@@ -82,13 +120,6 @@ final class JdbcSupport {
                 .addValue("nodeId", nodeId)
                 .addValue("epoch", epoch)
                 .addValue("attemptNumber", attemptNumber);
-    }
-
-    /** A {@code NamedParameterJdbcTemplate} with {@link #STREAM_FETCH_SIZE} — every store with a {@code queryForStream} method uses this constructor, not {@code new NamedParameterJdbcTemplate(dataSource)} directly. */
-    static NamedParameterJdbcTemplate namedTemplateWithStreamFetchSize(DataSource dataSource) {
-        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-        jdbcTemplate.setFetchSize(STREAM_FETCH_SIZE);
-        return new NamedParameterJdbcTemplate(jdbcTemplate);
     }
 
     @FunctionalInterface

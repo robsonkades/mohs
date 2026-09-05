@@ -44,7 +44,10 @@ public final class JdbcNodeStore implements NodeStore {
     private final JdbcDelegate delegate;
 
     public JdbcNodeStore(DataSource dataSource, JdbcDelegate delegate) {
-        this.jdbcTemplate = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
+        // One template, the tick's: the heartbeat is the statement that must never wait out the lease,
+        // and the purge runs on the same thread. The peers read also serves the facade's node listing —
+        // one row per node, so sharing the ceiling costs it nothing
+        this.jdbcTemplate = JdbcSupport.tickTemplate(Objects.requireNonNull(dataSource, "dataSource"));
         this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
 

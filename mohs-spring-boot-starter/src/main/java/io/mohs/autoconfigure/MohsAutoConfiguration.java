@@ -145,8 +145,9 @@ public class MohsAutoConfiguration {
      *
      * <p>Summing every ceiling demands 17s — 22s with the opt-in sweep on — and outlaws the 15s default this library ships — which is
      * the sign that the additive model is not a floor. Those ceilings only bite on a degraded database,
-     * and there the same tick's UNBOUNDED queries (definitions, nodes, the reaper, the firing sweep,
-     * each claim) blow the lease long before any minimum could help. So twelve is a SANITY floor,
+     * and there the same tick's remaining UNBOUNDED reads (the definition scans, whose cost is rows
+     * rather than a lock) and its bounded-but-many statements (up to 500 firing CASes at 3 s each)
+     * blow the lease long before any minimum could help. So twelve is a SANITY floor,
      * chosen by MARGIN rather than by the sum: the healthy-tick budget {@code TTL/3 + 7s} outgrows the
      * promise only at 10.5s and below, and 11s clears it by a third of a second — twelve is the first
      * whole second that leaves a FULL one ({@code 4 + 7 < 12}), and that second is the margin for the

@@ -113,6 +113,15 @@ public final class Engine implements MohsLifecycle {
     static final int RECLAIM_LIMIT = 500;
 
     /**
+     * Reclaims per transaction: enough to drain a mass death in a handful of ticks, small enough that the
+     * reaper's transaction deadline bounds a chunk rather than the whole sweep (see
+     * {@link #reapOrphanedLeases}). An order of magnitude, not a measurement: fifty rows each paying a
+     * rearm and a batch-counter round trip fit a 3 s deadline with room at any plausible latency; the
+     * number that would tune it is the cost of one chunk under contention, which nobody has measured.
+     */
+    static final int RECLAIM_CHUNK = 50;
+
+    /**
      * The heartbeat row's retention, in multiples of {@code node-lease-ttl} — derived on purpose, with
      * no new knob. Ten leases (2.5 minutes by default) keeps a dead node VISIBLE as stale for more than
      * enough time for {@code GET /nodes} and alerts.
@@ -848,6 +857,11 @@ public final class Engine implements MohsLifecycle {
             return new TickOutcome(firing.fired() || claimed > 0,
                     earliestArmedFire(definitions.values(), firing.rearmedAt(), now));
         } catch (RuntimeException e) {
+            // Counted like a maintenance step, under its own label: the alert on mohs.tick.failed is
+            // what separates "idle because the queue is empty" from "idle because every tick dies",
+            // and a death in the heartbeat, the definitions read, the firing or the claim is the
+            // one that matters most
+            metrics.tickStepFailed("tick");
             log.error("engine tick failed — will retry next tick", e);
             // A failure is not an empty queue, but backoff is the right answer to both: a database that
             // is down does not improve by being hammered at the 25ms floor — nor by the trigger cap,
@@ -1055,9 +1069,35 @@ public final class Engine implements MohsLifecycle {
                 .map(orphan -> decideReclaim(orphan, storedJobFor(orphan.jobKey(), definitions),
                         heads.get(orphan.executionId()), now))
                 .toList();
+        // One transaction per chunk, not per sweep: the reclaim runs under the tick's deadline, and a
+        // mass death is up to RECLAIM_LIMIT rows each paying a rearm and a batch counter round trip —
+        // a sweep that could not finish inside the deadline would roll back whole, find the same
+        // orphans next tick, and never reclaim anything. A chunk that fails loses only itself: the
+        // ones after it still run, and what it lost is found again next tick. The loop itself has the
+        // claim laps' budget — ten chunks each waiting out a 3 s deadline would outlast the lease
+        TickBudget budget = TickBudget.start(settings.nodeLeaseTtl());
+        for (int from = 0; from < decisions.size(); from += RECLAIM_CHUNK) {
+            if (from > 0 && budget.spent()) {
+                log.warn("reclaim sweep stopped after {} of {} orphaned lease(s) — the tick's budget is spent, "
+                        + "the rest are reclaimed next tick", from, decisions.size());
+                break;
+            }
+            List<ReclaimDecision> chunk = decisions.subList(from, Math.min(from + RECLAIM_CHUNK, decisions.size()));
+            try {
+                reclaimChunk(chunk);
+            } catch (RuntimeException e) {
+                metrics.tickStepFailed("reap-orphaned-leases");
+                log.warn("reclaim of {} orphaned lease(s) failed — the remaining chunks continue, this one is retried next tick",
+                        chunk.size(), e);
+            }
+        }
+    }
+
+    /** One reclaim transaction; only the decisions whose fence won are counted and published. */
+    private void reclaimChunk(List<ReclaimDecision> chunk) {
         Map<ExecutionId, LeaseStore.Completion> verdicts =
-                leaseStore.complete(decisions.stream().map(ReclaimDecision::result).toList(), jobStore);
-        for (ReclaimDecision decision : decisions) {
+                leaseStore.reclaim(chunk.stream().map(ReclaimDecision::result).toList(), jobStore);
+        for (ReclaimDecision decision : chunk) {
             LeaseStore.Completion verdict = verdicts.get(decision.result().executionId());
             if (verdict != null && verdict.owned()) {
                 metrics.leaseReclaimed(decision.reclaimedState(), decision.attemptsExhausted());
@@ -1339,11 +1379,10 @@ public final class Engine implements MohsLifecycle {
      * back to the queue WITHOUT consuming budget ({@link #admit}).
      */
     private LapOutcome claimLaps(Map<JobKey, StoredJob> definitions, List<Integer> ownedShards) {
-        long lapsBudgetNanos = settings.nodeLeaseTtl().toNanos() / 4;
-        long startNanos = System.nanoTime();
+        TickBudget budget = TickBudget.start(settings.nodeLeaseTtl());
         int totalClaimed = 0;
         for (int lap = 0; lap < settings.claimRounds(); lap++) {
-            if (lap > 0 && mustStopClaiming(startNanos, lapsBudgetNanos)) {
+            if (lap > 0 && mustStopClaiming(budget)) {
                 return new LapOutcome(totalClaimed, false);
             }
             int lapBudget = Math.min(settings.batchSize(), settings.dispatchConcurrency() - inFlight.size());
@@ -1371,7 +1410,7 @@ public final class Engine implements MohsLifecycle {
                 // The same lap-boundary guard, PER PROBE: one lap is up to 64 statements, and a time
                 // budget only protects at the granularity it is checked — a degraded database at
                 // 300ms/claim would blow the NODE's lease mid-tick; the tick's first probe always runs
-                if ((lap > 0 || probe > 0) && mustStopClaiming(startNanos, lapsBudgetNanos)) {
+                if ((lap > 0 || probe > 0) && mustStopClaiming(budget)) {
                     return new LapOutcome(totalClaimed, false);
                 }
                 int shard = ownedShards.get(Math.floorMod(shardCursor++, ownedShards.size()));
@@ -1405,11 +1444,34 @@ public final class Engine implements MohsLifecycle {
 
     /**
      * The guard between claims of the same tick: a drain or pause breaks the chain, and so does the
-     * monotonic budget of {@code nodeLeaseTtl/4} — the reason for each checkpoint (the lap boundary and
-     * each probe) is at the call sites.
+     * tick's budget — the reason for each checkpoint (the lap boundary and each probe) is at the call
+     * sites.
      */
-    private boolean mustStopClaiming(long startNanos, long lapsBudgetNanos) {
-        return state.get() != EngineState.RUNNING || System.nanoTime() - startNanos >= lapsBudgetNanos;
+    private boolean mustStopClaiming(TickBudget budget) {
+        return state.get() != EngineState.RUNNING || budget.spent();
+    }
+
+    /**
+     * How long one step of the tick may keep issuing statements: a quarter of {@code node-lease-ttl},
+     * on monotonic time. The heartbeat runs ONCE per tick, before the firing and the claim, and a step
+     * that ran on towards the TTL would let the NODE's lease expire mid-tick — a lease is failure
+     * detection (DDIA), and a node reaped while alive is the failure mode this bounds.
+     *
+     * <p>One budget PER STEP (reap, firing, claim), not one for the whole tick, by decision: each step
+     * is guaranteed its own progress — a heavy reclaim after a mass death never starves the claim of
+     * the same tick. The price is that the three quarters add up, and a tick where all three run out
+     * at once overruns the TTL; the lease floor's Javadoc in the auto-configuration reasons about
+     * that margin explicitly and accepts it, because only a node whose every step is saturated pays it.
+     */
+    private record TickBudget(long startNanos, long budgetNanos) {
+
+        static TickBudget start(Duration nodeLeaseTtl) {
+            return new TickBudget(System.nanoTime(), nodeLeaseTtl.toNanos() / 4);
+        }
+
+        boolean spent() {
+            return System.nanoTime() - startNanos >= budgetNanos;
+        }
     }
 
     /**
@@ -1696,8 +1758,19 @@ public final class Engine implements MohsLifecycle {
     private FiringOutcome fireDueTriggers() {
         Instant now = clock.instant();
         List<StoredJob> due = jobStore.findDueRecurring(now, FIRE_LIMIT);
+        // The same budget as the claim laps: each CAS is bounded by the tick's statement ceiling, but
+        // up to FIRE_LIMIT of them in a row would still outlast the node's lease when a host
+        // transaction holds a handful of definition rows. What does not fire now fires next tick
+        TickBudget budget = TickBudget.start(settings.nodeLeaseTtl());
         Instant rearmedAt = null;
+        int fired = 0;
         for (StoredJob job : due) {
+            if (fired > 0 && budget.spent()) {
+                log.warn("firing sweep stopped after {} of {} due trigger(s) — the tick's budget is spent, "
+                        + "the rest fire next tick", fired, due.size());
+                break;
+            }
+            fired++;
             JobDefinition definition = job.definition();
             try {
                 // Inside the try: a contract violated by a custom store fails ONLY this job, not the sweep nor the tick's claim
