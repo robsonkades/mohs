@@ -1659,7 +1659,23 @@ public final class Engine implements MohsLifecycle {
             return false;
         }
         for (WorkQueue.ClaimedWork work : claimed) {
-            submitDispatch(work, payloads, definitions, claimInstant);
+            try {
+                submitDispatch(work, payloads, definitions, claimInstant);
+            } catch (IllegalArgumentException e) {
+                // A row this node cannot even turn into an Execution (a priority outside the enum, an
+                // actor the record refuses — what a value object rejects, and only that) is terminally
+                // broken, like an unreadable payload, and must fail alone. Without this catch it unwound
+                // the whole batch and the tick: every execution already claimed stayed leased with
+                // nothing dispatching it, and the same row was re-claimed and re-thrown on every tick.
+                // Anything wider stays uncaught on purpose: a DataAccessException from the fresh
+                // definition read is infrastructure, and a verdict written on it would turn a stale
+                // pooled connection into a terminal FAILED with no retry — the lease stands for the
+                // reconcile instead. Its own message: the operator reading Attempt.error must see the
+                // column that broke, not a payload that was never read
+                failBeforeDispatchGuarded(executionFor(work, null, claimInstant), null, new IllegalStateException(
+                        "claimed row could not become an execution: " + Objects.requireNonNullElse(e.getMessage(), e.toString()), e),
+                        new Dispatcher.Grant(nodeId, nodeEpoch, work.attemptNumber(), claimInstant));
+            }
         }
         return true;
     }
@@ -1990,11 +2006,12 @@ public final class Engine implements MohsLifecycle {
      * A corrupt payload, or a class gone from the classpath, does not stall the cycle — it fails only
      * this execution, directly, without going through the handler.
      *
-     * <p>Only {@code findPayloads}'s PER-ROW verdict reaches here: a transient failure of the batched
-     * query is left to the reaper and never becomes terminal. {@link Dispatcher#failBeforeDispatch}
-     * synthesises the attempt and publishes {@code Failed} — the same path as any terminal failure.
+     * <p>Only {@code findPayloads}'s PER-ROW verdict arrives here (a transient failure of the batched
+     * query is left to the reaper and never becomes terminal), plus the lease that has no history row
+     * at all. {@link Dispatcher#failBeforeDispatch} synthesises the attempt and publishes
+     * {@code Failed} — the same path as any terminal failure.
      */
-    private void failUnreadablePayload(Execution execution, JobDefinition definition, RuntimeException cause,
+    private void failUnreadablePayload(Execution execution, @Nullable JobDefinition definition, RuntimeException cause,
             Dispatcher.Grant grant) {
         String message = "payload could not be read: " + Objects.requireNonNullElse(cause.getMessage(), cause.toString());
         failBeforeDispatchGuarded(execution, definition, new IllegalStateException(message, cause), grant);

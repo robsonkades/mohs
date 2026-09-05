@@ -2424,6 +2424,39 @@ class EngineTest {
     }
 
     /**
+     * A claimed row this node cannot even turn into an {@code Execution} — a priority outside the enum,
+     * written by an operator or a data migration — is terminally broken, like an unreadable payload,
+     * and must fail alone. It used to unwind the whole batch and the tick: every execution claimed
+     * alongside it stayed leased with nothing dispatching it, and the same row was re-claimed and
+     * re-thrown on every tick.
+     */
+    @Test
+    void aRowThatCannotBecomeAnExecutionFailsAloneAndItsBatchSiblingsStillRun() throws Exception {
+        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(0)));
+        CountDownLatch siblingRan = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> siblingRan.countDown());
+        recordAndOffer("exec-poisoned", "welcome-email", "hello", NOW.minusSeconds(2));
+        recordAndOffer("exec-healthy", "welcome-email", "hello", NOW.minusSeconds(1));
+        rawJdbcTemplate.update("UPDATE mohs_execution SET priority = 99 WHERE execution_id = 'exec-poisoned'");
+        Engine engine = newEngine(nodeStore, List.of());
+
+        engine.start();
+        try {
+            assertThat(siblingRan.await(5, TimeUnit.SECONDS)).as("the healthy sibling dispatched").isTrue();
+            // Raw SQL, not the read model: the read model maps the priority too, and would throw on
+            // the very row this test poisons
+            Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(rawJdbcTemplate.queryForObject(
+                            "SELECT state FROM mohs_execution WHERE execution_id = 'exec-poisoned'", String.class))
+                            .isEqualTo("FAILED"));
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class))
+                .as("nothing stays leased: the poisoned row was failed, not abandoned").isZero();
+    }
+
+    /**
      * The reaper's sweep has the claim laps' budget too: ten reclaim chunks each waiting out a 3 s
      * deadline would outlast the node's lease. With a 120 ms node lease the budget is 30 ms, and a
      * reclaim that takes 40 ms leaves the second chunk for the next tick — a real wait, like the
