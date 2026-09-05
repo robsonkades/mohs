@@ -1,9 +1,9 @@
 # Data lifecycle and retention
 
-Status: Active · Last Reviewed: 2026-09-01 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 **Read this before running Mohs in production.** History retention exists but is **opt-in**
-(`mohs.engine.history-retention`, DR-002): with the property unset, three tables grow without bound
+(`mohs.engine.history-retention`): with the property unset, three tables grow without bound
 and pruning them is your responsibility.
 
 ## Growth profile per table
@@ -14,11 +14,11 @@ and pruning them is your responsibility.
 | `mohs_rate_limits` | Number of limits | **Yes** | None needed |
 | `mohs_batches` | Number of batches created | **Only with `history-retention` set** | The hourly sweep, once no member remains |
 | `mohs_nodes` | Node incarnations (one per boot) | Effectively yes | **Yes** — the stale purge, on every tick |
-| `mohs_ready` | The current backlog | **Yes** — self-limiting: a claim deletes the row | Structural |
+| `mohs_ready` | The current backlog | No fixed capacity — grows when enqueue outpaces claim | Structural |
 | `mohs_lease` | Work executing across the cluster (`nodes × dispatch-concurrency`) | **Yes** — thousands, never millions | Structural: a completion deletes the row |
 | `mohs_execution` | Every execution | **Only with `history-retention` set** | The hourly sweep, terminal rows outside the window |
 | `mohs_attempt` | Every attempt | **Only with `history-retention` set** | The hourly sweep, once the execution is gone |
-| `mohs_idempotency` | Every idempotent enqueue | **Yes** — by `idempotency-retention` (default 7d) | The hourly idempotency prune |
+| `mohs_idempotency` | Every idempotent enqueue | Time-based retention, proportional to request volume (default 7d) | The hourly idempotency prune |
 
 ## What is purged automatically
 
@@ -49,8 +49,7 @@ Two details worth knowing:
 
 ## Built-in history retention (`mohs.engine.history-retention`)
 
-Set a positive window and the engine sweeps history hourly, on the tick, on every node
-([DR-002](../15-design-decisions/records/DR-002-history-retention.md)):
+Set a positive window and the engine sweeps history hourly, on the tick, on every node:
 
 | Property | Value |
 | --- | --- |

@@ -1,14 +1,13 @@
 # Package architecture
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`package-info.java` of each package)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`package-info.java` of each package)
 
 Every production package carries a `package-info.java` with `@NullMarked` and a prose contract.
 Nothing in the build verifies it since the ArchUnit suite went away; review is the guard.
 
 ## The public API: `io.mohs.core` and its six subpackages
 
-The subpackage graph is **acyclic**, and that is enforced
-(a convention, no longer checked by a test). The cut is by cohesion, and the reason
+Keep the subpackage graph acyclic; this is a review convention, not a whole-reactor test. The cut is by cohesion, and the reason
 `job` exists as a package of its own is precisely to keep the graph acyclic.
 
 ```mermaid
@@ -55,9 +54,9 @@ This is the single most important thing to know before extending Mohs:
 | Interface | Extendable by consumers? |
 | --- | --- |
 | `Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`, `BatchBuilder`, `JobContext` | **No.** They are non-sealed only because the implementation lives in another module and the project does not use a JPMS `permits` clause across them. They **may gain methods in minor releases**. Implementing them yourself breaks with `AbstractMethodError` on the first new method. To test handlers, use `io.mohs.test`. |
-| `ExecutionListener`, `ExecutionInterceptor` | **Yes.** Both `@FunctionalInterface`, stable by contract. These are the supported extension points. |
+| `ExecutionListener`, `ExecutionInterceptor`, `RetryPolicy` | **Yes.** All are `@FunctionalInterface`, stable by contract. These are the supported extension points. |
 | `io.mohs.rest.ActorResolver` | **Yes.** The SPI of the REST module. |
-| `JobSpec`, `PolicySpec`, `Schedule`, `ExecutionEvent` and the other sealed types | Not implementable at all, which is why they may grow freely and stay binary-compatible. |
+| `JobSpec`, `PolicySpec`, `Schedule`, `ExecutionEvent` and the other sealed types | Not implementable by consumers; added variants may require updating exhaustive switches. |
 
 ## Internal packages
 
@@ -155,14 +154,14 @@ the `@RestControllerAdvice`. Every other subpackage is exactly one controller pl
 
 ### `io.mohs.autoconfigure`
 
-The composition root. Three auto-configurations, one properties record, one scanner, three pure
+The composition root. Four auto-configurations, one properties record, one scanner, three pure
 assembler classes (`MohsJobs`, `MohsRunners`, `MohsRateLimits`) and two `SmartLifecycle` adapters.
 
-A design rule worth quoting, from `MohsAutoConfiguration`'s Javadoc: **no bean here backs off with
-`@ConditionalOnMissingBean`**, and that is deliberate rather than an oversight — internal
-infrastructure is not an extension point. The host's surface is the `io.mohs.core` vocabulary
-collected as beans, plus the validated properties. The two exceptions are `ActorResolver` (a genuine
-SPI) and `CompletionBatcher` (gated by a property, not by a bean).
+Most internal infrastructure beans do not back off: applications configure them through
+public resource beans and properties. `JdbcDelegate` explicitly supports a replacement bean;
+REST permits a custom `ActorResolver`, and health permits replacing the named indicator.
+`CompletionBatcher` is enabled by a property. These conditions are separate from the
+`defaultCandidate = false` isolation of generic framework beans.
 
 Every bean of a *generic framework type* (`Clock`, `ThreadPoolTaskScheduler`, `AsyncTaskExecutor`)
 is declared `defaultCandidate = false` and injected by `@Qualifier`. Without that, merely putting

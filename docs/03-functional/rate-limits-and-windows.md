@@ -1,6 +1,6 @@
 # Rate limits and execution windows
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Two named resources that gate whether a job may be claimed at all. Both are referenced **by name**
 from `JobDefinition`, and for both an unknown name **blocks the job** — fail-safe.
@@ -54,114 +54,44 @@ and the REST `PATCH` body**, deliberately not two copies that would diverge by t
 
 ### Two-phase consumption
 
-The claim reads and charges in two separate steps, and that separation is the whole performance
-story:
+Before each claim lap, the engine reads available balances to exclude jobs with no tokens.
+After a claim commits, `Engine#admitFor` applies the window and concurrency guards, then
+charges tokens for the granted share of each job. The charge uses up to three compare-and-set attempts. On the engine loop these
+statements run in autocommit after the claim transaction has ended.
 
-```mermaid
-sequenceDiagram
-    participant Loop as Engine
-    participant RL as RateLimitStore
-    participant DB as mohs_rate_limits
+A failed charge returns that job's claimed share to the queue without invoking its handlers
+or consuming retry attempts. Other jobs in the batch can still be admitted when a charge
+returns `false`; a thrown infrastructure exception aborts the remaining processing and
+stray-lease reconciliation recovers owned work that did not reach dispatch.
 
-    Note over Loop: phase 1 — before the claim, per job
-    Loop->>RL: available(name, now)
-    RL->>DB: pure SELECT, no lock, no write
-    DB-->>RL: balance with refill applied in memory
-    RL-->>Loop: n tokens
-
-    Note over Loop: the claim runs; executions are now owned
-
-    Note over Loop: phase 2 — after the CAS, at the transaction's tail
-    Loop->>RL: charge(name, granted, now)
-    RL->>DB: guarded UPDATE (up to 3 CAS attempts)
-    DB-->>RL: true / false
-    alt false — another node took the balance between the phases
-        Loop->>Loop: undo the round: requeue everything of this job
-    end
-```
-
-| Phase | Cost | Why it is shaped this way |
-| --- | --- | --- |
-| `available` | A pure read: no lock, no write, no serialisation cost | It allows deciding the batch's admission without holding the row for the whole claim |
-| `charge` | A guarded `UPDATE` at the **end** of the claim transaction | The row lock is born here and dies at the commit, so the serialisation window is the transaction's *tail* rather than the whole transaction. Measured improvement: 2.3× at 4 clients, 3.5× at 8 |
-
-**It charges what was claimed, not what was admitted**, so a token does not burn on a candidate that
-lost the job's mutex.
-
-**A `false` from `charge` must undo the round.** The executions have already been claimed, and
-delivering them without a token would be over-delivery — the one unacceptable violation of the
-contract.
+Tokens are charged before handler execution. A crash or dispatch failure after charging can
+consume tokens without running a handler; they are replenished by normal refill. The claim
+transaction and the rate-limit transaction are not one atomic unit.
 
 ### Isolation requirement
 
-`charge` requires **`READ COMMITTED`**. The implementation re-reads the row between CAS attempts;
-under `REPEATABLE READ` the re-read would return the same snapshot, the attempts would fail
-identically, and the retry would become an expensive no-op. `JdbcWorkQueue` guarantees this
-explicitly with `REQUIRES_NEW` + explicit isolation. Any other caller inheriting a `@Transactional`
-transaction from the host must guarantee the same.
-
-Three CAS attempts, because the cost is asymmetric: each attempt costs two round trips, while giving
-up costs the whole claim round.
-
-### The lock timeout
-
-`BUCKET_LOCK_TIMEOUT = 2s` is the **only unconditional wait on the claim path** — the candidate
-selection's `SKIP LOCKED`/`READPAST` skips what is locked and never waits.
-
-The ceiling exists because one stuck node holding the row would delay *other* nodes' ticks — and the
-tick is what carries the heartbeat that renews the node lease. Contention would become a **false
-positive of death**, and the reaper would reclaim executions that are still running: work duplicated
-by the very mechanism meant to protect the external resource.
-
-On expiry a `QueryTimeoutException` surfaces (measured: H2 SQLState 50200 at 2,013 ms; PostgreSQL 18
-57014 at 2,022 ms) — **not** a `CannotAcquireLockException`, because Spring's translator sends
-statement timeout and deadlock to sibling branches of the hierarchy. Both are caught explicitly: the
-round is lost, never the heartbeat.
-
-Two seconds assumes a generous `lease-ttl` (30 s default). **A `lease-ttl` below about 10 s calls
-for revisiting this value.**
+`JdbcRateLimitStore` does not open a transaction. On the engine loop, each autocommit
+statement sees committed balances. An internal caller using an explicit transaction must
+provide `READ COMMITTED` so repeated reads can resolve CAS contention. The statement timeout is two seconds; on timeout, the operation fails and
+the engine can recover the claimed work through its normal ownership mechanisms.
 
 ### Runtime adjustment
 
-`Mohs.adjustRateLimit(name, max, window)` / `PATCH /rate-limits/{name}`:
-
-| Property | Behaviour |
-| --- | --- |
-| Creates a missing limit? | **No** — declaring is an act of boot, not of emergency. Returns empty (HTTP 404) with a message naming the property to set |
-| The bucket | **Survives** the adjustment, its balance clamped to the new ceiling. Lowering the limit cuts future throughput; it does not give back what was already consumed |
-| Durability | Holds until the next boot under the default `on-conflict: override` |
-| Concurrency | Two operators adjusting the same limit at the same instant is last-write-wins, which is what a `PATCH` promises |
-
-The boot-time upsert writes **the spec and only the spec**. Resetting the bucket there would make
-every node coming up in a rolling deploy hand back a full bucket, turning a deploy into a burst.
-Same reasoning as `paused` in `JobStore#upsert`: boot configuration governs the spec, never the
-current state.
+`Mohs.adjustRateLimit(name, max, window)` and `PATCH /rate-limits/{name}` adjust an existing
+declaration. An unknown name returns empty (HTTP 404). The bucket survives and its balance
+is clamped to the new capacity. At the next application boot, declared rate-limit settings
+are upserted again; `registration.on-conflict` governs job definitions, not rate limits.
 
 ### Reading a limit
 
-`available` in a snapshot means **tokens available now**, not "used". Whoever opens the dashboard
-wants to know how much still fits, and "used" is not even a quantity a bucket has — refill is
-continuous, with no window boundary at which to reset a counter.
-
-The refill is applied **in memory at read time**. The row stores only the balance as of the last
-charge, and showing that raw number would display an empty bucket long after it had refilled.
-Writing at read time would be worse: it would turn a monitoring read into contention for the claim
-hot path's lock.
-
-### Cross-job cost
-
-A claim round that fails its CAS is undone **entirely**, and that round may contain executions of
-jobs with **no limit at all**. This is measured deliberately by `RateLimitCeilingScenario`, whose
-second question is exactly "does the unlimited job pay for its limited neighbour?".
-
-The ceiling criterion asserted there is the **token bucket's**, not a fixed window's: the legitimate
-envelope of the k-th delivery is `t_k >= (k − max) × window/max`. Demanding "never more than `max`
-in any sliding window" would be demanding a mechanism that was deliberately not chosen.
+`available` means tokens available now. Reads apply refill in memory without consuming tokens
+or updating the bucket. Token buckets permit bursts up to their capacity; they do not promise
+at most `max` deliveries in every sliding window.
 
 ## Execution windows
 
-An `ExecutionWindow(name, exclusions)` is a set of predicates over `Instant`. A job whose scheduled
-time falls inside **any** exclusion does not fire.
+An `ExecutionWindow(name, exclusions)` is a set of predicates over `Instant`. The engine tests the claim-time instant against these predicates. While **any** exclusion
+matches, queued executions wait for admission; they are not cancelled or discarded.
 
 ```java
 @Bean

@@ -5,8 +5,7 @@ the market reference in performance and execution reliability. The name comes
 from the Mohs hardness scale — on which quartz is only a 7.
 
 This file is a prompt, not documentation: every line exists to change your
-behavior. When this file conflicts with a newer ADR, the ADR wins; when memory
-conflicts with real code, the code wins.
+behavior. Follow the user's current instructions; when memory conflicts with real code, the code wins.
 
 ## Language
 - This file and all agent-facing instructions (subagents, slash commands,
@@ -20,10 +19,10 @@ conflicts with real code, the code wins.
   `.java`. **The Java is done: no `.java` file in the reactor carries Portuguese
   prose.** One subtree is not — the store SQL, 30 of the 34 `.sql` files under
   `mohs-store-jdbc/src/main/resources`, are still commented in Portuguese
-  (TD-12, deferred with no date, because that prose is the record of why a
+  (deferred with no date, because that prose is the record of why a
   migration is shaped the way it is and a careless pass would lose the
   argument). Reintroducing Portuguese anywhere else would widen exactly the
-  bilingual split that ADR-0045 §6 argues against.
+  bilingual split.
 - **No decision-record references in code.** Decisions are cited by their ARGUMENT, never
   by number: a comment says *why*, and a reader must not have to open
   the decision log to understand the line in front of them. The records remain the
@@ -41,10 +40,10 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
   (disagree & commit).
 - Clean code, SOLID, and tests are prerequisites, not merit. Don't waste words
   celebrating the basics: the bar for excellence starts after them.
-- Every relevant decision is born with explicit trade-offs: alternatives
-  considered, why this one, what we are paying. Architecture decisions become
-  a decision record (context → decision → consequences → alternatives) in
-  `docs/15-design-decisions/records/`, numbered `DR-nnn`.
+- Explain relevant trade-offs in the change review. Keep `/docs` focused on
+  public usage, contracts and operations. Do not create or publish internal
+  decision records, findings, documentation audits or technical-debt ledgers there
+  (publication scope requested by the maintainer on 2026-09-05).
 - Think failure modes first: what happens if the process dies between claim
   and execution? If two nodes fire the same trigger? If the clock goes
   backwards? Code that doesn't answer these is not ready.
@@ -58,7 +57,7 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
 
 ## Milestones (legend)
 - **M0** — foundation: package skeleton, bootstrap, commit practices.
-- **M1** — public API: contracts consolidated under `io.mohs.core` (ADR 0015).
+- **M1** — public API: contracts consolidated under `io.mohs.core`.
 - **M2** — REST: the operational API as a contract, no implementation
   (`ProblemDetail`/real logic land in M3).
 - **M3** — engine and persistence: `engine`/`jdbc` implementation (claim,
@@ -96,7 +95,7 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
 ## Workflow
 For any task that changes code:
 1. **Understand before editing** — read the types involved and the relevant
-   decision record. Non-trivial task: propose a short plan (steps + trade-offs)
+   public documentation. Non-trivial task: propose a short plan (steps + trade-offs)
    before coding. Refactors: one step per commit/PR.
 2. **Small steps, green suite after each one.** Uncovered code → write the
    test first, show it, then touch the code.
@@ -129,17 +128,13 @@ For any task that changes code:
 - `docs/01-overview/` — product vision, capabilities and the glossary
   (source of naming).
 - `docs/05-api/` — the Java API and the REST endpoint ↔ controller table.
-- `docs/15-design-decisions/records/` — the decision log (`DR-nnn`); a record
-  outranks opinions in chat. The historical `ADR-nnnn` series was retired with
-  `docs/old/`; a number cited in prose has no file behind it.
 - `docs/10-performance/` — reference performance numbers, benchmarks and the
   tuning recipes. `docs/05-api/streaming.md` records what was measured on
   `/overview/stream` and what still is not: on an IDLE database the throughput
   count costs the window, not the history (1.6 ms at 2M rows) — what costs is
   the backlog scan (13.2 ms at 500k). The number that still does not exist is
   the endpoint under load with an SSE subscriber attached.
-- `docs/technical-debt.md` — the open debt ledger; `CHANGELOG.md` — the
-  running record of what the next release contains.
+- `CHANGELOG.md` — the running record of user-visible changes.
 
 ## Identity and naming
 - Repository: github.com/robsonkades/mohs · Maven groupId: `io.github.robsonkades` ·
@@ -148,7 +143,7 @@ For any task that changes code:
   personal account, and every URL in the POMs, the workflows and the community
   files points there.
 - Multi-module reactor under `io.github.robsonkades:mohs-parent`, full Spring Boot
-  (ADR-0044, which revokes ADR-0001's single artifact): `mohs-cron`,
+  as a multi-module reactor: `mohs-cron`,
   `mohs-api`, `mohs-engine`, `mohs-store-jdbc`, `mohs-rest`, `mohs-test`,
   `mohs-ui`, `mohs-spring-boot-starter`, `mohs-demo` (app, never published)
   and `mohs-bom`. An application declares `mohs-spring-boot-starter`, plus
@@ -174,7 +169,7 @@ sub-packaging was revised), all under `io.mohs.core`:
   `ExecutionInterceptor`, `@OnExecution`
 - `io.mohs.core.resource` — `MohsRunner`, `RateLimit`, `ExecutionWindow`
 
-Every package below maps 1:1 to a Maven module (ADR-0044); the module name is
+Every package below maps 1:1 to a Maven module; the module name is
 the package with `.` swapped for `-`, except `io.mohs.autoconfigure` →
 `mohs-spring-boot-starter`, the `io.mohs`/`io.mohs.demo` pair →
 `mohs-demo`, and `io.mohs.core` → `mohs-api` (the redesign renamed the
@@ -204,20 +199,19 @@ Internals and infrastructure (M0 skeleton, implementation lands in M3, except
   - `overview`/`job`/`execution`/`batch`/`ratelimit`/`runner`/`node` — one
     controller each (sealed `ScheduleView` lives in `job`)
 - `io.mohs.test` — test kit, its own artifact (`mohs-test`)
-- `mohs-ui` — the dashboard (ADR-0045). No Java at all: a jar carrying only
+- `mohs-ui` — the dashboard. No Java at all: a jar carrying only
   the built React/TypeScript bundle at `classpath:/mohs-ui-webapp`, served
   under `/mohs-ui` by `MohsUiAutoConfiguration` (in the starter, gated by
   `@ConditionalOnResource` on the bundle, not by a marker class). It consumes
   the public REST API — it has no controllers of its own. Prose in that
   subtree is **English**, deliberately diverging from the rule above: the
   files came from Cadrix already in English, and one bilingual subtree is
-  worse than either language (ADR-0045 §6).
+  worse than either language.
 
 Public/internal boundaries are executable through the reactor itself
 (`mohs-api` has no `mohs-engine` on its compile classpath). The ArchUnit
 suite that also enforced them went away with `mohs-demo/src/test`
-(2026-08-30) — the demo carries no tests by decision. The ADR-0043 source
-scan lives apart, in
+(2026-08-30) — the demo carries no tests by decision. The terminal-state source scan lives in
 `mohs-store-jdbc/src/test/java/io/mohs/store/jdbc/TerminalStateWriteScanTest.java`: it
 reads `src/main/java` of the module it runs in, and the SQL it guards is
 there.
@@ -259,7 +253,7 @@ when it is exactly what the code does:
 - **DDIA** (Kleppmann): the reliability/consistency vocabulary
   (at-least-once vs. exactly-once, transaction isolation, replication)
   guides claim (`FOR UPDATE SKIP LOCKED`), the execution contract, and any
-  cluster-wide enforcement (the benchmark gate of ADR 0009). Applies from M3
+  cluster-wide enforcement. Applies from M3
   (`engine`/`jdbc`); don't force storage-engine vocabulary onto contracts.
 - **Java Concurrency in Practice** (Goetz): the authority behind the
   "Concurrency" section — safe publication, thread confinement, the Java
@@ -270,13 +264,13 @@ when it is exactly what the code does:
 - **Designing Distributed Systems** (Burns): operational patterns (sidecar/
   ambassador, health/readiness, coordinated graceful shutdown) guide the
   engine lifecycle (`DRAINING`, `terminationGracePeriodSeconds`,
-  `GET /nodes`) — ADRs 0007 and 0012.
+  `GET /nodes`).
 - **Distributed Systems** (van Steen/Tanenbaum): the theoretical basis for
   clock synchronization (injected `Clock`, `DatabaseSyncedClock`,
   NTP-style offset sampling — §5.12) and failure detection
-  (heartbeat/lease/reaper) — ADRs 0008 and 0012.
+  (heartbeat/lease/reaper).
 - **Enterprise Integration Patterns** (Hohpe/Woolf): clause 4 of the async
-  contract (ADR 0003) IS this book's Transactional Outbox — cite it by name;
+  contract is this book's Transactional Outbox — cite it by name;
   likewise Idempotent Receiver (`Idempotency-Key`), Dead Letter Channel
   (exhausted retries), and Competing Consumers (multi-node claim). The
   natural reference when SSE/webhooks enter the roadmap.
@@ -358,7 +352,7 @@ when it is exactly what the code does:
 - Every generated PK is UUIDv7 (`io.github.robsonkades:uuidv7`), on every
   dialect — client-side generation (no allocation round trip), time-ordered
   (inserts stay localized at the index tail), lexicographically sortable as
-  a string (keyset-able if ever needed, ADR-0040). Applies to future tables
+  a string (keyset-able if ever needed). Applies to future tables
   too (e.g. `mohs_batches`). Natural keys (`job_key`, `rate_limits.name`,
   per-aggregate counters like `attempts.number`) are fine — what is banned
   is the database-sequential surrogate.
@@ -383,6 +377,5 @@ when it is exactly what the code does:
   baseline only changes with a new baseline.
 
 ## Maintaining this file
-When you notice a rule here that is stale against the code or a newer ADR,
-point it out and propose the edit immediately — never silently follow a rule
-you know is wrong, and never "fix" it on your own without recording it.
+When you notice a rule here that is stale against the code, point it out and
+propose the edit immediately — never silently follow a rule you know is wrong.

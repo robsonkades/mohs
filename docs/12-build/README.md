@@ -1,6 +1,6 @@
 # 12. Build
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 | Document | What it covers |
 | --- | --- |
@@ -24,5 +24,5 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 2. **`LICENSE` and `NOTICE` are packaged into every jar's `META-INF`.** Apache 2.0 §4(d) applies to
    the *distributed work*, and what is distributed is the jar. `io.mohs.cron` is a derivative work of
    Spring's cron support, so this is an obligation rather than a formality.
-3. **There is no CI, no coverage gate, no static analysis and no release process.** Everything is
-   run by hand today.
+3. **CI runs the full reactor on `main` pushes and pull requests.** JaCoCo reports coverage per
+   module without a threshold, while CodeQL performs Java security analysis.

@@ -1,6 +1,6 @@
 # Clustering and liveness
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Mohs clusters without a coordinator. There is no leader election, no consensus protocol, no
 membership service. Every contended decision is arbitrated by the database, and every node's role is
@@ -60,7 +60,7 @@ Three properties of this design:
 
 | Property | Default | Role |
 | --- | --- | --- |
-| `mohs.engine.node-lease-ttl` | `15s` | The promise's length. Recovery latency after a crash has this as its floor |
+| `mohs.engine.node-lease-ttl` | `15s` | The promise's length. Detection waits for the remaining lease plus peer processing |
 | `mohs.engine.lease-ttl` | `30s` | Feeds the claim; also the staleness cutoff for a legacy node row with no `expires_at` (mixed-version tolerance) |
 | Effective tick cadence | `min(sleep, node-lease-ttl / 3)` | The heartbeat rides on the tick, so the tick cannot be slower than the promise allows |
 | Heartbeat-row retention | `node-lease-ttl × 10` | `purgeStaleNodeRows`. Not death detection — just collecting rows no reader can use, since each boot creates a new `node_id` |
@@ -228,7 +228,7 @@ Summarised in the standard vocabulary:
 | Completeness | Strong — a crashed node's promise always expires |
 | Accuracy | Not perfect. A node stalled longer than its TTL is falsely suspected. **Mitigated, not prevented**: the false suspicion is safe because the fence discards the zombie's writes |
 | Detection latency | Between 0 and `node-lease-ttl`, plus up to one tick of the detecting peer |
-| Recovery latency floor | `node-lease-ttl` (15 s by default) — a measured chaos run recorded a reclaim wave 15.4 s after a `kill -9`, with the whole recovery finished at 19.6 s |
+| Recorded recovery example | With `node-lease-ttl=15s` — a measured chaos run recorded a reclaim wave 15.4 s after a `kill -9`, with the whole recovery finished at 19.6 s |
 | Clock assumption | Wall-clock comparison across nodes. A backwards jump between heartbeats is **detected and logged** with its consequence, naming NTP and `mohs.time.mode` as the things to check |
 
 ## The database-synced clock

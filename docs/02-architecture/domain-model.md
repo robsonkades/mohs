@@ -1,6 +1,6 @@
 # Domain model
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`mohs-api/src/main/java/io/mohs/core`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`mohs-api/src/main/java/io/mohs/core`)
 
 The domain is expressed almost entirely as Java records and sealed interfaces. Validation lives in
 compact constructors, so an invalid domain object cannot exist.
@@ -87,7 +87,8 @@ Mohs has **two** aggregates in the DDD sense, and they are deliberately decouple
 - **Key invariant**: definitional and operational state are separated. An upsert writes what the
   code declares and **never** touches `paused`, `orphaned` or `next_fire_at` — with exactly two
   documented exceptions: the upsert clears `orphaned` (the source reappearing is proof of life),
-  and *only on the first registration* initialises `paused = startPaused`.
+  and *only on the first registration* initialises `paused = startPaused`. The store also
+  rearms a changed schedule, heals eligible disarmed triggers and clears retirement on resurrection.
 - **Another key invariant**: preserving `next_fire_at` means **not writing the column**, never
   rewriting the value that was read. Rewriting would be a lost update against the firing CAS and
   against the completion's rearm.
@@ -111,7 +112,7 @@ Record-level invariants, enforced in the compact constructor:
   the split is by write profile.
 - **Written by**: the enqueue unit (`HistoryStore#record` + `WorkQueue#offer`), the claim
   (`WorkQueue#claim`), and the completion (`LeaseStore#complete`).
-- **Key invariant**: an execution is never simultaneously "neither queued nor owned". The claim
+- **Key invariant**: a live execution has a queue or lease row at committed transition boundaries. The claim
   transaction removes the queue entry and inserts the lease atomically.
 - **Key invariant**: a completion result is *either* terminal *or* carries a retry entry, never
   both and never neither. Enforced in `LeaseStore.CompletionResult`'s compact constructor.

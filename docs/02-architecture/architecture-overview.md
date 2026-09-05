@@ -1,6 +1,6 @@
 # Architecture overview
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## Architectural style, and the evidence for it
 
@@ -114,8 +114,6 @@ Analysed across every module `pom.xml` and package `package-info.java`:
   `ScheduleCommandImplTest`; `mohs-test/src/test` contains `io.mohs.engine.MohsImplTest`. These are
   engine tests that need a real store, and they live where the store is. Documented as a deliberate
   placement, not a leak — the production code does not move.
-- **No architectural violations detected** beyond the items recorded in
-  [technical debt](../technical-debt.md).
 
 ## Two structural ideas that explain most of the design
 

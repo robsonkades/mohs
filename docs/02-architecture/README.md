@@ -1,6 +1,6 @@
 # 2. Architecture
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 | Document | What it answers |
 | --- | --- |

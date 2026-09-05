@@ -1,6 +1,6 @@
 # Operational runbook
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Task-oriented procedures. For diagnosing an unknown problem, start with
 [troubleshooting](troubleshooting.md).
@@ -217,14 +217,12 @@ consider whether the limit is set far below demand, which maximises contention o
 
 ## Periodic maintenance
 
-### History retention — **you must do this**
+### Retention
 
-There is **no automatic purge** for `mohs_execution`, `mohs_attempt`, `mohs_batches` or
-`mohs_idempotency`. See [data lifecycle](../06-data/data-lifecycle.md) for the batched-delete recipe
-and the ordering.
-
-The natural implementation is a Mohs job of your own — the tool schedules its own housekeeping
-perfectly well.
+Set `mohs.engine.history-retention` when execution payloads, attempts and completed batches must
+expire. Cleanup runs automatically in bounded batches when the property is enabled. Idempotency
+records use `mohs.engine.idempotency-retention` and are pruned automatically; the default is seven
+days. See [data lifecycle](../06-data/data-lifecycle.md) for ordering and operational effects.
 
 ### Reviewing warnings
 
@@ -260,7 +258,7 @@ the web server's phase, or the pod is killed mid-drain and its work is reclaimed
 ### Changing `dispatch-concurrency`
 
 Remember it is three things at once — the in-flight ceiling, the claim budget, **and** the size of
-the built-in `io` runner. Raise the connection pool with it.
+the built-in `io` runner. Re-measure database, pool and downstream latency after changing it.
 
 ## Recovering from operator error
 

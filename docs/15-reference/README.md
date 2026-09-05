@@ -1,6 +1,6 @@
 # 15. Reference
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 | Document | What it covers |
 | --- | --- |
@@ -19,4 +19,3 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 | Every metric and its labels | [Metrics](../09-observability/metrics.md) |
 | Every architecture rule | [Boundaries and fitness functions](../02-architecture/boundaries-and-fitness-functions.md) |
 | The project vocabulary | [Glossary](../01-overview/glossary.md) |
-| Known gaps | [Technical debt](../technical-debt.md) |

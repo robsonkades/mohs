@@ -1,10 +1,16 @@
 # Schema reference
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`mohs-store-jdbc/src/main/resources/schema-*.sql`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`mohs-store-jdbc/src/main/resources/schema-*.sql`)
 
-The canonical DDL, shown for PostgreSQL. Type differences per dialect are listed at the end; the
+Selected DDL for PostgreSQL; use the linked installers for execution, not this excerpt. Type differences per dialect are listed at the end; the
 authoritative files are `schema-postgresql.sql`, `schema-h2.sql`, `schema-mysql.sql` and
-`schema-sqlserver.sql`, which are kept in step with the `V*.sql` delta chain by a structural test.
+`schema-sqlserver.sql`. PostgreSQL has a structural test comparing installer and delta chain;
+all production dialects have store round-trip tests.
+
+- [PostgreSQL installer](../../mohs-store-jdbc/src/main/resources/schema-postgresql.sql)
+- [MySQL installer](../../mohs-store-jdbc/src/main/resources/schema-mysql.sql)
+- [SQL Server installer](../../mohs-store-jdbc/src/main/resources/schema-sqlserver.sql)
+- [H2 installer](../../mohs-store-jdbc/src/main/resources/schema-h2.sql)
 
 ## Control plane
 
@@ -28,7 +34,7 @@ CREATE TABLE IF NOT EXISTS mohs_job_definitions (
     max_concurrent_executions   INT          NOT NULL DEFAULT 0,
     retries                     INT          NOT NULL DEFAULT 0,
     timeout                     VARCHAR(50),                -- ISO-8601
-    retry_policy                VARCHAR(255),               -- accepted, NOT honoured
+    retry_policy                VARCHAR(255),               -- named RetryPolicy bean
     source                      VARCHAR(20)  NOT NULL,      -- ANNOTATION | PROGRAMMATIC
     orphaned                    BOOLEAN      NOT NULL DEFAULT FALSE,   -- operational
     paused                      BOOLEAN      NOT NULL DEFAULT FALSE,   -- operational
@@ -137,19 +143,15 @@ CREATE TABLE IF NOT EXISTS mohs_attempt (
     outcome      VARCHAR(20)  NOT NULL,     -- SUCCEEDED | FAILED | CANCELLED
     error_type   VARCHAR(500),              -- the exception CLASS
     error        TEXT,                      -- the MESSAGE only
-    PRIMARY KEY (finished_at, execution_id, number)   -- PostgreSQL only
+    PRIMARY KEY (execution_id, number)
 );
 
 CREATE INDEX IF NOT EXISTS idx_mohs_attempt_throughput ON mohs_attempt (finished_at, outcome);
 ```
 
-**The PostgreSQL primary keys lead with a time column.** That is inherited from the removed
-partitioning (PostgreSQL required the partition key in the PK) and survives deliberately:
-normalising them would touch the hot terminal-update path with no measurement to justify it. The two
-extra indexes above compensate.
-
-On H2, MySQL and SQL Server the keys are the natural ones — `mohs_execution(execution_id)` and
-`mohs_attempt(execution_id, number)` — and neither compensating index exists.
+All four dialects use `mohs_execution(execution_id)` and
+`mohs_attempt(execution_id, number)` as primary keys. The throughput index supports
+windowed attempt counts; the job and correlation indexes support execution listings and batches.
 
 ## Idempotency
 

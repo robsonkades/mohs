@@ -1,6 +1,6 @@
 # Startup and shutdown
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## Startup
 
@@ -41,14 +41,14 @@ sequenceDiagram
 | --- | --- |
 | Missing `mohs.jdbc.dialect` | **Boot fails**, naming the four valid values |
 | Any `EngineSettings` violation | **Boot fails**, naming the property, the value and what the constraint means |
-| Duplicate job id, two job annotations on one method, blank stereotype id, unsupported handler signature, `@RecurringJob` with no trigger, `@OnExecution` present, annotation/programmatic identity collision | **Boot fails** |
+| Duplicate job id, two job annotations on one method, blank stereotype id, unsupported handler signature, `@RecurringJob` with no trigger, invalid `@OnExecution` signature or filter, annotation/programmatic identity collision | **Boot fails** |
 | Definitional drift under `on-conflict=fail` | **Boot fails**, showing the diff |
 | Duplicate runner or rate-limit name; a runner field of the wrong mode | **Boot fails** |
 | Every warning in [configuration](../07-configuration/configuration-reference.md#warnings-emitted-at-boot) | Logged, boot continues |
 
-The policy-gap warnings run over a single pass of the definitions store, and **diagnostics never
-bring the boot down**: a read failure becomes a WARN carrying the full cause, and the engine starts
-regardless.
+Policy checks run over the definitions once. A detected missing `RetryPolicy` bean fails
+automatic startup; a failure to read definitions is logged as a warning. Watchdog-versus-job
+timeout mismatches are warnings. See [configuration](../07-configuration/configuration-reference.md).
 
 ### Manual start
 
@@ -113,8 +113,9 @@ sequenceDiagram
 
 ### The grace budget
 
-Both deadlines of **one** `stop` are born at the same instant, so the shutdown stays bounded by the
-requested `grace`. By contrast, `drain(g)` followed by `stop(g)` are two **separate** deadlines in
+Both in-flight waits of **one** `stop` share the requested grace budget. Loop joining,
+completion draining (with a one-second minimum wait) and final JDBC work can extend total
+shutdown time beyond that grace; measure the whole application shutdown for deployment sizing. By contrast, `drain(g)` followed by `stop(g)` are two **separate** deadlines in
 time — that sequence can cost up to `2 × g` when the drain escalates and the handler ignores the
 interrupt.
 
@@ -169,13 +170,13 @@ Mohs ships no manifests, but the code makes specific assumptions:
 | `preStop` hook | Useful to let the load balancer drain first — although Mohs' work does **not** arrive through the load balancer, so this matters only for REST and the dashboard |
 | Liveness probe | **Must not depend on the database.** A database outage would restart every healthy pod |
 | Readiness probe | `state == RUNNING`, if you want a paused node out of the load balancer |
-| Startup probe | Preferable to a guessed `initialDelaySeconds`; boot includes migrations |
+| Startup probe | Preferable to a guessed `initialDelaySeconds`; boot includes registration and, in database time mode, the initial clock sample |
 | Replicas | Any number **up to 64**. Above that, extra nodes own no shard and never claim, with a WARN |
 | Rolling updates | Supported and measured. See `NodeChurnScenario` and `RollingUpdateScenario` |
 
 ### What a rolling update looks like
 
-1. A new pod starts, migrates (a no-op if already applied), registers definitions, and starts
+1. After the schema has been upgraded separately, a new pod starts, registers definitions, and starts
    claiming.
 2. Membership changes, so **shard assignment shifts** — nodes may disagree for one heartbeat, which
    degrades to the pre-shard behaviour and heals itself.
@@ -194,7 +195,7 @@ permanently blind node.
 | --- | --- |
 | What is written | **Nothing.** A crash gives no notice |
 | Detection | A peer sees `expires_at <= now` and treats the node as dead |
-| Latency floor | `node-lease-ttl` (15 s by default), plus up to one tick of the detecting peer |
+| Detection latency | The remaining node lease (0 to 15 s by default), plus peer polling and processing time; recovery can span additional ticks |
 | Recovery | The reaper reclaims each orphaned lease through the retry budget |
 | Measured | `kill -9` mid-drain: 50,000 executions terminal; **827 re-executions = exactly the set that was `RUNNING` at the kill**; reclaim wave 15.4 s after the kill; whole recovery finished at 19.6 s; zero exception lines |
 | If the node comes back | Its epoch bumps on the first tick that notices the expiry, so every write from the old incarnation loses the fence |

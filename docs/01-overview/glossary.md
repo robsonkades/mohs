@@ -1,6 +1,6 @@
 # Glossary
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 The vocabulary is deliberate and consistent across code, SQL and the REST wire format. Where two
 words look interchangeable in English, they mean different things here.

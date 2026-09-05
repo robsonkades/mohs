@@ -1,6 +1,6 @@
 # Job definition and registration
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 **A job is defined once and invoked N ways.** Cron, `Mohs.schedule`, `Mohs.batch`, the dashboard and
 the REST API are all *invocations*; none of them redefines policy. That principle is what makes the
@@ -15,7 +15,7 @@ whole surface small.
 | **Inputs** | `@MohsJob`-annotated methods on singleton beans, or `JobDefinition.of(...)` calls |
 | **Outputs** | Rows in `mohs_job_definitions`; entries in the in-memory `HandlerRegistry` |
 | **Side effects** | Definitions that disappeared from the code are marked `ORPHANED` |
-| **Errors** | Duplicate id; two job annotations on one method; blank id; unsupported signature; `@OnExecution` present; identity collision with a programmatic definition; definitional drift under `on-conflict=fail` |
+| **Errors** | Duplicate id; two job annotations on one method; blank id; unsupported signature; invalid `@OnExecution` signature or filter; identity collision with a programmatic definition; definitional drift under `on-conflict=fail` |
 
 ## Path 1 — the annotation
 

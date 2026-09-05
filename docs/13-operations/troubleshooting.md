@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Symptom-first. For a known task, use the [runbook](runbook.md).
 
@@ -77,7 +77,7 @@ Duplicates are **within contract** (at-least-once). The question is whether the 
 | The clock jumped backwards | `grep "clock moved backwards"` — the line names NTP and `mohs.time.mode` | Fix NTP, or use `mohs.time.mode=database` |
 | The shutdown grace exceeds the lease TTL | With a 15 s TTL and a 30 s grace, more than half the drain is uncovered by any heartbeat | Bring the grace closer to the TTL, or accept the window |
 | The watchdog released a healthy job | `grep "exceeded mohs.engine.watchdog-timeout"` | Raise the bound above the slowest job |
-| A crash inside the group-commit window | Up to 5 ms of results | Expected. `completion-flush-on-every-result=true` removes it at a throughput cost |
+| A crash inside the group-commit window | Results waiting for the next flush | Expected. The nominal interval is 5 ms, but scheduling and database latency can extend it. `completion-flush-on-every-result=true` removes batching at a throughput cost |
 
 **What duplicates should never do** is complete twice. The fence guarantees a zombie's result is
 discarded — asserted by the `SUSPEND` chaos scenario: zero executions with more than one `SUCCEEDED`
@@ -101,7 +101,7 @@ attempt.
 | 404 on a job | Unknown key — the body carries `nearbyJobKeys` | Check the spelling against the suggestion |
 | 404 on a rate limit | It was never declared. **A `PATCH` never creates one** | The `detail` names the property to set |
 | 409 on a retry | Not `FAILED`, a retired job, a duplicate, or **a batch member** | The `detail` says which. A batch member is refused permanently |
-| 422 | Domain validation | The `detail` is the original message from the record's constructor |
+| 422 | Domain validation | The `detail` is a controlled Mohs validation message; payload conversion failures remain generic |
 | 501 | A v1 contract operation with no implementation | Nothing to do |
 | **503** | The rate-limit bucket is contended. **Nothing changed** | Retry in a few seconds |
 | 500 | Unexpected | The real cause is in the server log, never in the body |
@@ -112,11 +112,11 @@ attempt.
 | --- | --- | --- |
 | `Could not initialize class *TestSupport` in tests | **Docker is not running** | Start Docker. An environment failure, not a regression |
 | Deadlocks on SQL Server | Every node issues the same purge `DELETE` each tick | It is isolated by `runMaintenance` and does not stop the claim. Watch `mohs.tick.failed{step="stale-node-purge"}` |
-| Boot refuses with `READ_COMMITTED_SNAPSHOT is OFF` on SQL Server | RCSI is a requirement of the dialect (DR-001) — without it reads block against the claim's locks | Run the `ALTER DATABASE … SET READ_COMMITTED_SNAPSHOT ON` the message carries. Azure SQL has it ON by default |
+| Boot refuses with `READ_COMMITTED_SNAPSHOT is OFF` on SQL Server | RCSI is a requirement of the dialect — without it reads block against the claim's locks | Enable RCSI during a planned database maintenance window, following your platform's connection-drain procedure, then restart the application |
 | `Msg 1946 ... exceeds the maximum length of 900 bytes` on SQL Server enqueue | The `mohs_idempotency` clustered-key limit | Apply `V8`, which makes the PK `NONCLUSTERED` |
 | Slow `GET /overview` | The backlog `COUNT(*)`, not history | Measured ~13.2 ms at a 500 k backlog. Reduce the backlog |
 | The idle probe is slow | A large **non-visible** backlog turns it into a sequential scan (5.5 ms at 200 k, 27.5 ms at 1 M) | Expected. Dead tuples make it much worse — check autovacuum |
-| Pool exhaustion | `dispatch-concurrency` above the pool size | Raise the pool. High `maximumPoolSize`, low `connectionTimeout` |
+| Pool exhaustion | Handler, engine and host demand exceed available connections, or the database is slow | Inspect pool acquisition and query latency; reduce concurrency or resize the pool within the database connection budget |
 | `V5` migration failed | It refuses to run outside `READ COMMITTED`, or its 2 s `lock_timeout` expired | The message names the cause. Run it by hand in a `READ COMMITTED` session during a window |
 
 ## Time and clock problems

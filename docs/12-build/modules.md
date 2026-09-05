@@ -1,6 +1,6 @@
 # Modules and publishing
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## What is published, and what is not
 

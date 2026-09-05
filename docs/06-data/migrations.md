@@ -1,6 +1,6 @@
 # Installing and upgrading the schema
 
-Status: Active · Last Reviewed: 2026-08-30 · Source of Truth: Repository (`mohs-store-jdbc/src/main/resources/`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`mohs-store-jdbc/src/main/resources/`)
 
 > **You install the schema. Mohs never does.**
 >

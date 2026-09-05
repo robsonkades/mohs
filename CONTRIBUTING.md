@@ -24,7 +24,9 @@ absorb on its own. Bug fixes and documentation need no preamble.
 PostgreSQL, MySQL and SQL Server through Testcontainers. Without a running engine they fail on
 `Could not initialize class *TestSupport` — that is the environment, not your change.
 
-CI runs `./mvnw clean verify` on every push, without `-Dskip.frontend=true`.
+CI runs `mvn -B -ntp verify` on pushes to `main` and pull requests targeting `main`.
+It builds the dashboard or restores the bundle from an exact source-keyed cache, then
+checks that the bundle is present. See [build system](docs/12-build/build-system.md).
 
 ## What a change is expected to carry
 

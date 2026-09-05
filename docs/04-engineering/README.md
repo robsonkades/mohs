@@ -1,6 +1,6 @@
 # 4. Engineering
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Practices, models and guidelines derived from the actual code. Where a document separates **current
 practice** from **recommended practice**, it says so explicitly — recommendations are never

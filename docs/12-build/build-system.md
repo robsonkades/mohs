@@ -1,6 +1,6 @@
 # Build system
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`pom.xml`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`pom.xml`)
 
 ## Shape
 
@@ -157,7 +157,7 @@ Only `frontend/` (the source) is in git; `node/`, `node_modules/` and `dist/` ar
 | Dependency versions | Managed by the Spring Boot BOM plus three explicit pins |
 | Maven Wrapper | Yes |
 | `maven-enforcer-plugin` | **Not present** — no dependency-convergence check |
-| Reproducible-build timestamp | **Not configured** |
+| Reproducible-build timestamp | Configured through `project.build.outputTimestamp` |
 
 ## Quality gates in the build
 
@@ -174,22 +174,3 @@ Only `frontend/` (the source) is in git; `node/`, `node_modules/` and `dist/` ar
 | **Dependency vulnerability scanning** | **No** |
 | **Dependency convergence** | **No enforcer** |
 | **Frontend linting or tests** | **No** — `package.json` defines only `dev`, `build`, `typecheck`, `preview` |
-
-## Known build issues
-
-| Issue | Detail |
-| --- | --- |
-| SQL Server container flake | Occasionally fails to start during a full-reactor `verify`; passes when `mohs-store-jdbc` is built in isolation |
-| `npm ci` EPERM | While a `npm run dev` holds `node_modules` binaries. Use `-Dskip.frontend=true` |
-| A first build is slow | It downloads Node and runs `npm ci` |
-
-## Recommended additions
-
-| Recommendation | Gap |
-| --- | --- |
-| JaCoCo aggregation and per-module thresholds | The per-module report exists; nothing merges it across modules or gates the build on it |
-| `maven-enforcer-plugin` (dependency convergence, required Java version, banned duplicate classes) | Nothing enforces a single version per transitive dependency |
-| Spotless or Checkstyle | Formatting is consistent by convention only |
-| OWASP dependency-check | No vulnerability scanning |
-| `project.build.outputTimestamp` | Reproducible builds |
-| A `release` profile with sources, javadoc and GPG signing | See [modules and publishing](modules.md) |

@@ -1,6 +1,6 @@
 # Batches
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 A batch is a **flat set of independent members with a shared counter**. It is not a workflow: there
 are no dependencies between members, no ordering, no compensation.
@@ -14,7 +14,7 @@ Batch batch = mohs.batch("nightly-invoices", b -> {
     }
 });
 
-String id = batch.batchId();          // already durable when this returns
+String id = batch.batchId();          // durable after the surrounding transaction commits
 
 batch.onCompletion(done ->
         log.info("batch {} finished: {} ok, {} failed", done.name(), done.succeeded(), done.failed()));

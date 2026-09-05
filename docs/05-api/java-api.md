@@ -1,6 +1,6 @@
 # Java API
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`mohs-api`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`mohs-api`)
 
 The `Mohs` facade is the entire programmatic surface. One verb per operation, always over an
 **existing** definition.
@@ -67,7 +67,7 @@ warnings that matter.
 
 ### The receipt
 
-Every terminal returns an `Enqueued`, with the `executionId` **already durable** — and the same
+Every terminal returns an `Enqueued`, with the `executionId` assigned and the enqueue written in the current transaction — and the same
 record reaches the `ExecutionListener`s (and `@OnExecution(ENQUEUED)`) once it is: immediately, or
 after the host's commit when the call ran inside a host transaction. It is a receipt,
 never a `Future` of the result.
@@ -81,7 +81,8 @@ Batch batch = mohs.batch("nightly-invoices", b -> {
 batch.onCompletion(done -> log.info("{}: {} ok, {} failed", done.name(), done.succeeded(), done.failed()));
 ```
 
-All-or-nothing, with `batchId` durable on return. See [batches](../03-functional/batches.md).
+All-or-nothing. Inside a host transaction, durability depends on that transaction committing;
+a rollback removes the batch and its members. See [batches](../03-functional/batches.md).
 
 ## Definitions
 
@@ -150,8 +151,9 @@ lifecycle.stop(Duration.ofSeconds(30));    // drain, then shut the loop down
 ```
 
 This is **node-local**, and not to be confused with pausing a job, which is cluster-wide and per job.
-Under Spring, `MohsEngineLifecycle` calls `start()` and `stop(grace)` automatically unless
-`mohs.lifecycle.start-mode=manual`.
+Under Spring, `MohsEngineLifecycle` starts the engine automatically in `auto` mode.
+`mohs.lifecycle.start-mode=manual` disables automatic startup; Spring still stops a running
+engine during context shutdown.
 
 Every transition is a guarded CAS: calling `pause()` from anything but `RUNNING` throws
 `IllegalStateException` naming both states.
@@ -196,15 +198,16 @@ This is the part to read before writing any integration code.
 | Type | May you implement it? |
 | --- | --- |
 | `Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`, `BatchBuilder`, `JobContext` | **No.** They are non-sealed only because the implementation lives in another module and the project does not use a JPMS `permits` clause across them. **They may gain methods in minor releases**, and implementing them breaks with `AbstractMethodError` on the first new method. To test handlers, use `io.mohs.test` |
-| `ExecutionListener`, `ExecutionInterceptor` | **Yes.** Both `@FunctionalInterface`, stable by contract |
+| `ExecutionListener`, `ExecutionInterceptor`, `RetryPolicy` | **Yes.** Functional interfaces intended for application implementations |
 | `io.mohs.rest.ActorResolver` | **Yes.** The REST module's SPI |
-| `JobSpec`, `PolicySpec`, `Schedule`, `ExecutionEvent`, `ScheduleView` | Sealed — not implementable, which is exactly why they may grow freely and stay binary-compatible |
+| `JobSpec`, `PolicySpec`, `Schedule`, `ExecutionEvent`, `ScheduleView` | Sealed — not implementable by consumers. Adding a permitted subtype can require changes to exhaustive switches in consuming code |
 
-## Deprecations
+## Constructing definitions
 
-| Element | Since | Replacement |
-| --- | --- | --- |
-| `JobDefinition`'s 13-argument constructor | 0.1, `forRemoval = true` | The canonical 15-argument constructor (it adds `rateLimit` and `startPaused`), or `JobDefinition.of` |
+Use `JobDefinition.of(id, handlerType, spec -> ...)` to avoid coupling application code
+to constructor arity. The record currently has 15 components; the former 13-argument
+compatibility constructor is no longer present. There are no deprecated API elements
+in this checkout.
 
 ## The test kit
 

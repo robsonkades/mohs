@@ -1,12 +1,11 @@
 # Mohs Documentation
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`io.github.robsonkades:mohs-parent` 0.0.1-SNAPSHOT)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`io.github.robsonkades:mohs-parent` 0.0.1-SNAPSHOT)
 
 Mohs is an **embedded job scheduling library for Java 25 / Spring Boot 4**. It is not a server you
 deploy: it is a set of jars an application declares, backed by the application's own relational
-database. This documentation was reconstructed from the source tree — code, SQL migrations, build
-files, tests and benchmark harnesses — and every claim below is traceable to a file in this
-repository.
+database. These guides cover integration, job behavior, the dashboard, configuration and operations.
+Start with the [getting started guide](01-overview/getting-started.md) to run a local instance.
 
 > **Reading rule.** Where this documentation and the code disagree, the code wins. Sections that
 > could not be determined from the repository are marked `Unknown` rather than filled in.
@@ -17,10 +16,10 @@ repository.
 
 | If you are… | Read, in this order |
 | --- | --- |
-| New to the project | [Product overview](01-overview/product-overview.md) → [Architecture overview](02-architecture/architecture-overview.md) → [Local development](14-development/local-development.md) |
+| New to the project | [Getting started](01-overview/getting-started.md) → [Product overview](01-overview/product-overview.md) → [Architecture overview](02-architecture/architecture-overview.md) → [Local development](14-development/local-development.md) |
 | Integrating Mohs into an app | [Capabilities](01-overview/capabilities.md) → [Java API](05-api/java-api.md) → [Configuration reference](07-configuration/configuration-reference.md) |
 | Operating it in production | [Startup & shutdown](13-operations/startup-and-shutdown.md) → [Runbook](13-operations/runbook.md) → [Troubleshooting](13-operations/troubleshooting.md) → [Security](08-security/security-overview.md) |
-| Reviewing the design | [Module architecture](02-architecture/module-architecture.md) → [Boundaries and fitness functions](02-architecture/boundaries-and-fitness-functions.md) → [Technical debt](technical-debt.md) |
+| Reviewing the design | [Module architecture](02-architecture/module-architecture.md) → [Boundaries and fitness functions](02-architecture/boundaries-and-fitness-functions.md) |
 | Tuning performance | [Performance characteristics](10-performance/performance-characteristics.md) → [Tuning](10-performance/tuning.md) → [Benchmarks](10-performance/benchmarks.md) |
 
 ---
@@ -28,6 +27,8 @@ repository.
 ## Table of contents
 
 ### 1. Overview
+
+- [Getting started](01-overview/getting-started.md) — run the demo and integrate the starter
 - [Product overview](01-overview/product-overview.md) — what Mohs is, what it solves, boundaries
 - [Capabilities](01-overview/capabilities.md) — the feature inventory, each with its status
 - [System context](01-overview/system-context.md) — actors, external systems, deployment shape
@@ -100,6 +101,8 @@ repository.
 - [Modules and publishing](12-build/modules.md)
 
 ### 13. Operations
+
+- [Using the dashboard](13-operations/dashboard.md) — navigation, filters, live updates and actions
 - [Startup and shutdown](13-operations/startup-and-shutdown.md)
 - [Deployment](13-operations/deployment.md)
 - [Runbook](13-operations/runbook.md)
@@ -112,10 +115,6 @@ repository.
 ### 15. Reference
 - [Technology stack](15-reference/technology-stack.md)
 - [Repository map](15-reference/repository-map.md)
-
-### Cross-cutting
-- [Technical debt](technical-debt.md)
-- [Documentation audit](documentation-audit.md)
 
 ---
 

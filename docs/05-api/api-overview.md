@@ -1,6 +1,6 @@
 # API overview
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Mohs exposes two APIs, and they have different audiences and different guarantees.
 

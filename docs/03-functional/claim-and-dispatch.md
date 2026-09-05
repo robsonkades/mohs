@@ -1,6 +1,6 @@
 # Claim and dispatch
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 The hot path. Everything else in Mohs exists so that this stays cheap and correct.
 
@@ -82,7 +82,7 @@ contract promises `(priority, visible_at)` order in **all four** dialects.
 | Explicit `READ COMMITTED`, `REQUIRES_NEW` | `SKIP LOCKED` plus the inserts assume "last write wins". With the default `REQUIRED`, an outer transaction would impose *its* isolation — MySQL defaults to `REPEATABLE READ` |
 | Queue removal and ownership insert are atomic | There is no instant at which an execution is neither queued nor owned. The storage guarantees it, not the caller's call order |
 | Results come back ordered | Contract across all four dialects |
-| `limit` never exceeds ~1,000 | It is bounded by dispatch headroom, which is below SQL Server's ~2,100-parameter ceiling — so the portable `DELETE … IN` deliberately does not chunk |
+| Claim size is bounded by configuration | `min(batch-size, dispatch headroom)` limits each claim. Neither setting has a 1,000-entry hard maximum; very large values must respect the selected driver's statement and parameter limits |
 | The claim returns identity only, never the payload | The dispatcher follows with **one** batched read of history |
 
 ## Admission
@@ -139,8 +139,7 @@ one execution *per shard*. With it, the over-admission bound stays "nodes × 1 l
 promised.
 
 The window check runs a second time in `admit` and that is not redundancy: the pre-claim filter is a
-snapshot and is *discarded* above the parameter ceiling, so a newborn job — or a round with no
-filter — arrives here with this as the only barrier between the queue and a closed window.
+snapshot and is truncated above the parameter ceiling, so a newborn or omitted job arrives here with this as the only barrier between the queue and a closed window.
 
 ## The claim lap
 

@@ -1,15 +1,16 @@
 # Extensibility
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## The supported extension points
 
-There are **three**, and the list is closed by contract.
+The following interfaces are intended for application implementations:
 
 | Extension point | Type | How you register it | Runs on |
 | --- | --- | --- | --- |
 | `ExecutionListener` | `@FunctionalInterface` | A Spring `@Bean` | A dedicated virtual thread, asynchronously |
 | `ExecutionInterceptor` | `@FunctionalInterface` | A Spring `@Bean` | **The attempt's own thread**, around the handler |
+| `RetryPolicy` | `@FunctionalInterface` | A named Spring `@Bean`, referenced by `retryPolicy` | The failure path on the dispatch or engine thread |
 | `ActorResolver` | Interface, `@ConditionalOnMissingBean` | A Spring `@Bean` | The request thread |
 
 Everything else in the public API is either sealed (and therefore not implementable) or explicitly
@@ -32,8 +33,8 @@ ExecutionListener alerting(AlertService alerts) {
 }
 ```
 
-`ExecutionEvent` is **sealed**, so an exhaustive switch is possible and a new variant in a future
-release becomes a compiler warning in every existing listener rather than a silent `default` branch.
+`ExecutionEvent` is **sealed**, so an exhaustive switch is possible and adding a variant can require updating an exhaustive switch when recompiling. A switch with
+a `default` branch, like the example above, deliberately ignores events it does not handle.
 
 ### The contract, stated precisely
 
@@ -157,7 +158,7 @@ Not extension points in the SPI sense, but the way you extend Mohs' vocabulary:
 | `Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`, `BatchBuilder`, `JobContext` | Non-sealed only because the implementation lives in another module and the project does not use a JPMS `permits` clause across them. **They may gain methods in minor releases.** Implementing them breaks with `AbstractMethodError` on the first new method |
 | `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `StoreTransactions` | Internal ports in `io.mohs.engine`. Not published as an SPI, and the auto-configuration registers concrete implementations with no `@ConditionalOnMissingBean` |
 | `JdbcDelegate` | Internal, but a bean of your own replaces it: `mohsJdbcDelegate` is `@ConditionalOnMissingBean`. Adding a *supported* database is still a change to the library. The named parameters are the contract: `fencedLeaseDelete()` must match `execution_id`, `node_id`, `epoch` **and** `attempt_number` — a statement that ignores a bound parameter runs without error and keeps a weaker fence |
-| Any sealed type (`Schedule`, `ExecutionEvent`, `JobSpec`, `PolicySpec`, `ScheduleView`) | Not implementable at all — which is precisely why they can grow freely and stay binary-compatible |
+| Any sealed type (`Schedule`, `ExecutionEvent`, `JobSpec`, `PolicySpec`, `ScheduleView`) | Not implementable by consumers; additions to a sealed hierarchy may require updating exhaustive switches |
 
 To test handlers, use `io.mohs.test` (`MutableClock`, `InMemoryJobStore`) rather than implementing
 `Mohs` yourself.

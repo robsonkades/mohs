@@ -1,6 +1,6 @@
 # Deployment
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## What the repository contains
 
@@ -13,7 +13,7 @@ Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 | Kubernetes manifests | **No** |
 | Helm chart | **No** |
 | Terraform / Pulumi / CloudFormation | **No** |
-| CI pipeline (`.github/`, `.gitlab-ci.yml`, `Jenkinsfile`, Azure Pipelines) | **No** |
+| CI and release workflows | **Yes**, GitHub Actions builds/tests and publishes library artifacts; it does not deploy a service |
 | Environment-specific configuration | **No** — there is not even an `application.yaml` |
 
 This is a **consequence of what Mohs is**, not an omission at the deployment layer: Mohs is a
@@ -39,51 +39,34 @@ about its runtime.
 
 ### Database connections
 
-The pool must cover:
-
-```
-in-flight executions that touch the database    (up to dispatch-concurrency)
-+ the engine's tick traffic                     (~6–8 statements per tick, sequential)
-+ the completion flusher                        (1)
-+ the SSE broadcaster                           (5 concurrent per tick, if enabled)
-+ the host application's own usage
-```
-
-The tuned reference point measured in this repository used `dispatch-concurrency = 1024` with a
-Hikari pool of 300.
+Size the host's pool for measured simultaneous database use: handler transactions, the
+engine loop, completion flushing, optional snapshot reads and application requests.
+Virtual-thread concurrency is not a connection-count target. Start with a measured baseline
+and watch pool wait time and database saturation before increasing it.
 
 ```yaml
 spring:
   datasource:
     hikari:
-      maximum-pool-size: 250
-      connection-timeout: 3000     # low: fail fast rather than queue
+      connection-timeout: 3000
 ```
 
-The guidance for virtual threads applies: a **high** `maximumPoolSize` and a **low**
-`connectionTimeout`. A blocked virtual thread costs almost nothing, so queueing on connection
-acquisition is the wrong place to queue.
+Hikari's acquisition timeout must be strictly below `mohs.engine.node-lease-ttl`.
+The actual pool is validated at startup; the default 30-second Hikari timeout is incompatible
+with the default 15-second node lease. For other pools and opaque wrappers, verify the same
+relationship yourself. See [configuration](../07-configuration/configuration-reference.md).
 
 ### Memory
 
-Mohs itself holds very little: the definitions snapshot per tick, the in-flight map (bounded by
-`dispatch-concurrency`), the completion queue (`4 × 256` entries), the cron expression cache (≤
-10,000) and the `onCompletion` LRU (≤ 10,000). **Payloads are the variable**: each in-flight
-execution holds its deserialised payload.
+Budget for in-flight deserialized payloads, definitions, completion buffering, the cron cache
+and batch callbacks, in addition to the host application's memory. Large payloads and many
+dynamic definitions can dominate the library's footprint.
 
-### CPU
+### CPU and nodes
 
-The engine loop is one platform thread doing mostly I/O. CPU is dominated by your handlers. Route
-CPU-bound work to a `cpu` runner sized from the core count; do not raise `dispatch-concurrency` to
-get CPU parallelism.
-
-### Node count
-
-| Consideration | Value |
-| --- | --- |
-| Minimum | 1 |
-| **Maximum that can claim** | **64** — `Shards.SHARD_COUNT`. Beyond that, extra `RUNNING` nodes own no shard and never claim, with a WARN once per transition |
-| Measured scaling | 1.37× at two nodes, 2.29× at four — **on one machine sharing CPU, one database container and one disk**, so treat it as a floor rather than a prediction |
+Route CPU-bound work to a bounded CPU runner. Mohs has 64 fixed claim shards, so more than
+64 active nodes leaves some nodes unable to claim. Scaling depends on the database and the
+workload; repository benchmarks describe their own environments, not deployment guarantees.
 
 ## Container guidance
 
@@ -145,7 +128,7 @@ and for the part that is now yours: **nothing records which versions a database 
 column fails on its first statement with the driver's error and does not start — it corrupts
 nothing, but it also does not wait. Apply the schema first, then roll the replicas.
 
-**One delta needs a maintenance window**: PostgreSQL's `V5`, which converts the partitioned history
+**Plan maintenance for table-rebuilding deltas**, including MySQL `V10` and PostgreSQL's `V5`, which converts the partitioned history
 tables to normal ones by copying rows under an `ACCESS EXCLUSIVE` lock. Peak space is 2× the larger
 table plus indexes, and the tables are sealed — not even readable — for the duration. Run it in a
 `READ COMMITTED` session during a window. **Take a backup first: there is no undo.**
@@ -193,7 +176,7 @@ mohs:
 - [ ] `spring.lifecycle.timeout-per-shutdown-phase` > drain grace
 - [ ] Probes that do not depend on the database for liveness
 - [ ] A migration plan, especially if PostgreSQL `V5` has not yet been applied
-- [ ] **A retention plan** — history has no automatic purge
+- [ ] **A retention plan** — configure opt-in history retention or manage cleanup externally
 - [ ] A `SecurityFilterChain` if `mohs.api.enabled=true`
 - [ ] Metrics scraped; alert on `mohs.lease.reclaimed` and `mohs.tick.failed`
 - [ ] Replica count at or below 64

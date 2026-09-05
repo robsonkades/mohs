@@ -1,6 +1,6 @@
 # REST endpoints
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`io.mohs.rest`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`io.mohs.rest`)
 
 All paths are relative to `mohs.api.base-path` (default `/api/mohs/v1`), which is itself relative to
 the host's `server.servlet.context-path`.
@@ -102,7 +102,8 @@ Returns `JobResponse[]`. Bounded cardinality, no pagination.
 ```
 
 `name` falls back to the `jobKey` when no label was set. `nextFireAt` is `null` for an on-demand job
-or a paused one.
+or a fixed-delay job awaiting completion. A paused job can retain its next firing
+instant; use `paused` to determine whether automatic firing is suspended.
 
 `schedule` is a **discriminated union** with an explicit `type` in the JSON, so it is portable across
 client languages:
@@ -133,7 +134,6 @@ Invoke a job.
 {
   "payload": { "invoiceId": 4711 },
   "at": "2026-08-30T03:00:00Z",
-  "delay": "PT30M",
   "priority": "HIGH"
 }
 ```
@@ -179,10 +179,12 @@ Response is a `RuntimePatchResponse<JobResponse>`:
 
 ```json
 {
-  "resource": { "jobKey": "...", "schedule": { "type": "INTERVAL", ... }, ... },
+  "resource": {},
   "notice": "Emergency change: it holds until the next boot; encode it in properties to make it permanent."
 }
 ```
+
+`resource` contains the complete updated `JobResponse` (omitted above for brevity).
 
 The trigger is recomputed from the clock in the same write; `ON_DEMAND` disarms the recurrence. The
 actor is resolved **before** the mutation, so a 4xx genuinely means "nothing changed" — and the
@@ -251,7 +253,8 @@ The same shape **plus `attempts`**:
 }
 ```
 
-`error` is present **if and only if** `outcome` is `FAILED`. 404 for an unknown id.
+`error` is non-null exactly when `outcome` is `FAILED`. Successful and cancelled
+attempts have no error message. 404 for an unknown id.
 
 ### `POST /executions/{id}/cancel`
 
@@ -280,7 +283,7 @@ of who asked.
 
 ### `POST /executions/{id}/retry`
 
-No body. Rearms the **same** `FAILED` execution as `RETRY_WAITING`, due now, bypassing the retry
+No body. Rearms the **same** `FAILED` execution in the queue, due now, bypassing the retry
 budget.
 
 **202 Accepted** with `AcceptedExecutionResponse`. The `actor` is the *original* invocation's, since
@@ -353,7 +356,7 @@ anything.
 | Field | Meaning |
 | --- | --- |
 | `max` | `maxConcurrent` for an IO runner, `maxSize` for a CPU runner |
-| `running` | Accepted and not finished. In IO mode that is effectively what is executing; **in CPU mode it includes what waits in the queue, so it can exceed `max`** — which is exactly the backlog an operator needs to see. The CPU-mode backlog is `running − max` |
+| `running` | Accepted and not finished. In IO mode that is effectively what is executing; **in CPU mode it includes what waits in the queue, so it can exceed `max`** — which is exactly the backlog an operator needs to see. `max(0, running − max)` is a lower bound on waiting work, not an exact queue-depth reading |
 
 Read-only: a runner is configuration, not adjustable runtime.
 

@@ -1,6 +1,6 @@
 # Repository map
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ```text
 mohs/
@@ -77,7 +77,7 @@ ArchUnit suite went away.
 
 ```text
 io/mohs/engine/
-├── Engine.java                  the poll loop; implements MohsLifecycle (1,768 lines)
+├── Engine.java                  the poll loop; implements MohsLifecycle
 ├── MohsImpl.java                implements Mohs
 ├── Dispatcher.java              invokes handlers; maps outcomes
 ├── CompletionBatcher.java       group commit
@@ -121,7 +121,7 @@ io/mohs/rest/
 ├── overview/    OverviewController · OverviewStreamBroadcaster · OverviewResponse · ThroughputView
 ├── job/         JobsController · JobResponse · ScheduleView (sealed) + views · ScheduleJobRequest
 ├── execution/   ExecutionsController · ExecutionResponse · ExecutionSummaryResponse · AttemptResponse
-├── batch/       BatchesController · BatchResponse · BatchState        ← NOT registered as a bean
+├── batch/       BatchesController · BatchResponse · BatchState
 ├── ratelimit/   RateLimitsController · RateLimitResponse · RateLimitPatchRequest
 ├── runner/      RunnersController · RunnerResponse
 └── node/        NodesController · NodeResponse
@@ -156,7 +156,7 @@ Built output goes to `target/classes/mohs-ui-webapp`, served under `/mohs-ui` �
 mohs-benchmark/
 ├── src/test/java/io/mohs/store/jdbc/
 │   ├── ScenarioCluster.java              N engines in one JVM, real PostgreSQL
-│   └── *Scenario.java                    nine scenarios, run BY NAME only
+│   └── *Scenario.java                    ten scenarios, run BY NAME only
 └── scripts/
     ├── chaos-recovery.ps1                S6 (kill -9) · S8 (db pause) · SUSPEND (freeze)
     ├── cluster-scale.ps1                 Idle · Drain · Latency, N node-processes

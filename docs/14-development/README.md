@@ -1,6 +1,6 @@
 # 14. Development
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 | Document | What it covers |
 | --- | --- |

@@ -1,13 +1,13 @@
 # Transaction management
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Mohs manages transactions **programmatically**, with `TransactionTemplate` over a
 `DataSourceTransactionManager` built on the host's `DataSource`. There is no `@Transactional`
 anywhere in the production code, and that is deliberate: propagation and isolation are decisions per
 operation, and an annotation would hide them.
 
-## The three transactional postures
+## Transactional postures
 
 | Posture | Propagation | Isolation | Used by |
 | --- | --- | --- | --- |
@@ -161,8 +161,8 @@ With `mohs.engine.completion-flush-on-every-result=false` (the default), complet
 
 | Property | Value |
 | --- | --- |
-| The declared cost | The window between "the handler finished" and "the result is durable" grows from ~1 ms to at most the flush interval |
-| The declared risk | A crash inside that window re-executes up to `flushSize` results beyond those in flight |
+| The declared cost | Batching adds a nominal flush delay of 5 ms; queueing and database commit latency can extend the actual durability window |
+| The declared risk | A crash can leave finished handlers without durable completions; recovery may invoke them again while retry budget remains |
 | What does **not** change | The contract was already at-least-once. This changes the exposure to duplicates, not the guarantee |
 | Batch failure | Falls back to one transaction per result |
 | Two paths bypass it | `failBeforeDispatch` and `abandonOwnership` — their callers depend on the "it threw, so it did not happen" contract, and an enqueue that always returns would silently change that |
@@ -187,7 +187,7 @@ dead — a result still in the queue would be reclaimed as an orphan.
 | Streaming reads | `JobStore#findAll`, `findAllAnnotationSourced` and `RateLimitStore#findAll` return `Stream` over an open cursor. **The caller owns the lifecycle** (try-with-resources) |
 | PostgreSQL caveat, documented on the ports | The cursor only streams **inside a transaction** (autocommit off). Outside one, the driver materialises the entire result before returning the first item, despite the configured `fetchSize` |
 | Never write with a read cursor open | Stated at two sites: `MohsJobScanner#reconcileOrphans` collects keys to a list and marks them **after** the try-with-resources closes; the same rule is cited for `JdbcJobStore` |
-| Statement timeout | Only `JdbcRateLimitStore` sets one (2 s), because it is the only store that takes an unconditional lock wait |
+| Statement timeouts | Store templates have bounded statement timeouts; rate-limit operations use 2 s, history pruning uses 1 s per statement, and idempotency pruning uses 5 s. Acquisition and driver network timeouts are separate |
 | Chunking | `JdbcSupport.chunksOf` splits `IN` lists so no statement approaches SQL Server's ~2,100-parameter ceiling |
 
 ## Recommended practice for host applications
@@ -196,5 +196,5 @@ dead — a result still in the queue would be reclaimed as an orphan.
 | --- | --- |
 | Call `mohs.schedule(...)` **inside** your business transaction when the job must only exist if the business change commits | Rely on `Batch#onCompletion` for anything that must happen |
 | Make handlers idempotent | Assume exactly-once |
-| Size the pool for `dispatch-concurrency` plus the engine's own tick traffic | Set a global `spring.datasource.hikari.transaction-isolation` without checking the PostgreSQL `V5` migration's requirement (it refuses to run outside `READ COMMITTED`, rather than silently losing rows) |
+| Size the pool for measured concurrent database usage from handlers, engine, monitoring and host traffic | Set a global `spring.datasource.hikari.transaction-isolation` without checking the PostgreSQL `V5` migration's requirement (it refuses to run outside `READ COMMITTED`, rather than silently losing rows) |
 | Keep handlers' own transactions short | Hold a transaction open across the whole handler when it performs network I/O |

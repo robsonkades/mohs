@@ -1,6 +1,6 @@
 # Configuration reference
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`io.mohs.autoconfigure.MohsProperties`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`io.mohs.autoconfigure.MohsProperties`)
 
 Every `mohs.*` property, bound as **immutable records with constructor binding** — a property is a
 snapshot of the boot, not mutable state. `spring-boot-configuration-processor` is declared, so IDE
@@ -12,7 +12,6 @@ metadata is generated from the `@param` documentation.
 | --- | --- | --- | --- |
 | `mohs.enabled` | No | `true` | **Master gate.** `false` removes every Mohs bean from the context |
 | `mohs.jdbc.dialect` | **YES** | *(none)* | `h2` / `postgresql` / `mysql` / `sqlserver`. Never auto-detected; an unset value **fails the boot** |
-
 | `mohs.engine.poll-interval` | No | `25ms` | The **floor** of the tick interval |
 | `mohs.engine.max-poll-interval` | No | `2s` | The **ceiling** of the idle backoff. Must be `>= poll-interval` |
 | `mohs.engine.batch-size` | No | `50` | Maximum executions claimed per claim statement |
@@ -61,48 +60,58 @@ case-sensitive. Prefer lower-case names; to preserve exact case use the brackete
 
 ## Minimal configuration
 
+For an application with the starter and a PostgreSQL JDBC driver:
+
 ```yaml
+spring:
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USER}
+    password: ${DATABASE_PASSWORD}
+    hikari:
+      connection-timeout: 3000
 mohs:
   jdbc:
     dialect: postgresql
 ```
 
-That is genuinely all that is required. Everything else has a default.
+`DATABASE_URL` is a JDBC URL, such as `jdbc:postgresql://localhost:5432/mohs`.
+Install the [schema](../06-data/migrations.md) before starting the application.
+The dialect is the only mandatory `mohs.*` property, but the host must also supply
+a working `DataSource`. With Hikari, set `connection-timeout` below `node-lease-ttl`:
+the pool's 30-second default exceeds Mohs' default 15-second node lease and fails startup.
+The starter validates the actual pool, including supported delegating data sources.
 
-## Typical production configuration
+## Optional operational settings
+
+Add these to the configuration above when they match the application's requirements:
 
 ```yaml
 mohs:
   jdbc:
     dialect: postgresql
+  time:
+    mode: database
   engine:
-    poll-interval: 50ms
-    max-poll-interval: 2s
-    batch-size: 500
-    claim-rounds: 4
-    dispatch-concurrency: 512
-    event-concurrency: 64
-    node-lease-ttl: 15s
-    lease-ttl: 30s
-    watchdog-timeout: 10m
+    history-retention: 30d
+    idempotency-retention: 7d
   lifecycle:
     shutdown:
       grace-period: 30s
-  registration:
-    on-conflict: override
-  api:
-    enabled: true              # WARN at boot: no authentication
   rate-limits:
     smtp:
       max: 100
       window: 1m
-
-spring:
-  datasource:
-    hikari:
-      maximum-pool-size: 250   # high for virtual threads
-      connection-timeout: 3000 # low
 ```
+
+The retention values are examples: choose them for your recovery and data-retention
+requirements. Deleting execution history prevents retrying those executions.
+Enabling the REST API additionally requires a web application and host-supplied
+[security](../08-security/security-overview.md).
+
+Start with the default dispatch and claim settings. Size the JDBC pool using measured
+database demand, including the host's own traffic; virtual threads do not require one
+database connection per handler. See [tuning](../10-performance/tuning.md).
 
 ## Validated relationships
 
@@ -177,7 +186,7 @@ So `poll-interval` bounds how *often* the loop can tick, `max-poll-interval` bou
 | The stop's loop-join budget | `node-lease-ttl / 4` |
 | Heartbeat-row retention | `node-lease-ttl × 10` |
 | Minimum `watchdog-timeout` | Strictly greater than `node-lease-ttl` |
-| Crash recovery latency floor | `node-lease-ttl` |
+| Crash detection | Remaining node lease, plus peer polling and processing time |
 
 Lowering it speeds recovery and raises the tick's minimum frequency. Raising it does the reverse.
 
@@ -200,7 +209,7 @@ Standard Spring Boot relaxed binding applies:
 | Property | Environment variable |
 | --- | --- |
 | `mohs.jdbc.dialect` | `MOHS_JDBC_DIALECT` |
-| `mohs.engine.poll-interval` | `MOHS_ENGINE_POLL_INTERVAL` |
+| `mohs.engine.poll-interval` | `MOHS_ENGINE_POLLINTERVAL` |
 | `mohs.api.enabled` | `MOHS_API_ENABLED` |
 | `mohs.rate-limits.smtp.max` | `MOHS_RATELIMITS_SMTP_MAX` |
 

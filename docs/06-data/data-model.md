@@ -1,6 +1,6 @@
 # Data model
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`mohs-store-jdbc/src/main/resources`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`mohs-store-jdbc/src/main/resources`)
 
 ## The nine tables
 
@@ -52,7 +52,7 @@ deleted entirely (`V4`).
 
 ## The control plane
 
-Three tables that are read often and written rarely:
+Four control tables with different update cadences:
 
 | Table | Rows | Written by |
 | --- | --- | --- |
@@ -122,7 +122,7 @@ Same PostgreSQL storage parameters as `mohs_ready`, for the same reason.
 
 | Column | Notes |
 | --- | --- |
-| `execution_id` | PK on H2/MySQL/SQL Server. On **PostgreSQL** the PK is `(created_at, execution_id)` |
+| `execution_id` | Primary key on all four dialects |
 | `job_key`, `shard`, `priority` | |
 | `state` | **Advisory**: `PENDING` from birth until a terminal write |
 | `scheduled_at` | When it was due |
@@ -133,17 +133,16 @@ Same PostgreSQL storage parameters as `mohs_ready`, for the same reason.
 | `idempotency_key` | Denormalised for reads; uniqueness lives in `mohs_idempotency` |
 | `payload`, `payload_type` | JSON plus the concrete class name. `TEXT` on PostgreSQL/H2, `MEDIUMTEXT` on MySQL, `NVARCHAR(MAX)` on SQL Server — **never `CLOB`**, which PostgreSQL does not have |
 
-**The PostgreSQL PK ordering is a historical artefact**, and it is documented as such: `created_at`
-had to lead because it was the partition key. Partitioning was removed in `V5`; the PK was left
-alone because normalising it would touch the hot terminal-update path without a measurement
-justifying it. `created_at` therefore travels in memory from the payload read to the completion, so
-the terminal `UPDATE` can match the row by equality on both columns.
+PostgreSQL uses the same execution identity key as the other dialects. The current installer
+and migration chain normalize the former time-leading keys. The completion still carries
+`created_at` from the payload read, but it is not part of the primary key. See
+[indexes](indexes.md) and [migrations](migrations.md) before upgrading an older schema.
 
 ### `mohs_attempt` — the append-only attempt log
 
 | Column | Notes |
 | --- | --- |
-| `execution_id`, `number` | PK on H2/MySQL/SQL Server. On **PostgreSQL** the PK is `(finished_at, execution_id, number)` — the same partitioning artefact |
+| `execution_id`, `number` | Composite primary key on all four dialects |
 | `node_id` | **Forensics: which node executed this attempt** |
 | `started_at`, `finished_at` | |
 | `outcome` | `SUCCEEDED` / `FAILED` / `CANCELLED` — never `ENQUEUED` or `RETRY_WAITING`, which describe the owning execution |

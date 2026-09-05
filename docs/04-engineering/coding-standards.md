@@ -1,6 +1,6 @@
 # Coding standards
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 This document separates **current practice** (what the code does, observably) from **recommended
 practice** (what a contributor should do going forward). Where they coincide, that is said.
@@ -14,7 +14,7 @@ practice** (what a contributor should do going forward). Where they coincide, th
 | Preview features | **None.** `--enable-preview` would lock the host application to one exact JDK |
 | Compiler flags | `-parameters` (Spring MVC resolves `@RequestParam`/`@PathVariable` names reflectively) |
 | Formatter / linter | **Not present.** No Checkstyle, Spotless, PMD, SpotBugs or ErrorProne in the build |
-| Static analysis | None beyond the three source-scan tests in `mohs-store-jdbc` |
+| Static analysis | Module-local source scans plus the configured GitHub CodeQL workflow |
 
 ## Naming
 
@@ -37,17 +37,9 @@ Current practice, consistently applied:
 
 ## Prose language
 
-A deliberate, documented split:
-
-| Where | Language |
-| --- | --- |
-| Identifiers (classes, methods, fields, packages) | **English** |
-| Commit messages | **English** |
-| Javadoc, comments, `package-info.java` | Historically **Portuguese**; the majority of the tree has been translated to English, and a minority of shorter comments remain in Portuguese |
-| `mohs-ui` subtree | **English**, a deliberate divergence — the files arrived in English, and one bilingual subtree is worse than either language |
-
-**Recommended practice**: write new prose in English. A migration of the remaining Portuguese
-comments is deferred with no date; do not mix languages within one file.
+Write identifiers, documentation, commit messages, Java comments and frontend prose in English.
+Historical SQL comments remain in some scripts; preserve their meaning when maintaining them.
+Use the [glossary](../01-overview/glossary.md) for domain terms.
 
 ## Comments
 
@@ -183,15 +175,3 @@ These are review criteria in this project, and the code cites them by name where
 
 **Recommended practice**: cite by name only when the code genuinely *is* the thing. A pattern named
 as decoration is worse than no name at all.
-
-## Recommended additions
-
-Not present today; each would close a concrete gap.
-
-| Recommendation | Gap |
-| --- | --- |
-| A formatter (Spotless with a fixed style) | Formatting is currently consistent by convention alone |
-| `maven-enforcer-plugin` with dependency convergence | No enforcement of a single version per transitive dependency |
-| JaCoCo aggregation and a per-module threshold | The per-module report exists; nothing merges it across modules or gates the build on it |
-| A `.editorconfig` | Nothing pins indentation or line endings beyond `.gitattributes` |
-| A CONTRIBUTING-level statement of the prose-language migration date | Currently "deferred, date undefined" |

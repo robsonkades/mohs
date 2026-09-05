@@ -1,6 +1,6 @@
 # Performance characteristics
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (measurements recorded 2026-08-14 to 2026-08-23)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (measurements recorded 2026-08-14 to 2026-08-23)
 
 > **Read the caveat first.** Every number below was measured on a **local development machine**
 > (Windows, 24 logical threads) against **Docker Desktop containers**, not production hardware and
@@ -20,11 +20,11 @@ Independent of hardware:
 | **Claim cost does not depend on history size** | The claim statement references only `mohs_ready` and `mohs_lease`. Verified as a release gate: throughput flat between ~0 and 2 M history rows in a clean A/B on the same binary and session |
 | **`GET /overview`'s throughput count costs the window, not the archive** | `idx_mohs_attempt_throughput(finished_at, outcome)` makes it a short range scan. Measured ~1.6 ms at 2 M history rows |
 | **`GET /overview`'s backlog count costs the backlog** | It is `COUNT(*)` with no `WHERE` over `mohs_ready`. Measured ~13.2 ms at a 500 k backlog. **The endpoint hurts on the queue, not on history** |
-| **Ownership table size is bounded** | `nodes × dispatch-concurrency` — thousands of rows, never millions. That is what makes the derived concurrency cap an always-cached index scan |
+| **Ownership table size has a configured bound** | At most `nodes × dispatch-concurrency`; choose both values so the ownership indexes remain small enough for the database |
 | **One payload read per claim round, never per execution** | `HistoryStore#findPayloads` takes a batch |
 | **One definitions scan per tick, never per job** | The tick's snapshot serves admission, dispatch and the reaper |
 | **One `mohs_nodes` read per tick** | Serves both the reaper and the shard assignment |
-| **One completion transaction per flush, not per execution** | Group commit, 256 results or 5 ms |
+| **One completion transaction per flush, not per execution** | Group commit, 256 results or a nominal 5 ms interval |
 | **Idle cost is one existence probe per tick**, not 64 shard statements | The idle gate |
 
 ## Throughput, measured
@@ -33,13 +33,12 @@ Independent of hardware:
 
 | Configuration | Throughput |
 | --- | --- |
-| Defaults (`poll=5s`, `batch=50`) | **10/s** — the arithmetic ceiling of that configuration, not a system limit |
+| Low-throughput test (`poll=5s`, `batch=50`) | **10/s** — the arithmetic ceiling of that configuration, not a system limit |
 | Tuned (`poll=50ms`, `batch=1000`, `dispatch=1024`, events 256, Hikari 300) | **~4,000–4,200/s** |
 | After the table split | **12,200–14,500/s** across 10 warm rounds in 3 sessions |
 
-The first row is the single most important tuning lesson in this document: **the defaults are
-latency-oriented, not throughput-oriented**, and a 5-second poll with a 50-row batch mathematically
-caps at 10 executions per second.
+The first row is a deliberately slow test configuration, not the defaults. It demonstrates that a
+5-second poll with a 50-row batch mathematically caps that experiment at 10 executions per second.
 
 ### Cluster scale, four node-processes on one machine
 

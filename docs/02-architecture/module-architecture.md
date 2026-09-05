@@ -1,6 +1,6 @@
 # Module architecture
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`pom.xml` of each module)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`pom.xml` of each module)
 
 Eleven Maven modules under `io.github.robsonkades:mohs-parent:0.0.1-SNAPSHOT`. The naming rule is mechanical: the
 module name is the package with `.` replaced by `-`, with four deliberate exceptions listed at the
@@ -69,7 +69,7 @@ flowchart TB
 | | |
 | --- | --- |
 | **Purpose** | The execution engine: poll loop, trigger firing, claim, admission, dispatch, retry, reaper, metrics — plus the persistence ports it runs over. |
-| **Key types** | `Engine` (1,768 lines; implements `MohsLifecycle`), `Dispatcher`, `MohsImpl` (implements `Mohs`), `CompletionBatcher`, `RunnerRegistry`, `MohsExecutors`, `FiringPlanner`, `NextFireCalculator`, `RetrySchedule`, `Shards`, `CancellationSignal`, `EngineMetrics`, `EngineSettings` |
+| **Key types** | `Engine` (implements `MohsLifecycle`), `Dispatcher`, `MohsImpl` (implements `Mohs`), `CompletionBatcher`, `RunnerRegistry`, `MohsExecutors`, `FiringPlanner`, `NextFireCalculator`, `RetrySchedule`, `Shards`, `CancellationSignal`, `EngineMetrics`, `EngineSettings` |
 | **Ports (interfaces this module defines and does not implement)** | `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `StoreTransactions`, `SyncableClock`, `JobHandler` |
 | **Dependencies** | `mohs-api`, `mohs-cron`, `uuidv7`, `slf4j-api`, `micrometer-core`, `spring-context`, `spring-tx` |
 | **Consumers** | `mohs-store-jdbc`, `mohs-test`, `mohs-spring-boot-starter` |
@@ -110,7 +110,7 @@ flowchart TB
 | **Escape hatch** | `-Dskip.frontend=true` skips Node entirely. **A published jar must never be built with it** — `mohs-ui` would ship empty. |
 | **Served by** | `MohsUiAutoConfiguration` in the starter, gated by `@ConditionalOnResource` on `index.html` rather than by a marker class — which is why the starter does not depend on this module. |
 | **Caching** | `assets/**` (content-hashed by Vite) is `Cache-Control: max-age=31536000, immutable` — deliberately without `public`, which would let a shared cache store a response the host serves behind authentication; a missing asset is a 404. `index.html`, the icons and the client routes are `no-cache`, so a deploy is picked up on the next load. |
-| **Notes** | Prose in this subtree is English, deliberately diverging from the Portuguese Javadoc convention used elsewhere. |
+| **Notes** | Frontend prose and Java documentation are written in English. |
 
 ### `mohs-test`
 
@@ -128,7 +128,7 @@ flowchart TB
 | --- | --- |
 | **Purpose** | The composition root. Turns beans and properties into a running engine. |
 | **Key types** | `MohsAutoConfiguration`, `MohsRestAutoConfiguration`, `MohsUiAutoConfiguration`, `MohsProperties`, `MohsJobScanner`, `MohsJobs`, `MohsRunners`, `MohsRateLimits`, `MohsEngineLifecycle`, `MohsOverviewStreamLifecycle` |
-| **Registration** | `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` lists the three auto-configurations. |
+| **Registration** | `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` lists the engine, health, REST and UI auto-configurations. |
 | **Dependencies** | `mohs-engine`, `mohs-store-jdbc`, `mohs-rest`, `spring-boot-starter`, `spring-boot-autoconfigure`, `spring-boot-starter-jdbc`, `spring-boot-starter-jackson`, and `spring-boot-starter-webmvc` as `<optional>` |
 | **Privilege** | The only package permitted to depend on `io.mohs.engine` and `io.mohs.store.jdbc`, and the only one permitted to speak `org.springframework.boot.autoconfigure`. |
 | **Notes** | Declares `spring-boot-configuration-processor`, so `mohs.*` properties get IDE metadata from the `@param` tags on `MohsProperties`. |
@@ -147,7 +147,7 @@ flowchart TB
 | | |
 | --- | --- |
 | **Purpose** | Load and chaos harnesses. **Never published.** |
-| **Contents** | `ScenarioCluster` (N engines in one JVM against a real PostgreSQL container) plus nine scenarios: `BatchCompletion`, `ColdStart`, `ConcurrentMigration`, `NodeChurn`, `OverviewLatency`, `RateLimitCeiling`, `RecurringTrigger`, `RollingUpdate`, `ShutdownLatency`. |
+| **Contents** | `ScenarioCluster` (N engines in one JVM against a real PostgreSQL container) plus ten scenarios covering batches, bursts, cold starts, node churn, overview latency, rate limits, recurring triggers, rolling updates, schedule density and shutdown latency. |
 | **Scripts** | `scripts/write-amplification.ps1`, `scripts/chaos-recovery.ps1`, `scripts/cluster-scale.ps1` |
 | **Execution** | Scenarios are **not** picked up by Surefire's default pattern in the reactor build; run them by name: `./mvnw -pl mohs-benchmark test -Dtest=NodeChurnScenario`. |
 | **Notes** | No JMH. `ScenarioCluster` deliberately mirrors `MohsAutoConfiguration`'s wiring — a verdict about lost work drawn from a wiring nobody runs in production would not be admissible as release evidence. |
@@ -156,7 +156,7 @@ flowchart TB
 
 | | |
 | --- | --- |
-| **Purpose** | A bill of materials pinning every published `io.mohs` artifact at one version. |
+| **Purpose** | A bill of materials pinning every published `io.github.robsonkades` artifact at one version. |
 | **Contents** | `dependencyManagement` only, listing `mohs-cron`, `mohs-api`, `mohs-engine`, `mohs-store-jdbc`, `mohs-rest`, `mohs-ui`, `mohs-test`, `mohs-spring-boot-starter`. |
 | **Notes** | `mohs-demo` and `mohs-benchmark` are absent by design: they are not published. |
 

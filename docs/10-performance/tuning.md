@@ -1,6 +1,6 @@
 # Tuning
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## Start by knowing what you are optimising for
 
@@ -8,7 +8,7 @@ The defaults are **latency-oriented**: a 25 ms poll floor gives fast dispatch on
 the adaptive backoff keeps the idle cost low. They are **not** throughput-oriented, and the single
 most instructive measurement in the project makes that concrete:
 
-| Configuration | Drain throughput |
+| Measured benchmark configuration | Drain throughput |
 | --- | --- |
 | `poll=5s`, `batch=50` | **10/s** — the arithmetic ceiling of that configuration |
 | `poll=50ms`, `batch=1000`, `dispatch=1024`, events 256, Hikari 300 | ~4,000/s |
@@ -28,12 +28,12 @@ It is **three things at once**:
 
 | Workload | Guidance |
 | --- | --- |
-| I/O-bound jobs (the common case) | Go high — 512, 1024. Virtual threads make this cheap; the real constraint is the connection pool |
+| I/O-bound jobs | Increase gradually while watching handler latency, database waits and pool acquisition time |
 | CPU-bound jobs | Do not raise this to raise CPU parallelism. Declare a `cpu` runner and size it from the core count |
 | Mixed | Size for the I/O work and route CPU work to a `cpu` runner |
 
-**Raising it demands raising the connection pool too**, or executions will queue on connection
-acquisition, which is the worst place to queue.
+Raising it increases potential pressure on the connection pool and every downstream dependency.
+Measure those resources before changing their limits; virtual threads do not add database capacity.
 
 ### 2. `batch-size` and `claim-rounds` — under backlog
 
@@ -88,14 +88,13 @@ guarantee that every combination of slow operations fits inside the lease.
 spring:
   datasource:
     hikari:
-      maximum-pool-size: 250      # high — virtual threads do not hold a thread while blocked
       connection-timeout: 3000    # low — fail fast rather than queue
 ```
 
-The tuned reference point used Hikari 300 with `dispatch-concurrency` 1024. The rule of thumb: the
-pool must cover the in-flight executions that actually touch the database, plus the engine's own
-tick traffic (roughly 6–8 statements per tick), plus the completion flusher, plus whatever the host
-application uses.
+The tuned benchmark used a large pool for a deliberately high-concurrency experiment. Treat that as
+a measurement record, not a production recommendation. Size the pool from observed concurrent
+database use by handlers, the engine and the host application, while respecting the database's
+connection budget.
 
 **Do not set a global `transaction-isolation`** without reading
 [migrations](../06-data/migrations.md#v5--the-one-migration-that-moves-rows) — the PostgreSQL `V5`
@@ -111,7 +110,7 @@ metric.
 
 | Lower it | Raise it |
 | --- | --- |
-| Faster recovery after a crash (the floor is one TTL) | Fewer heartbeat writes |
+| Faster recovery after a crash (bounded by the remaining lease lifetime) | Fewer heartbeat writes |
 | Forces a faster minimum tick cadence (`TTL/3`) | Allows a slower idle cadence |
 | Shrinks the claim lap budget and the firing sweep's budget (both `TTL/4`) | |
 
@@ -131,13 +130,14 @@ mohs:
     completion-flush-on-every-result: true
 ```
 
-Turn it off only if you cannot accept the durability window (up to 5 ms between "the handler
-finished" and "the result is durable"). The cost of turning it off is a synchronous commit per
-execution, which measurements put at the top of the wait profile (`LWLock:WALWrite`).
+Turn it off only if you cannot accept the short batching window between handler completion and a
+durable result. The nominal flush interval is 5 ms, but scheduling and database latency can extend
+wall-clock time. The cost of opting out is a synchronous commit per execution, which measurements
+put at the top of the wait profile (`LWLock:WALWrite`).
 
-## Per-workload starting points
+## Configuration experiments
 
-### High throughput, I/O-bound
+### Backlog throughput experiment
 
 ```yaml
 mohs:
@@ -151,11 +151,12 @@ mohs:
 spring:
   datasource:
     hikari:
-      maximum-pool-size: 250
       connection-timeout: 3000
 ```
 
-### Low latency, low volume
+Increase dispatch and pool capacity independently and keep only changes supported by measurements.
+
+### Cross-node latency experiment
 
 ```yaml
 mohs:
@@ -221,7 +222,7 @@ the schema, because they are pure insert/delete churn. Beyond that:
 
 | Setting | Note |
 | --- | --- |
-| `READ_COMMITTED_SNAPSHOT ON` | **Required — the boot refuses without it** (DR-001). It is what keeps every read non-blocking and correct on the hot tables; monitor the `tempdb` version store it introduces |
+| `READ_COMMITTED_SNAPSHOT ON` | **Required — the boot refuses without it**. It is what keeps every read non-blocking and correct on the hot tables; monitor the `tempdb` version store it introduces |
 | `idle_in_transaction`-equivalent timeouts | Relevant to the frozen-node scenario documented in [resilience](../04-engineering/resilience.md) |
 
 ### MySQL
@@ -235,7 +236,7 @@ host application does around a Mohs call.
 | `mohs.claim.batch.size` | `inflight / capacity` | Diagnosis | Action |
 | --- | --- | --- | --- |
 | Full | Low | **Claim-bound** | Raise `claim-rounds` or `batch-size`; lower `poll-interval` |
-| Small | High | **Dispatch-bound** | Raise `dispatch-concurrency` and the pool; or the work is genuinely slow |
+| Small | High | **Dispatch-bound or slow handlers** | Inspect handler and pool latency, then adjust the constrained resource |
 | Small | Low | Idle | Nothing to tune |
 | Full | High | Both saturated | Add nodes |
 

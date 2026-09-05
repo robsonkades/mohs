@@ -1,28 +1,17 @@
 # Logging
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## The framework
 
 SLF4J, with the host application's binding. Mohs configures **no** logging backend and ships no
 `logback.xml` — an embedded library must not decide the host's logging configuration.
 
-## Level distribution
+## Levels
 
-Counted across production sources in `mohs-engine`, `mohs-store-jdbc`, `mohs-rest` and
-`mohs-spring-boot-starter`:
-
-| Level | Count | Character |
-| --- | --- | --- |
-| `WARN` | 47 | The dominant level, by design |
-| `ERROR` | 12 | Reserved for "a human is needed" |
-| `INFO` | 11 | Notable, correct state changes |
-| `DEBUG` | 5 | Routine detail |
-| `TRACE` | 0 | Not used |
-
-The distribution is deliberate: severity reflects **operational meaning**, not the code path's
-excitement. Most of what can go wrong in a distributed scheduler is recoverable and *should* be
-noticed — which is exactly what WARN is for.
+Use `ERROR` for failures requiring investigation, `WARN` for abnormal conditions with a recovery
+path, `INFO` for lifecycle and operational changes, and `DEBUG` for routine diagnostics.
+The tables below describe useful messages rather than a count of logging call sites.
 
 ## Loggers
 
@@ -107,7 +96,6 @@ shutdown's duration and record definitional drift.
 | `execution {} manually rearmed for retry — rejoins the claim path bypassing the retries budget` | |
 | `execution {} of job '{}' cancelled on attempt {} — cooperative cancellation honoured` | **INFO, not WARN, and with no stack trace**: an honoured cancellation is the system doing what the operator asked |
 | `execution {} has a standing cancel request — cooperative cancellation signalled to the handler` | |
-| `mohs schema migrated: N migration(s) applied up to version {}` | |
 | `purged N stale node heartbeat row(s)` | |
 
 ### DEBUG

@@ -1,16 +1,16 @@
 # Product overview
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## What Mohs is
 
 Mohs is a **job scheduling and execution library** for Java 25 and Spring Boot 4, distributed as a
-set of Maven artifacts under the `io.mohs` group. An application adds
+set of Maven artifacts under the `io.github.robsonkades` group. An application adds
 `io.github.robsonkades:mohs-spring-boot-starter` to its build, points a `DataSource` at a relational database,
 annotates a method, and gets durable, cluster-safe, at-least-once job execution.
 
 The name comes from the Mohs hardness scale; the project description in the root `pom.xml` is
-*"Job scheduling for Java/Spring Boot"*, published under `https://mohs.io` and licensed Apache 2.0
+*"Job scheduling for Java/Spring Boot"*, maintained at `github.com/robsonkades/mohs` and licensed Apache 2.0
 (`LICENSE`, `NOTICE`).
 
 ## The problem it solves
@@ -22,7 +22,7 @@ requires answers that are hard to get right:
 | Question | Mohs' answer | Where |
 | --- | --- | --- |
 | Two nodes see the same due trigger. Who fires? | A compare-and-set on `mohs_job_definitions.next_fire_at`; the loser does nothing | `io.mohs.store.jdbc.JdbcTriggerFirer` |
-| Two nodes see the same queued execution. Who runs it? | `SELECT … FOR UPDATE SKIP LOCKED` (or `READPAST` on SQL Server) inside one transaction that also writes ownership | `io.mohs.store.jdbc.dialect.JdbcDelegate` |
+| Two nodes see the same queued execution. Who runs it? | `SELECT … FOR UPDATE SKIP LOCKED` (or `READPAST` on SQL Server) inside one transaction that also writes ownership | `io.mohs.store.jdbc.delegate.JdbcDelegate` |
 | A node dies mid-execution. What happens to the work? | Its node lease expires; a peer's reaper reclaims the ownership row and reschedules through the retry budget | `Engine#reapOrphanedLeases` |
 | The dead node comes back and finishes the job. | Every write over owned work is fenced by `(node_id, epoch, attempt)`; the zombie's result is discarded | `io.mohs.engine.LeaseStore` |
 | The clock jumps backwards. | All "when" values come from an injected `Clock`; all durations use `System.nanoTime()`; a backwards jump is logged with its operational consequence | `Engine#renewNodeLease` |
@@ -71,7 +71,7 @@ explain otherwise-surprising choices:
 
 ## Current maturity
 
-- Version `0.0.1-SNAPSHOT`; no released artifact and no release process in the repository.
+- Version `0.0.1-SNAPSHOT`; the repository contains CI and a manual release workflow; see [build and publishing](../12-build/modules.md).
 - Database tiers, from `MohsAutoConfiguration#mohsJdbcDelegate`: PostgreSQL, MySQL 8.0+ and SQL
   Server are production dialects; **H2 is explicitly a test/dev tier** and logs a WARN at boot when
   selected.

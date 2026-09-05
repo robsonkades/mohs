@@ -1,6 +1,6 @@
 # Error handling
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## Exception taxonomy
 
@@ -27,7 +27,7 @@ This is the operative taxonomy — not by exception type, but by what the system
 | Class | Example | Treatment | Retryable |
 | --- | --- | --- | --- |
 | **Caller error** | Blank job id, negative delay, `at` and `delay` together, a reserved actor | Fail fast at the boundary with a message naming the field | No |
-| **Configuration error** | Missing dialect, duplicate job id, unsupported handler signature, `@OnExecution` present | **Fail the boot** | No |
+| **Configuration error** | Missing dialect, duplicate job id, unsupported handler signature, invalid `@OnExecution` declaration | **Fail the boot** | No |
 | **Transient infrastructure** | The payload query threw, the tick step threw, the rate-limit lock timed out | Log, back off, leave ownership intact; a reaper resolves it if this node dies | Yes, implicitly |
 | **Terminal-by-nature** | Unreadable payload, removed definition, unresolvable runner | Terminal `FAILED` with `attemptsExhausted = false` | No |
 | **Handler failure** | Whatever the job threw | Retry through the budget, or terminal | Per the budget |
@@ -84,7 +84,7 @@ Every error crosses the wire as RFC 7807 `application/problem+json`. See
 | `@RestControllerAdvice(basePackages = "io.mohs.rest")`, **never global** | An unscoped advice applies to every controller in the context, so enabling the API would start deciding the **host application's** error handling — one of its `@ResponseStatus(NOT_FOUND)` methods would become a 500 because of the `@ExceptionHandler(Exception.class)` here, without a line of the app changing |
 | `@Order(HIGHEST_PRECEDENCE)` | On Mohs' endpoints the house advice must beat a generic advice from the host. Without it, a tie between two `ResponseEntityExceptionHandler`s at `LOWEST_PRECEDENCE` falls to bean registration order |
 | Extends `ResponseEntityExceptionHandler` | Inherits framework-error translation (malformed JSON, missing parameter) for free |
-| `handleHttpMessageNotReadable` is overridden | The base implementation replaces the message with a fixed "Failed to read request", losing the well-written validation the request records already perform in their compact constructors. When the root cause is an `IllegalArgumentException` it returns a 422 with the original message; genuinely malformed JSON still falls through to Spring's default |
+| `handleHttpMessageNotReadable` is overridden | The base implementation replaces the message with a fixed "Failed to read request", losing the well-written validation the request records already perform in their compact constructors. Only a Jackson-identified Mohs REST constructor validation returns its public message with 422. Other deserialization failures use a generic response; the cause walk is bounded at 64 |
 | The catch-all logs the cause and returns a generic body | `"An unexpected error occurred"` — never `ex.getMessage()`, so internal detail does not leak to an untrusted caller |
 | `type` stays at `about:blank` | The `mohs.io` domain has no confirmed URI registry, and inventing one would be worse than omitting it |
 
@@ -125,7 +125,9 @@ Silent acceptance would mean silent misbehaviour:
 | Blank id on a stereotype | The concise form to use |
 | Unsupported handler signature | The method, the reason, and the count found |
 | `@RecurringJob` with no trigger | The three attributes to set, or `@OnDemandJob` |
-| `@OnExecution` present | To register an `ExecutionListener` bean instead |
+| Invalid `@OnExecution` signature or filter | The method and incompatible event selection |
+| Missing named `RetryPolicy` bean | The affected job and bean name |
+| Hikari acquisition timeout at least the node lease | Lower `spring.datasource.hikari.connection-timeout` or adjust the lease |
 | `@MohsJob` colliding with a `PROGRAMMATIC` definition | The id and the method |
 | Definitional drift under `on-conflict=fail` | The diff |
 | Duplicate runner or window name | Both sources |

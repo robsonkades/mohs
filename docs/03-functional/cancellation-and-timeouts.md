@@ -1,6 +1,6 @@
 # Cancellation and timeouts
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Cancellation in Mohs is **cooperative**. Nothing kills a thread; the handler decides when to stop.
 
@@ -102,8 +102,10 @@ sweep — zero new threads.
 | Outcome | Passive — recorded when the handler actually stops, never by the tick |
 | Active in | `RUNNING`, `PAUSED` and `DRAINING` |
 
-A handler that ignores the interrupt stays a zombie until it finishes on its own, and its result is
-discarded by the fence. That is precisely the case the watchdog bound exists for.
+A handler that ignores the interrupt remains owned while the node is alive. A timeout alone
+does not invalidate its fence, and a later normal return still records success. If a watchdog
+releases ownership, or a peer reclaims it after node failure, the old handler becomes a zombie
+and its later completion loses the fence.
 
 ## The interrupt window
 

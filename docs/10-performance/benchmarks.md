@@ -1,6 +1,6 @@
 # Benchmarks and harnesses
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`mohs-benchmark`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`mohs-benchmark`)
 
 Everything measurable lives in `mohs-benchmark`, a module that is **never published**. There is no
 JMH in the project.
@@ -28,7 +28,7 @@ event executor at the same ceiling of 16, the same shutdown order. That is not f
 about lost work drawn from a wiring nobody runs in production is not admissible as release
 evidence.*
 
-### The nine scenarios
+### The ten scenarios
 
 | Scenario | Question it answers |
 | --- | --- |
@@ -40,6 +40,8 @@ evidence.*
 | `BatchCompletionScenario` | Two nodes completing the second-to-last and last members simultaneously must produce **one** `BatchCompleted`. Half the members fail on purpose, with `retries(1)` — which is what makes the assertion **falsifiable**: each failing member is invoked twice and must count once, separating "counted the terminal failure" from "counted every attempt" |
 | `RateLimitCeilingScenario` | Does the cluster-wide ceiling hold under concurrency, **and** does an unlimited job pay for its limited neighbour? (A round that fails the CAS is undone entirely, and may contain unlimited executions.) The criterion is the token bucket's envelope, `t_k >= (k − max) × window/max`, not a sliding window — demanding the latter would demand a mechanism that was deliberately not chosen |
 | `OverviewLatencyScenario` | The cost of `GET /overview` once the database is no longer small. It exposes that the endpoint's two reads have **opposite** cost profiles: the throughput count should cost the window, the backlog count costs the whole queue |
+| `BurstAbsorptionScenario` | How a cluster absorbs and drains a sudden queue burst, including completion latency and backlog shape over time |
+| `ScheduleDensityScenario` | How trigger scanning behaves as the number and density of recurring schedules increase |
 
 ### Running one
 

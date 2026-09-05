@@ -1,6 +1,6 @@
 # Concurrency model
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Concurrency is the project's declared priority. This document is the complete inventory of threads,
 shared state, and the reasoning behind each choice.

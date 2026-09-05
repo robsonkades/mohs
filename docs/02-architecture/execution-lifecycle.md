@@ -1,6 +1,6 @@
 # Execution lifecycle
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 This is the single most important document for understanding Mohs at runtime. It describes the
 states an execution passes through, *which storage fact defines each state*, and *which transaction*
@@ -20,8 +20,8 @@ stateDiagram-v2
     RUNNING --> RETRY_WAITING : completion, budget remains<br/>(lease DELETE + attempt INSERT + queue INSERT)
     RETRY_WAITING --> ENQUEUED : visible_at reached<br/>(no write — the visibility rule)
     ENQUEUED --> CANCELLED : cancelQueued<br/>(queue DELETE + advisory terminal)
-    RUNNING --> ENQUEUED : requeue<br/>(admission loss · stray lease · watchdog release)
-    FAILED --> RETRY_WAITING : manual retry (operator)<br/>bypasses the budget
+    RUNNING --> ENQUEUED : requeue<br/>(admission loss · stray lease)
+    FAILED --> ENQUEUED : manual retry (operator)<br/>bypasses the budget
     SUCCEEDED --> [*]
     FAILED --> [*]
     CANCELLED --> [*]
@@ -168,7 +168,7 @@ Every way an execution can leave `RUNNING` other than by finishing, and how it i
 
 | Failure | Detection | Resolution | Guarantee |
 | --- | --- | --- | --- |
-| Handler throws, budget remains | The dispatcher's `catch` | Lease deleted, attempt recorded, queue entry reborn with backoff — **one transaction** | Retry, no duplicate |
+| Handler throws, budget remains | The dispatcher's `catch` | Lease deleted, attempt recorded, queue entry reborn with backoff — **one transaction** | Retry; handler side effects may repeat |
 | Handler throws, budget exhausted | `RetrySchedule.nextRetryAt` returns empty | Terminal `FAILED`; `Failed(attemptsExhausted = true)` published | Terminal |
 | Node dies (kill, crash, OOM) | Its node lease expires; a peer's reaper sees the lease with an owner absent from the live set | Synthetic `FAILED` attempt + requeue through the budget, all fenced by the **dead** node's `(node_id, epoch, attempt)` | At-least-once when `retries > 0`; at-most-once when `retries = 0` |
 | Node stalls longer than its lease, then resumes | The node itself, in `renewNodeLease`, sees `now >= nodeLeaseExpiresAt` | Bumps its own epoch and logs a WARN. Every in-flight completion it later attempts loses the fence and is discarded | No double completion |
@@ -180,13 +180,13 @@ Every way an execution can leave `RUNNING` other than by finishing, and how it i
 | Runner name does not resolve | `RunnerRegistry#resolve` throws `NoSuchElementException` | Terminal `FAILED` naming the runner | Terminal |
 | No handler registered for the job | `HandlerRegistry#find` empty at dispatch time | Goes **through the retry budget** on purpose: during a rolling update another node running the newer version may claim the retry | Retry |
 | Shutdown grace expires with work in flight | `Engine#escalateAfterDrainGrace` | Flag + interrupt; attempts fail with a node-shutdown cause and follow the normal retry | Retry |
-| Admission lost after the claim (cap turned, rate limit taken) | `Engine#admit` | Requeued with the same attempt and `visible_at = now`; counted in `mohs.claim.requeued` | No budget consumed |
+| Admission lost after the claim (cap turned, rate limit taken) | `Engine#admit` | Requeued with the same attempt; delayed by `max-poll-interval` above the 1,000-job exclusion cap; counted in `mohs.claim.requeued` | No budget consumed |
 
 ## Two windows that are declared, not hidden
 
 1. **The group-commit durability window.** With batching on (the default), the gap between "the
-   handler finished" and "the result is durable" grows from about 1 ms to at most the flush interval
-   (5 ms). A crash in that window re-executes up to `flushSize` results beyond those in flight. The
+   handler finished" and "the result is durable" includes the nominal 5 ms flush interval,
+   queueing and database commit time. A crash may cause finished work to be invoked again. The
    contract was already at-least-once — this changes the *exposure to duplicates*, not the
    guarantee. `mohs.engine.completion-flush-on-every-result=true` restores the old behaviour.
 2. **The cancel-flag window.** The cooperative cancel flag lives on the lease and dies with it. A

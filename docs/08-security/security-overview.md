@@ -1,6 +1,6 @@
 # Security overview
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 > **The single most important fact: the Mohs REST API and dashboard perform no authentication and no
 > authorization.** The host application's security configuration is the only protection. This is a
@@ -48,7 +48,8 @@ flowchart LR
     api --> db
 ```
 
-Everything inside the perimeter is trusted. **Mohs draws no boundary of its own.**
+Mohs relies on the host security perimeter and on control of the shared database. It does not add
+an authentication boundary of its own.
 
 ## What an unauthenticated caller can do
 
@@ -74,9 +75,9 @@ The boot WARN states this in the operator's own words:
 > resume and reschedule jobs, and change rate limits. Restrict it to an internal network, or put a
 > gateway/mTLS in front of /api/mohs/v1 and /mohs-ui before exposing this instance.`
 
-Note also that `GET /jobs` returns `handlerType` — a fully qualified class name — and that a 422 on
-`POST .../schedule` echoes Jackson's message, which names the payload class. Both are
-implementation disclosure, useful to an attacker fingerprinting the application.
+Note also that `GET /jobs` returns `handlerType`, a fully qualified class name. Payload conversion
+failures use a controlled 422 response and do not expose Jackson diagnostics, Java class names or
+rejected values.
 
 ## Securing it — the recommended pattern
 
@@ -87,7 +88,7 @@ covers them:
 @Bean
 SecurityFilterChain mohsOperations(HttpSecurity http) throws Exception {
     return http
-        .securityMatcher("/api/mohs/**", "/mohs-ui/**")
+        .securityMatcher("/api/mohs/**", "/mohs-ui", "/mohs-ui/**")
         .authorizeHttpRequests(a -> a
             .requestMatchers(HttpMethod.GET, "/api/mohs/**").hasRole("MOHS_VIEWER")
             .anyRequest().hasRole("MOHS_OPERATOR"))

@@ -1,12 +1,13 @@
 # System context
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## The shape of a Mohs deployment
 
 Mohs has no process of its own. It runs **inside** the host application's JVM, on the host's
-`DataSource`, on the host's web server. There is exactly one moving part it adds: a single
-platform thread named `mohs-engine-loop` per node.
+`DataSource`, on the host's web server. Each node has a platform thread named `mohs-engine-loop`, bounded job runners,
+completion flushing and event publication. The optional REST stream adds its own
+snapshot scheduler. See the [thread inventory](../04-engineering/concurrency.md#thread-inventory).
 
 ```mermaid
 flowchart TB
@@ -90,8 +91,8 @@ can do. See [security overview](../08-security/security-overview.md).
 
 ## Deployment shape
 
-The repository contains **no** Dockerfile, Kubernetes manifest, Helm chart, Terraform module or CI
-pipeline. Mohs is packaged as jars and inherits the host application's deployment entirely.
+The repository contains no deployment manifests. GitHub Actions workflows build, test and
+release the library; they do not deploy a running scheduler service. Mohs is packaged as jars and inherits the host application's deployment entirely.
 
 What the code *does* assume about the runtime environment:
 

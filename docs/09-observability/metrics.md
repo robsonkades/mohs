@@ -1,6 +1,6 @@
 # Metrics
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`io.mohs.engine.EngineMetrics`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`io.mohs.engine.EngineMetrics`)
 
 Metrics are **always on**. A host with Micrometer in the context (Actuator, Prometheus) sees
 everything under `mohs.*`; with no registry, a local `SimpleMeterRegistry` keeps the engine
@@ -11,7 +11,7 @@ identical — inert for the host, and with **no conditional path in the hot code
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `mohs.claim.latency` | Timer | — | Duration of one claim round against the store |
-| `mohs.claim.batch.size` | Distribution summary | — | Executions claimed per round. **Full batches mean claim-bound; small ones mean dispatch-bound** |
+| `mohs.claim.batch.size` | Distribution summary | — | Executions claimed per round. Interpret together with backlog, admission guards and dispatch occupancy |
 | `mohs.claim.requeued` | Counter | `reason` | Post-claim admission losses |
 | `mohs.dispatch.latency` | Timer | `job` | **From `scheduled_at` to the handler's start — the SLO visible to the user** |
 | `mohs.attempt.total` | Counter | `job`, `outcome` | Every confirmed attempt |
@@ -33,7 +33,8 @@ identical — inert for the host, and with **no conditional path in the hot code
 | `reason` on `mohs.lease.reclaimed` | `retry`, `attempts_exhausted`, `job_retired`, `cancelled` |
 | `step` on `mohs.tick.failed` | `signal-job-timeouts`, `poll-cancel-requests`, `signal-watchdog-overruns`, `queue-depth-sample`, `idempotency-prune`, `history-prune`, `reap-orphaned-leases` (counted once per failed reclaim chunk of 50, so up to 10 per tick), `reconcile-stray-leases`, `stale-node-purge`, and `tick` — the whole tick dying outside a maintenance step: the heartbeat, the definitions read, the due-trigger read or the claim |
 
-**Label values are contract, just as much as the names**: lower case, `snake_case`. The first saved
+**Label values are contract, just as much as the names**: preserve the exact spelling above.
+Outcomes use lower case, reclaim reasons use underscores and several step/requeue values use hyphens. The first saved
 dashboard freezes that vocabulary.
 
 ## The cardinality rule
@@ -64,7 +65,8 @@ sum by (job) (rate(mohs_attempt_total[5m]))
 sum by (job) (rate(mohs_execution_total[5m]))
 ```
 
-A value near 1.0 means jobs succeed first time. A rising value means retries are climbing.
+A value near 1.0 is consistent with one attempt per terminal execution, including terminal
+failures. Compare it with failure rates; a short window can also differ while jobs remain in flight.
 
 ## Reading the operational picture
 
@@ -93,7 +95,7 @@ Sustained near 1.0 means the node is dispatch-bound. Combine with the claim batc
 | --- | --- | --- |
 | Consistently full (= `batch-size`) | Low | **Claim-bound** — raise `claim-rounds` or `batch-size`, or lower `poll-interval` |
 | Consistently small | High | **Dispatch-bound** — raise `dispatch-concurrency`, or the work is genuinely slow |
-| Consistently small | Low | The queue is empty — the system is idle |
+| Consistently small | Low | Check for an empty shard, future work or admission guards; this alone does not prove the whole queue is empty |
 | Full | High | Both are saturated — add nodes |
 
 ### Is something wrong?
@@ -143,7 +145,7 @@ stopped node**, and the `reason` label already carries the triage.
 | --- | --- |
 | Execution duration source | The **persisted `Attempt` timestamps** — the same window the dashboard reads, so there is a single source |
 | Claim latency source | `System.nanoTime()` in the caller, honouring the project's monotonic-time invariant |
-| Behaviour during a backwards clock resync | The duration window may come out negative and Micrometer's `Timer` **silently drops the sample**. Missing samples during a resync is expected behaviour, not data loss |
+| Behaviour during a backwards clock resync | `DatabaseClock` keeps emitted instants nondecreasing when resynchronizing. Application-clock mode or a custom clock can still regress; Micrometer drops negative durations |
 | Gauge strength | `strongReference(true)` — without it the gauge's ephemeral method-reference supplier would vanish at the first GC |
 
 ## A recorded limitation
@@ -194,7 +196,14 @@ management:
     web:
       exposure:
         include: health,metrics,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        mohs.dispatch.latency: true
 ```
+
+The histogram setting is required for the `_bucket` queries above; verify the series on the
+host's Prometheus endpoint and adapt alert thresholds to the workload.
 
 Mohs adds no Actuator endpoint of its own; it contributes a `HealthIndicator` under the `mohs` key
 when the host brings the actuator — see [health and diagnostics](health-and-diagnostics.md).

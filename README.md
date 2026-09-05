@@ -54,6 +54,8 @@ boundary.
 
 ## Quick start
 
+For a complete walkthrough, see [Getting started](docs/01-overview/getting-started.md).
+
 ```xml
 <dependencyManagement>
   <dependencies>
@@ -193,8 +195,8 @@ a regression.
 
 Version `0.0.1-SNAPSHOT` — **no released artefact yet**, but the release pipeline exists
 (`.github/workflows/release.yml`, signed, to the Central Portal), and CI runs the full build on
-every push. See [technical debt](docs/technical-debt.md) for the complete, evidence-backed gap list
-and [CHANGELOG.md](CHANGELOG.md) for what `0.1.0` will contain.
+push to `main` and pull requests targeting it. See the [documentation](docs/README.md) for usage
+and operational requirements, and [CHANGELOG.md](CHANGELOG.md) for the changes in this checkout.
 
 Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) · Security: [SECURITY.md](SECURITY.md)
 

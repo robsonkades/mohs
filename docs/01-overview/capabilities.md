@@ -1,6 +1,6 @@
 # Capabilities
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 The complete feature inventory, each row traceable to code. Status markers are defined in the
 [documentation portal](../README.md#conventions-used-in-this-documentation).

@@ -1,6 +1,6 @@
 # Retry and failure handling
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## The budget
 
@@ -123,7 +123,8 @@ This is the node-death alerting hook.
 ## Manual retry
 
 `Mohs.retry(executionId)` / `POST /executions/{id}/retry` rearms the **same** row as
-`RETRY_WAITING`, due now, and the new attempt travels the normal claim path.
+queued work due now, and the new attempt travels the normal claim path. A due retry
+is reported as `ENQUEUED`; `RETRY_WAITING` describes a retry whose `visible_at` is still in the future.
 
 ```sql
 UPDATE mohs_execution SET state = 'PENDING', finished_at = NULL

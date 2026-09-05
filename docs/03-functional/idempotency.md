@@ -1,6 +1,6 @@
 # Idempotency
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Mohs implements the **Idempotent Receiver** pattern: a caller supplies a key, and a repeated request
 carrying the same key returns the original receipt instead of creating a second execution.
@@ -25,7 +25,8 @@ Content-Type: application/json
 {"payload": {"invoiceId": 4711}}
 ```
 
-Both return `202 Accepted` with the same `executionId` on every repeat.
+The Java API returns `Enqueued`; REST returns `202 Accepted`. Repeats resolve to the
+same `executionId` while the key and its referenced execution are retained.
 
 ## The mechanism
 
@@ -119,7 +120,8 @@ independent of history's physical layout. Note the following about the batched w
   unit aborts** — per-item resolution is the caller's job (retrying without the duplicate), not the
   port's.
 - Batch members are enqueued **without** idempotency keys (`MohsImpl#enqueueMembers` passes `null`).
-  A batch's all-or-nothing creation is its own protection.
+  A batch's all-or-nothing creation prevents partial persistence, but repeating a successful
+  `mohs.batch(...)` call creates another batch; it is not request deduplication.
 
 ## What is deliberately not deduplicated
 
@@ -129,7 +131,7 @@ independent of history's physical layout. Note the following about the batched w
 | `POST /jobs/{k}/schedule` with an `Idempotency-Key` header | Yes | Same mechanism |
 | `POST /jobs/{k}/schedule` **without** the header | No | Nothing to deduplicate against |
 | **Scheduler occurrences** | **No, deliberately** | The trigger's advance-and-insert is atomic, so a crash between them can neither lose nor duplicate an occurrence. A key here would be subject to a retention window; atomicity is not |
-| **Batch members** | No | The batch's transaction is the protection |
+| **Batch members** | No | Atomic creation prevents partial batches, not duplicates of repeated batch calls |
 | **Retries** | No | The same execution row is reused; nothing new is inserted |
 | **Manual retry** | No | Same reason. Its natural idempotence is the CAS — repeating the POST finds the execution already rearmed and returns 409 naming the current state |
 
@@ -143,7 +145,7 @@ happen twice:
 | --- | --- |
 | A retry after a failure | Normal operation |
 | A reclaim after node death | Whenever a node dies mid-execution |
-| A completion lost inside the group-commit window (up to 5 ms) during a crash | Rare |
+| A completion lost while waiting for the next group-commit flush during a crash | Rare |
 | A zombie whose result is fenced out, then a re-execution elsewhere | Whenever a node stalls past its lease |
 
 Recommended handler-side techniques, all outside Mohs' scope:

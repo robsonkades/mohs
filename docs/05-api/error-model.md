@@ -1,6 +1,6 @@
 # Error model (RFC 7807)
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`io.mohs.rest.error`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`io.mohs.rest.error`)
 
 Every error the Mohs REST API returns is `application/problem+json`, per RFC 7807.
 
@@ -11,7 +11,7 @@ Every error the Mohs REST API returns is `application/problem+json`, per RFC 780
   "type": "about:blank",
   "title": "Job not found",
   "status": 404,
-  "detail": "No job registered for id 'send-invoce'",
+  "detail": "The requested job was not found",
   "instance": "/api/mohs/v1/jobs/send-invoce",
   "nearbyJobKeys": ["send-invoice"]
 }
@@ -30,18 +30,18 @@ Every error the Mohs REST API returns is `application/problem+json`, per RFC 780
 
 | Exception | Status | `title` | `detail` |
 | --- | --- | --- | --- |
-| `JobNotFoundException` | 404 | Job not found | The id; plus a `nearbyJobKeys` array |
-| `ExecutionNotFoundException` | 404 | Execution not found | The id |
-| `BatchNotFoundException` | 404 | Batch not found | The id |
+| `JobNotFoundException` | 404 | Job not found | Generic not-found message; `nearbyJobKeys` is included when suggestions exist |
+| `ExecutionNotFoundException` | 404 | Execution not found | Generic not-found message |
+| `BatchNotFoundException` | 404 | Batch not found | Generic not-found message |
 | `RateLimitNotFoundException` | 404 | Rate limit not found | Names the property to declare: `mohs.rate-limits.<name>.max/.window` (or a `@Bean RateLimit`), and says that `PATCH` only adjusts what boot declared |
 | `InvalidActorException` | 400 | Invalid actor | Which rule the `X-Mohs-Actor` header broke |
 | `ExecutionNotRetryableException` | 409 | Execution not retryable | The current state, or the batch-membership explanation |
 | `PayloadValidationException` | 422 | Request validation failed | The message; plus a `field` extension |
-| `IllegalArgumentException` inside a deserialisation failure | 422 | Request validation failed | The original message from the record's compact constructor |
+| `IllegalArgumentException` from a Mohs REST request constructor, identified by Jackson | 422 | Request validation failed | The original message from the record's compact constructor |
 | `QueryTimeoutException`, `PessimisticLockingFailureException` | **503** | Resource busy | "A database row is under contention and nothing changed — retry in a few seconds" |
 | `UnsupportedOperationException` | 501 | Not implemented | "This operation is part of the v1 contract but is not implemented yet" |
 | Anything else | 500 | *(Spring's default)* | "An unexpected error occurred" — **never** the exception's message |
-| Malformed JSON with no `IllegalArgumentException` in the cause chain | 400 | *(Spring's default)* | Spring's default |
+| Malformed JSON or an unrecognized deserialization failure | 400 | *(Spring's default)* | Spring's default |
 | A missing or untypeable request parameter | 400 | *(Spring's default)* | Inherited from `ResponseEntityExceptionHandler` |
 
 ## Status-code choices worth explaining
@@ -111,10 +111,12 @@ The base implementation replaces the message with a fixed `"Failed to read reque
 well-written validation the request records already perform in their compact constructors — thrown
 *during* Jackson's deserialisation.
 
-The override walks the cause chain for an `IllegalArgumentException`. If it finds one, it returns
-422 with the original message (no `field` extension, because that exception does not carry one — the
-message already names the field by convention). Genuinely malformed JSON, with no
-`IllegalArgumentException` in the chain, still falls through to Spring's default.
+The override inspects at most 64 causes. It returns 422 only when Jackson identifies
+a constructor in `io.mohs.rest.*` whose direct cause is `IllegalArgumentException`.
+That constructor's validation message is public; there is no `field` extension on this path.
+Other conversion failures, malformed JSON, cycles and deeper unrecognized chains retain
+the generic 400 response. Payload conversion to an application's handler type produces
+a 422 with a controlled message, without exposing Jackson internals or Java class names.
 
 ## Client guidance
 

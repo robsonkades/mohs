@@ -1,10 +1,9 @@
 # Contributing
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
-There is no `CONTRIBUTING.md` in the repository and no formal process document. What follows is
-reconstructed from the practices visible in the code and the git history, and should be read as
-*"how this codebase is actually maintained"* rather than as a policy anyone has signed.
+Start with [CONTRIBUTING.md](../../CONTRIBUTING.md) for contribution scope and bug reports.
+This guide explains the development conventions and documentation expectations.
 
 ## The bar
 
@@ -45,7 +44,7 @@ The full treatment is in [coding standards](../04-engineering/coding-standards.m
 | Rule | Detail |
 | --- | --- |
 | Identifiers | English, using the domain vocabulary |
-| Prose in code | Historically Portuguese; **write new prose in English**. Never mix languages within one file. `mohs-ui` is English throughout, deliberately |
+| Prose in code | English for documentation, Java and frontend prose; preserve historical SQL comments when unrelated to the change |
 | Comments | The **why** the code cannot show. Never narrate the what, and never narrate the change itself |
 | Records for value objects; validation in the compact constructor | An invalid object must not be constructible |
 | `@NullMarked` on every production package | Convention; nothing in the build verifies it |
@@ -80,25 +79,14 @@ The ones most likely to catch a newcomer:
 | `engine_never_reads_wall_clock_directly` | Inject a `Clock`. `System.nanoTime()` is fine — it is monotonic time, not a wall-clock "now" |
 | `ids_are_generated_as_uuidv7_never_v4` | `UUIDv7.randomUUIDString()`. The rule catches method references too |
 | `all_production_packages_declare_null_marked` | A new package needs a `package-info.java` |
-| `engine_is_free_of_jdbc` | A `ResultSet` in a port signature fails the build |
+| `engine_is_free_of_jdbc` | Do not put `ResultSet` or other JDBC types in a port signature; review enforces this rule |
 | `no_synchronized_methods_in_concurrency_critical_code` | Use `ReentrantLock` |
 
-## Documenting a decision
+## Documenting public behavior
 
-A decision is significant when it is expensive to reverse, when it constrains future work, or when a
-future reader would otherwise be tempted to "fix" it. The tell is simple: **if the code needs a
-paragraph of comment explaining why it is not the obvious thing, that paragraph is the decision.**
-
-Write it where the reader will meet it, in the shape **context → decision → consequences →
-alternatives**:
-
-- the **document that owns the subject** — a schema decision belongs in `06-data/`, a lifecycle one
-  in `13-operations/`, and so on, with the trade-off stated rather than only the outcome;
-- a **comment on the code** that would otherwise read as a mistake, giving the argument itself.
-
-Cite the argument, never a record number. A reader must be able to understand the line in front of
-them without opening a second file, and a number is exactly the kind of pointer that outlives what it
-pointed at.
+Explain usage, guarantees, limitations and operational requirements in the guide that owns
+the subject. Explain necessary implementation reasoning in a nearby code comment.
+Keep internal decision records, findings, audits and technical-debt ledgers out of `/docs`.
 
 ## Updating this documentation
 
@@ -109,7 +97,7 @@ pointed at.
 | An endpoint was added | [Endpoints](../05-api/endpoints.md) **and** verify it is registered as a bean |
 | The schema changed | [Data model](../06-data/data-model.md), [schema](../06-data/schema.md), [indexes](../06-data/indexes.md), [migrations](../06-data/migrations.md) |
 | A metric was added | [Metrics](../09-observability/metrics.md) — **label values are contract** |
-| A gap was found | [Technical debt](../technical-debt.md), with evidence and impact |
+| A limitation affects users | Document its observable effect and available workaround in the relevant guide |
 | A performance number was measured | [Performance characteristics](../10-performance/performance-characteristics.md), **with the environment stated** |
 
 The documentation's own rules: **never invent behaviour**, mark what could not be determined as

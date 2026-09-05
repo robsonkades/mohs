@@ -1,6 +1,6 @@
 # Health and diagnostics
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## Health checks
 
@@ -58,7 +58,7 @@ A database outage would otherwise restart every healthy pod.
 | --- | --- |
 | Liveness | The process responds. Do **not** include the engine's state — a `DRAINING` node is deliberately winding down, and a `PAUSED` node is an operator's decision |
 | Readiness | `state == RUNNING`, if you want a paused node removed from a load balancer. Note that Mohs' work does not arrive through the load balancer, so readiness matters only for the REST API and the dashboard |
-| Startup | Boot can take a while when migrations run. `startupProbe` is the right mechanism, not a guessed `initialDelaySeconds` |
+| Startup | Boot can take time during bean registration and the initial database-clock sample. `startupProbe` is the right mechanism, not a guessed `initialDelaySeconds` |
 
 ## Tracing
 

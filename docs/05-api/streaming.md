@@ -1,6 +1,6 @@
 # Dashboard SSE stream
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`io.mohs.rest.overview.OverviewStreamBroadcaster`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`io.mohs.rest.overview.OverviewStreamBroadcaster`)
 
 `GET /overview/stream` — `text/event-stream`.
 
@@ -9,11 +9,11 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`io.
 **Polling moved to the server, not event delivery.** Each tick emits the *complete current state*,
 not a delta and not a change notification.
 
-That distinction is what makes the endpoint compatible with the design decision that v1 carries no
-SSE event bus: that decision rejected best-effort *event* delivery without a durable table, whereas
-a periodic snapshot promises no durability at all.
+Use the execution listing and detail endpoints to inspect persisted history. The snapshot
+stream supports a live dashboard and carries no delivery or replay guarantee.
 
-**A disconnection loses nothing.** The next frame is the whole snapshot again.
+After reconnecting, the next frame contains current state. Intermediate transitions can be
+missed; this endpoint is not a durable event log or a complete execution history.
 
 ## The frames
 
@@ -178,5 +178,5 @@ es.onerror = () => { /* the browser reconnects; the next frame is the whole snap
 | No per-client filtering | Every subscriber receives all five events |
 | Fixed 2 s cadence | Not configurable today |
 | Frames may arrive out of order across a reconnect | `asOf` exists so a client can discard a stale frame; the server also avoids producing the reorder on the initial-snapshot path |
-| SQL Server needs RCSI | `READ_COMMITTED_SNAPSHOT ON` is a boot requirement of the dialect (DR-001), so a running system already has it — the counts read the last committed version without blocking |
+| SQL Server needs RCSI | `READ_COMMITTED_SNAPSHOT ON` is a boot requirement of the dialect, so a running system already has it — the counts read the last committed version without blocking |
 | The reads inherit whatever `GET /overview` costs | On an idle database the throughput count costs the window (≈1.6 ms at 2 M rows); the backlog scan is what costs (≈13.2 ms at 500 k). Measured 2026-08-23 by `OverviewLatencyScenario`. **The number that still does not exist is the endpoint under load with a subscriber attached** |

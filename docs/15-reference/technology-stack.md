@@ -1,6 +1,6 @@
 # Technology stack
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`pom.xml`, `package.json`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`pom.xml`, `package.json`)
 
 Versions are taken from the build files. Where a version is managed by the Spring Boot BOM rather than
 pinned explicitly, that is stated instead of guessing a number.
@@ -33,7 +33,7 @@ the tree is written in its shape with the stable API.
 | Micrometer | BOM-managed (`micrometer-core`) | The `mohs.*` metrics | `mohs-engine` |
 | SLF4J | BOM-managed | Logging façade | Everywhere |
 | JSpecify | BOM-managed | Nullness annotations | Every module |
-| `io.github.robsonkades:uuidv7` | **1.1.0** | UUIDv7 generation | `mohs-engine`, `mohs-store-jdbc` |
+| `io.github.robsonkades:uuidv7` | **1.2.0** | UUIDv7 generation | `mohs-engine`, `mohs-store-jdbc` |
 | HikariCP | BOM-managed, supplied by the host | Connection pooling | The host's `DataSource` |
 
 **Not present anywhere**: any message-broker client, HTTP client, cloud SDK, cache client, ORM, or
@@ -117,17 +117,17 @@ no `lint`.**
 | **JSpecify over Spring's or JetBrains' annotations** | The emerging standard, and already available transitively |
 | **No migration engine at all** | The operator installs the schema; an embedded library does not run DDL against a database it does not own |
 
-## Absent tooling
+## Tooling and limits
 
 Listed so nobody looks for it:
 
 | Absent | Consequence |
 | --- | --- |
-| CI (any provider) | Nothing gates a commit |
-| Code coverage | No measurement, no threshold |
+| CI | GitHub Actions runs Maven verification on pushes to `main` and pull requests targeting `main` |
+| Coverage threshold | JaCoCo reports exist per module; no threshold or aggregate report |
 | Static analysis (Checkstyle, Spotless, PMD, SpotBugs, ErrorProne) | Formatting and style are consistent by convention |
-| Dependency vulnerability scanning | No automated CVE surfacing |
+| Dependency updates | Dependabot checks Maven, npm and GitHub Actions; CodeQL analyzes configured source languages |
 | `maven-enforcer-plugin` | No dependency-convergence check |
 | OpenAPI generation | The REST contract is documented in prose, here |
 | Distributed tracing | `ExecutionInterceptor` is the integration point |
-| A release profile | See [modules and publishing](../12-build/modules.md#release-process) |
+| Publishing | Sources, Javadoc and optional signing are configured in the POM; see [modules and publishing](../12-build/modules.md#release-process) |

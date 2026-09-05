@@ -1,6 +1,6 @@
 # Boundaries and fitness functions
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Mohs' architectural rules are not prose. They are **executable**, in three independent mechanisms.
 This document is the complete inventory, including the gaps each mechanism admits.
@@ -70,23 +70,3 @@ warning at the moment it is violated:
 | `poll-interval > node-lease-ttl / 3` | `Engine#start` | WARN naming the effective capped cadence — liveness wins, but silently would be a tuning mystery |
 | Duplicate job id, or a method with two job annotations | Boot | `IllegalStateException` naming both declaring methods. **Always fails**, unconditionally — this is identity, not drift |
 | `@OnExecution` with an impossible signature or filter | Boot | `IllegalStateException` — a method that could never be called must not boot |
-
-## Boundary violations found
-
-None, beyond what is recorded in [technical debt](../technical-debt.md). Specifically checked:
-
-- No production class outside `io.mohs.autoconfigure` references `io.mohs.engine` or
-  `io.mohs.store.jdbc` from a public package.
-- No module cycle exists in the reactor.
-- Test classes for `io.mohs.engine` living in `mohs-store-jdbc/src/test` and `mohs-test/src/test`
-  are a deliberate placement (engine tests that need a real store), not a production leak — no
-  production code crosses that boundary.
-
-## Recommended additions
-
-Not present today; listed with the concrete gap each would close.
-
-| Proposed fitness function | Gap it closes |
-| --- | --- |
-| A source scan for `synchronized (…) { }` in the engine and the store, and for `randomUUID` in the engine | Rules that used to be checked and no longer are — `KeyGenerationScanTest` restored the UUIDv7 invariant for the store, where ids become rows, but the engine is outside its reach |
-| A dependency-convergence or `maven-enforcer` rule | There is no enforcer plugin in the build today |

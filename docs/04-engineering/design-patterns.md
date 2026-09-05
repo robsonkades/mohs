@@ -1,6 +1,6 @@
 # Design patterns in use
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Only patterns that are genuinely present are listed. Where the code names a pattern in its own
 Javadoc, that is noted — the project's rule is that a pattern is named only when the problem it

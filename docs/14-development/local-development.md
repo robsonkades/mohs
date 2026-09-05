@@ -1,6 +1,6 @@
 # Local development
 
-Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ Nothing else. No local database is required — H2 runs embedded, and Testcontai
 ## Clone and build
 
 ```bash
-git clone <repository-url> mohs
+git clone https://github.com/robsonkades/mohs.git mohs
 cd mohs
 
 ./mvnw clean verify                     # everything, including the frontend
@@ -33,9 +33,16 @@ The first build downloads Node and runs `npm ci`, so it is slow. Later builds ar
 `mohs-demo` is a Spring Boot application whose only purpose is development. It runs on H2 by default
 and defines three sample jobs.
 
+Build and install reactor dependencies once, then run the goal only in the application module:
+
 ```bash
-./mvnw -pl mohs-demo -am spring-boot:run
+./mvnw install -pl mohs-demo -am -DskipTests
+./mvnw -pl mohs-demo spring-boot:run -Dspring-boot.run.arguments="--spring.datasource.hikari.connection-timeout=3000"
 ```
+
+The install command packages the demo and dashboard; `-DskipTests` is for this local startup
+step, not test validation. Use `./mvnw.cmd` in PowerShell. The commands below use Bash line
+continuations; in PowerShell use one line and quote each `-D...` argument as a whole.
 
 Its defaults come from `SpringApplication#setDefaultProperties`, not from an `application.yaml` — a
 library must not ship one, and `defaultProperties` loses to any external source.
@@ -43,8 +50,8 @@ library must not ship one, and `defaultProperties` loses to any external source.
 To turn on the API and the dashboard:
 
 ```bash
-./mvnw -pl mohs-demo -am spring-boot:run \
-  -Dspring-boot.run.arguments="--mohs.api.enabled=true"
+./mvnw -pl mohs-demo spring-boot:run \
+  -Dspring-boot.run.arguments="--mohs.api.enabled=true --spring.datasource.hikari.connection-timeout=3000"
 ```
 
 Then:
@@ -57,24 +64,32 @@ Then:
 
 ### Running against PostgreSQL locally
 
-```bash
-docker run -d --name postgres -p 5432:5432 \
-  -e POSTGRES_PASSWORD=postgres postgres:16-alpine
+From the repository root, using a new local database:
 
-./mvnw -pl mohs-demo -am spring-boot:run -Dspring-boot.run.arguments="\
---mohs.jdbc.dialect=postgresql \
---spring.datasource.url=jdbc:postgresql://localhost:5432/postgres \
---spring.datasource.username=postgres \
---spring.datasource.password=postgres"
+```bash
+docker run -d --name mohs-postgres -p 127.0.0.1:5432:5432 \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=mohs postgres:16-alpine
+docker exec mohs-postgres pg_isready -U postgres -d mohs
 ```
 
-Apply `schema-<dialect>.sql` before starting — Mohs creates nothing.
+Wait for `pg_isready` to report that connections are accepted, then apply the installer:
+
+```bash
+docker cp mohs-store-jdbc/src/main/resources/schema-postgresql.sql mohs-postgres:/tmp/schema-postgresql.sql
+docker exec mohs-postgres psql -v ON_ERROR_STOP=1 -U postgres -d mohs -f /tmp/schema-postgresql.sql
+./mvnw -pl mohs-demo spring-boot:run -Dspring-boot.run.arguments="--mohs.jdbc.dialect=postgresql --spring.datasource.url=jdbc:postgresql://localhost:5432/mohs --spring.datasource.username=postgres --spring.datasource.password=postgres --spring.datasource.hikari.connection-timeout=3000 --spring.sql.init.mode=never --mohs.api.enabled=true"
+```
+
+These credentials are for the disposable local example. `spring.sql.init.mode=never`
+overrides the demo's H2 initializer: changing only the JDBC URL and dialect would otherwise
+apply `schema-h2.sql` to PostgreSQL. Use the [migration guide](../06-data/migrations.md)
+when upgrading an existing database.
 
 ## The dashboard development loop
 
 ```bash
 cd mohs-ui/frontend
-npm install
+npm ci
 npm run dev            # Vite on :5173, proxying /api/mohs to localhost:8080
 ```
 
@@ -91,7 +106,7 @@ exactly as it would when served from the jar.
 
 There is **no `npm test` and no linter** — see [testing strategy](../11-testing/testing-strategy.md).
 
-> **While `npm run dev` is running, `npm ci` fails with `EPERM`** because esbuild/rollup binaries are
+> **On Windows, `npm ci` can fail with `EPERM` while `npm run dev` is running** because esbuild/rollup binaries are
 > held open. Use `./mvnw verify -Dskip.frontend=true` for backend work — that is exactly why the flag
 > exists.
 
@@ -101,7 +116,7 @@ There is **no `npm test` and no linter** — see [testing strategy](../11-testin
 ./mvnw test                                        # the whole suite
 ./mvnw test -pl mohs-engine                        # one module
 ./mvnw test -pl mohs-engine -Dtest=ShardsTest      # one class
-./mvnw test -pl mohs-engine -Dtest=ShardsTest#shardIsStableAcrossJvms
+./mvnw test -pl mohs-engine -Dtest=ShardsTest#hashIsPinnedAcrossVersions
 ./mvnw verify -pl mohs-store-jdbc -am              # a module plus its dependencies
 ./mvnw verify -rf :mohs-rest                       # resume the reactor from a module
 ```
@@ -109,7 +124,7 @@ There is **no `npm test` and no linter** — see [testing strategy](../11-testin
 | Note | Detail |
 | --- | --- |
 | **Docker must be running** for `mohs-store-jdbc` | Otherwise: `Could not initialize class *TestSupport` — environment, not regression. Without Docker, skip them explicitly: `./mvnw test -DexcludedGroups=docker` (every container-backed class is `@Tag("docker")`; the H2 tests and the source scans still run, and a red suite then means a regression) |
-| A known flake | The SQL Server container occasionally fails to start in a full-reactor `verify`; it passes when the module is built in isolation |
+| Container startup failure | Inspect Docker resources and container logs before classifying the failure; rerun the affected module after resolving the cause |
 | Benchmarks are excluded by default | Surefire's default pattern does not match `*Scenario`. Run them by name |
 
 ```bash
@@ -120,8 +135,9 @@ pwsh mohs-benchmark/scripts/chaos-recovery.ps1 -Scenario S6
 ## Debugging
 
 ```bash
-./mvnw -pl mohs-demo -am spring-boot:run \
-  -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+./mvnw -pl mohs-demo spring-boot:run \
+  -Dspring-boot.run.arguments="--spring.datasource.hikari.connection-timeout=3000" \
+  -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:5005"
 ```
 
 ### Useful breakpoints
@@ -162,6 +178,8 @@ JFR's `jdk.VirtualThreadPinned` event.
 
 ### Watching the database
 
+The following queries use PostgreSQL syntax.
+
 ```sql
 SELECT COUNT(*) FROM mohs_ready WHERE visible_at <= now();
 SELECT node_id, COUNT(*) FROM mohs_lease GROUP BY node_id;
@@ -169,7 +187,8 @@ SELECT job_key, next_fire_at, paused FROM mohs_job_definitions;
 SELECT execution_id, state, scheduled_at FROM mohs_execution ORDER BY created_at DESC LIMIT 20;
 ```
 
-With H2, the demo enables the H2 console (`spring-boot-h2console` is a declared dependency).
+The demo includes `spring-boot-h2console`. To enable the console locally, set
+`spring.h2.console.enabled=true`; the dependency alone does not enable it.
 
 ## Common tasks
 

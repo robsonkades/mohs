@@ -1,6 +1,6 @@
 # 3. Functional documentation
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 Every meaningful behaviour Mohs implements, one document per feature area. Each answers: what it is,
 who triggers it, what it writes, what it guarantees, how it fails, and what it deliberately does not

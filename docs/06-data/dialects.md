@@ -1,6 +1,6 @@
 # Dialects
 
-Status: Active · Last Reviewed: 2026-09-01 · Source of Truth: Repository (`io.mohs.store.jdbc.delegate`)
+Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`io.mohs.store.jdbc.delegate`)
 
 ## Support tiers
 
@@ -61,7 +61,7 @@ binding the same things fails the build.
 
 They were seven until 2026-09-01: `visibleWorkExists` and `visibleWorkCount` carried `WITH (NOLOCK)`
 on SQL Server, and became byte-identical to the other three when the RCSI requirement retired the
-hint (DR-001).
+hint.
 
 PostgreSQL additionally replaces the claim *algorithm* rather than a statement: `claimReady` becomes
 one CTE instead of the portable three.
@@ -123,7 +123,7 @@ The dialect with the most divergences, all documented:
 | Timestamps | `DATETIME2`. **`TIMESTAMP` in T-SQL is a synonym for `ROWVERSION`**, a binary auto-incremented counter — not a date at all |
 | Conditional DDL | No `IF NOT EXISTS`; uses `IF OBJECT_ID(...) IS NULL` / `IF NOT EXISTS (SELECT … FROM sys.indexes)` guarding a **single statement without `BEGIN/END`**, because `ResourceDatabasePopulator` splits scripts on `;` and would break a block in half |
 | `mohs_idempotency` | PK `NONCLUSTERED`, clustered on `created_at` — a hard 900-byte limit on clustered keys, not a preference |
-| Parameter ceiling | ~2,100 per statement. `JdbcSupport.chunksOf` and the claim's `limit` bound (dispatch headroom, ≈1,000) keep every statement below it |
+| Parameter ceiling | ~2,100 per statement. `JdbcSupport.chunksOf` bounds supported list operations; keep claim and dispatch settings within driver limits, since the configurable headroom is not capped at 1,000 |
 | **RCSI** | **A boot requirement.** `SqlServerRcsiRequirement` refuses to start unless `READ_COMMITTED_SNAPSHOT` is ON — see below |
 | Read hints | **None.** The `WITH (NOLOCK)` the idle-gate probe used to carry was retired by the RCSI requirement |
 | `DatabaseClock` | Samples `SYSUTCDATETIME()`, not `CURRENT_TIMESTAMP`: the latter is a zoneless `DATETIME` the driver reads back in the JVM's zone, and it is only `datetime2` that resolves finer than ~3.3 ms |
@@ -131,14 +131,15 @@ The dialect with the most divergences, all documented:
 ### The RCSI requirement
 
 `READ_COMMITTED_SNAPSHOT ON` is a **stated requirement** of the SQL Server dialect, verified at
-boot and refused loudly with the exact command to run
-([DR-001](../15-design-decisions/records/DR-001-rcsi-required-on-sql-server.md)):
+boot. Enable it in a planned maintenance window:
 
 ```sql
 ALTER DATABASE [your_database] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE
 ```
 
-Azure SQL Database ships with it ON; on-premises servers default to OFF.
+`WITH ROLLBACK IMMEDIATE` disconnects conflicting sessions and rolls back their transactions.
+Run it with the database administrator after stopping or draining affected applications.
+Check the actual database setting rather than assuming a server default.
 
 Both sides of the requirement were measured. Without RCSI, one uncommitted claim holding X locks
 blocked the overview counts to a lock timeout (`Msg 1222`) — and the dashboard's stream runs them
