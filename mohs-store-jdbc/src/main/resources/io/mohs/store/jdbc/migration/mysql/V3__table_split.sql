@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS mohs_ready (
     attempt      INT          NOT NULL,
     visible_at   DATETIME(6)  NOT NULL,
     INDEX idx_mohs_ready_claim (shard, priority, visible_at)
-);
+) DEFAULT CHARACTER SET utf8mb4;
 
 CREATE TABLE IF NOT EXISTS mohs_lease (
     execution_id     VARCHAR(255) PRIMARY KEY,
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS mohs_lease (
     cancel_requested BOOLEAN      NOT NULL DEFAULT FALSE,
     INDEX idx_mohs_lease_node (node_id, epoch),
     INDEX idx_mohs_lease_job (job_key)
-);
+) DEFAULT CHARACTER SET utf8mb4;
 
 CREATE TABLE IF NOT EXISTS mohs_execution (
     execution_id    VARCHAR(255) PRIMARY KEY,
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS mohs_execution (
     INDEX idx_mohs_execution_created (created_at),
     INDEX idx_mohs_execution_job (job_key, execution_id DESC), -- ORDER BY/cursor do findPage — ver o V3 do Postgres
     INDEX idx_mohs_execution_corr (correlation_id)
-);
+) DEFAULT CHARACTER SET utf8mb4;
 
 CREATE TABLE IF NOT EXISTS mohs_attempt (
     execution_id VARCHAR(255) NOT NULL,
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS mohs_attempt (
     error        MEDIUMTEXT, -- mesmo racional do payload: stack trace não pode truncar em 64 KB
     PRIMARY KEY (execution_id, number),
     INDEX idx_mohs_attempt_throughput (finished_at, outcome)
-);
+) DEFAULT CHARACTER SET utf8mb4;
 
 CREATE TABLE IF NOT EXISTS mohs_idempotency (
     job_key         VARCHAR(255) NOT NULL,
@@ -67,4 +67,4 @@ CREATE TABLE IF NOT EXISTS mohs_idempotency (
     execution_id    VARCHAR(255) NOT NULL,
     created_at      DATETIME(6)  NOT NULL,
     PRIMARY KEY (job_key, idempotency_key)
-);
+) DEFAULT CHARACTER SET utf8mb4;

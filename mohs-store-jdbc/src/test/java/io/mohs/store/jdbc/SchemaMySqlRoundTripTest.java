@@ -69,6 +69,24 @@ class SchemaMySqlRoundTripTest {
         clock = new MutableClock(Instant.parse("2026-08-13T00:00:00Z"), ZoneId.of("UTC"));
     }
 
+    /**
+     * Every table declares its character set, so the two statements that compare {@code job_key}
+     * across tables never meet an "Illegal mix of collations" on a server whose default is not
+     * {@code utf8mb4}. The five tables of the table split forgot the clause once. The assertion is
+     * "the same collation as the first table", not "some utf8mb4 collation": two utf8mb4 collations
+     * mix just as illegally as utf8mb4 and latin1 do.
+     */
+    @Test
+    void everyTableSharesTheCollationOfTheFirstOne() {
+        List<String> tables = new JdbcTemplate(dataSource).queryForList(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()"
+                        + " AND table_name LIKE 'mohs_%' AND table_collation <> (SELECT t.table_collation"
+                        + " FROM information_schema.tables t WHERE t.table_schema = DATABASE()"
+                        + " AND t.table_name = 'mohs_job_definitions')", String.class);
+
+        assertThat(tables).as("tables whose collation differs from mohs_job_definitions").isEmpty();
+    }
+
     @Test
     void jobStoreRoundTripsAgainstMySql() {
         JdbcJobStore store = new JdbcJobStore(dataSource, clock, new MySqlJdbcDelegate());

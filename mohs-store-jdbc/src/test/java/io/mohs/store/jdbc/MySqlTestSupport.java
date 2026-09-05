@@ -40,6 +40,10 @@ final class MySqlTestSupport {
     private static final MySQLContainer CONTAINER = new MySQLContainer("mysql:8.0");
 
     static {
+        // A server default that is utf8mb4 but NOT the collation DEFAULT CHARACTER SET utf8mb4
+        // resolves to (0900_ai_ci): a table that forgets the clause inherits this one, and the
+        // round-trip's collation-equality test sees it — on the image's own default it could not
+        CONTAINER.withCommand("mysqld", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_general_ci");
         CONTAINER.start();
         new ResourceDatabasePopulator(new ClassPathResource("schema-mysql.sql")).execute(dataSource());
     }
