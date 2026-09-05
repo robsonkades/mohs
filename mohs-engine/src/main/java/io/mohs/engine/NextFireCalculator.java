@@ -35,7 +35,7 @@ import io.mohs.cron.CronExpression;
  * {@code reference} (the "now" from the engine's injected {@code Clock}); that rule is what makes
  * schedule tests deterministic, with no {@code Thread.sleep}.
  *
- * <p>For a {@link CronSpec} it delegates to the parser vendored in {@link io.mohs.cron}, caching the
+ * <p>For a {@link CronSpec} it delegates to the vendored {@link CronExpression} parser, caching the
  * parse result per expression — parsing is not expensive, but avoiding repeating it on every poll of
  * the claim loop is cheap mechanical sympathy.
  *

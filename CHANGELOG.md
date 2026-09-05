@@ -49,6 +49,10 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 
 ### Fixed
 
+- Updated the dashboard tooling's transitive `fast-uri` and `qs` dependencies to resolve npm audit
+  findings. Fixed invalid Javadoc references in the engine and demo, and strengthened the cluster
+  regression test to require completed work from both live nodes.
+
 - REST validation inspects at most 64 exceptions in a cause chain; cyclic or deeper chains return
   the generic unreadable-request response. Dispatcher tests now distinguish an immediately visible
   retry from a waiting retry, preserving the built-in jitter's zero-delay case.

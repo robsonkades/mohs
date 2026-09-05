@@ -15,7 +15,7 @@
  */
 /**
  * This module's Spring Boot bootstrap ({@link io.mohs.MohsApplication}) — not library API. Mohs's
- * public API lives in {@link io.mohs.core} and its subpackages.
+ * public API starts at {@link io.mohs.core.Mohs} in {@code io.mohs.core}.
  */
 @NullMarked
 package io.mohs;

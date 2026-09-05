@@ -20,11 +20,13 @@ Conclusão após aprovação das duas pendências pelo usuário:
 - As extrações preexistentes de métodos em `Engine` foram incluídas em commit separado. O SHA-256 do arquivo corresponde exatamente ao código que passou nos 860 testes e no `verify` acima; não houve nova alteração de Java nem repetição desses testes.
 - O trecho sobre CSRF em `docs/08-security/security-overview.md` foi corrigido: o exemplo mantém a proteção padrão, inclui HTTP Basic e mTLS de navegador entre as credenciais automáticas e exige proteção na entrada do gateway quando ele troca cookie por bearer. Referências: [Spring Security](https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html) e [OWASP](https://owasp.org/www-community/attacks/csrf).
 
-Pendências remanescentes, sem mudanças adicionais:
+Correções adicionais autorizadas e validadas em 2026-09-05:
 
-- `ClusterEngineTest` é um teste novo, não uma extração de `EngineTest`; seu cenário de concorrência não exige que os dois nós executem trabalho, portanto não prova participação de ambos.
-- `npm audit` informou duas dependências transitivas vulneráveis: `fast-uri` (alta) e `qs` (moderada). O lockfile não foi alterado; atualizar dependências está fora do escopo aprovado.
-- A geração de Javadoc passou com avisos, inclusive marcadores de entrada inválida. Esses avisos não foram corrigidos nesta validação.
+- `ClusterEngineTest` agora espera que cada engine observe os dois nós RUNNING, oferece uma execução por shard usando `Shards.of` e exige os dois IDs nos attempts concluídos. Os dois testes da classe passaram, incluindo recuperação de nó particionado; `mvnw.cmd test -pl mohs-store-jdbc -am -Dtest=ClusterEngineTest -Dsurefire.failIfNoSpecifiedTests=false`: BUILD SUCCESS.
+- O lockfile atualizou `fast-uri` de 3.1.5 para 3.1.7 e `qs` de 6.15.3 para 6.16.0, sem mudar dependências diretas. `npm audit fix --package-lock-only --ignore-scripts` e o `npm ci` subsequente informaram zero vulnerabilidades; o build TypeScript/Vite passou.
+- As referências inválidas de Javadoc em `NextFireCalculator` e no package-info do demo agora apontam para classes existentes. `mvnw.cmd verify -DskipTests` passou. A documentação do Engine foi regenerada após remover apenas seu arquivo de cache de Javadoc, e uma varredura dos HTMLs gerados de todos os módulos não encontrou marcadores `invalid-tag`.
+
+Permanece o inventário de comentários e tags de Javadoc ausentes. Esses avisos não foram desativados; nesta etapa foi corrigido o conteúdo inválido, conforme o recorte comunicado ao usuário.
 
 O inventário original abaixo foi preservado; seus achados não são uma lista de correções aprovadas ou uma certificação do estado atual.
 
