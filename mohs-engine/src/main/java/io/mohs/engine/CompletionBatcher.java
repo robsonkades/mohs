@@ -127,8 +127,9 @@ public final class CompletionBatcher implements AutoCloseable {
             return;
         }
         inTransit.add(result.executionId());
+        Pending pending = new Pending(result, onOutcome);
         try {
-            queue.put(new Pending(result, onOutcome));
+            queue.put(pending);
         } catch (InterruptedException e) {
             // An interrupted put did NOT insert — the transit never began
             inTransit.remove(result.executionId());
@@ -137,6 +138,15 @@ public final class CompletionBatcher implements AutoCloseable {
             // is for the CALLER to observe afterwards (JCIP §7.1.3)
             onOutcome.accept(completeOne(result));
             Thread.currentThread().interrupt();
+            return;
+        }
+        // The flusher may have died between the closed check above and the put (check-then-act,
+        // JCIP §2.2): its final sweep would then have run before this entry landed, leaving it
+        // queued with its marker set and nobody left to complete it. Whoever removes the entry
+        // completes it — the sweep by polling, this thread by removing; the queue makes the two
+        // atomic against each other
+        if (closed && queue.remove(pending)) {
+            completeIndividually(pending);
         }
     }
 
@@ -198,8 +208,12 @@ public final class CompletionBatcher implements AutoCloseable {
             }
         } finally {
             // If this thread exits by ANY route, submit degrades to the synchronous path rather than
-            // blocking on a dead queue
+            // blocking on a dead queue — and what was still queued is completed here, one by one, so
+            // no result keeps its in-transit marker with nobody left to clear it (a marker that
+            // outlives its flusher hides the lease from the reconcile forever). A submit that raced
+            // this sweep re-checks after its put and completes its own entry
             closed = true;
+            completeQueuedIndividually();
         }
     }
 
@@ -292,9 +306,14 @@ public final class CompletionBatcher implements AutoCloseable {
                 Thread.currentThread().interrupt();
             }
         }
+        completeQueuedIndividually();
+        drained = true;
+    }
+
+    /** The synchronous sweep of whatever is still queued — the flusher's last act and the close's straggler catch. */
+    private void completeQueuedIndividually() {
         for (Pending pending; (pending = queue.poll()) != null; ) {
             completeIndividually(pending);
         }
-        drained = true;
     }
 }
