@@ -336,6 +336,38 @@ class DispatcherTest {
         assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
     }
 
+    /** Past the ceiling the message is data, not an error: the row keeps the head and says how much was cut. */
+    @Test
+    void anOversizedErrorMessageIsCutAtTheCeilingWithTheTailAccounted() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        String oversized = "x".repeat(Dispatcher.MAX_ERROR_LENGTH + 1_000);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            throw new IllegalStateException(oversized);
+        });
+
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+
+        String stored = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow().attempts().get(0).error();
+        assertThat(stored).startsWith("x".repeat(Dispatcher.MAX_ERROR_LENGTH)).endsWith("… [truncated 1000 chars]");
+        assertThat(stored.length()).isLessThan(oversized.length());
+    }
+
+    /** The cut never lands inside a surrogate pair: the head loses one char rather than end in half an emoji. */
+    @Test
+    void anOversizedErrorMessageNeverEndsInHalfASurrogatePair() throws Exception {
+        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        String pairStraddlingTheCeiling = "x".repeat(Dispatcher.MAX_ERROR_LENGTH - 1) + "😀" + "y".repeat(10);
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
+            throw new IllegalStateException(pairStraddlingTheCeiling);
+        });
+
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+
+        String stored = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow().attempts().get(0).error();
+        assertThat(stored).isEqualTo("x".repeat(Dispatcher.MAX_ERROR_LENGTH - 1) + "… [truncated 12 chars]");
+        assertThat(stored.chars().noneMatch(c -> Character.isSurrogate((char) c))).isTrue();
+    }
+
     @Test
     void dispatchRecordsTerminalFailureWhenHandlerThrows() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");

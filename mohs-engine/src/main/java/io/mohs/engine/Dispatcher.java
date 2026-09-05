@@ -68,6 +68,14 @@ public final class Dispatcher {
 
     private static final String NO_HANDLER_ERROR = "no handler registered for job ";
 
+    /**
+     * The ceiling on {@code Attempt.error}, in chars: the payload's documented ceiling (256 KB), well
+     * above any stack trace — the history column was widened past 64 KB precisely so a trace never
+     * truncates — and low enough that a handler echoing a response body into its exception cannot
+     * make one attempt row megabytes wide. Package-private for the test.
+     */
+    static final int MAX_ERROR_LENGTH = 256 * 1024;
+
     private final LeaseStore leaseStore;
     private final JobStore jobStore;
     private final HandlerRegistry handlerRegistry;
@@ -441,8 +449,26 @@ public final class Dispatcher {
         }
     }
 
+    /**
+     * What {@code Attempt.error} keeps of the exception: its message, never the stack trace (that
+     * goes to the WARN log), and at most {@link #MAX_ERROR_LENGTH} of it. A handler that throws with
+     * a request body or a report in the message would otherwise store that much per attempt, and
+     * {@code GET /executions/{id}} would return all of it; past the ceiling it is data, not an
+     * error, and the tail says how much was cut.
+     */
     private static String errorMessage(Exception error) {
-        return Objects.requireNonNullElse(error.getMessage(), error.toString());
+        String message = Objects.requireNonNullElse(error.getMessage(), error.toString());
+        return message.length() <= MAX_ERROR_LENGTH ? message : truncated(message);
+    }
+
+    /**
+     * The head up to the ceiling, then how many chars were dropped. When the last char kept would be
+     * the high half of a surrogate pair the cut steps back one char rather than split the pair: a
+     * lone surrogate is not valid text for any dialect.
+     */
+    private static String truncated(String message) {
+        int kept = Character.isHighSurrogate(message.charAt(MAX_ERROR_LENGTH - 1)) ? MAX_ERROR_LENGTH - 1 : MAX_ERROR_LENGTH;
+        return message.substring(0, kept) + "… [truncated " + (message.length() - kept) + " chars]";
     }
 
     /**
