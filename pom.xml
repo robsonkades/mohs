@@ -68,7 +68,6 @@
         <project.build.outputTimestamp>2026-08-29T00:00:00Z</project.build.outputTimestamp>
         <gpg.skip>true</gpg.skip>
         <uuidv7.version>1.2.0</uuidv7.version>
-        <archunit.version>1.4.1</archunit.version>
     </properties>
 
     <dependencyManagement>
@@ -124,11 +123,6 @@
                 <groupId>io.github.robsonkades</groupId>
                 <artifactId>uuidv7</artifactId>
                 <version>${uuidv7.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.tngtech.archunit</groupId>
-                <artifactId>archunit-junit5</artifactId>
-                <version>${archunit.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
