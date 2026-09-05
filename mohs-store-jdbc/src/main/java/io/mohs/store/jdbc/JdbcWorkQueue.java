@@ -40,7 +40,8 @@ import io.mohs.store.jdbc.delegate.JdbcDelegate;
 /**
  * {@link WorkQueue} over {@code mohs_ready}/{@code mohs_lease}. The claim is the transaction in which
  * queue and ownership change together or not at all; the SQL's shape belongs to {@link JdbcDelegate}
- * (a single statement on Postgres, three portable statements elsewhere).
+ * (a single statement on Postgres, a {@code DELETE … OUTPUT} plus the lease insert on SQL Server, three
+ * portable statements elsewhere).
  *
  * <p>{@link #offer} deliberately does NOT open a transaction: the enqueue takes part in the caller's —
  * it is the async contract's "joins your transaction", now with execution, queue and idempotency in the

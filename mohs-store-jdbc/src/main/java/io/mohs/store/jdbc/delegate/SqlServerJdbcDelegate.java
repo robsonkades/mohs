@@ -19,17 +19,25 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Objects;
 
 import org.jspecify.annotations.Nullable;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import io.mohs.store.jdbc.JdbcTimestamps;
 
 /**
  * SQL Server's SQL. The rationale for each statement is on {@link JdbcDelegate}; what is here is the
- * T-SQL — including the two places where T-SQL is not merely different text but a different
- * STRUCTURE: {@code TOP} sits right after {@code SELECT} (never at the end, like {@code LIMIT}), and
+ * T-SQL — including the three places where T-SQL is not merely different text but a different
+ * STRUCTURE: {@code TOP} sits right after {@code SELECT} (never at the end, like {@code LIMIT}),
  * {@code FOR UPDATE SKIP LOCKED} does not exist and is emulated by
- * {@code WITH (UPDLOCK, ROWLOCK, READPAST)} (the emulation jOOQ confirms).
+ * {@code WITH (UPDLOCK, ROWLOCK, READPAST)} (the emulation jOOQ confirms), and the claim's queue side
+ * is one self-joined {@code DELETE … OUTPUT} rather than a SELECT followed by a DELETE
+ * ({@link #CLAIM_READY}).
  *
  * <p>What is deliberately NOT here is any read hint. Plain reads are non-blocking and correct only
  * under row versioning, so {@code READ_COMMITTED_SNAPSHOT} is a boot requirement of this dialect —
@@ -96,6 +104,99 @@ public final class SqlServerJdbcDelegate implements JdbcDelegate {
                 INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at)
                 VALUES (:executionId, :jobKey, :nodeId, :epoch, :attempt, :priority, :now)
                 """;
+    }
+
+    /**
+     * The queue side of the claim as ONE statement: the derived table picks under exactly the hints,
+     * predicate, {@code TOP} and {@code ORDER BY} of {@link #readyCandidates()}, and the {@code DELETE}
+     * consumes those rows and nothing else — it is driven by the seek that locked them, so it never
+     * touches a key another transaction holds.
+     *
+     * <p>That is what the separate {@code DELETE … WHERE execution_id IN (…)} could not promise. Its
+     * plan depends on statistics, and a queue table's are empty or stale by nature: compiled against
+     * them, the optimizer fell back to its no-histogram guess for an equality list (the cached plan
+     * estimated 141 rows for 10 ids over 200 — {@code n × √rows}) and walked {@code idx_mohs_ready_claim}
+     * with an Index Scan, taking a U lock on every key on the way — the keys a peer had just locked with
+     * {@code UPDLOCK} included. Two nodes on one shard then deadlocked on that index, or blocked past the
+     * tick's statement timeout (both measured; the deadlock graph shows the two DELETEs waiting on each
+     * other's {@code idx_mohs_ready_claim} keys). A hint could not pin the seek: {@code FORCESEEK} is
+     * refused on a DML target.
+     *
+     * <p>Why a self-join and not an updatable CTE: the CTE form deletes straight off the claim index and
+     * has no clustered-key access of its own, so a row another transaction holds ONLY at the clustered
+     * key (a cancel's {@code DELETE … WHERE execution_id = ?}, mid-flight) made it block until the
+     * statement timeout — where the old key lookup, under {@code READPAST}, skipped it. Here the target
+     * carries {@code READPAST} itself and keeps that skip, and {@code LOOP JOIN} pins the direction
+     * (picked rows outer, one clustered seek per row inner) so the shape cannot fall back to a scan.
+     * The plan carries an Eager Spool between the pick and the delete — Halloween protection, because
+     * the derived table reads the index the delete modifies; it materialises at most {@code limit}
+     * rows and is part of the correct shape, not something to optimise away.
+     *
+     * <p>{@code OUTPUT} returns rows in no guaranteed order, so {@code visible_at} comes back too and
+     * {@link #claimReady} restores the {@code (priority, visible_at)} order the port promises. The three
+     * statements this folds ({@link #readyCandidates()}, {@link #readyCandidatesFiltered()},
+     * {@link #readyDelete()}) stay, as on Postgres: the text this database would run if the single
+     * statement ever had to be backed out. {@link #leaseInsert()} is not among them — it is still the
+     * ownership side, batched by {@link #insertLeases}.
+     */
+    public static final String CLAIM_READY = """
+            DELETE r
+            OUTPUT deleted.execution_id, deleted.job_key, deleted.attempt, deleted.priority, deleted.visible_at
+              FROM (SELECT TOP (:limit) execution_id
+                      FROM mohs_ready WITH (UPDLOCK, ROWLOCK, READPAST)
+                     WHERE shard = :shard AND visible_at <= :now
+                     ORDER BY priority, visible_at) p
+              INNER LOOP JOIN mohs_ready r WITH (ROWLOCK, READPAST) ON r.execution_id = p.execution_id
+            """;
+
+    /** {@link #CLAIM_READY} with the inadmissible keys excluded — written out in full, as on Postgres, and guarded by {@code JdbcDelegateStatementDriftTest}. */
+    public static final String CLAIM_READY_FILTERED = """
+            DELETE r
+            OUTPUT deleted.execution_id, deleted.job_key, deleted.attempt, deleted.priority, deleted.visible_at
+              FROM (SELECT TOP (:limit) execution_id
+                      FROM mohs_ready WITH (UPDLOCK, ROWLOCK, READPAST)
+                     WHERE shard = :shard AND visible_at <= :now AND job_key NOT IN (:inadmissible)
+                     ORDER BY priority, visible_at) p
+              INNER LOOP JOIN mohs_ready r WITH (ROWLOCK, READPAST) ON r.execution_id = p.execution_id
+            """;
+
+    /** One {@code OUTPUT} row: the claimed entry plus the sort key {@code OUTPUT} does not preserve. */
+    private record Picked(ClaimedReady row, Instant visibleAt) {
+
+        int priority() {
+            return row.priority();
+        }
+    }
+
+    @Override
+    public List<ClaimedReady> claimReady(NamedParameterJdbcTemplate jdbcTemplate, int shard, String nodeId, long epoch,
+            int limit, Collection<String> inadmissibleJobKeys, Instant now) {
+        List<ClaimedReady> picked = deleteReadyCandidates(jdbcTemplate, shard, limit, inadmissibleJobKeys, now);
+        if (!picked.isEmpty()) {
+            insertLeases(jdbcTemplate, picked, nodeId, epoch, now);
+        }
+        return picked;
+    }
+
+    /** The queue side, executed: {@link #CLAIM_READY}'s {@code OUTPUT}, put back in the {@code (priority, visible_at)} order the pick took. */
+    private List<ClaimedReady> deleteReadyCandidates(NamedParameterJdbcTemplate jdbcTemplate, int shard, int limit,
+            Collection<String> inadmissibleJobKeys, Instant now) {
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("shard", shard)
+                .addValue("now", splitTimestamp(now))
+                .addValue("limit", limit);
+        List<Picked> deleted = inadmissibleJobKeys.isEmpty()
+                ? jdbcTemplate.query(CLAIM_READY, params, this::pickedRow)
+                : jdbcTemplate.query(CLAIM_READY_FILTERED, params.addValue("inadmissible", inadmissibleJobKeys), this::pickedRow);
+        return deleted.stream()
+                .sorted(Comparator.comparingInt(Picked::priority).thenComparing(Picked::visibleAt))
+                .map(Picked::row)
+                .toList();
+    }
+
+    private Picked pickedRow(ResultSet rs, int rowNum) throws SQLException {
+        return new Picked(ClaimedReady.fromReadyRow(rs, rowNum),
+                Objects.requireNonNull(readSplitTimestamp(rs, "visible_at"), "visible_at"));
     }
 
     // --- the queue ---------------------------------------------------------------------------------

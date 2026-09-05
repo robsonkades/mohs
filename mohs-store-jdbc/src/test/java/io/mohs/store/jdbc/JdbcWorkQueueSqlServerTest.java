@@ -98,13 +98,16 @@ class JdbcWorkQueueSqlServerTest {
     }
 
     /**
-     * The subtlest part of the T-SQL emulation: {@code READPAST} is what makes the claim SKIP a row
-     * locked by another node instead of blocking — losing it from the hint would pass green through the
-     * rest of the suite and become a lock wait in a multi-node claim (JCIP ch. 12, controlled
-     * interleaving).
+     * The lock here sits on the CLUSTERED key only (a seek by execution_id — the shape a mid-flight
+     * {@code cancelQueued} holds), so the covering seek on {@code idx_mohs_ready_claim} still PICKS the
+     * row: what makes the claim skip it instead of blocking is the {@code READPAST} on the DELETE
+     * target, not the one on the pick. A concurrent claimant, by contrast, holds the claim-index key
+     * and is skipped at the pick — {@code ConcurrentClaimAcrossDialectsTest} pins that. Losing either
+     * hint passes green through the rest of the suite and becomes a lock wait against a cancel, or a
+     * peer, in production (JCIP ch. 12, controlled interleaving).
      */
     @Test
-    void claimSkipsRowsLockedByAConcurrentClaimant() throws Exception {
+    void claimSkipsARowAnotherTransactionHoldsAtTheClusteredKey() throws Exception {
         queue.offer(List.of(
                 entry("exec-locked", "job-a", 10, 1, NOW.minusSeconds(2)),
                 entry("exec-free", "job-a", 20, 1, NOW.minusSeconds(1))));

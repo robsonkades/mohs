@@ -178,7 +178,8 @@ class JdbcDelegateStatementDriftTest {
      * <p>Both variants are written out in full now, so the drift is no longer a broken anchor but an
      * edit applied to one and not the other — which the cross-delegate check above cannot see, since it
      * compares a statement against its peers rather than against its own sibling. Postgres runs the
-     * whole claim as one statement and reaches this through its two constants instead.
+     * whole claim as one statement, SQL Server the queue half of it, and both reach this through their
+     * two constants instead.
      */
     @Test
     void theFilteredClaimNeverLosesItsInadmissiblePredicate() {
@@ -196,6 +197,24 @@ class JdbcDelegateStatementDriftTest {
         }
         assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY_FILTERED)).contains("inadmissible");
         assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY)).doesNotContain("inadmissible");
+        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY_FILTERED)).contains("inadmissible");
+        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY)).doesNotContain("inadmissible");
+    }
+
+    /**
+     * A folded claim and the pick it folds must bind alike: the portable text stays as the record of
+     * what the fold replaces, and an edit to one that is not an edit to the other is a drift the
+     * cross-delegate comparison cannot see (it compares peers, never a delegate with itself).
+     */
+    @Test
+    void aFoldedClaimBindsWhatThePickItReplacesBinds() {
+        SqlServerJdbcDelegate sqlServer = new SqlServerJdbcDelegate();
+        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY)).isEqualTo(parametersOf(sqlServer.readyCandidates()));
+        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY_FILTERED)).isEqualTo(parametersOf(sqlServer.readyCandidatesFiltered()));
+        // Postgres folds the lease insert too, so its fold binds the pick's parameters plus the lease's
+        PostgresJdbcDelegate postgres = new PostgresJdbcDelegate();
+        assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY)).containsAll(parametersOf(postgres.readyCandidates()));
+        assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY_FILTERED)).containsAll(parametersOf(postgres.readyCandidatesFiltered()));
     }
 
 }

@@ -149,7 +149,9 @@ public interface JdbcDelegate {
      * ({@code JdbcWorkQueue}) guarantees the transaction that makes both effects atomic (there is no
      * instant of "neither queued nor owned"). The portable form is three statements (a locking SELECT, a
      * DELETE, then a batched INSERT); Postgres overrides it with a single
-     * {@code WITH picked … DELETE … RETURNING → INSERT} statement.
+     * {@code WITH picked … DELETE … USING → INSERT … SELECT} statement, and SQL Server folds the SELECT
+     * and the DELETE into one {@code DELETE … OUTPUT} and keeps the batched INSERT
+     * ({@link #insertLeases}).
      */
     default List<ClaimedReady> claimReady(NamedParameterJdbcTemplate jdbcTemplate, int shard, String nodeId, long epoch,
             int limit, Collection<String> inadmissibleJobKeys, Instant now) {
@@ -159,6 +161,13 @@ public interface JdbcDelegate {
         }
         jdbcTemplate.update(readyDelete(), new MapSqlParameterSource()
                 .addValue("ids", picked.stream().map(ClaimedReady::executionId).toList()));
+        insertLeases(jdbcTemplate, picked, nodeId, epoch, now);
+        return picked;
+    }
+
+    /** The ownership side of the claim, executed: one {@link #leaseInsert()} per picked row, batched. */
+    default void insertLeases(NamedParameterJdbcTemplate jdbcTemplate, List<ClaimedReady> picked, String nodeId, long epoch,
+            Instant now) {
         Object claimedAt = splitTimestamp(now);
         MapSqlParameterSource[] leases = picked.stream()
                 .map(row -> new MapSqlParameterSource()
@@ -171,7 +180,6 @@ public interface JdbcDelegate {
                         .addValue("now", claimedAt))
                 .toArray(MapSqlParameterSource[]::new);
         jdbcTemplate.batchUpdate(leaseInsert(), leases);
-        return picked;
     }
 
     // ---------------------------------------------------------------------------------------------
