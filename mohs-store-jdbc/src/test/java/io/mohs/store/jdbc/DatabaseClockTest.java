@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.sql.DataSource;
 
@@ -45,8 +46,8 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * Against a real H2 (embedded, same JVM) rather than mocking
  * {@link org.springframework.jdbc.core.JdbcTemplate}'s internal chain — mocking down to the
  * {@code ResultSet} would be fragile (it would depend on a Spring implementation detail, not on a stable
- * contract). The controlled scenarios (a positive offset, the clamp, skew) are built by manipulating the
- * application-side {@link MutableClock}, not by faking the database's time.
+ * contract). A {@link MutableClock} controls the application side; the RTT and recovery regressions
+ * also control monotonic elapsed time and a delegate's sample, without sleeping.
  */
 class DatabaseClockTest {
 
@@ -104,31 +105,17 @@ class DatabaseClockTest {
         assertThat(clock.currentOffset()).isBetween(expected.minus(TOLERANCE), expected.plus(TOLERANCE));
     }
 
-    /**
-     * The previous version of this test asserted on {@code clock.instant()} (= {@code appClock.instant()}
-     * plus the offset) — and since {@code appClock.advance(1h)} already embeds the +1h jump in the
-     * application's read, a broken clamp that blindly applied the incorrect negative offset (~-1h) would
-     * cancel the jump and produce a {@code second} nearly equal to {@code first} anyway — the assertion
-     * passed even in the broken counterfactual.
-     *
-     * <p>Asserting directly on {@link DatabaseClock#currentOffset()} (before and after the second
-     * {@code sync()}) is what actually distinguishes "clamp applied" from "clamp missing".
-     */
     @Test
-    void offsetNeverDecreasesAcrossAResampleThatWouldMoveItBackward() {
+    void correctsTheOffsetAfterTheApplicationClockJumpsAhead() {
         MutableClock appClock = new MutableClock(Instant.now(), UTC);
         DatabaseClock clock = clockOver(dataSource, appClock);
 
         clock.sync();
-        Duration offsetAfterFirstSync = clock.currentOffset();
-
-        // The app clock runs an hour ahead while the database stays in real time — the next sample would try
-        // to apply a negative offset large enough to go back in time. The clamp must discard that sample and
-        // leave the previous offset untouched.
         appClock.advance(Duration.ofHours(1));
         clock.sync();
 
-        assertThat(clock.currentOffset()).isEqualTo(offsetAfterFirstSync);
+        assertThat(clock.currentOffset()).isBetween(Duration.ofHours(-1).minus(TOLERANCE),
+                Duration.ofHours(-1).plus(TOLERANCE));
     }
 
     /**
@@ -192,23 +179,71 @@ class DatabaseClockTest {
                 appClockIsAheadBy.negated().minus(TOLERANCE), appClockIsAheadBy.negated().plus(TOLERANCE));
     }
 
-    /**
-     * A discard is invisible unless it says so. The clamp is the right answer to a transient measurement
-     * error and the wrong one to a persistent disagreement — in the second case the samples keep
-     * arriving, keep being dropped, and the offset quietly stops converging with nothing in the log to
-     * say which node is refusing to move.
-     */
     @Test
-    void warnsWhenASampleIsDiscardedByTheClamp() {
+    void aCorrectedClockDoesNotReturnAnInstantEarlierThanOneAlreadyObserved() {
         MutableClock appClock = new MutableClock(Instant.now(), UTC);
         DatabaseClock clock = clockOver(dataSource, appClock);
         clock.sync();
 
         appClock.advance(Duration.ofHours(1));
+        Instant observed = clock.instant();
         clock.sync();
 
-        assertThat(logAppender.list)
-                .anyMatch(event -> event.getFormattedMessage().contains("would move this node's time backwards"));
+        assertThat(clock.instant()).isEqualTo(observed);
+        appClock.advance(Duration.ofHours(1));
+        assertThat(clock.instant()).isAfterOrEqualTo(observed);
+    }
+
+    @Test
+    void rejectsASlowFirstSampleAndCanSynchroniseOnTheNextFastOne() {
+        var elapsed = new AtomicLong(Duration.ofSeconds(2).toNanos());
+        var nanos = new AtomicLong();
+        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, DELEGATE, UTC,
+                Clock.systemUTC(), () -> nanos.getAndAdd(elapsed.get()));
+
+        clock.sync();
+        assertThat(clock.isSynchronised()).isFalse();
+        assertThat(logAppender.list).anyMatch(event -> event.getFormattedMessage().contains("round trip"));
+
+        elapsed.set(Duration.ofMillis(1).toNanos());
+        clock.sync();
+        assertThat(clock.isSynchronised()).isTrue();
+    }
+
+    @Test
+    void aSlowResampleKeepsThePreviouslyAcceptedOffset() {
+        var elapsed = new AtomicLong(Duration.ofMillis(1).toNanos());
+        var nanos = new AtomicLong();
+        MutableClock appClock = new MutableClock(Instant.now().minusSeconds(5), UTC);
+        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, DELEGATE, UTC,
+                appClock, () -> nanos.getAndAdd(elapsed.get()));
+        clock.sync();
+        Duration accepted = clock.currentOffset();
+
+        appClock.advance(Duration.ofHours(1));
+        elapsed.set(Duration.ofSeconds(2).toNanos());
+        clock.sync();
+
+        assertThat(clock.currentOffset()).isEqualTo(accepted);
+        assertThat(clock.isSynchronised()).isTrue();
+    }
+
+    @Test
+    void aFastButAheadSampleCanBeCorrectedAndTheOutputEventuallyCatchesUp() throws SQLException {
+        Instant now = Instant.parse("2026-09-05T12:00:00Z");
+        MutableClock local = new MutableClock(now, UTC);
+        JdbcDelegate controlled = Mockito.mock(JdbcDelegate.class, org.mockito.AdditionalAnswers.delegatesTo(DELEGATE));
+        Mockito.doReturn(now.plusSeconds(5), now).when(controlled).readNow(Mockito.any());
+        DatabaseClock clock = new DatabaseClock(dataSource, SKEW_WARN_THRESHOLD, controlled, UTC, local, () -> 0L);
+
+        clock.sync();
+        assertThat(clock.instant()).isEqualTo(now.plusSeconds(5));
+        clock.sync();
+        assertThat(clock.currentOffset()).isZero();
+        assertThat(clock.instant()).isEqualTo(now.plusSeconds(5));
+
+        local.advance(Duration.ofSeconds(6));
+        assertThat(clock.instant()).isEqualTo(now.plusSeconds(6));
     }
 
     @Test

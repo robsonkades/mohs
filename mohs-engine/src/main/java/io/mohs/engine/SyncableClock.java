@@ -29,7 +29,7 @@ import java.time.Duration;
  */
 public interface SyncableClock {
 
-    /** One sample: it measures the offset against the external source and applies the monotonic clamp. */
+    /** Samples the external source; implementations preserve monotonic returned instants when correcting the offset. */
     void sync();
 
     /** The current offset (external source minus application), exposed for when the metrics infrastructure exists. */

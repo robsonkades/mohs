@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 
 import javax.sql.DataSource;
 
@@ -44,13 +45,16 @@ import io.mohs.store.jdbc.delegate.JdbcDelegate;
  * user (the scheduling belongs to {@code io.mohs.autoconfigure}, alongside the rest of
  * {@code mohs.time.*}'s property binding).
  *
- * <p>It is the one place in the engine where reading the real clock ({@link Clock#systemUTC()}) is the
- * class's purpose rather than a violation of "every now comes from the injected Clock" —
- * {@code ArchitectureTest} makes an exception for this class alone.
+ * <p>It reads the host clock to estimate the offset against the database. Returned instants are
+ * clamped independently of the offset: correcting an ahead sample pauses time until the database
+ * catches up with the last observation, rather than preserving that erroneous offset forever.
  */
 public final class DatabaseClock extends Clock implements SyncableClock {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseClock.class);
+
+    /** At most 500 ms of midpoint uncertainty; a stalled connection is not a clock measurement. */
+    private static final Duration MAX_SAMPLE_ROUND_TRIP = Duration.ofSeconds(1);
 
     private final JdbcTemplate jdbcTemplate;
     /**
@@ -63,25 +67,17 @@ public final class DatabaseClock extends Clock implements SyncableClock {
     private final Duration skewWarnThreshold;
     private final ZoneId zone;
     private final Clock systemClock;
+    private final LongSupplier nanoTime;
     private final AtomicReference<Sample> sample = new AtomicReference<>(Sample.UNSYNCED);
 
-    /**
-     * The offset and whether it was ever measured, in one reference so the clamp below stays a single
-     * atomic unit.
-     *
-     * <p>The flag is what keeps the clamp from anchoring on a value nobody sampled. A monotonic clamp
-     * is an invariant over the SEQUENCE of samples; the starting value is not a sample, and treating
-     * it as one silently inverted the feature for half the cluster — a node whose local clock runs
-     * AHEAD of the database has a negative offset, every sample of it compares below zero, and every
-     * one was discarded. That node kept its own fast clock forever, which is the node that reaps a
-     * live peer's lease.
-     */
-    private record Sample(Duration offset, boolean measured) {
+    /** The accepted offset and last returned instant move atomically, including across a resample. */
+    private record Sample(Duration offset, boolean measured, Instant lastReturned) {
 
-        static final Sample UNSYNCED = new Sample(Duration.ZERO, false);
+        static final Sample UNSYNCED = new Sample(Duration.ZERO, false, Instant.MIN);
 
-        Sample keepingTheLaterOf(Sample sampled) {
-            return !measured || sampled.offset().compareTo(offset) >= 0 ? sampled : this;
+        Sample at(Instant localNow) {
+            Instant candidate = localNow.plus(offset);
+            return candidate.isAfter(lastReturned) ? new Sample(offset, measured, candidate) : this;
         }
     }
 
@@ -90,11 +86,18 @@ public final class DatabaseClock extends Clock implements SyncableClock {
     }
 
     DatabaseClock(DataSource dataSource, Duration skewWarnThreshold, JdbcDelegate delegate, ZoneId zone, Clock systemClock) {
+        this(dataSource, skewWarnThreshold, delegate, zone, systemClock, System::nanoTime);
+    }
+
+    DatabaseClock(DataSource dataSource, Duration skewWarnThreshold, JdbcDelegate delegate, ZoneId zone,
+            Clock systemClock, LongSupplier nanoTime) {
         this.jdbcTemplate = new JdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
+        this.jdbcTemplate.setQueryTimeout((int) MAX_SAMPLE_ROUND_TRIP.toSeconds());
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.skewWarnThreshold = Objects.requireNonNull(skewWarnThreshold, "skewWarnThreshold");
         this.zone = Objects.requireNonNull(zone, "zone");
         this.systemClock = Objects.requireNonNull(systemClock, "systemClock");
+        this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
     }
 
     @Override
@@ -126,7 +129,8 @@ public final class DatabaseClock extends Clock implements SyncableClock {
 
     @Override
     public Instant instant() {
-        return systemClock.instant().plus(sample.get().offset());
+        Instant localNow = systemClock.instant();
+        return sample.updateAndGet(current -> current.at(localNow)).lastReturned();
     }
 
     @Override
@@ -144,15 +148,21 @@ public final class DatabaseClock extends Clock implements SyncableClock {
         return sample.get().measured();
     }
 
-    /** Measures the database-to-application offset with round-trip compensation and applies the monotonic clamp. */
+    /** Serialises measurements, not reads: a slow older query cannot overwrite a newer sample. */
     @Override
-    public void sync() {
+    public synchronized void sync() {
         try {
             Instant beforeQuery = systemClock.instant();
-            long startNanos = System.nanoTime();
+            long startNanos = nanoTime.getAsLong();
             String nowQuery = delegate.nowQuery();
-            Instant databaseNow = jdbcTemplate.queryForObject(nowQuery, (rs, rowNum) -> delegate.readNow(rs));
-            Duration roundTrip = Duration.ofNanos(System.nanoTime() - startNanos);
+            Instant databaseNow = jdbcTemplate.queryForObject(nowQuery, (rs, _) -> delegate.readNow(rs));
+            Duration roundTrip = Duration.ofNanos(nanoTime.getAsLong() - startNanos);
+
+            if (roundTrip.compareTo(MAX_SAMPLE_ROUND_TRIP) > 0) {
+                log.warn("clock sample discarded: round trip {} exceeds {}; keeping last known offset {}",
+                        roundTrip, MAX_SAMPLE_ROUND_TRIP, currentOffset());
+                return;
+            }
 
             if (databaseNow == null) {
                 log.warn("'{}' returned no result, keeping last known offset {}", nowQuery, currentOffset());
@@ -162,7 +172,9 @@ public final class DatabaseClock extends Clock implements SyncableClock {
             Instant appNowAtMidpoint = beforeQuery.plus(roundTrip.dividedBy(2));
             Duration sampledOffset = Duration.between(appNowAtMidpoint, databaseNow);
             warnOnExcessiveSkew(sampledOffset);
-            applyIfMonotonic(sampledOffset);
+            // An offset may decrease. Clamping OFFSETS would retain a fast sample forever; clamp
+            // only instants already returned, letting database time catch up with that finite floor.
+            sample.updateAndGet(current -> new Sample(sampledOffset, true, current.lastReturned()));
         } catch (DataAccessException e) {
             log.warn("failed to sync clock with database, keeping last known offset {}", currentOffset(), e);
         }
@@ -174,30 +186,4 @@ public final class DatabaseClock extends Clock implements SyncableClock {
         }
     }
 
-    /**
-     * "now + sampledOffset < now + current offset" simplifies to "sampledOffset < current offset" — the
-     * {@code now} is the same on both sides, so there is no need to read the clock again to compare. A
-     * resample that would go backwards in time is discarded — not adjusted to some minimum safe value —
-     * and is retried on the next call.
-     *
-     * <p>The FIRST measurement is always applied, whatever its sign: there is no earlier sample for it
-     * to move backwards from. The clamp only ever compares two things the database actually said.
-     *
-     * <p>A discard is logged, because it is invisible otherwise. The clamp is the right answer to a
-     * transient measurement error and the wrong one to a persistent disagreement — the samples keep
-     * arriving, keep being dropped, and the offset silently stops converging. The line says which node
-     * is refusing to move and by how much.
-     *
-     * <p>{@code getAndAccumulate} makes the clamp atomic regardless of who calls {@link #sync()} —
-     * nothing assumes a single writer; if two concurrent samplings arrive here, the comparison and the
-     * write happen as one unit, with no window for an older write to overwrite a newer one already
-     * published.
-     */
-    private void applyIfMonotonic(Duration sampledOffset) {
-        Sample previous = sample.getAndAccumulate(new Sample(sampledOffset, true), Sample::keepingTheLaterOf);
-        if (previous.measured() && sampledOffset.compareTo(previous.offset()) < 0) {
-            log.warn("clock sample {} discarded: it would move this node's time backwards from offset {}",
-                    sampledOffset, previous.offset());
-        }
-    }
 }

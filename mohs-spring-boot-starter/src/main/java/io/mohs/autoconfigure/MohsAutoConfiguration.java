@@ -22,12 +22,15 @@ import java.util.Map;
 
 import javax.sql.DataSource;
 
+import com.zaxxer.hikari.HikariDataSource;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -36,6 +39,7 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import io.micrometer.core.instrument.MeterRegistry;
@@ -428,6 +432,36 @@ public class MohsAutoConfiguration {
         return new Engine(mohsWorkQueue, mohsDispatcher, mohsHistoryStore, mohsLeaseStore, mohsJobStore, mohsNodeStore,
                 mohsTriggerFirer, mohsExecutionWindowRegistry, mohsRateLimitStore, mohsClock, settings,
                 mohsRunnerRegistry, mohsEngineMetrics, mohsRetryPolicyRegistry);
+    }
+
+    /** Query timeouts begin after acquisition: a pool wait must not consume the whole node lease. */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = "com.zaxxer.hikari.HikariDataSource")
+    static class HikariPoolValidationConfiguration {
+
+        /** Runs before SmartLifecycle starts the engine; other pool implementations remain supported. */
+        @Bean
+        SmartInitializingSingleton mohsConnectionTimeoutValidation(DataSource dataSource, MohsProperties properties) {
+            return () -> rejectPoolWaitThatOutlivesTheNodeLease(dataSource, properties.engine().nodeLeaseTtl());
+        }
+
+        private static void rejectPoolWaitThatOutlivesTheNodeLease(DataSource dataSource, Duration nodeLeaseTtl) {
+            // Spring's transaction/lazy proxies expose their target without acquiring a connection.
+            while (dataSource instanceof DelegatingDataSource proxy) {
+                DataSource target = proxy.getTargetDataSource();
+                if (target == null || target == dataSource) {
+                    break;
+                }
+                dataSource = target;
+            }
+            if (dataSource instanceof HikariDataSource pool
+                    && Duration.ofMillis(pool.getConnectionTimeout()).compareTo(nodeLeaseTtl) >= 0) {
+                throw new IllegalStateException("spring.datasource.hikari.connection-timeout ("
+                        + pool.getConnectionTimeout() + "ms) must be less than mohs.engine.node-lease-ttl ("
+                        + nodeLeaseTtl + ") — waiting for a pool connection is not covered by JDBC query timeouts; "
+                        + "configure a shorter connection-timeout on the DataSource used by Mohs");
+            }
+        }
     }
 
     /**

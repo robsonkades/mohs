@@ -729,6 +729,38 @@ class MohsAutoConfigurationTest {
                 .run(context -> assertThat(context).hasNotFailed());
     }
 
+    @Test
+    void hikariWaitAtTheNodeLeaseFailsBootEvenThroughASpringProxy() {
+        try (var pool = new com.zaxxer.hikari.HikariDataSource()) {
+            pool.setDataSource(freshH2DataSource());
+            pool.setConnectionTimeout(15_000);
+            var proxy = new org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy(pool);
+            runnerWith(proxy, "mohs.engine.node-lease-ttl=15s").run(context -> {
+                assertThat(context).hasFailed();
+                assertThat(context.getStartupFailure())
+                        .hasStackTraceContaining("connection-timeout")
+                        .hasStackTraceContaining("node-lease-ttl");
+            });
+        }
+    }
+
+    @Test
+    void hikariWaitBelowTheNodeLeaseBootsWithoutChangingThePool() {
+        try (var pool = new com.zaxxer.hikari.HikariDataSource()) {
+            pool.setDataSource(freshH2DataSource());
+            pool.setConnectionTimeout(2_000);
+            runnerWith(pool).run(context -> assertThat(context).hasNotFailed());
+            assertThat(pool.getConnectionTimeout()).isEqualTo(2_000);
+        }
+    }
+
+    @Test
+    void aNonHikariDataSourceStillBootsWhenHikariIsAbsent() {
+        runnerWith(freshH2DataSource())
+                .withClassLoader(new org.springframework.boot.test.context.FilteredClassLoader("com.zaxxer.hikari"))
+                .run(context -> assertThat(context).hasNotFailed());
+    }
+
     /** Retry end to end: the 1st attempt fails, the execution comes back as RETRY_WAITING with backoff, the same claim path picks it up again and the 2nd succeeds. */
     @Test
     void failedExecutionIsRetriedThroughTheRealEngineUntilItSucceeds() {
