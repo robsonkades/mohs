@@ -64,6 +64,12 @@ import io.mohs.core.event.Succeeded;
 @Component
 public class EventListenerExample implements ExecutionListener {
 
+    /**
+     * Creates a {@code EventListenerExample} instance.
+     */
+    public EventListenerExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(EventListenerExample.class);
 
     /**

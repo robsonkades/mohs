@@ -24,9 +24,18 @@ import io.mohs.core.resource.RateLimit;
  * {@link RateLimit#requireRefillable}, not a copy: divergence between the wire validation and the
  * domain's is what would let a too-short {@code window} cross the API and bring down the claim
  * round. Here the failure is a 422 in the client's face; at boot it is a startup error.
+ *
+ * @param max the maximum permitted count
+ * @param window the positive window over which the rate is limited
  */
 public record RateLimitPatchRequest(int max, Duration window) {
 
+    /**
+     * Creates a {@code RateLimitPatchRequest} with the supplied values.
+     *
+     * @param max the maximum permitted count
+     * @param window the positive window over which the rate is limited
+     */
     public RateLimitPatchRequest {
         RateLimit.requireRefillable(max, window);
     }

@@ -66,9 +66,21 @@ import io.mohs.core.job.JobKey;
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class RestExceptionHandler extends ResponseEntityExceptionHandler {
 
+    /**
+     * Creates the REST exception translator.
+     */
+    public RestExceptionHandler() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(RestExceptionHandler.class);
     private static final int MAX_CAUSE_DEPTH = 64;
 
+    /**
+     * Translates this exception into an HTTP problem response.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
+     */
     @ExceptionHandler(RateLimitNotFoundException.class)
     public ProblemDetail handleRateLimitNotFound(RateLimitNotFoundException ex) {
         return problem(HttpStatus.NOT_FOUND, "Rate limit not found",
@@ -76,6 +88,12 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
                         + "and restart; PATCH only adjusts what boot declared");
     }
 
+    /**
+     * Translates this exception into an HTTP problem response.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
+     */
     @ExceptionHandler(JobNotFoundException.class)
     public ProblemDetail handleJobNotFound(JobNotFoundException ex) {
         ProblemDetail problem = problem(HttpStatus.NOT_FOUND, "Job not found", "The requested job was not found");
@@ -85,26 +103,56 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
         return problem;
     }
 
+    /**
+     * Translates this exception into an HTTP problem response.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
+     */
     @ExceptionHandler(BatchNotFoundException.class)
     public ProblemDetail handleBatchNotFound(BatchNotFoundException ex) {
         return problem(HttpStatus.NOT_FOUND, "Batch not found", "The requested batch was not found");
     }
 
+    /**
+     * Translates this exception into an HTTP problem response.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
+     */
     @ExceptionHandler(ExecutionNotFoundException.class)
     public ProblemDetail handleExecutionNotFound(ExecutionNotFoundException ex) {
         return problem(HttpStatus.NOT_FOUND, "Execution not found", "The requested execution was not found");
     }
 
+    /**
+     * Translates this exception into an HTTP problem response.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
+     */
     @ExceptionHandler(ExecutionNotRetryableException.class)
     public ProblemDetail handleExecutionNotRetryable(ExecutionNotRetryableException ex) {
         return problem(HttpStatus.CONFLICT, "Execution not retryable", ex.getMessage());
     }
 
+    /**
+     * Translates this exception into an HTTP problem response.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
+     */
     @ExceptionHandler(InvalidActorException.class)
     public ProblemDetail handleInvalidActor(InvalidActorException ex) {
         return problem(HttpStatus.BAD_REQUEST, "Invalid actor", ex.getMessage());
     }
 
+    /**
+     * Translates this exception into an HTTP problem response.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
+     */
     @ExceptionHandler(PayloadValidationException.class)
     public ProblemDetail handlePayloadValidation(PayloadValidationException ex) {
         ProblemDetail problem = problem(HttpStatus.UNPROCESSABLE_CONTENT, "Request validation failed", ex.getMessage());
@@ -162,6 +210,9 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
      * unsure whether it applied — retrying on top of an already saturated row. Transient by
      * definition ({@code TransientDataAccessException}): the same request repeated later tends to
      * succeed.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
      */
     @ExceptionHandler({QueryTimeoutException.class, PessimisticLockingFailureException.class})
     public ProblemDetail handleContention(TransientDataAccessException ex) {
@@ -176,6 +227,9 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
      * {@code UnsupportedOperationException} become a 500 "unexpected error" with a stack trace in
      * the log. It stays because the alternative on the day a contract route lands ahead of its
      * implementation is the worst of the two answers.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
      */
     @ExceptionHandler(UnsupportedOperationException.class)
     public ProblemDetail handleNotImplemented(UnsupportedOperationException ex) {
@@ -188,6 +242,9 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
      * that would fall through to Boot's default {@code /error}, whose body is structurally different
      * from RFC 7807. The real cause goes only to the server's log — never {@code ex.getMessage()} in
      * the body, so as not to leak internal detail to an untrusted caller.
+     *
+     * @param ex the exception being translated
+     * @return the HTTP problem describing this failure
      */
     @ExceptionHandler(Exception.class)
     public ProblemDetail handleUnexpected(Exception ex) {

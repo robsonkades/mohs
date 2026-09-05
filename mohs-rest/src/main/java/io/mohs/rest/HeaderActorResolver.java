@@ -30,6 +30,12 @@ import io.mohs.rest.error.InvalidActorException;
  */
 public final class HeaderActorResolver implements ActorResolver {
 
+    /**
+     * Creates the default HTTP header actor resolver.
+     */
+    public HeaderActorResolver() {
+    }
+
     private static final String ACTOR_HEADER = "X-Mohs-Actor";
 
     /** The {@code actor} column's ceiling (VARCHAR(255) in the schema) — validated here so it becomes a 400 that teaches rather than an INSERT failure (a 500). */

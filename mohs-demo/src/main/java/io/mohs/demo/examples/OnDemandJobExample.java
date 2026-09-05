@@ -66,11 +66,21 @@ public class OnDemandJobExample {
 
     private final Mohs mohs;
 
+    /**
+     * Creates a {@code OnDemandJobExample} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     */
     public OnDemandJobExample(Mohs mohs) {
         this.mohs = mohs;
     }
 
-    /** A record of plain data — it will be JSON on the way in and on the way out. */
+    /**
+     * A record of plain data — it will be JSON on the way in and on the way out.
+     *
+     * @param address the destination email address
+     * @param locale the locale used to render the message
+     */
     public record WelcomeEmail(String address, String locale) {
     }
 
@@ -78,6 +88,10 @@ public class OnDemandJobExample {
      * What a caller — a controller, a service, another job — actually writes. {@code now()} means
      * "as soon as a claim can take it", not "on this thread": the call returns as soon as the row
      * is durable.
+     *
+     * @param address the destination email address
+     * @param locale the locale used to render the message
+     * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued sendWelcome(String address, String locale) {
         return mohs.schedule(WELCOME_EMAIL, new WelcomeEmail(address, locale)).now();

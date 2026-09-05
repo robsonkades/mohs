@@ -28,6 +28,11 @@ public final class InvalidActorException extends RuntimeException {
     @Serial
     private static final long serialVersionUID = 1L;
 
+    /**
+     * Creates a {@code InvalidActorException} with the supplied values.
+     *
+     * @param message the validation message
+     */
     public InvalidActorException(String message) {
         super(message);
     }

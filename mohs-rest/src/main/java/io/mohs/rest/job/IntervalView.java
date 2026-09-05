@@ -20,7 +20,13 @@ import java.util.Objects;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 
-/** The wire form of {@link io.mohs.core.schedule.IntervalSpec}. */
+/**
+ * The wire form of {@link io.mohs.core.schedule.IntervalSpec}.
+ *
+ * @param type the schedule variant discriminator
+ * @param interval the positive interval between firings
+ * @param afterFinish whether the interval starts at completion rather than the scheduled firing instant
+ */
 public record IntervalView(ScheduleType type, Duration interval, boolean afterFinish) implements ScheduleView {
 
     /** See {@link CronView} — the same reason for the explicit {@code @JsonCreator} on the canonical constructor. */
@@ -30,6 +36,12 @@ public record IntervalView(ScheduleType type, Duration interval, boolean afterFi
         Objects.requireNonNull(interval, "interval");
     }
 
+    /**
+     * Creates a {@code IntervalView} with the supplied values.
+     *
+     * @param interval the positive interval between firings
+     * @param afterFinish whether the interval starts at completion rather than the scheduled firing instant
+     */
     public IntervalView(Duration interval, boolean afterFinish) {
         this(ScheduleType.INTERVAL, interval, afterFinish);
     }

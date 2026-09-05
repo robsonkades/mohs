@@ -20,7 +20,13 @@ import java.util.Objects;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 
-/** The wire form of {@link io.mohs.core.schedule.CronSpec}. */
+/**
+ * The wire form of {@link io.mohs.core.schedule.CronSpec}.
+ *
+ * @param type the schedule variant discriminator
+ * @param expression the Quartz-style, seconds-first cron expression
+ * @param zone the time zone used to evaluate the schedule
+ */
 public record CronView(ScheduleType type, String expression, ZoneId zone) implements ScheduleView {
 
     /**
@@ -36,6 +42,12 @@ public record CronView(ScheduleType type, String expression, ZoneId zone) implem
         Objects.requireNonNull(zone, "zone");
     }
 
+    /**
+     * Creates a {@code CronView} with the supplied values.
+     *
+     * @param expression the Quartz-style, seconds-first cron expression
+     * @param zone the time zone used to evaluate the schedule
+     */
     public CronView(String expression, ZoneId zone) {
         this(ScheduleType.CRON, expression, zone);
     }

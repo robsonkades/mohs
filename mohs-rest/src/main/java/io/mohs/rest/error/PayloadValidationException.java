@@ -28,8 +28,17 @@ public final class PayloadValidationException extends RuntimeException {
     @Serial
     private static final long serialVersionUID = 1L;
 
+    /**
+     * Returns the request field associated with the validation failure.
+     */
     private final String field;
 
+    /**
+     * Creates a {@code PayloadValidationException} with the supplied values.
+     *
+     * @param field the request field that failed validation
+     * @param message the validation message
+     */
     public PayloadValidationException(String field, String message) {
         super(Objects.requireNonNull(message, "message"));
         this.field = Objects.requireNonNull(field, "field");
@@ -40,6 +49,11 @@ public final class PayloadValidationException extends RuntimeException {
      * constructor, a command's guard) and turns that refusal into this 422 naming {@code field}.
      * Only an IAE thrown INSIDE {@code validation} is translated — the caller keeps the scope of the
      * supplier tight enough that every IAE in it is validation by construction.
+     *
+     * @param <T> the type returned by the validated operation
+     * @param field the request field that failed validation
+     * @param validation the operation whose argument validation is translated
+     * @return the result of the validated operation
      */
     public static <T> T validating(String field, Supplier<T> validation) {
         try {
@@ -49,6 +63,11 @@ public final class PayloadValidationException extends RuntimeException {
         }
     }
 
+    /**
+     * Returns the request field associated with the validation failure.
+     *
+     * @return the field associated with the invalid value
+     */
     public String field() {
         return field;
     }

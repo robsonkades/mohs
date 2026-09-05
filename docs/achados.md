@@ -26,7 +26,14 @@ Correções adicionais autorizadas e validadas em 2026-09-05:
 - O lockfile atualizou `fast-uri` de 3.1.5 para 3.1.7 e `qs` de 6.15.3 para 6.16.0, sem mudar dependências diretas. `npm audit fix --package-lock-only --ignore-scripts` e o `npm ci` subsequente informaram zero vulnerabilidades; o build TypeScript/Vite passou.
 - As referências inválidas de Javadoc em `NextFireCalculator` e no package-info do demo agora apontam para classes existentes. `mvnw.cmd verify -DskipTests` passou. A documentação do Engine foi regenerada após remover apenas seu arquivo de cache de Javadoc, e uma varredura dos HTMLs gerados de todos os módulos não encontrou marcadores `invalid-tag`.
 
-Permanece o inventário de comentários e tags de Javadoc ausentes. Esses avisos não foram desativados; nesta etapa foi corrigido o conteúdo inválido, conforme o recorte comunicado ao usuário.
+Complementação de Javadoc autorizada e concluída em 2026-09-05:
+
+- O inventário completo, com o limite de avisos elevado para não truncar a contagem, encontrou 1.225 avisos de comentários e tags ausentes. A geração final dos oito módulos com fontes documentadas ficou sem avisos, sem desativar o doclint.
+- Foram completados comentários, parâmetros, retornos e exceções da API, engine, JDBC, REST, starter, test kit e exemplos. As descrições distinguem ausência de valor, cursores que o chamador deve fechar, cercas de ownership e commit da transação hospedeira. A documentação de idempotência esclarece que sua retenção independe da retenção de histórico.
+- A comparação das fontes desconsiderando Javadoc e espaços confirmou apenas 25 construtores públicos vazios, equivalentes aos construtores implícitos anteriores, além dos comentários. Nenhum corpo de método, assinatura existente ou regra de execução foi alterado.
+- `mvnw.cmd verify "-Dmaven.javadoc.failOnWarnings=true"`: BUILD SUCCESS; 860 testes em 105 classes, zero falhas, erros ou ignorados, incluindo os testes com PostgreSQL, MySQL e SQL Server. `npm ci`, TypeScript e Vite também passaram.
+- Após os ajustes finais de redação, os caches de Javadoc foram removidos e `mvnw.cmd verify -DskipTests "-Dmaven.javadoc.failOnWarnings=true"` passou novamente, regenerando a documentação. Não foi necessário repetir os testes, pois esses últimos ajustes só mudaram comentários.
+- `git diff --check` passou. `.claude/settings.local.json` mantém o SHA-256 anterior e foi excluído dos commits. Nenhum push foi executado.
 
 O inventário original abaixo foi preservado; seus achados não são uma lista de correções aprovadas ou uma certificação do estado atual.
 

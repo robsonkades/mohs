@@ -56,6 +56,12 @@ import io.mohs.core.execution.JobContext;
 @Component
 public class HandlerSignatureExample {
 
+    /**
+     * Creates a {@code HandlerSignatureExample} instance.
+     */
+    public HandlerSignatureExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(HandlerSignatureExample.class);
 
     /** The whole job, when the work needs nothing from its invocation. */
@@ -111,6 +117,10 @@ public class HandlerSignatureExample {
      * A payload may be any type Jackson can round-trip, including a {@code Map} when the shape is
      * genuinely dynamic — but a record documents the contract, and a typo in a key becomes a
      * compilation error instead of a {@code null}.
+     *
+     * @param table the database table name
+     * @param rowCount the number of rows included in the statement
+     * @param filters the enabled execution-page predicates
      */
     public record ExportRequest(String table, int rowCount, Map<String, String> filters) {
     }

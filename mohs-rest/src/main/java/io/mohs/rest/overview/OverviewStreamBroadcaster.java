@@ -135,6 +135,10 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
      *
      * <p>Fixed-delay, not fixed-rate: a slow tick (a degraded database) must not accumulate a queue
      * of ticks that then fire in a burst.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param clock the time source used by the component
+     * @return this broadcaster after scheduling periodic publication
      */
     public static OverviewStreamBroadcaster start(Mohs mohs, Clock clock) {
         OverviewStreamBroadcaster broadcaster = new OverviewStreamBroadcaster(mohs, clock);
@@ -164,6 +168,8 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
      * {@link #buildFrames} (four database reads) at a closed door; the second is what closes the
      * race — publishing the subscriber BEFORE re-reading the flag guarantees that either
      * {@code close} finds it in the list, or we find the flag, never neither.
+     *
+     * @return an emitter registered for overview updates
      */
     public SseEmitter subscribe() {
         SseEmitter emitter = newEmitter.get();

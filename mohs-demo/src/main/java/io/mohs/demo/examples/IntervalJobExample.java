@@ -55,6 +55,12 @@ import io.mohs.core.definition.RecurringJob;
 @Component
 public class IntervalJobExample {
 
+    /**
+     * Creates a {@code IntervalJobExample} instance.
+     */
+    public IntervalJobExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(IntervalJobExample.class);
 
     /**

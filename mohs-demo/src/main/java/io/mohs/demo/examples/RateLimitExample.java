@@ -76,6 +76,11 @@ public class RateLimitExample {
 
     private final Mohs mohs;
 
+    /**
+     * Creates a {@code RateLimitExample} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     */
     public RateLimitExample(Mohs mohs) {
         this.mohs = mohs;
     }
@@ -94,6 +99,10 @@ public class RateLimitExample {
      * <p>It is a PATCH, not a redefinition: the next boot reapplies the code's value under the
      * default {@code on-conflict=override}. Declaring a NEW limit is an act of boot, so an unknown
      * name returns empty rather than creating one.
+     *
+     * @param max the maximum permitted count
+     * @param window the positive window over which the rate is limited
+     * @return the updated SMTP rate limit, or empty when absent
      */
     public Optional<RateLimitSnapshot> throttleSmtpTo(int max, Duration window) {
         return mohs.adjustRateLimit("example-smtp", max, window);
@@ -102,6 +111,8 @@ public class RateLimitExample {
     /**
      * The declared limits with each bucket's current balance. A pure read — checking the balance
      * consumes no token — which is what makes it safe on a dashboard poll.
+     *
+     * @return the declared rate limits and their current balances
      */
     public List<RateLimitSnapshot> currentBalances() {
         return mohs.rateLimits();

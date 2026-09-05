@@ -38,8 +38,19 @@ import io.mohs.core.schedule.Schedule;
 })
 public sealed interface ScheduleView permits CronView, IntervalView, OnDemandView {
 
+    /**
+     * Returns the discriminator of this schedule variant.
+     *
+     * @return the schedule variant discriminator
+     */
     ScheduleType type();
 
+    /**
+     * Converts the supplied snapshot to its REST representation.
+     *
+     * @param schedule the firing schedule to evaluate
+     * @return the corresponding REST representation
+     */
     static ScheduleView from(Schedule schedule) {
         return switch (schedule) {
             case CronSpec cron -> new CronView(cron.expression(), cron.zone());
@@ -48,7 +59,11 @@ public sealed interface ScheduleView permits CronView, IntervalView, OnDemandVie
         };
     }
 
-    /** The inverse of {@link #from} — the request body of {@code PATCH .../schedule} translated back into the domain. */
+    /**
+     * The inverse of {@link #from} — the request body of {@code PATCH .../schedule} translated back into the domain.
+     *
+     * @return the corresponding scheduling specification
+     */
     default Schedule toSchedule() {
         return switch (this) {
             case CronView cron -> new CronSpec(cron.expression(), cron.zone());

@@ -25,8 +25,17 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 
+/**
+ * Enables the demonstration jobs for the demo profile.
+ */
 @Component
 public class Demo {
+
+    /**
+     * Creates a {@code Demo} instance.
+     */
+    public Demo() {
+    }
 
     @Bean
     RateLimit smtpRateLimit() {

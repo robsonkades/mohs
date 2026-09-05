@@ -43,10 +43,20 @@ public class RunnersController {
 
     private final Mohs mohs;
 
+    /**
+     * Creates a {@code RunnersController} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     */
     public RunnersController(Mohs mohs) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
     }
 
+    /**
+     * Lists this node's runner configuration and occupancy.
+     *
+     * @return the local runner configurations and occupancy
+     */
     @GetMapping
     public List<RunnerResponse> list() {
         return mohs.runners().stream().map(RunnerResponse::from).toList();

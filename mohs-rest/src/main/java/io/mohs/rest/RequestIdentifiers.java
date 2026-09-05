@@ -33,10 +33,22 @@ public final class RequestIdentifiers {
     private RequestIdentifiers() {
     }
 
+    /**
+     * Validates and parses a job key from an HTTP request.
+     *
+     * @param raw the untrusted serialized identifier
+     * @return the validated job identity
+     */
     public static JobKey jobKey(String raw) {
         return PayloadValidationException.validating("jobKey", () -> JobKey.of(raw));
     }
 
+    /**
+     * Validates and parses an execution identifier from an HTTP request.
+     *
+     * @param raw the untrusted serialized identifier
+     * @return the validated execution identity
+     */
     public static ExecutionId executionId(String raw) {
         return PayloadValidationException.validating("id", () -> ExecutionId.of(raw));
     }

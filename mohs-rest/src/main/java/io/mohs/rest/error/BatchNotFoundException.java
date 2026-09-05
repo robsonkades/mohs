@@ -24,13 +24,26 @@ public final class BatchNotFoundException extends RuntimeException {
     @Serial
     private static final long serialVersionUID = 1L;
 
+    /**
+     * Returns the batch identity that was not found.
+     */
     private final String batchId;
 
+    /**
+     * Creates a {@code BatchNotFoundException} with the supplied values.
+     *
+     * @param batchId the identity of the batch
+     */
     public BatchNotFoundException(String batchId) {
         super("Batch not found: " + batchId);
         this.batchId = Objects.requireNonNull(batchId, "batchId");
     }
 
+    /**
+     * Returns the batch identity that was not found.
+     *
+     * @return the identity of the batch
+     */
     public String batchId() {
         return batchId;
     }

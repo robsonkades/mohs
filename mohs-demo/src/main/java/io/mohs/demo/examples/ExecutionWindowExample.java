@@ -55,6 +55,12 @@ import io.mohs.core.resource.ExecutionWindow;
 @Configuration(proxyBeanMethods = false)
 public class ExecutionWindowExample {
 
+    /**
+     * Creates a {@code ExecutionWindowExample} instance.
+     */
+    public ExecutionWindowExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(ExecutionWindowExample.class);
 
     /**

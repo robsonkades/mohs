@@ -28,14 +28,33 @@ import io.mohs.core.resource.RunnerMode;
  * {@code maxSize} for {@link RunnerMode#CPU}. The remaining CPU-only tuning fields
  * ({@code coreSize}/{@code queueCapacity}/{@code keepAlive}) are not exposed here — only what the
  * design document asks for.
+ *
+ * @param name the human-readable name
+ * @param mode the runner workload mode
+ * @param max the maximum permitted count
+ * @param running accepted executions that have not finished, including queued CPU work
  */
 public record RunnerResponse(String name, RunnerMode mode, int max, int running) {
 
+    /**
+     * Creates a {@code RunnerResponse} with the supplied values.
+     *
+     * @param name the human-readable name
+     * @param mode the runner workload mode
+     * @param max the maximum permitted count
+     * @param running accepted executions that have not finished, including queued CPU work
+     */
     public RunnerResponse {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(mode, "mode");
     }
 
+    /**
+     * Converts the supplied snapshot to its REST representation.
+     *
+     * @param snapshot the current operational snapshot
+     * @return the corresponding REST representation
+     */
     public static RunnerResponse from(RunnerSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot");
         return new RunnerResponse(snapshot.name(), snapshot.mode(), snapshot.max(), snapshot.running());

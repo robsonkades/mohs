@@ -66,6 +66,12 @@ import io.mohs.core.execution.JobContext;
 @Order(0)
 public class InterceptorExample implements ExecutionInterceptor {
 
+    /**
+     * Creates a {@code InterceptorExample} instance.
+     */
+    public InterceptorExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(InterceptorExample.class);
 
     /**

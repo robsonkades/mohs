@@ -52,6 +52,12 @@ import org.springframework.context.annotation.FilterType;
 public class MohsApplication {
 
     /**
+     * Creates a {@code MohsApplication} instance.
+     */
+    public MohsApplication() {
+    }
+
+    /**
      * Local development configuration lives here, never in {@code src/main/resources/
      * application.yaml}: an {@code application.yaml} at the library jar's classpath root competes
      * with the host application's own — only one is loaded, decided by classpath order — and
@@ -59,6 +65,8 @@ public class MohsApplication {
      * {@code defaultProperties} loses to any external source (a developer's file, an argument, an
      * environment variable): it only fills the gap, and only when this {@code main()} is what
      * started the process.
+     *
+     * @param args the command-line arguments
      */
     public static void main(String[] args) {
         SpringApplication app = new SpringApplication(MohsApplication.class);

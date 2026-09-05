@@ -30,6 +30,21 @@ import io.mohs.core.schedule.Misfire;
  * The wire form of {@link JobDefinition} — {@code paused} and {@code nextFireAt} are operational
  * state with no counterpart in the definition itself (which models only static configuration); they
  * come from {@link JobSnapshot}.
+ *
+ * @param jobKey the stable identity of the job
+ * @param name the human-readable name
+ * @param handlerType the fully qualified handler class name
+ * @param schedule the firing schedule representation
+ * @param runner the selected runner name, or {@code null} for the default
+ * @param window the exclusion-window name, or {@code null} for no exclusion
+ * @param rateLimit the rate-limit name, or {@code null} for no throughput limit
+ * @param misfire the policy for missed automatic firings
+ * @param retries the allowed retry attempts beyond the first
+ * @param timeout the per-attempt timeout, or {@code null} for no job-specific timeout
+ * @param retryPolicy the custom retry-policy bean name, or {@code null} for the default
+ * @param source the origin of the definition
+ * @param paused whether automatic firing is suspended
+ * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
  */
 public record JobResponse(
         String jobKey,
@@ -47,6 +62,24 @@ public record JobResponse(
         boolean paused,
         @Nullable Instant nextFireAt) {
 
+    /**
+     * Creates a {@code JobResponse} with the supplied values.
+     *
+     * @param jobKey the stable identity of the job
+     * @param name the human-readable name
+     * @param handlerType the fully qualified handler class name
+     * @param schedule the firing schedule representation
+     * @param runner the selected runner name, or {@code null} for the default
+     * @param window the exclusion-window name, or {@code null} for no exclusion
+     * @param rateLimit the rate-limit name, or {@code null} for no throughput limit
+     * @param misfire the policy for missed automatic firings
+     * @param retries the allowed retry attempts beyond the first
+     * @param timeout the per-attempt timeout, or {@code null} for no job-specific timeout
+     * @param retryPolicy the custom retry-policy bean name, or {@code null} for the default
+     * @param source the origin of the definition
+     * @param paused whether automatic firing is suspended
+     * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
+     */
     public JobResponse {
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(name, "name");
@@ -56,7 +89,12 @@ public record JobResponse(
         Objects.requireNonNull(source, "source");
     }
 
-    /** {@code name} falls back to the {@code jobKey}'s value when no human-readable label was set. */
+    /**
+     * {@code name} falls back to the {@code jobKey}'s value when no human-readable label was set.
+     *
+     * @param snapshot the current operational snapshot
+     * @return the corresponding REST representation
+     */
     public static JobResponse from(JobSnapshot snapshot) {
         JobDefinition definition = snapshot.definition();
         String name = definition.name() != null ? definition.name() : definition.key().value();

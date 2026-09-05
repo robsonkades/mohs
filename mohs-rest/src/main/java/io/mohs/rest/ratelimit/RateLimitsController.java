@@ -52,16 +52,35 @@ public class RateLimitsController {
     private final Mohs mohs;
     private final ActorResolver actorResolver;
 
+    /**
+     * Creates a {@code RateLimitsController} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param actorResolver the resolver that attributes HTTP operations to an actor
+     */
     public RateLimitsController(Mohs mohs, ActorResolver actorResolver) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
         this.actorResolver = Objects.requireNonNull(actorResolver, "actorResolver");
     }
 
+    /**
+     * Lists the declared rate limits and current balances.
+     *
+     * @return the rate-limit specifications and current balances
+     */
     @GetMapping
     public List<RateLimitResponse> list() {
         return mohs.rateLimits().stream().map(RateLimitResponse::from).toList();
     }
 
+    /**
+     * Updates a rate-limit specification at runtime.
+     *
+     * @param name the human-readable name
+     * @param body the request body
+     * @param request the incoming HTTP request
+     * @return the updated rate limit with its runtime-change notice
+     */
     @PatchMapping("/{name}")
     public RuntimePatchResponse<RateLimitResponse> patch(@PathVariable String name, @RequestBody RateLimitPatchRequest body,
             HttpServletRequest request) {

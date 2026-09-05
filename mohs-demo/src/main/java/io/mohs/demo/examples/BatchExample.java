@@ -64,16 +64,30 @@ import io.mohs.core.job.JobRef;
 @Component
 public class BatchExample {
 
+    /**
+     * The typed reference to the row-import handler.
+     */
     public static final JobRef<ImportRow> IMPORT_ROW = JobRef.of("example-import-row", ImportRow.class);
 
     private static final Logger log = LoggerFactory.getLogger(BatchExample.class);
 
     private final Mohs mohs;
 
+    /**
+     * Creates a {@code BatchExample} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     */
     public BatchExample(Mohs mohs) {
         this.mohs = mohs;
     }
 
+    /**
+     * One row submitted to the import batch.
+     *
+     * @param lineNumber the one-based input row number
+     * @param csv the CSV row contents
+     */
     public record ImportRow(int lineNumber, String csv) {
     }
 
@@ -81,6 +95,9 @@ public class BatchExample {
      * One member per row, one receipt for the whole thing. The {@code batchId} is durable by the
      * time {@link Mohs#batch} returns — hand it back to whoever uploaded the file, and they can
      * poll {@link #progressOf} with it.
+     *
+     * @param lines the input rows to import
+     * @return the identity of the scheduled import batch
      */
     public String importFile(List<String> lines) {
         Batch batch = mohs.batch("nightly-import", members -> {
@@ -100,6 +117,9 @@ public class BatchExample {
      * The pull side of the same question. {@link BatchSnapshot#pending()} and
      * {@link BatchSnapshot#completed()} are derived from the counters, so a progress bar costs one
      * cheap read no matter how many members there are.
+     *
+     * @param batchId the identity of the batch
+     * @return the batch snapshot, or empty when the batch does not exist
      */
     public Optional<BatchSnapshot> progressOf(String batchId) {
         return mohs.findBatch(batchId);

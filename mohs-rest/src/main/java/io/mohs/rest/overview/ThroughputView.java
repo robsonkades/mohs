@@ -23,9 +23,22 @@ import io.mohs.core.ThroughputReading;
 /**
  * One window's throughput — part of {@link OverviewResponse}, which carries TWO: the long one ("how
  * much was done") and the short one ("is anything happening right now").
+ *
+ * @param window the duration over which terminal completions were counted
+ * @param succeeded the number of successful terminal executions
+ * @param failed the number of failed terminal executions
+ * @param ratePerSecond the measured completions per second
  */
 public record ThroughputView(Duration window, long succeeded, long failed, double ratePerSecond) {
 
+    /**
+     * Creates a {@code ThroughputView} with the supplied values.
+     *
+     * @param window the duration over which terminal completions were counted
+     * @param succeeded the number of successful terminal executions
+     * @param failed the number of failed terminal executions
+     * @param ratePerSecond the measured completions per second
+     */
     public ThroughputView {
         Objects.requireNonNull(window, "window");
     }

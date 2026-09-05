@@ -30,6 +30,13 @@ import io.mohs.core.execution.ExecutionState;
  *
  * <p>What the list stops carrying is not only volume: an attempt's {@code error} is arbitrarily
  * long text that used to travel on every page and on every tick of the dashboard's stream.
+ *
+ * @param executionId the identity of the execution
+ * @param jobKey the stable identity of the job
+ * @param state the current derived execution state
+ * @param scheduledAt the intended firing instant
+ * @param firedAt the instant this attempt began
+ * @param actor the identity attributed to the operation
  */
 public record ExecutionSummaryResponse(
         String executionId,
@@ -39,6 +46,16 @@ public record ExecutionSummaryResponse(
         @Nullable Instant firedAt,
         String actor) {
 
+    /**
+     * Creates a {@code ExecutionSummaryResponse} with the supplied values.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param state the current derived execution state
+     * @param scheduledAt the intended firing instant
+     * @param firedAt the instant this attempt began
+     * @param actor the identity attributed to the operation
+     */
     public ExecutionSummaryResponse {
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");
@@ -47,6 +64,12 @@ public record ExecutionSummaryResponse(
         Objects.requireNonNull(actor, "actor");
     }
 
+    /**
+     * Converts the supplied snapshot to its REST representation.
+     *
+     * @param execution the execution to represent
+     * @return the corresponding REST representation
+     */
     public static ExecutionSummaryResponse from(Execution execution) {
         return new ExecutionSummaryResponse(
                 execution.id().value(),

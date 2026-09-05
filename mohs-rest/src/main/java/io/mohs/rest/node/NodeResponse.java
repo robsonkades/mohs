@@ -21,15 +21,34 @@ import java.util.Objects;
 import io.mohs.core.EngineState;
 import io.mohs.core.NodeSnapshot;
 
-/** A cluster node with a recent heartbeat — a read over the heartbeat registry that liveness builds. */
+/**
+ * A cluster node with a recent heartbeat — a read over the heartbeat registry that liveness builds.
+ *
+ * @param nodeId the identity of the engine node
+ * @param state the current lifecycle state
+ * @param lastHeartbeatAt the instant of the last recorded heartbeat
+ */
 public record NodeResponse(String nodeId, EngineState state, Instant lastHeartbeatAt) {
 
+    /**
+     * Creates a {@code NodeResponse} with the supplied values.
+     *
+     * @param nodeId the identity of the engine node
+     * @param state the current lifecycle state
+     * @param lastHeartbeatAt the instant of the last recorded heartbeat
+     */
     public NodeResponse {
         Objects.requireNonNull(nodeId, "nodeId");
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(lastHeartbeatAt, "lastHeartbeatAt");
     }
 
+    /**
+     * Converts the supplied snapshot to its REST representation.
+     *
+     * @param node the node snapshot to represent
+     * @return the corresponding REST representation
+     */
     public static NodeResponse from(NodeSnapshot node) {
         return new NodeResponse(node.nodeId(), node.state(), node.lastHeartbeatAt());
     }

@@ -24,7 +24,17 @@ import org.jspecify.annotations.Nullable;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 
-/** The wire form of {@link Execution} — the detail view, attempts included. */
+/**
+ * The wire form of {@link Execution} — the detail view, attempts included.
+ *
+ * @param executionId the identity of the execution
+ * @param jobKey the stable identity of the job
+ * @param state the current derived execution state
+ * @param scheduledAt the intended firing instant
+ * @param firedAt the instant this attempt began
+ * @param actor the identity attributed to the operation
+ * @param attempts the recorded attempts of this execution
+ */
 public record ExecutionResponse(
         String executionId,
         String jobKey,
@@ -34,6 +44,17 @@ public record ExecutionResponse(
         String actor,
         List<AttemptResponse> attempts) {
 
+    /**
+     * Creates a {@code ExecutionResponse} with the supplied values.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param state the current derived execution state
+     * @param scheduledAt the intended firing instant
+     * @param firedAt the instant this attempt began
+     * @param actor the identity attributed to the operation
+     * @param attempts the recorded attempts of this execution
+     */
     public ExecutionResponse {
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");
@@ -43,6 +64,12 @@ public record ExecutionResponse(
         attempts = List.copyOf(attempts);
     }
 
+    /**
+     * Converts the supplied snapshot to its REST representation.
+     *
+     * @param execution the execution to represent
+     * @return the corresponding REST representation
+     */
     public static ExecutionResponse from(Execution execution) {
         return new ExecutionResponse(
                 execution.id().value(),

@@ -29,6 +29,11 @@ public final class ExecutionNotRetryableException extends RuntimeException {
     @Serial
     private static final long serialVersionUID = 1L;
 
+    /**
+     * Creates a {@code ExecutionNotRetryableException} with the supplied values.
+     *
+     * @param message the validation message
+     */
     public ExecutionNotRetryableException(String message) {
         super(message);
     }

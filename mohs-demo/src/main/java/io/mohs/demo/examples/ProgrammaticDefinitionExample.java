@@ -76,6 +76,11 @@ public class ProgrammaticDefinitionExample {
 
     private final Mohs mohs;
 
+    /**
+     * Creates a {@code ProgrammaticDefinitionExample} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     */
     public ProgrammaticDefinitionExample(Mohs mohs) {
         this.mohs = mohs;
     }
@@ -84,6 +89,10 @@ public class ProgrammaticDefinitionExample {
      * One definition per tenant, each with the tenant's own cron in the tenant's own zone. The id is
      * the stable identity — deriving it from the tenant id is what makes a redeploy an upsert
      * rather than a duplicate.
+     *
+     * @param tenantId the tenant identity used to namespace the job
+     * @param cron the cron expression for the tenant job
+     * @param zone the time zone used to evaluate the schedule
      */
     public void defineTenantSync(String tenantId, String cron, ZoneId zone) {
         mohs.define(JobDefinition.of("tenant-" + tenantId + "-sync", TenantSync.class,
@@ -98,6 +107,8 @@ public class ProgrammaticDefinitionExample {
     /**
      * The same definition without a trigger: it exists, it can be invoked, and it never fires by
      * itself — the programmatic equivalent of {@code @OnDemandJob}.
+     *
+     * @param tenantId the tenant identity used to namespace the job
      */
     public void defineTenantExport(String tenantId) {
         mohs.define(JobDefinition.of("tenant-" + tenantId + "-export", TenantSync.class,
@@ -109,6 +120,8 @@ public class ProgrammaticDefinitionExample {
      * disappears from the listings, and the history stays. It is reversible — defining the same key
      * again resurrects it. Calling this on an annotated job throws, telling you to remove the
      * annotation instead.
+     *
+     * @param tenantId the tenant identity used to namespace the job
      */
     public void retireTenant(String tenantId) {
         mohs.remove(JobKey.of("tenant-" + tenantId + "-sync"));

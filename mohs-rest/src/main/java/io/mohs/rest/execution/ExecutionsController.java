@@ -67,12 +67,28 @@ public class ExecutionsController {
     private final Mohs mohs;
     private final ActorResolver actorResolver;
 
+    /**
+     * Creates a {@code ExecutionsController} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param actorResolver the resolver that attributes HTTP operations to an actor
+     */
     public ExecutionsController(Mohs mohs, ActorResolver actorResolver) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
         this.actorResolver = Objects.requireNonNull(actorResolver, "actorResolver");
     }
 
-    /** {@code size} — see {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view. */
+    /**
+     * {@code size} — see {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view.
+     *
+     * @param status the execution state filter, or {@code null} for all states
+     * @param jobKey the stable identity of the job
+     * @param from the inclusive lower bound on scheduled time, or {@code null}
+     * @param to the exclusive upper bound on scheduled time, or {@code null}
+     * @param cursor the last execution identity of the previous page, or {@code null}
+     * @param size the requested page size
+     * @return the matching summaries and optional continuation cursor
+     */
     @GetMapping
     public CursorPage<ExecutionSummaryResponse> search(
             @RequestParam(required = false) @Nullable ExecutionState status,
@@ -89,6 +105,12 @@ public class ExecutionsController {
         return CursorPage.of(responses, pageSize, ExecutionSummaryResponse::executionId);
     }
 
+    /**
+     * Returns one execution with its attempt history.
+     *
+     * @param id the identity of the execution
+     * @return the execution detail with attempt history
+     */
     @GetMapping("/{id}")
     public ExecutionResponse get(@PathVariable String id) {
         ExecutionId executionId = RequestIdentifiers.executionId(id);
@@ -104,6 +126,10 @@ public class ExecutionsController {
      * <p>It returns a {@code ResponseEntity} rather than a bare {@code ExecutionResponse} for the
      * same reason as {@link #retry}: that is where the {@code Location: /executions/{id}} header
      * required by the REST design is attached — {@code @ResponseStatus} would have no effect here.
+     *
+     * @param id the identity of the execution
+     * @param request the incoming HTTP request
+     * @return the cancellation result and its HTTP status
      */
     @PostMapping("/{id}/cancel")
     public ResponseEntity<ExecutionResponse> cancel(@PathVariable String id, HttpServletRequest request) {
@@ -124,6 +150,10 @@ public class ExecutionsController {
      * because nothing new is inserted. The idempotence is the CAS itself, and repeating the POST
      * becomes a 409 naming the current state. The 202 comes through {@code ResponseEntity} —
      * {@code @ResponseStatus} has no effect on one.
+     *
+     * @param id the identity of the execution
+     * @param request the incoming HTTP request
+     * @return the accepted retry receipt and its location
      */
     @PostMapping("/{id}/retry")
     public ResponseEntity<AcceptedExecutionResponse> retry(@PathVariable String id, HttpServletRequest request) {

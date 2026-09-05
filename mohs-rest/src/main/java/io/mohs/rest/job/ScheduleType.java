@@ -17,7 +17,16 @@ package io.mohs.rest.job;
 
 /** The discriminator of {@link ScheduleView} at the JSON boundary. */
 public enum ScheduleType {
+    /**
+     * A cron schedule evaluated in a named time zone.
+     */
     CRON,
+    /**
+     * A fixed-rate or fixed-delay interval schedule.
+     */
     INTERVAL,
+    /**
+     * A job fired only by explicit scheduling requests.
+     */
     ON_DEMAND
 }

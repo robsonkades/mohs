@@ -56,6 +56,12 @@ import io.mohs.core.event.Succeeded;
  */
 public final class OnExecutionRegistry implements ExecutionListener {
 
+    /**
+     * Creates an empty execution-event callback registry.
+     */
+    public OnExecutionRegistry() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(OnExecutionRegistry.class);
 
     /** Shared because a no-argument method's argument array is always the same empty one. */

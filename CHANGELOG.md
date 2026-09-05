@@ -49,6 +49,11 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 
 ### Fixed
 
+- Completed missing Javadoc comments and parameter, return and exception tags across the API,
+  engine, JDBC, REST, Spring integration, test kit and examples. Documentation builds now pass
+  with warnings treated as errors; idempotency retention and enclosing-transaction commit
+  semantics are explicit in the scheduling contract.
+
 - Updated the dashboard tooling's transitive `fast-uri` and `qs` dependencies to resolve npm audit
   findings. Fixed invalid Javadoc references in the engine and demo, and strengthened the cluster
   regression test to require completed work from both live nodes.

@@ -17,6 +17,12 @@ package io.mohs.rest.batch;
 
 /** A batch's aggregate state — {@code COMPLETED} once no pending execution is left. */
 public enum BatchState {
+    /**
+     * At least one member has not reached a terminal outcome.
+     */
     RUNNING,
+    /**
+     * Every member has reached a terminal outcome.
+     */
     COMPLETED
 }

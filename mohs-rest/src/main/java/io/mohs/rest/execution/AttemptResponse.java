@@ -23,14 +23,37 @@ import org.jspecify.annotations.Nullable;
 import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.ExecutionState;
 
-/** The wire form of {@link Attempt}. */
+/**
+ * The wire form of {@link Attempt}.
+ *
+ * @param number the one-based attempt number
+ * @param startedAt the instant this attempt began
+ * @param finishedAt the instant the attempt finished
+ * @param outcome the recorded outcome of the attempt
+ * @param error the recorded failure text, or {@code null} when unavailable
+ */
 public record AttemptResponse(int number, Instant startedAt, @Nullable Instant finishedAt, ExecutionState outcome, @Nullable String error) {
 
+    /**
+     * Creates a {@code AttemptResponse} with the supplied values.
+     *
+     * @param number the one-based attempt number
+     * @param startedAt the instant this attempt began
+     * @param finishedAt the instant the attempt finished
+     * @param outcome the recorded outcome of the attempt
+     * @param error the recorded failure text, or {@code null} when unavailable
+     */
     public AttemptResponse {
         Objects.requireNonNull(startedAt, "startedAt");
         Objects.requireNonNull(outcome, "outcome");
     }
 
+    /**
+     * Converts the supplied snapshot to its REST representation.
+     *
+     * @param attempt the one-based attempt number
+     * @return the corresponding REST representation
+     */
     public static AttemptResponse from(Attempt attempt) {
         return new AttemptResponse(attempt.number(), attempt.startedAt(), attempt.finishedAt(), attempt.outcome(), attempt.error());
     }

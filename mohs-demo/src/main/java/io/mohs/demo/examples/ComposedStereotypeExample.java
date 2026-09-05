@@ -65,6 +65,12 @@ import io.mohs.core.schedule.Misfire;
 @Component
 public class ComposedStereotypeExample {
 
+    /**
+     * Creates a {@code ComposedStereotypeExample} instance.
+     */
+    public ComposedStereotypeExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(ComposedStereotypeExample.class);
 
     /**
@@ -87,7 +93,11 @@ public class ComposedStereotypeExample {
     )
     public @interface NightlyReport {
 
-        /** The job's id — the only thing a nightly report gets to choose. */
+        /**
+         * The job's id — the only thing a nightly report gets to choose.
+         *
+         * @return the job ID alias
+         */
         @AliasFor(annotation = MohsJob.class, attribute = "id")
         String value() default "";
     }

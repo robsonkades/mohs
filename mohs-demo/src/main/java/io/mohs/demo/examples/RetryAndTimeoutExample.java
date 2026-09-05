@@ -77,6 +77,12 @@ import io.mohs.core.execution.RetryPolicy;
 @Configuration(proxyBeanMethods = false)
 public class RetryAndTimeoutExample {
 
+    /**
+     * Creates a {@code RetryAndTimeoutExample} instance.
+     */
+    public RetryAndTimeoutExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(RetryAndTimeoutExample.class);
 
     /**

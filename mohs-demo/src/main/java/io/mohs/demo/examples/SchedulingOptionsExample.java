@@ -76,14 +76,30 @@ public class SchedulingOptionsExample {
 
     private final Mohs mohs;
 
+    /**
+     * Creates a {@code SchedulingOptionsExample} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     */
     public SchedulingOptionsExample(Mohs mohs) {
         this.mohs = mohs;
     }
 
+    /**
+     * The payment payload used by the scheduling examples.
+     *
+     * @param invoiceId the invoice identity
+     * @param cents the payment amount in cents
+     */
     public record Charge(String invoiceId, long cents) {
     }
 
-    /** The plain case, and by far the most common line in any application using Mohs. */
+    /**
+     * The plain case, and by far the most common line in any application using Mohs.
+     *
+     * @param charge the payment request to schedule
+     * @return the enqueue receipt, subject to commit of any enclosing transaction
+     */
     public Enqueued chargeNow(Charge charge) {
         return mohs.schedule(CHARGE, charge).now();
     }
@@ -92,12 +108,22 @@ public class SchedulingOptionsExample {
      * An absolute instant — a deadline the domain already knows (the end of a trial, a contract's
      * renewal date). The caller supplies it, because "now" belongs to the application's own
      * {@code Clock}, never to a static call buried in a library's example.
+     *
+     * @param charge the payment request to schedule
+     * @param when the instant at which the execution becomes eligible
+     * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued chargeAt(Charge charge, Instant when) {
         return mohs.schedule(CHARGE, charge).at(when);
     }
 
-    /** A relative delay — a cool-off, a backoff the domain decides, a "try again in five minutes". */
+    /**
+     * A relative delay — a cool-off, a backoff the domain decides, a "try again in five minutes".
+     *
+     * @param charge the payment request to schedule
+     * @param delay the delay before the scheduled instant
+     * @return the enqueue receipt, subject to commit of any enclosing transaction
+     */
     public Enqueued chargeAfter(Charge charge, Duration delay) {
         return mohs.schedule(CHARGE, charge).after(delay);
     }
@@ -106,6 +132,10 @@ public class SchedulingOptionsExample {
      * Everything at once, which is what a real call site looks like when the work is money: it
      * jumps the queue, it records who asked, and a retried HTTP request cannot charge the customer
      * twice.
+     *
+     * @param charge the payment request to schedule
+     * @param requestedBy the actor requesting the execution
+     * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued chargeUrgently(Charge charge, String requestedBy) {
         return mohs.schedule(CHARGE, charge)
@@ -119,6 +149,10 @@ public class SchedulingOptionsExample {
      * The string overload, for callers holding a name rather than a {@link JobRef} — a REST
      * controller, an admin screen, a dispatch table. The payload's type is checked at runtime
      * against the definition, so a mismatch is a clear error and not a surprise inside the handler.
+     *
+     * @param jobId the stable identity of the job
+     * @param charge the payment request to schedule
+     * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued chargeByName(String jobId, Charge charge) {
         return mohs.schedule(jobId, charge).now();

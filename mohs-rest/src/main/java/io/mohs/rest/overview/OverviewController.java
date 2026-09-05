@@ -58,6 +58,12 @@ public class OverviewController {
     private final Mohs mohs;
     private final OverviewStreamBroadcaster broadcaster;
 
+    /**
+     * Creates a {@code OverviewController} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param broadcaster the shared overview event broadcaster
+     */
     public OverviewController(Mohs mohs, OverviewStreamBroadcaster broadcaster) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
         this.broadcaster = Objects.requireNonNull(broadcaster, "broadcaster");
@@ -69,6 +75,9 @@ public class OverviewController {
      * never the host's binder: Mohs is an embedded library, and depending on the host application's
      * MVC {@code ConversionService} would make the accepted format vary per host. An unparseable
      * value becomes a 422 that teaches, not a 500.
+     *
+     * @param window the requested throughput duration, or {@code null} or blank for the default
+     * @return the current counts and throughput readings
      */
     @GetMapping
     public OverviewResponse overview(@RequestParam(required = false) @Nullable String window) {
@@ -97,6 +106,11 @@ public class OverviewController {
         }
     }
 
+    /**
+     * Subscribes to periodic server-sent overview updates.
+     *
+     * @return the subscribed server-sent-event emitter
+     */
     @GetMapping("/stream")
     public SseEmitter stream() {
         return broadcaster.subscribe();

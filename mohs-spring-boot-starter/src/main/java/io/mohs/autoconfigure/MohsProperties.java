@@ -37,6 +37,12 @@ import io.mohs.rest.ApiPaths;
  * @param enabled master gate — turning it off removes every Mohs bean from the context
  * @param runners named runners in addition to the built-in ones — see {@link Runner}
  * @param rateLimits cluster-wide throughput limits by name ({@code mohs.rate-limits.smtp.max=100}) — see {@link RateLimitSpec}
+ * @param jdbc the JDBC configuration
+ * @param engine the local execution engine
+ * @param lifecycle the startup and shutdown settings
+ * @param time the clock synchronization settings
+ * @param registration the startup definition reconciliation settings
+ * @param api the operational REST API settings
  */
 @ConfigurationProperties("mohs")
 public record MohsProperties(
@@ -59,12 +65,26 @@ public record MohsProperties(
      */
     public record Jdbc(@Nullable Dialect dialect) {
 
+        /**
+         * The explicitly selected SQL dialect.
+         */
         public enum Dialect {
-            H2, POSTGRESQL, MYSQL, SQLSERVER
+            /**
+             * The H2 SQL dialect.
+             */
+            H2,
+            /** The PostgreSQL SQL dialect. */
+            POSTGRESQL,
+            /** The MySQL SQL dialect. */
+            MYSQL,
+            /** The Microsoft SQL Server dialect. */
+            SQLSERVER
         }
     }
 
     /**
+     * Configures polling, execution ownership, dispatch and retention.
+     *
      * @param pollInterval the FLOOR of the interval between engine loop ticks: the loop polls at this rate while it keeps finding work and doubles the interval on every empty tick up to {@code max-poll-interval}; default 25ms — dispatch latency is about poll/2 in the worst case without a wake-up, and idle cost is controlled by the backoff, not by the floor
      * @param maxPollInterval the CEILING of the adaptive backoff: the longest interval between ticks of an idle engine; must be >= {@code poll-interval}; the actual sleep never exceeds {@code node-lease-ttl/3} — the heartbeat has its own cadence, and a high ceiling must not let an idle node be declared dead
      * @param batchSize the maximum number of executions claimed per claim
@@ -96,17 +116,30 @@ public record MohsProperties(
     }
 
     /**
+     * Controls automatic startup and graceful shutdown.
+     *
      * @param startMode {@code auto} calls {@link io.mohs.core.MohsLifecycle#start()} by itself at boot; {@code manual} waits for the consumer to call it
+     * @param shutdown the graceful shutdown settings
      */
     public record Lifecycle(
             @DefaultValue("auto") StartMode startMode,
             @DefaultValue Shutdown shutdown) {
 
+        /**
+         * Whether Spring starts the engine automatically.
+         */
         public enum StartMode {
-            AUTO, MANUAL
+            /**
+             * Starts the engine with the Spring application context.
+             */
+            AUTO,
+            /** Waits for an explicit lifecycle start call. */
+            MANUAL
         }
 
         /**
+         * Bounds the wait for in-flight work during shutdown.
+         *
          * @param gracePeriod how long shutdown waits for in-flight executions before interrupting them
          */
         public record Shutdown(@DefaultValue("30s") Duration gracePeriod) {
@@ -114,6 +147,8 @@ public record MohsProperties(
     }
 
     /**
+     * Selects the cluster time source and its synchronization cadence.
+     *
      * @param mode {@code application} uses the system clock; {@code database} uses {@link io.mohs.store.jdbc.DatabaseClock} (the database is the cluster's time authority)
      * @param skewWarnThreshold only read when {@code mode} is {@code database} — the WARN threshold of {@link io.mohs.store.jdbc.DatabaseClock#sync()}
      * @param syncInterval only read when {@code mode} is {@code database} — how often to resample (see {@link io.mohs.engine.SyncableClock}'s Javadoc, which already names this property)
@@ -123,16 +158,29 @@ public record MohsProperties(
             @DefaultValue("1s") Duration skewWarnThreshold,
             @DefaultValue("30s") Duration syncInterval) {
 
+        /**
+         * The authority used for scheduler wall-clock time.
+         */
         public enum Mode {
-            APPLICATION, DATABASE
+            /**
+             * Uses the application system clock.
+             */
+            APPLICATION,
+            /** Synchronizes scheduler time with the database clock. */
+            DATABASE
         }
     }
 
     /**
+     * Controls reconciliation of code and persisted job definitions at startup.
+     *
      * @param onConflict how {@link MohsJobScanner} resolves definitional drift between the code and what is already in the store
      */
     public record Registration(@DefaultValue("override") OnConflict onConflict) {
 
+        /**
+         * The policy for differences between code and stored definitions.
+         */
         public enum OnConflict {
             /** Code wins; every change is logged with a diff (the default). */
             OVERRIDE,

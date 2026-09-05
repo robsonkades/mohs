@@ -79,6 +79,14 @@ public class JobsController {
     private final ObjectMapper objectMapper;
     private final String basePath;
 
+    /**
+     * Creates a {@code JobsController} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param actorResolver the resolver that attributes HTTP operations to an actor
+     * @param objectMapper the JSON mapper used for payload conversion
+     * @param basePath the configured REST route prefix
+     */
     public JobsController(Mohs mohs, ActorResolver actorResolver, ObjectMapper objectMapper, String basePath) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
         this.actorResolver = Objects.requireNonNull(actorResolver, "actorResolver");
@@ -86,17 +94,36 @@ public class JobsController {
         this.basePath = Objects.requireNonNull(basePath, "basePath");
     }
 
+    /**
+     * Lists the registered jobs.
+     *
+     * @return the registered job snapshots
+     */
     @GetMapping
     public List<JobResponse> list() {
         return mohs.jobs().stream().map(JobResponse::from).toList();
     }
 
+    /**
+     * Returns a job definition and its operational state.
+     *
+     * @param jobKey the stable identity of the job
+     * @return the requested job snapshot
+     */
     @GetMapping("/{jobKey}")
     public JobResponse get(@PathVariable String jobKey) {
         return JobResponse.from(requireJob(jobKey));
     }
 
-    /** The 202 comes from {@link ResponseEntity#getStatusCode()} in the method body — {@code @ResponseStatus} has no effect on a {@code ResponseEntity}. */
+    /**
+     * The 202 comes from {@link ResponseEntity#getStatusCode()} in the method body — {@code @ResponseStatus} has no effect on a {@code ResponseEntity}.
+     *
+     * @param jobKey the stable identity of the job
+     * @param body the request body
+     * @param idempotencyKey the optional key used to deduplicate scheduling requests
+     * @param request the incoming HTTP request
+     * @return the accepted enqueue receipt and execution location
+     */
     @PostMapping("/{jobKey}/schedule")
     public ResponseEntity<AcceptedExecutionResponse> schedule(@PathVariable String jobKey, @RequestBody ScheduleJobRequest body,
             @RequestHeader(value = "Idempotency-Key", required = false) @Nullable String idempotencyKey, HttpServletRequest request) {
@@ -126,14 +153,24 @@ public class JobsController {
         return command.now();
     }
 
-    /** Answers with the snapshot re-read AFTER the write: {@code paused} is state the definition does not carry, and the pre-write snapshot would say the opposite of what just happened. */
+    /**
+     * Answers with the snapshot re-read AFTER the write: {@code paused} is state the definition does not carry, and the pre-write snapshot would say the opposite of what just happened.
+     *
+     * @param jobKey the stable identity of the job
+     * @return the paused job snapshot
+     */
     @PostMapping("/{jobKey}/pause")
     public JobResponse pause(@PathVariable String jobKey) {
         mohs.pause(requireJobKey(jobKey));
         return JobResponse.from(requireJob(jobKey));
     }
 
-    /** See {@link #pause} — the same post-write re-read. */
+    /**
+     * See {@link #pause} — the same post-write re-read.
+     *
+     * @param jobKey the stable identity of the job
+     * @return the resumed job snapshot
+     */
     @PostMapping("/{jobKey}/resume")
     public JobResponse resume(@PathVariable String jobKey) {
         mohs.resume(requireJobKey(jobKey));
@@ -147,6 +184,11 @@ public class JobsController {
      *
      * <p>The body is a {@link ScheduleView} ({@code CRON}/{@code INTERVAL}/{@code ON_DEMAND}); an
      * unrealisable schedule (a cron that never fires) becomes a 422 that teaches, never a 500.
+     *
+     * @param jobKey the stable identity of the job
+     * @param body the request body
+     * @param request the incoming HTTP request
+     * @return the updated job with its runtime-change notice
      */
     @PatchMapping("/{jobKey}/schedule")
     public RuntimePatchResponse<JobResponse> reschedule(@PathVariable String jobKey, @RequestBody ScheduleView body,
@@ -185,7 +227,14 @@ public class JobsController {
         return PayloadValidationException.validating("schedule", () -> mohs.reschedule(key, body.toSchedule()));
     }
 
-    /** {@code size} — see {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view. */
+    /**
+     * {@code size} — see {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view.
+     *
+     * @param jobKey the stable identity of the job
+     * @param cursor the last execution identity of the previous page, or {@code null}
+     * @param size the requested page size
+     * @return the job's execution summaries and optional continuation cursor
+     */
     @GetMapping("/{jobKey}/executions")
     public CursorPage<ExecutionSummaryResponse> executions(
             @PathVariable String jobKey, @RequestParam(required = false) @Nullable String cursor, @RequestParam(required = false) @Nullable Integer size) {

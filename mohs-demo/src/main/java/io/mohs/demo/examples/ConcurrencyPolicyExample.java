@@ -59,6 +59,12 @@ import io.mohs.core.definition.RecurringJob;
 @Component
 public class ConcurrencyPolicyExample {
 
+    /**
+     * Creates a {@code ConcurrencyPolicyExample} instance.
+     */
+    public ConcurrencyPolicyExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(ConcurrencyPolicyExample.class);
 
     /**

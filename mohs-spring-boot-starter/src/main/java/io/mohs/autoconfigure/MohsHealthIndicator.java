@@ -58,6 +58,11 @@ public class MohsHealthIndicator implements HealthIndicator {
 
     private final MohsLifecycle lifecycle;
 
+    /**
+     * Creates a {@code MohsHealthIndicator} with the supplied values.
+     *
+     * @param lifecycle the local engine lifecycle controls
+     */
     public MohsHealthIndicator(MohsLifecycle lifecycle) {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
     }

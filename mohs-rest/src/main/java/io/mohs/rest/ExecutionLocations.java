@@ -44,6 +44,11 @@ public final class ExecutionLocations {
      * The {@code Location} of an execution's detail, from a request made to another resource (the
      * scheduling receipt). The application prefix comes from {@code getContextPath()}, which is what
      * the base path does not know about.
+     *
+     * @param request the incoming HTTP request
+     * @param basePath the configured REST route prefix
+     * @param executionId the identity of the execution
+     * @return the execution detail URI under the configured route prefix
      */
     public static URI ofExecution(HttpServletRequest request, String basePath, String executionId) {
         return URI.create(request.getContextPath() + basePath + "/executions/" + executionId);
@@ -53,6 +58,10 @@ public final class ExecutionLocations {
      * The detail's {@code Location} from a request made to the execution ITSELF, dropping the action
      * suffix ({@code /cancel}, {@code /retry}). {@code getRequestURI()} already includes the context
      * path.
+     *
+     * @param request the incoming HTTP request
+     * @param actionSuffix the action path segment appended to the execution URI
+     * @return the execution action URI under the configured route prefix
      */
     public static URI ofAction(HttpServletRequest request, String actionSuffix) {
         // endsWith/substring rather than replaceFirst: the suffix went into a Pattern, so any future

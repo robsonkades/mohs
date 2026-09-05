@@ -26,9 +26,22 @@ import io.mohs.core.RateLimitSnapshot;
  * <p>{@code available} — tokens available — rather than "used": whoever opens the dashboard wants to
  * know how much still fits NOW, and "used" is not even a quantity a bucket has (refill is
  * continuous, with no window boundary at which to reset a counter).
+ *
+ * @param name the human-readable name
+ * @param max the maximum permitted count
+ * @param window the positive window over which the rate is limited
+ * @param available the available capacity
  */
 public record RateLimitResponse(String name, int max, Duration window, int available) {
 
+    /**
+     * Creates a {@code RateLimitResponse} with the supplied values.
+     *
+     * @param name the human-readable name
+     * @param max the maximum permitted count
+     * @param window the positive window over which the rate is limited
+     * @param available the available capacity
+     */
     public RateLimitResponse {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(window, "window");

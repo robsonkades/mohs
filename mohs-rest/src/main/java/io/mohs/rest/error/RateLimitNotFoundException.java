@@ -30,13 +30,26 @@ public final class RateLimitNotFoundException extends RuntimeException {
     @Serial
     private static final long serialVersionUID = 1L;
 
+    /**
+     * Returns the rate-limit name that was not found.
+     */
     private final String rateLimitName;
 
+    /**
+     * Creates a {@code RateLimitNotFoundException} with the supplied values.
+     *
+     * @param rateLimitName the name of the declared rate limit
+     */
     public RateLimitNotFoundException(String rateLimitName) {
         super("Rate limit not found: " + rateLimitName);
         this.rateLimitName = Objects.requireNonNull(rateLimitName, "rateLimitName");
     }
 
+    /**
+     * Returns the rate-limit name that was not found.
+     *
+     * @return the unknown rate-limit name
+     */
     public String rateLimitName() {
         return rateLimitName;
     }

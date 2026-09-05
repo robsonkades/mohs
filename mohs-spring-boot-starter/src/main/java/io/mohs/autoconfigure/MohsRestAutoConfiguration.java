@@ -77,6 +77,8 @@ public class MohsRestAutoConfiguration {
      * The only active guardrail a user reads before exposing the API, which is why its wording
      * matters more than an ordinary log line's: it says what the API CAN do, and what to do about
      * it — a warning that names the risk without naming the remedy only tells an operator to worry.
+     *
+     * @param properties the bound Mohs configuration properties
      */
     public MohsRestAutoConfiguration(MohsProperties properties) {
         String basePath = properties.api().basePath();
@@ -95,17 +97,35 @@ public class MohsRestAutoConfiguration {
                 basePath, basePath);
     }
 
+    /**
+     * Creates the {@code ActorResolver} bean for Mohs integration.
+     *
+     * @return the configured {@code ActorResolver} bean
+     */
     @Bean
     @ConditionalOnMissingBean(ActorResolver.class)
     public ActorResolver mohsActorResolver() {
         return new HeaderActorResolver();
     }
 
+    /**
+     * Creates the {@code RestExceptionHandler} bean for Mohs integration.
+     *
+     * @return the configured {@code RestExceptionHandler} bean
+     */
     @Bean
     public RestExceptionHandler mohsRestExceptionHandler() {
         return new RestExceptionHandler();
     }
 
+    /**
+     * Creates the {@code JobsController} bean for Mohs integration.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param mohsActorResolver the resolver that attributes HTTP operations to an actor
+     * @param properties the bound Mohs configuration properties
+     * @return the configured {@code JobsController} bean
+     */
     @Bean
     public JobsController mohsJobsController(Mohs mohs, ActorResolver mohsActorResolver, MohsProperties properties) {
         // The request body is converted with Mohs' own mapper, the one the store reads with — never
@@ -113,44 +133,93 @@ public class MohsRestAutoConfiguration {
         return new JobsController(mohs, mohsActorResolver, PayloadMapper.STRICT, properties.api().basePath());
     }
 
+    /**
+     * Creates the {@code ExecutionsController} bean for Mohs integration.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param mohsActorResolver the resolver that attributes HTTP operations to an actor
+     * @return the configured {@code ExecutionsController} bean
+     */
     @Bean
     public ExecutionsController mohsExecutionsController(Mohs mohs, ActorResolver mohsActorResolver) {
         return new ExecutionsController(mohs, mohsActorResolver);
     }
 
+    /**
+     * Creates the {@code BatchesController} bean for Mohs integration.
+     *
+     * @param mohs the scheduling and operations facade
+     * @return the configured {@code BatchesController} bean
+     */
     @Bean
     public BatchesController mohsBatchesController(Mohs mohs) {
         return new BatchesController(mohs);
     }
 
+    /**
+     * Creates the {@code NodesController} bean for Mohs integration.
+     *
+     * @param mohs the scheduling and operations facade
+     * @return the configured {@code NodesController} bean
+     */
     @Bean
     public NodesController mohsNodesController(Mohs mohs) {
         return new NodesController(mohs);
     }
 
-    /** Node-local by nature: it describes the process answering the request, not the cluster (see {@link io.mohs.core.RunnerSnapshot}). */
+    /**
+     * Node-local by nature: it describes the process answering the request, not the cluster (see {@link io.mohs.core.RunnerSnapshot}).
+     *
+     * @param mohs the scheduling and operations facade
+     * @return the configured {@code RunnersController} bean
+     */
     @Bean
     public RunnersController mohsRunnersController(Mohs mohs) {
         return new RunnersController(mohs);
     }
 
+    /**
+     * Creates the {@code RateLimitsController} bean for Mohs integration.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param mohsActorResolver the resolver that attributes HTTP operations to an actor
+     * @return the configured {@code RateLimitsController} bean
+     */
     @Bean
     public RateLimitsController mohsRateLimitsController(Mohs mohs, ActorResolver mohsActorResolver) {
         return new RateLimitsController(mohs, mohsActorResolver);
     }
 
-    /** {@code AutoCloseable}: the bean's destroy method is the backstop — what closes the streams within the deadline that matters is {@link MohsOverviewStreamLifecycle}. */
+    /**
+     * {@code AutoCloseable}: the bean's destroy method is the backstop — what closes the streams within the deadline that matters is {@link MohsOverviewStreamLifecycle}.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param mohsClock the time source used by the component
+     * @return the configured {@code OverviewStreamBroadcaster} bean
+     */
     @Bean
     public OverviewStreamBroadcaster mohsOverviewStreamBroadcaster(Mohs mohs, @Qualifier("mohsClock") Clock mohsClock) {
         return OverviewStreamBroadcaster.start(mohs, mohsClock);
     }
 
-    /** {@link SmartLifecycle} — closes the SSE streams before the web server starts waiting on active requests; without it shutdown spends the whole phase (see {@link MohsOverviewStreamLifecycle}'s Javadoc). */
+    /**
+     * {@link SmartLifecycle} — closes the SSE streams before the web server starts waiting on active requests; without it shutdown spends the whole phase (see {@link MohsOverviewStreamLifecycle}'s Javadoc).
+     *
+     * @param mohsOverviewStreamBroadcaster the shared overview event broadcaster
+     * @return the configured {@code SmartLifecycle} bean
+     */
     @Bean
     public SmartLifecycle mohsOverviewStreamLifecycle(OverviewStreamBroadcaster mohsOverviewStreamBroadcaster) {
         return new MohsOverviewStreamLifecycle(mohsOverviewStreamBroadcaster);
     }
 
+    /**
+     * Creates the {@code OverviewController} bean for Mohs integration.
+     *
+     * @param mohs the scheduling and operations facade
+     * @param mohsOverviewStreamBroadcaster the shared overview event broadcaster
+     * @return the configured {@code OverviewController} bean
+     */
     @Bean
     public OverviewController mohsOverviewController(Mohs mohs, OverviewStreamBroadcaster mohsOverviewStreamBroadcaster) {
         return new OverviewController(mohs, mohsOverviewStreamBroadcaster);

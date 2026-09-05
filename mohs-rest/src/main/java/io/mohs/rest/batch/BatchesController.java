@@ -33,6 +33,11 @@ public class BatchesController {
 
     private final Mohs mohs;
 
+    /**
+     * Creates a {@code BatchesController} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     */
     public BatchesController(Mohs mohs) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
     }
@@ -44,6 +49,9 @@ public class BatchesController {
      * <p>{@code pending} and {@code state} are derived from the three counters by
      * {@link BatchResponse#from} rather than stored: one more column could drift from the others, and
      * there is no question it would answer any faster.
+     *
+     * @param id the identity of the execution
+     * @return the batch counters and completion state
      */
     @GetMapping("/{id}")
     public BatchResponse get(@PathVariable String id) {

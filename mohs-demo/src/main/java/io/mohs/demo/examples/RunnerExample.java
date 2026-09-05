@@ -81,6 +81,12 @@ import io.mohs.core.resource.RunnerMode;
 @Configuration(proxyBeanMethods = false)
 public class RunnerExample {
 
+    /**
+     * Creates a {@code RunnerExample} instance.
+     */
+    public RunnerExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(RunnerExample.class);
 
     /**

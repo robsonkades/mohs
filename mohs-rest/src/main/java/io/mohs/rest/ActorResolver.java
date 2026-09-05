@@ -28,6 +28,9 @@ import jakarta.servlet.http.HttpServletRequest;
  */
 public interface ActorResolver {
 
+    /**
+     * The fallback actor when the request supplies no identity.
+     */
     String ANONYMOUS = "anonymous";
 
     /**
@@ -36,6 +39,9 @@ public interface ActorResolver {
      * coming from this SPI surfaces as a generic 500 rather than the 400 the boundary gives. An
      * authenticated principal carrying that name (a "scheduler" service account, say) must be
      * mapped to another identifier here.
+     *
+     * @param request the incoming HTTP request
+     * @return the actor identity attributed to the request
      */
     String resolve(HttpServletRequest request);
 }

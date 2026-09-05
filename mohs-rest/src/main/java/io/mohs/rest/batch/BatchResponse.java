@@ -24,10 +24,29 @@ import io.mohs.core.BatchSnapshot;
  * exists once the batch has finished: here {@code pending = total - succeeded - failed} and the batch
  * may still be {@link BatchState#RUNNING}, since the point of a {@code GET} is to allow polling
  * before completion too.
+ *
+ * @param batchId the identity of the batch
+ * @param name the human-readable name
+ * @param state the current lifecycle state
+ * @param total the total number of batch members
+ * @param succeeded the number of successful terminal executions
+ * @param failed the number of failed terminal executions
+ * @param pending the number of batch members not yet terminal
  */
 public record BatchResponse(String batchId, String name, BatchState state, int total, int succeeded, int failed,
         int pending) {
 
+    /**
+     * Creates a {@code BatchResponse} with the supplied values.
+     *
+     * @param batchId the identity of the batch
+     * @param name the human-readable name
+     * @param state the current lifecycle state
+     * @param total the total number of batch members
+     * @param succeeded the number of successful terminal executions
+     * @param failed the number of failed terminal executions
+     * @param pending the number of batch members not yet terminal
+     */
     public BatchResponse {
         Objects.requireNonNull(batchId, "batchId");
         Objects.requireNonNull(name, "name");
@@ -44,6 +63,13 @@ public record BatchResponse(String batchId, String name, BatchState state, int t
      * <p>Preferable to the canonical constructor whenever the counters come from a single source
      * (the engine's {@code BatchCounters}, say), which should never be able to disagree with
      * {@code pending} by construction.
+     *
+     * @param batchId the identity of the batch
+     * @param name the human-readable name
+     * @param total the total number of batch members
+     * @param succeeded the number of successful terminal executions
+     * @param failed the number of failed terminal executions
+     * @return the REST representation of the batch counters
      */
     public static BatchResponse of(String batchId, String name, int total, int succeeded, int failed) {
         int pending = total - succeeded - failed;

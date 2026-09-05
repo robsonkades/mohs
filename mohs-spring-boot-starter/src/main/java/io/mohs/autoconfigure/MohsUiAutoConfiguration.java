@@ -57,6 +57,12 @@ import io.mohs.rest.ApiPaths;
 @ConditionalOnResource(resources = "classpath:/mohs-ui-webapp/index.html")
 public class MohsUiAutoConfiguration {
 
+    /**
+     * Creates a {@code MohsUiAutoConfiguration} instance.
+     */
+    public MohsUiAutoConfiguration() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(MohsUiAutoConfiguration.class);
 
     /** Where the dashboard is mounted. It matches Vite's {@code base} and the router's basepath. */

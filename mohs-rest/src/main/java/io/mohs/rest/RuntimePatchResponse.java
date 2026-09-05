@@ -22,17 +22,34 @@ import java.util.Objects;
  * emergency one and holds only until the next boot ("runtime
  * PATCH versus boot configuration"), unless {@code mohs.registration.on-conflict: preserve} is
  * configured.
+ *
+ * @param <T> the resource representation type
+ * @param resource the resource after the runtime change
+ * @param notice the explanation accompanying the runtime change
  */
 public record RuntimePatchResponse<T>(T resource, String notice) {
 
     public static final String BOOT_REVERSION_NOTICE =
             "Emergency change: it holds until the next boot; encode it in properties to make it permanent.";
 
+    /**
+     * Creates a {@code RuntimePatchResponse} with the supplied values.
+     *
+     * @param resource the resource after the runtime change
+     * @param notice the explanation accompanying the runtime change
+     */
     public RuntimePatchResponse {
         Objects.requireNonNull(resource, "resource");
         Objects.requireNonNull(notice, "notice");
     }
 
+    /**
+     * Wraps a resource with the notice that its change is runtime-only.
+     *
+     * @param <T> the resource representation type
+     * @param resource the resource after the runtime change
+     * @return the resource wrapped with a runtime-change notice
+     */
     public static <T> RuntimePatchResponse<T> of(T resource) {
         return new RuntimePatchResponse<>(resource, BOOT_REVERSION_NOTICE);
     }

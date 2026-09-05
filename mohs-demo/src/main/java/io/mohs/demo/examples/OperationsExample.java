@@ -74,6 +74,11 @@ public class OperationsExample {
 
     private final Mohs mohs;
 
+    /**
+     * Creates a {@code OperationsExample} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     */
     public OperationsExample(Mohs mohs) {
         this.mohs = mohs;
     }
@@ -82,11 +87,18 @@ public class OperationsExample {
      * Stop a misbehaving job cluster-wide without a deploy. It suspends automatic firings only —
      * manual scheduling still works, mirroring the engine, so a fix can be tested on one execution
      * while the schedule stays disarmed.
+     *
+     * @param jobId the stable identity of the job
      */
     public void pause(String jobId) {
         mohs.pause(JobKey.of(jobId));
     }
 
+    /**
+     * Resumes automatic firings for the example job.
+     *
+     * @param jobId the stable identity of the job
+     */
     public void resume(String jobId) {
         mohs.resume(JobKey.of(jobId));
     }
@@ -99,17 +111,31 @@ public class OperationsExample {
      * the scanner restores the code's version and logs the diff (under the default
      * {@code on-conflict=override}); {@code preserve} keeps the patched version instead. Fix the
      * annotation too, or the change disappears at the next deploy.
+     *
+     * @param jobId the stable identity of the job
+     * @param zone the time zone used to evaluate the schedule
+     * @return the rescheduled job snapshot, or empty when the job does not exist
      */
     public Optional<JobSnapshot> moveToMidnight(String jobId, ZoneId zone) {
         return mohs.reschedule(JobKey.of(jobId), new CronSpec("0 0 0 * * *", zone));
     }
 
-    /** Cooperative, never guaranteed — see this class's Javadoc on the race. */
+    /**
+     * Cooperative, never guaranteed — see this class's Javadoc on the race.
+     *
+     * @param executionId the identity of the execution
+     * @return the execution after the cancellation request, or empty when absent
+     */
     public Optional<Execution> cancel(String executionId) {
         return mohs.cancel(ExecutionId.of(executionId));
     }
 
-    /** An operator's decision to try a FAILED execution once more, outside the budget. */
+    /**
+     * An operator's decision to try a FAILED execution once more, outside the budget.
+     *
+     * @param executionId the identity of the execution
+     * @return the execution after the retry request, or empty when absent
+     */
     public Optional<Execution> retry(String executionId) {
         return mohs.retry(ExecutionId.of(executionId));
     }
@@ -118,6 +144,8 @@ public class OperationsExample {
      * Every registered job. Bounded cardinality — a definition, not an execution — so there is no
      * pagination, and {@link JobSnapshot} carries the operational state ({@code paused},
      * {@code nextFireAt}) that the definition itself does not.
+     *
+     * @return the registered job snapshots
      */
     public List<JobSnapshot> allJobs() {
         return mohs.jobs();
@@ -130,11 +158,21 @@ public class OperationsExample {
      * <p>A listing is a SUMMARY — {@code attempts()} comes back empty, because a dashboard read must
      * not drag an arbitrarily large {@code error} column per row. {@link Mohs#findExecution} is the
      * detail view, attempts included.
+     *
+     * @param jobId the stable identity of the job
+     * @param limit the maximum number of results in one batch
+     * @return up to the requested limit of failed executions
      */
     public List<Execution> recentFailures(String jobId, int limit) {
         return mohs.executions(new ExecutionQuery(JobKey.of(jobId), ExecutionState.FAILED, null, null, null, limit));
     }
 
+    /**
+     * Looks up an execution and its recorded attempts.
+     *
+     * @param executionId the identity of the execution
+     * @return the execution with its attempts, or empty when absent
+     */
     public Optional<Execution> detail(String executionId) {
         return mohs.findExecution(ExecutionId.of(executionId));
     }
@@ -144,6 +182,8 @@ public class OperationsExample {
      * CALLER chooses. The counts come from independent reads rather than one transactional cut, so
      * executions in transit may disagree between the numbers — acceptable for polling, and a
      * serialisable cut here would be cost without benefit.
+     *
+     * @return the current execution counts and throughput
      */
     public OverviewSnapshot overview() {
         return mohs.overview(Duration.ofMinutes(5));
@@ -153,6 +193,8 @@ public class OperationsExample {
      * The cluster as it sees itself. Death is not a field: it is derived from the age of
      * {@link NodeSnapshot#lastHeartbeatAt()} at read time — {@code STOPPED} is the only
      * self-reported outcome, because a clean shutdown is the only ending a node gets to announce.
+     *
+     * @return the cluster node heartbeat snapshots
      */
     public List<NodeSnapshot> cluster() {
         return mohs.nodes();
@@ -161,6 +203,8 @@ public class OperationsExample {
     /**
      * This node's runners and their current occupancy. Unlike {@link #cluster()}, it touches no
      * database and does not see the cluster — a thread pool belongs to a process.
+     *
+     * @return the local runner configurations and occupancy
      */
     public List<RunnerSnapshot> localRunners() {
         return mohs.runners();
@@ -177,6 +221,9 @@ public class OperationsExample {
      * in-flight work finish inside the grace, and only then escalate. Spring's shutdown already
      * calls the equivalent with {@code mohs.lifecycle.shutdown.grace-period}, so this is for the
      * cases the container's lifecycle does not cover.
+     *
+     * @param grace the maximum time allowed for in-flight work to finish
+     * @return the state after draining the local engine
      */
     public EngineState drainThisNode(Duration grace) {
         MohsLifecycle lifecycle = mohs.lifecycle();

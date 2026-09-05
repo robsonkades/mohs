@@ -24,6 +24,9 @@ package io.mohs.rest;
  */
 public final class ApiPaths {
 
+    /**
+     * The default route prefix for version one of the operational API.
+     */
     public static final String V1 = "/api/mohs/v1";
 
     private ApiPaths() {

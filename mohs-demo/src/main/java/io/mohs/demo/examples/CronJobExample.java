@@ -71,6 +71,12 @@ import io.mohs.core.schedule.Misfire;
 @Component
 public class CronJobExample {
 
+    /**
+     * Creates a {@code CronJobExample} instance.
+     */
+    public CronJobExample() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(CronJobExample.class);
 
     /**

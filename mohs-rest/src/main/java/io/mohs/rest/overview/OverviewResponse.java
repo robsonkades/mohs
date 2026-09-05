@@ -30,10 +30,21 @@ import io.mohs.core.execution.ExecutionState;
  * <p>It is the flat form of {@link OverviewSnapshot}, which is what defines the contract: only live
  * states appear in the map (always all three, zeros included), while recent terminal activity is in
  * {@link ThroughputView}.
+ *
+ * @param executionCountsByStatus the live execution counts by state
+ * @param throughput the terminal counts over the requested window
+ * @param recent an independent short-window reading for the recent completion rate
  */
 public record OverviewResponse(Map<ExecutionState, Long> executionCountsByStatus, ThroughputView throughput,
         ThroughputView recent) {
 
+    /**
+     * Creates a {@code OverviewResponse} with the supplied values.
+     *
+     * @param executionCountsByStatus the live execution counts by state
+     * @param throughput the terminal counts over the requested window
+     * @param recent an independent short-window reading for the recent completion rate
+     */
     public OverviewResponse {
         Objects.requireNonNull(executionCountsByStatus, "executionCountsByStatus");
         Objects.requireNonNull(throughput, "throughput");

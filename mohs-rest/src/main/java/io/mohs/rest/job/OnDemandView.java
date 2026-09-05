@@ -19,7 +19,11 @@ import java.util.Objects;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 
-/** The wire form of {@link io.mohs.core.schedule.OnDemandSpec}. */
+/**
+ * The wire form of {@link io.mohs.core.schedule.OnDemandSpec}.
+ *
+ * @param type the schedule variant discriminator
+ */
 public record OnDemandView(ScheduleType type) implements ScheduleView {
 
     /** See {@link CronView} — the same reason for the explicit {@code @JsonCreator} on the canonical constructor. */
@@ -28,6 +32,9 @@ public record OnDemandView(ScheduleType type) implements ScheduleView {
         Objects.requireNonNull(type, "type");
     }
 
+    /**
+     * Creates a {@code OnDemandView} with the supplied values.
+     */
     public OnDemandView() {
         this(ScheduleType.ON_DEMAND);
     }

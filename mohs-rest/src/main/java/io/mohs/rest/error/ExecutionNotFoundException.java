@@ -26,13 +26,26 @@ public final class ExecutionNotFoundException extends RuntimeException {
     @Serial
     private static final long serialVersionUID = 1L;
 
+    /**
+     * Returns the execution identity that was not found.
+     */
     private final ExecutionId executionId;
 
+    /**
+     * Creates a {@code ExecutionNotFoundException} with the supplied values.
+     *
+     * @param executionId the identity of the execution
+     */
     public ExecutionNotFoundException(ExecutionId executionId) {
         super("Execution not found: " + executionId.value());
         this.executionId = Objects.requireNonNull(executionId, "executionId");
     }
 
+    /**
+     * Returns the execution identity that was not found.
+     *
+     * @return the identity of the execution
+     */
     public ExecutionId executionId() {
         return executionId;
     }

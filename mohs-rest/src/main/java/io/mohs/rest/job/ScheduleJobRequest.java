@@ -38,10 +38,23 @@ import io.mohs.core.execution.Priority;
  * {@code Collections.unmodifiableMap} rather than {@code Map.copyOf} — a deliberate divergence from
  * the project's usual {@code List.copyOf}/{@code Map.copyOf} pattern, because {@code Map.copyOf}
  * rejects {@code null} values and JSON legitimately has them (e.g. {@code {"a": null}}).
+ *
+ * @param payload the input passed to the job handler
+ * @param at the requested firing instant, or {@code null} when using a delay or immediate scheduling
+ * @param delay the delay before the scheduled instant
+ * @param priority the ordering priority used when claiming work
  */
 public record ScheduleJobRequest(Map<String, Object> payload, @Nullable Instant at, @Nullable Duration delay,
         @Nullable Priority priority) {
 
+    /**
+     * Creates a {@code ScheduleJobRequest} with the supplied values.
+     *
+     * @param payload the input passed to the job handler
+     * @param at the requested firing instant, or {@code null} when using a delay or immediate scheduling
+     * @param delay the delay before the scheduled instant
+     * @param priority the ordering priority used when claiming work
+     */
     public ScheduleJobRequest {
         Objects.requireNonNull(payload, "payload");
         payload = Collections.unmodifiableMap(new LinkedHashMap<>(payload));

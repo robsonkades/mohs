@@ -39,10 +39,20 @@ public class NodesController {
 
     private final Mohs mohs;
 
+    /**
+     * Creates a {@code NodesController} with the supplied values.
+     *
+     * @param mohs the scheduling and operations facade
+     */
     public NodesController(Mohs mohs) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
     }
 
+    /**
+     * Lists the cluster node heartbeat snapshots.
+     *
+     * @return the node heartbeat representations
+     */
     @GetMapping
     public List<NodeResponse> list() {
         return mohs.nodes().stream().map(NodeResponse::from).toList();

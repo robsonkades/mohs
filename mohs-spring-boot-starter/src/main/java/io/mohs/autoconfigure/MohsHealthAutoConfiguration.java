@@ -44,6 +44,18 @@ import io.mohs.core.Mohs;
 @ConditionalOnClass(HealthIndicator.class)
 public class MohsHealthAutoConfiguration {
 
+    /**
+     * Creates a {@code MohsHealthAutoConfiguration} instance.
+     */
+    public MohsHealthAutoConfiguration() {
+    }
+
+    /**
+     * Creates the {@code MohsHealthIndicator} bean for Mohs integration.
+     *
+     * @param mohs the scheduling and operations facade
+     * @return the configured {@code MohsHealthIndicator} bean
+     */
     @Bean
     @ConditionalOnMissingBean(name = "mohsHealthIndicator")
     @ConditionalOnEnabledHealthIndicator("mohs")
