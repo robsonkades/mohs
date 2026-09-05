@@ -22,6 +22,7 @@ import java.util.List;
 import javax.sql.DataSource;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -55,6 +56,7 @@ import static org.mockito.Mockito.mock;
  * <p>H2 proves the cross-delegate half (rollback-only avoided); only real Postgres proves the connection
  * stays healthy AFTER the conflict.
  */
+@Tag("docker")
 class ScheduleCommandPostgresTest {
 
     private static final Instant NOW = Instant.parse("2026-08-15T12:00:00Z");

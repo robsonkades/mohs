@@ -19,6 +19,7 @@ import java.sql.SQLException;
 
 import com.microsoft.sqlserver.jdbc.SQLServerDataSource;
 
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 import io.mohs.store.jdbc.delegate.SqlServerRcsiRequirement;
@@ -34,6 +35,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * check exists to catch. What the test pins about the message is that it is ACTIONABLE: it names the
  * database it inspected and the exact {@code ALTER DATABASE} the operator has to run.
  */
+@Tag("docker")
 class SqlServerRcsiRequirementTest {
 
     @Test

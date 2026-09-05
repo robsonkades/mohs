@@ -24,6 +24,7 @@ import java.util.stream.IntStream;
 import javax.sql.DataSource;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -42,6 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code JdbcWorkQueueTest} (H2, portable form); what stays here are the ones that prove Postgres's
  * FORM.
  */
+@Tag("docker")
 class JdbcWorkQueuePostgresTest {
 
     private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");

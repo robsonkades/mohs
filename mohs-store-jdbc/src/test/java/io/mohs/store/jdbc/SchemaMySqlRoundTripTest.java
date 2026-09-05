@@ -26,6 +26,7 @@ import javax.sql.DataSource;
 
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -52,6 +53,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code mohs_execution.payload}/{@code mohs_attempt.error} ({@code TEXT}) and the {@code DATETIME}
  * columns (MySQL does not use {@code TIMESTAMP} — see schema-mysql.sql).
  */
+@Tag("docker")
 class SchemaMySqlRoundTripTest {
 
     record Handler() {

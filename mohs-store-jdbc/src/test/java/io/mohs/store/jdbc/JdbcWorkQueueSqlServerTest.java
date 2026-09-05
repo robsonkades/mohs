@@ -24,6 +24,7 @@ import java.util.stream.IntStream;
 import javax.sql.DataSource;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -36,6 +37,7 @@ import io.mohs.store.jdbc.delegate.SqlServerJdbcDelegate;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** The claim's T-SQL sweep ({@code TOP} plus {@code UPDLOCK, ROWLOCK, READPAST}) against a real SQL Server (Tier 2). */
+@Tag("docker")
 class JdbcWorkQueueSqlServerTest {
 
     private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");

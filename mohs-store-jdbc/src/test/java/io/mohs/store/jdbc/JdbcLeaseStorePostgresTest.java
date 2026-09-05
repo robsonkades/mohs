@@ -24,6 +24,7 @@ import java.util.Map;
 import javax.sql.DataSource;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -45,6 +46,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * arrived with the natural key — {@code execution_id} is unique, so the terminal UPDATE matching by
  * id can only ever touch one row. The shared semantics live in {@code JdbcLeaseStoreTest} (H2).
  */
+@Tag("docker")
 class JdbcLeaseStorePostgresTest {
 
     private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");

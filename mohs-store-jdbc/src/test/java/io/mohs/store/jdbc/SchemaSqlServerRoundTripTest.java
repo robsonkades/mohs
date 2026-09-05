@@ -26,6 +26,7 @@ import javax.sql.DataSource;
 
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -53,6 +54,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code CLOB}/{@code TEXT}, which are deprecated on SQL Server) and the
  * {@code DATETIME2}/{@code NVARCHAR}/{@code BIT} columns (see schema-sqlserver.sql).
  */
+@Tag("docker")
 class SchemaSqlServerRoundTripTest {
 
     record Handler() {

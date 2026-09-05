@@ -24,6 +24,7 @@ import java.util.List;
 import javax.sql.DataSource;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 import tools.jackson.databind.json.JsonMapper;
@@ -63,6 +64,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * failure this closes is a 3 a.m. one — a reaper that throws {@code Incorrect syntax near ':'} on every
  * sweep never reclaims a dead node's work, and the claim path stays green throughout.
  */
+@Tag("docker")
 class SqlServerTsqlStatementTest {
 
     private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");

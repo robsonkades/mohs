@@ -25,6 +25,7 @@ import java.util.UUID;
 import javax.sql.DataSource;
 
 import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
@@ -57,6 +58,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * zoneless {@code LocalDateTime}, these two are the pair that breaks, and they break here.
  */
 @ResourceLock(Resources.TIME_ZONE)
+@Tag("docker")
 class DatabaseClockZoneTest {
 
     private static final TimeZone THREE_HOURS_FROM_UTC = TimeZone.getTimeZone("America/Sao_Paulo");

@@ -24,6 +24,7 @@ import java.util.stream.IntStream;
 import javax.sql.DataSource;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -36,6 +37,7 @@ import io.mohs.store.jdbc.delegate.MySqlJdbcDelegate;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** The claim's portable form against a real MySQL (Tier 2) — the complete semantics live in {@code JdbcWorkQueueTest} (H2, same form). */
+@Tag("docker")
 class JdbcWorkQueueMySqlTest {
 
     private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");

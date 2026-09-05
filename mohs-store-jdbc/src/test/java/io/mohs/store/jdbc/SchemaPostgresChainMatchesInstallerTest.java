@@ -40,6 +40,7 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
  * <p>This test is what keeps the two honest. It builds one database from each path, in the same
  * container, and compares the structure the {@code mohs_*} tables end up with.
  */
+@Tag("docker")
 class SchemaPostgresChainMatchesInstallerTest {
 
     @Test

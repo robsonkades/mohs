@@ -26,6 +26,7 @@ import javax.sql.DataSource;
 
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -53,6 +54,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * one real divergence confirmed between the two databases. One round trip per store, not each one's
  * whole suite — the other portability findings are SQL Server-specific, outside this round's scope.
  */
+@Tag("docker")
 class SchemaPostgresRoundTripTest {
 
     record Handler() {

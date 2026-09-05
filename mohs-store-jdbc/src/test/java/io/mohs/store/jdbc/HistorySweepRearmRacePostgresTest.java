@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 
 import javax.sql.DataSource;
 
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -50,6 +51,7 @@ import static org.awaitility.Awaitility.await;
  * sweep provably blocks on it ({@code pg_locks} shows an ungranted lock), the rearm commits, and the
  * sweep's re-evaluation must spare the now-{@code PENDING} row.
  */
+@Tag("docker")
 class HistorySweepRearmRacePostgresTest {
 
     private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");
