@@ -9,6 +9,12 @@ database, built for clustered deployments.
 
 The name comes from the Mohs hardness scale.
 
+[Getting started](docs/01-overview/getting-started.md) ·
+[Documentation](docs/README.md) ·
+[Dashboard guide](docs/13-operations/dashboard.md) ·
+[API reference](docs/05-api/api-overview.md) ·
+[Operations](docs/13-operations/README.md)
+
 ---
 
 ## What it is
@@ -51,6 +57,38 @@ boundary.
 | **Cluster-wide rate limits and exclusion windows** | Token buckets and firing exclusions, referenced by name |
 | **An operational REST API and dashboard** | Both opt-in, served on your server, inside your security |
 | **Metrics out of the box** | `mohs.*` through Micrometer, always on |
+
+## Operational dashboard
+
+The optional dashboard turns the operational API into a focused workspace for understanding the
+cluster and acting on it. It follows live throughput and queue state, highlights jobs that need
+attention, preserves filters in shareable URLs and asks for confirmation before mutations.
+
+![Mohs dashboard overview showing cluster health, activity, throughput, nodes and upcoming jobs](docs/assets/dashboard/overview.png)
+
+The activity chart combines execution rate with queued, running and retrying work. Hovering reveals
+the values at a point in time, and each series can be shown or hidden independently.
+
+![Interactive execution activity chart with four selectable series and a detailed tooltip](docs/assets/dashboard/activity-chart.png)
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/dashboard/jobs.png" alt="Jobs page filtered by name and active state">
+    </td>
+    <td width="50%">
+      <img src="docs/assets/dashboard/execution-details.png" alt="Execution detail drawer with retry action and attempt timeline">
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Searchable jobs, active filters and configurable columns</sub></td>
+    <td align="center"><sub>Execution metadata, attempt history and operational actions</sub></td>
+  </tr>
+</table>
+
+The UI is served at `/mohs-ui` by the host application. It has no authentication layer of its own;
+protect it and `/api/mohs/**` with the host security configuration. See the
+[dashboard guide](docs/13-operations/dashboard.md) for navigation, live updates and action semantics.
 
 ## Quick start
 
@@ -161,7 +199,8 @@ docs/                        the documentation
 ./mvnw verify -Dskip.frontend=true      # backend only — never for a published jar
 ./mvnw test -pl mohs-engine -Dtest=ShardsTest
 
-./mvnw -pl mohs-demo -am spring-boot:run -Dspring-boot.run.arguments="--mohs.api.enabled=true"
+./mvnw -pl mohs-demo -am spring-boot:run \
+  -Dspring-boot.run.arguments="--mohs.api.enabled=true --spring.datasource.hikari.connection-timeout=3000"
 ```
 
 **Docker is required** for `mohs-store-jdbc` and `mohs-benchmark` (Testcontainers). Without it,
@@ -174,16 +213,17 @@ a regression.
 
 | If you are… | Start at |
 | --- | --- |
-| New to the project | [Product overview](docs/01-overview/product-overview.md) |
+| New to the project | [Getting started](docs/01-overview/getting-started.md) · [Product overview](docs/01-overview/product-overview.md) |
 | Integrating Mohs | [Java API](docs/05-api/java-api.md) · [Configuration reference](docs/07-configuration/configuration-reference.md) |
-| Operating it | [Runbook](docs/13-operations/runbook.md) · [Troubleshooting](docs/13-operations/troubleshooting.md) · [Security](docs/08-security/security-overview.md) |
+| Operating it | [Dashboard](docs/13-operations/dashboard.md) · [Runbook](docs/13-operations/runbook.md) · [Troubleshooting](docs/13-operations/troubleshooting.md) · [Security](docs/08-security/security-overview.md) |
 | Reviewing the design | [Architecture overview](docs/02-architecture/architecture-overview.md) · [Execution lifecycle](docs/02-architecture/execution-lifecycle.md) |
 | Contributing | [Local development](docs/14-development/local-development.md) · [Contributing](docs/14-development/contributing.md) |
 
 ## Two things to read before production
 
 1. **The REST API has no authentication.** It is off by default, and enabling it logs a WARN naming
-   exactly what it can do. Put a `SecurityFilterChain` in front of `/api/mohs/**` and `/mohs-ui/**`.
+   exactly what it can do. Put a `SecurityFilterChain` in front of `/api/mohs/**`, `/mohs-ui` and
+   `/mohs-ui/**`.
    See [security](docs/08-security/security-overview.md).
 2. **History retention is opt-in.** `mohs_execution`, `mohs_attempt` and `mohs_batches` grow
    forever unless you set `mohs.engine.history-retention` (default `0s`, meaning keep everything);
