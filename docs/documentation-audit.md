@@ -1,6 +1,13 @@
 # Documentation audit
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`io.mohs:mohs-parent:0.0.1-SNAPSHOT`)
+Status: Superseded — a snapshot of 2026-08-29 · Source of Truth: Repository (`io.github.robsonkades:mohs-parent:0.0.1-SNAPSHOT`)
+
+> **Read this as history, not as the current state.** It records how the documentation set was
+> produced and what it looked like on 2026-08-29. Its counts (files, tests, indexes, rules, debt
+> items) and its "not present" claims are **not maintained**; several were true then and are false
+> now (there is a CHANGELOG, a release profile, a decision log, no ArchUnit suite, three open debt
+> items). The live inventories are `docs/11-testing/testing-strategy.md`, `docs/technical-debt.md`
+> and `docs/15-design-decisions/records/`.
 
 This is the self-assessment of the documentation set in `docs/`. It records what was covered, what
 could not be determined, what is likely to go stale, and what would require information the

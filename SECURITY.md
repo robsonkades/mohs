@@ -25,8 +25,9 @@ Two properties of Mohs are deliberate, documented, and off by default. Reports a
 closed with a pointer here:
 
 - **The operational REST API has no authentication of its own.** It is disabled by default
-  (`mohs.api.enabled=false`), and enabling it logs a WARN naming exactly what it can do — cancel,
-  retry and pause jobs, drain nodes, change rate limits. Authentication is the host application's:
+  (`mohs.api.enabled=false`), and enabling it logs a WARN naming exactly what it can do — trigger
+  any registered job with a caller-supplied payload, cancel and retry executions, pause, resume and
+  reschedule jobs, change rate limits. Authentication is the host application's:
   put a `SecurityFilterChain` in front of `/api/mohs/**` and `/mohs-ui/**`. See
   [security overview](docs/08-security/security-overview.md).
 - **`Idempotency-Key` and actor attribution are declarative.** `HeaderActorResolver` records who

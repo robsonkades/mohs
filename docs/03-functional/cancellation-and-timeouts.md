@@ -1,6 +1,6 @@
 # Cancellation and timeouts
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 Cancellation in Mohs is **cooperative**. Nothing kills a thread; the handler decides when to stop.
 
@@ -185,4 +185,3 @@ flowchart TB
 | Cancellation is never immediate | The owner observes it within at most one loop interval |
 | Cancellation is never guaranteed | A completion may win the race, and in that case it stands |
 | A handler that never checks the flag and never blocks is uncancellable | Only the watchdog bound (if configured) or node death resolves it |
-| `JobContext#progress(done, total)` is a **no-op** | Documented as such: it is optional and dashboard-oriented, and nothing observes it today |

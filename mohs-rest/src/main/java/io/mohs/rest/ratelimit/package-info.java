@@ -15,9 +15,9 @@
  */
 /**
  * The "rate-limits" resource area: {@link io.mohs.rest.ratelimit.RateLimitsController}
- * ({@code GET}/{@code PATCH /rate-limits/{name}}, cluster-wide) e seus
+ * ({@code GET}/{@code PATCH /rate-limits/{name}}, cluster-wide) and its
  * DTOs — {@link io.mohs.rest.ratelimit.RateLimitResponse},
- * {@link io.mohs.rest.ratelimit.RateLimitPatchRequest}. Depende de
+ * {@link io.mohs.rest.ratelimit.RateLimitPatchRequest}. Depends on
  * {@code io.mohs.rest} ({@code RuntimePatchResponse}).
  */
 @NullMarked

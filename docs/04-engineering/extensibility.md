@@ -1,6 +1,6 @@
 # Extensibility
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## The supported extension points
 
@@ -156,19 +156,20 @@ Not extension points in the SPI sense, but the way you extend Mohs' vocabulary:
 | --- | --- |
 | `Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`, `BatchBuilder`, `JobContext` | Non-sealed only because the implementation lives in another module and the project does not use a JPMS `permits` clause across them. **They may gain methods in minor releases.** Implementing them breaks with `AbstractMethodError` on the first new method |
 | `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `StoreTransactions` | Internal ports in `io.mohs.engine`. Not published as an SPI, and the auto-configuration registers concrete implementations with no `@ConditionalOnMissingBean` |
-| `JdbcDelegate` | Internal, but a bean of your own replaces it: `mohsJdbcDelegate` is `@ConditionalOnMissingBean`. Adding a *supported* database is still a change to the library |
+| `JdbcDelegate` | Internal, but a bean of your own replaces it: `mohsJdbcDelegate` is `@ConditionalOnMissingBean`. Adding a *supported* database is still a change to the library. The named parameters are the contract: `fencedLeaseDelete()` must match `execution_id`, `node_id`, `epoch` **and** `attempt_number` — a statement that ignores a bound parameter runs without error and keeps a weaker fence |
 | Any sealed type (`Schedule`, `ExecutionEvent`, `JobSpec`, `PolicySpec`, `ScheduleView`) | Not implementable at all — which is precisely why they can grow freely and stay binary-compatible |
 
 To test handlers, use `io.mohs.test` (`MutableClock`, `InMemoryJobStore`) rather than implementing
 `Mohs` yourself.
 
-## Extension points that exist as names but do nothing
+## `@OnExecution` and `RetryPolicy`
 
-| Name | Status | Behaviour today |
+Both were names without behaviour in an earlier build; both are delivered now.
+
+| Name | Status | Behaviour |
 | --- | --- | --- |
-| `@OnExecution(job = …, event = …)` | **Referenced, not implemented** | The scanner **fails the boot** on finding it, naming the alternative. Accepting it silently would mean the method never receives an event |
-| `retryPolicy` (a bean name on a job) | **Referenced, not implemented** | Accepted, persisted, and warned about at every boot. Only `retries` counts, with the default backoff |
-| `JobContext#progress(done, total)` | **No-op** | Documented as optional and dashboard-oriented; nothing observes it |
+| `@OnExecution(job = …, event = …)` | **Implemented** | The annotated method becomes a subscriber of the engine's event stream, filtered by job and event type, with the same asynchronous best-effort contract as `ExecutionListener`. An impossible signature or filter fails the boot |
+| `retryPolicy` (a bean name on a job) | **Implemented** | The named `RetryPolicy` bean decides the delay on both failure paths — a handler that threw and a lease reclaimed from a dead node — and replaces the `retries` budget while it returns one. A bean that does not exist fails the boot |
 
 ## How to add a new database dialect
 

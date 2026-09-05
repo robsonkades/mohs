@@ -112,9 +112,11 @@ does not start.
 | `V7__idempotency_retention_index` | Adds `idx_mohs_idempotency_created`; drops `idx_mohs_execution_created` where it existed | All four |
 | `V8__idempotency_clustered_key` | Makes the PK `NONCLUSTERED` and clusters on `created_at` | **SQL Server only** |
 | `V9__due_trigger_index` | Adds `idx_mohs_job_next_fire`; `mohs_job_definitions` carried no index beyond its keys, and the engine reads it on every tick | All four |
+| `V10__utf8mb4_table_split` | Converts the five tables `V3` created to the collation of the `V1` tables, which `V3` forgot to declare; a no-op where the five already share it. A copying rebuild — see its section below | **MySQL only** |
 
-Two of them are worth reading before you run them, and they have their own sections below: `V5`
-moves rows and takes a table lock, and `V8` rebuilds a primary key.
+Three of them are worth reading before you run them, and they have their own sections below: `V5`
+moves rows and takes a table lock, `V8` rebuilds a primary key, and `V10` rewrites the five
+busiest MySQL tables in place.
 
 ## Every file is idempotent
 
@@ -213,6 +215,35 @@ reasoning; the migration itself:
 4. Drop `idx_mohs_idempotency_created` from `V7` — redundant in this dialect, since the clustered
    index now covers it.
 
+## `V10` — MySQL's character-set repair of the table split
+
+MySQL only. `V3` created `mohs_ready`, `mohs_lease`, `mohs_execution`, `mohs_attempt` and
+`mohs_idempotency` without the `DEFAULT CHARACTER SET utf8mb4` every other table declares, so on a
+server whose database default is anything else their `job_key` columns took that default, and the
+two statements that compare `job_key` across tables failed with *Illegal mix of collations* or
+coerced one side and lost the index. `V10` brings the five tables to the collation of the `V1`
+tables, read from `mohs_job_definitions`.
+
+**What it is not**: a no-op wherever the server default was `utf8mb4`. Two utf8mb4 collations mix
+as illegally as utf8mb4 and latin1 — a server on `utf8mb4_general_ci` has the five tables in that
+collation and the `V1` tables in `utf8mb4_0900_ai_ci`, and the statements fail all the same. That
+is why each guard compares collations for **equality** with `mohs_job_definitions`, and why a
+converted database (or a fresh install) makes the file a no-op.
+
+### The operational cost, measured
+
+| Fact | Consequence |
+| --- | --- |
+| InnoDB refuses `INPLACE` for a column's character-set change; the conversion is `ALGORITHM=COPY` | Each table is rebuilt. Peak space 2× the table plus indexes |
+| Writers block for the whole copy | An `INSERT` waited 19.5 s behind 300k rows of `mohs_execution` (207 MB), about 80 µs per row: **minutes per million rows** |
+| The exclusive metadata lock at the end queues **readers** behind any transaction that still holds the table | With nodes running, the pool exhausts, the heartbeat cannot get a connection, and the peers reap a live node — the `V5` failure mode |
+| `lock_wait_timeout` defaults to one year | The file sets it to 2 s for its session, the pair of the lock as `lock_timeout` is in `V5`: a fast, visible failure that can be retried |
+| MySQL DDL commits implicitly; a failure mid-file leaves the tables before it converted | Every guard makes the re-run a **resume**, not a repeat |
+| `CONVERT TO CHARACTER SET` widens `MEDIUMTEXT` to `LONGTEXT` so the same characters still fit in four bytes each | `mohs_execution` and `mohs_attempt` are converted column by column instead, and `payload`/`error` stay `MEDIUMTEXT`, equal to the installer's |
+
+**Drain the cluster first**, size the window with `SELECT COUNT(*) FROM mohs_execution` at
+roughly 80 µs per row, and take a backup: there is no undo short of restoring one.
+
 ## Adding a migration
 
 | Rule | Reason |
@@ -232,4 +263,4 @@ reasoning; the migration itself:
 | --- | --- |
 | A failed delta | Fix forward. Applied in one transaction, a PostgreSQL failure rolls back to the previous state |
 | Rolling back the application jar | The schema is generally forward-compatible: `V2`'s comment notes that `lease_expires_at` was kept precisely to support rollback to the previous jar, and `V1`'s `expires_at` nullability provides mixed-version tolerance |
-| Undoing `V5` | **Not possible** without restoring a backup. Take one before running it on a large database |
+| Undoing `V5` or `V10` | **Not possible** without restoring a backup. Take one before running either on a large database |

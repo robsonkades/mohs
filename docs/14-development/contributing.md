@@ -1,6 +1,6 @@
 # Contributing
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 There is no `CONTRIBUTING.md` in the repository and no formal process document. What follows is
 reconstructed from the practices visible in the code and the git history, and should be read as
@@ -48,7 +48,7 @@ The full treatment is in [coding standards](../04-engineering/coding-standards.m
 | Prose in code | Historically Portuguese; **write new prose in English**. Never mix languages within one file. `mohs-ui` is English throughout, deliberately |
 | Comments | The **why** the code cannot show. Never narrate the what, and never narrate the change itself |
 | Records for value objects; validation in the compact constructor | An invalid object must not be constructible |
-| `@NullMarked` on every production package | Enforced by ArchUnit |
+| `@NullMarked` on every production package | Convention; nothing in the build verifies it |
 | No new dependency without discussion | The runtime footprint is deliberately small |
 | Prefer editing an existing file to creating one | Especially documentation |
 | No configuration flag for a hypothetical scenario | |
@@ -68,7 +68,8 @@ The full treatment is in [coding standards](../04-engineering/coding-standards.m
 
 ## Architecture rules you cannot break silently
 
-Twelve ArchUnit rules will fail the build. Before proposing a change that crosses a boundary, read
+The reactor's compile classpath and three source scans in `mohs-store-jdbc` are the only build rules;
+the rest is convention caught in review. Before proposing a change that crosses a boundary, read
 [boundaries and fitness functions](../02-architecture/boundaries-and-fitness-functions.md).
 
 The ones most likely to catch a newcomer:

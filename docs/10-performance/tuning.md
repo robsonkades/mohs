@@ -1,6 +1,6 @@
 # Tuning
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## Start by knowing what you are optimising for
 
@@ -78,6 +78,12 @@ Remember the two caps on the actual sleep: the nearest armed trigger shortens it
 
 ### 4. The connection pool
 
+The actual Hikari pool's `connection-timeout` must be strictly below `mohs.engine.node-lease-ttl`;
+boot rejects an equal or longer wait. This also covers Spring delegating proxies. Configure other
+pools and opaque wrappers explicitly: Mohs cannot inspect their acquisition timeout. A JDBC query
+timeout starts after acquisition and does not cover this wait; passing the check alone does not
+guarantee that every combination of slow operations fits inside the lease.
+
 ```yaml
 spring:
   datasource:
@@ -107,10 +113,13 @@ metric.
 | --- | --- |
 | Faster recovery after a crash (the floor is one TTL) | Fewer heartbeat writes |
 | Forces a faster minimum tick cadence (`TTL/3`) | Allows a slower idle cadence |
-| Shrinks the claim lap budget (`TTL/4`) | |
+| Shrinks the claim lap budget and the firing sweep's budget (both `TTL/4`) | |
 
-**Below about 10 s, revisit the rate-limit bucket's internal 2 s statement timeout** — the wait must
-fit comfortably inside the TTL, or the ceiling that protects the heartbeat becomes what consumes it.
+**The validated floor is 12 s** — below it the boot fails naming the property. One tick sleeps up to
+a third of the TTL and then spends up to 7 s on the idempotency prune and the queue-depth count, so
+a shorter promise expires while the node is alive and working. The rate-limit bucket's internal 2 s
+statement timeout has to fit inside the same budget, or the ceiling that protects the heartbeat
+becomes what consumes it.
 
 ### 7. Group commit
 

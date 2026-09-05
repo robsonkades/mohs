@@ -1,10 +1,10 @@
 # Repository map
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ```text
 mohs/
-├── pom.xml                      the reactor root: io.mohs:mohs-parent:0.0.1-SNAPSHOT
+├── pom.xml                      the reactor root: io.github.robsonkades:mohs-parent:0.0.1-SNAPSHOT
 ├── mvnw · mvnw.cmd · .mvn/      the Maven Wrapper
 ├── LICENSE · NOTICE             Apache 2.0; NOTICE records the vendored cron adaptation
 ├── CLAUDE.md                    working instructions for AI assistants on this repository
@@ -70,7 +70,8 @@ mohs-api/src/main/java/
     └── resource/     MohsRunner · RunnerMode · RateLimit · ExecutionWindow
 ```
 
-The subpackage dependency graph is **acyclic**, and that is enforced by ArchUnit.
+The subpackage dependency graph is **acyclic** — a convention nothing in the build verifies since the
+ArchUnit suite went away.
 
 ### `mohs-engine` — the loop and the ports
 

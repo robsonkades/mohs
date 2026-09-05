@@ -34,7 +34,8 @@ import io.mohs.rest.error.PayloadValidationException;
 /**
  * {@code GET /overview} — the dashboard's polling anchor:
  * live-work counts plus the terminal throughput of the recent window, all through the {@link Mohs}
- * facade (REST does not see the engine — the ArchitectureTest boundary).
+ * facade (REST does not see the engine — the reactor keeps {@code mohs-engine} off this module's
+ * compile classpath).
  *
  * <p>{@code /stream} is the same snapshot pushed over SSE — see {@link OverviewStreamBroadcaster}.
  */

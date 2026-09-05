@@ -130,7 +130,7 @@ scheduling happens **outside** the constructor, eliminating the this-escape.
 
 | | |
 | --- | --- |
-| **Location** | `(node_id, epoch)` on every write over owned work |
+| **Location** | `(node_id, epoch, attempt)` on every write over owned work |
 | **Intent** | Make a revived zombie's writes lose by construction |
 | **Implementation** | The completion is `DELETE … WHERE execution_id = ? AND node_id = ? AND epoch = ?`; the **row count is the verdict** |
 

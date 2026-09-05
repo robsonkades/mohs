@@ -21,7 +21,7 @@
  *
  * <p>Depends on {@code io.mohs.core.definition}/{@code .schedule} (types reused directly:
  * {@code Misfire}, {@code DefinitionSource}) and on {@code io.mohs.rest.execution}
- * ({@code ExecutionResponse}, only in a job's execution history).
+ * ({@code ExecutionSummaryResponse}, only in a job's execution history).
  */
 @NullMarked
 package io.mohs.rest.job;

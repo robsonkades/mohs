@@ -1,6 +1,6 @@
 # Resilience
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 Every resilience mechanism in Mohs, and the specific failure each one protects against.
 
@@ -14,15 +14,16 @@ Every resilience mechanism in Mohs, and the specific failure each one protects a
 | Executor rejection (never an unbounded queue) | Unbounded memory growth under load | Runner `maxConcurrent` / `queueCapacity` | 64 / 0 |
 | Completion-batcher blocking submit | Persisting slower than executing | `flushSize × 4` queue | 1,024 |
 | Node lease + reaper | A node dying mid-execution | `node-lease-ttl` | 15 s |
-| Fencing token `(node_id, epoch)` | A revived zombie corrupting state | — | Always on |
+| Fencing token `(node_id, epoch, attempt)` | A revived zombie corrupting state | — | Always on |
 | Stray-lease reconcile | Work lost between claim and dispatch on a **live** node | Derived: `max(2s, 4 × poll-interval)` | — |
 | Watchdog bound | A handler deaf to interrupts | `watchdog-timeout` | **off** |
 | Graceful drain + escalation | Losing in-flight work on shutdown | `lifecycle.shutdown.grace-period` | 30 s |
 | Per-step tick isolation | One broken maintenance step stopping the claim | — | Always on |
 | Rate-limit statement timeout | One stuck node stalling every other node's heartbeat | `BUCKET_LOCK_TIMEOUT` | 2 s (internal) |
+| Tick statement timeout | A statement on the loop thread waiting out the node's own lease | `TICK_STATEMENT_TIMEOUT_SECONDS` | 3 s (internal) — the heartbeat, the reaper's and reconcile's reads, the cancel poll, the firing CAS, the claim and the requeue |
 | Idle-gate fail-open | A failing probe silently stalling a node | — | Always on |
 | Inadmissible-filter truncation | Losing a guard when the list exceeds the parameter ceiling | `MAX_INADMISSIBLE_FILTER` | 1,000 (internal) |
-| Firing and reclaim caps | An unbounded sweep after downtime or mass death | `FIRE_LIMIT`, `RECLAIM_LIMIT` | 500 each (internal) |
+| Firing and reclaim caps | An unbounded sweep after downtime or mass death | `FIRE_LIMIT`, `RECLAIM_LIMIT` | 500 each (internal); reclaims commit in chunks of `RECLAIM_CHUNK` = 50, each its own transaction under the tick's deadline, and both sweeps stop at the tick's `node-lease-ttl / 4` budget |
 | Misfire replay cap | A pathological schedule turning one tick into an unbounded insert | `MAX_OCCURRENCES_PER_CYCLE` | 1,440 (internal) |
 | Cron expression cache ceiling | Operator-driven unbounded map growth | `MAX_CACHED_EXPRESSIONS` | 10,000 (internal) |
 | `onCompletion` LRU ceiling | Callback registrations resident forever in a cluster | `MAX_TRACKED_BATCHES` | 10,000 (internal) |
@@ -52,6 +53,8 @@ a database that is down does not improve by being hammered at the 25 ms floor.
 | `node-lease-ttl` | The node's liveness promise | Peers may reclaim its work |
 | Drain grace | Shutdown | Flag + interrupt on everything in flight |
 | Rate-limit statement timeout (2 s) | One `charge` | `QueryTimeoutException`; the claim round is lost, the heartbeat is not |
+| Tick statement timeout (3 s) | One lock-waiting statement the loop thread issues, or one chunk of the reaper's completion (50 reclaims per transaction) | `QueryTimeoutException`, or `TransactionTimedOutException` when the reaper's deadline runs out between statements; the tick step is lost and counted in `mohs.tick.failed` (under `step=tick` when the death is outside a maintenance step), the lease is not — a quarter of the 12 s floor on `node-lease-ttl`. The definition scans (rows, not locks) and host-thread statements (enqueue, completion flush, history reads) carry no ceiling; `GET /nodes` shares the heartbeat's |
+| Firing sweep budget (`node-lease-ttl / 4`) | One tick's trigger sweep | The sweep stops after the trigger that spent the budget and logs a WARN naming how many wait; they fire next tick. Up to 500 CASes at 3 s each would otherwise outlast the lease when a host transaction holds a few definition rows |
 | SSE snapshot deadline (2 s) | One `buildFrames` | `IllegalStateException` → the tick logs and retries next time |
 | SSE scope quiescence (1 s) | Cancelling snapshot subtasks | A leaked-reader WARN, never an unbounded wait |
 | Loop join on stop (`node-lease-ttl / 4`) | Waiting for the current tick | A WARN naming the degraded mode; shutdown continues |
@@ -90,7 +93,7 @@ thing it replaces:
 | No Micrometer registry in the host | A local `SimpleMeterRegistry` | The engine stays identical, with no conditional path in hot code |
 | Boot-time policy check throws | WARN with the full cause; the engine starts | Diagnostics never bring the boot down |
 | Final `STOPPED` heartbeat fails | Best-effort; staleness and the purge cover it | A shutdown never fails because the database is down |
-| SPA asset not found under `/mohs-ui/**` | Serve `index.html` | Refreshing on a client route resolves instead of 404ing |
+| Client route requested under `/mohs-ui/**` (anything outside `assets/`) | Serve `index.html` | Refreshing on a client route resolves instead of 404ing. A missing file under `assets/` is a plain 404: a browser with a stale page after a deploy must learn its script is gone, not receive HTML in its place |
 
 ## Recovery procedures the system performs itself
 
@@ -138,7 +141,5 @@ database-side mitigation is `idle_in_transaction_session_timeout`.
 | **Circuit breaker** over the database | There is one downstream, and the adaptive backoff plus per-step isolation already covers degradation. Opening a breaker would stop the heartbeat — which is exactly what must not stop, since a stopped heartbeat means peers reclaim work that is still running here |
 | **Dead-letter queue** | Exhausted retries become terminal `FAILED` rows in history, queryable and manually retryable. A separate DLQ table would be a second place to look |
 | **Priority aging** | `BACKGROUND` can starve under sustained higher-priority load. Documented as a known risk in `Priority`'s Javadoc rather than silently mitigated |
-| **Automatic history retention** | No purge exists for `mohs_execution`/`mohs_attempt`. See [data lifecycle](../06-data/data-lifecycle.md) |
-| **Automatic idempotency pruning** | The method exists and is indexed; nothing schedules it |
 | **Cross-node `onCompletion` delivery** | Explicitly out of contract; the outbox pattern is prescribed instead |
 | **Load shedding at the API** | The REST layer has no rate limiting of its own beyond the SSE subscriber cap |

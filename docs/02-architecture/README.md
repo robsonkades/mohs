@@ -20,7 +20,7 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 - **Coordination**: no leader, no consensus. Three database-arbitrated decisions — a CAS on the
   trigger, `SKIP LOCKED` on the claim, a fenced `DELETE` on the completion.
 - **Liveness**: one heartbeat per node per tick writing a lease promise; peers derive death from the
-  promise's age; every write over owned work carries the `(node_id, epoch)` fencing token.
+  promise's age; every write over owned work carries the `(node_id, epoch, attempt)` fencing token.
 - **Storage**: four hot-path tables split by write profile, so history size does not affect claim
   cost, plus a derived read model so the dashboard can read a cheap advisory column.
 - **Guarantee**: at-least-once when `retries > 0` (the default); at-most-once when a job opts into

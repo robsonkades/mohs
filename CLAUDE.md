@@ -29,7 +29,7 @@ conflicts with real code, the code wins.
   the decision log to understand the line in front of them. The records remain the
   record of the decision — they are just not load-bearing for reading the code.
 - Identifiers (classes, methods, fields, packages) are in English — the
-  vocabulary locked in `docs/API-DESIGN.md`/`docs/MOHS-DOCUMENTO-MESTRE.md`
+  vocabulary locked in `docs/01-overview/glossary.md`
   (`JobKey`, `Schedule`, `MohsRunner` etc.). The language convention applies
   to explanatory prose, not to names.
 - Commit messages in English (established practice since M0).
@@ -48,8 +48,8 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
 - Think failure modes first: what happens if the process dies between claim
   and execution? If two nodes fire the same trigger? If the clock goes
   backwards? Code that doesn't answer these is not ready.
-- Measure before opining on performance: BASELINE.md outranks intuition —
-  including yours.
+- Measure before opining on performance: the numbers recorded in
+  `docs/10-performance/` outrank intuition — including yours.
 - Know the state of the art: when touching something Quartz, JobRunr,
   db-scheduler, or Temporal already solve, say how they solve it and why our
   approach is equal or better.
@@ -77,14 +77,16 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
 - Single test: `./mvnw test -pl <module> -Dtest=ClassNameTest`
 - `mohs-store-jdbc`'s Testcontainers tests need Docker up (Rancher Desktop here);
   without it they error on `Could not initialize class *TestSupport`, which
-  is environment, not regression.
+  is environment, not regression. They are `@Tag("docker")`:
+  `./mvnw test -DexcludedGroups=docker` runs everything else, and a red suite
+  under that flag IS a regression.
 - Benchmarks/harnesses live in `mohs-benchmark` (never published). Query
   harnesses run only by explicit name (surefire's default pattern skips
   `*Harness`): `./mvnw -pl mohs-benchmark test -Dtest=ClaimQueryLoadHarness`.
   No JMH yet — when it lands, it lands there.
 - Load harness (macro): `mohs-benchmark/scripts/write-amplification.ps1`
   with the demo app running — measures commits/tuple versions/WAL bytes
-  per execution; boot recipe in BASELINE.md "Tuning fim a fim no Postgres".
+  per execution; see `docs/10-performance/benchmarks.md`.
 - Pinning diagnostics: `-Djdk.tracePinnedThreads` was **removed in JDK 24**
   (JEP 491) — it is a silent no-op on the JDK 25 this project uses. Today use
   JFR (`-XX:StartFlightRecording=filename=rec.jfr`, then `jfr print --events
@@ -94,8 +96,8 @@ You act as the tech lead of Mohs. This changes behavior, not just tone:
 ## Workflow
 For any task that changes code:
 1. **Understand before editing** — read the types involved and the relevant
-   ADR. Non-trivial task: propose a short plan (steps + trade-offs) before
-   coding. Refactors follow PLAN.md: one step per commit/PR.
+   decision record. Non-trivial task: propose a short plan (steps + trade-offs)
+   before coding. Refactors: one step per commit/PR.
 2. **Small steps, green suite after each one.** Uncovered code → write the
    test first, show it, then touch the code.
 3. **End-of-task pipeline (Definition of Done)** — mandatory whenever `.java`
@@ -123,33 +125,26 @@ For any task that changes code:
    to the files this session actually edited and left uncommitted.
 
 ## Document map
-- `docs/MOHS-DOCUMENTO-MESTRE.md` — product vision and vocabulary.
-- `docs/API-DESIGN.md` — public API design (source of naming).
-- `docs/REST-API-DESIGN.md` — endpoint ↔ controller table (M2).
-- `docs/15-design-decisions/` — the decision log (`DR-nnn`); a record outranks
-  opinions in chat. `docs/old/adr/` is the historical `ADR-nnnn` series and goes
-  away with `docs/old/`; no new record is written there.
-- `BASELINE.md` — reference performance numbers.
-- `docs/RATE-LIMIT-EVOLUTION.md` — deferred rate-limit improvements, each with
-  its measured trigger (companion to ADR-0042).
-- `docs/BATCH-ARCHITECTURE-REVIEW.md` — deferred batch decisions, each with its
-  trigger (companion to ADR-0043).
-- `docs/DASHBOARD-STREAM-REVIEW.md` — what stayed open in `/overview/stream`,
-  each with its trigger (companion to ADR-0046, which decided *not* to change
-  it). Read it before proposing any stream optimization: two were already
-  implemented and reverted. Partially measured on 2026-08-23
-  (`OverviewLatencyScenario`): on an IDLE database the throughput count costs
-  the window, not the history (1.6 ms at 2M rows) — what costs is the backlog
-  scan (13.2 ms at 500k). The number that still does not exist, and that the
-  trigger asks for, is the endpoint under load with an SSE subscriber attached.
-- `docs/CLAIM-GRANULARITY.md` — open exploration: should the claim stay global,
-  or split per runner? Not a decision; carries the number that would settle it.
-- `docs/old/PLAN.md` — current refactor steps; one step per commit/PR.
+- `docs/README.md` — the index of the numbered documentation tree.
+- `docs/01-overview/` — product vision, capabilities and the glossary
+  (source of naming).
+- `docs/05-api/` — the Java API and the REST endpoint ↔ controller table.
+- `docs/15-design-decisions/records/` — the decision log (`DR-nnn`); a record
+  outranks opinions in chat. The historical `ADR-nnnn` series was retired with
+  `docs/old/`; a number cited in prose has no file behind it.
+- `docs/10-performance/` — reference performance numbers, benchmarks and the
+  tuning recipes. `docs/05-api/streaming.md` records what was measured on
+  `/overview/stream` and what still is not: on an IDLE database the throughput
+  count costs the window, not the history (1.6 ms at 2M rows) — what costs is
+  the backlog scan (13.2 ms at 500k). The number that still does not exist is
+  the endpoint under load with an SSE subscriber attached.
+- `docs/technical-debt.md` — the open debt ledger; `CHANGELOG.md` — the
+  running record of what the next release contains.
 
 ## Identity and naming
 - Repository: github.com/robsonkades/mohs · Maven groupId: `io.github.robsonkades` ·
-  domains: mohs.io / mohs.dev. The `mohs-io` org was the plan in
-  `docs/old/MOHS-DOCUMENTO-MESTRE.md`; the repository actually lives under the
+  domains: mohs.io / mohs.dev. The `mohs-io` org was the plan in the original,
+  retired design document; the repository actually lives under the
   personal account, and every URL in the POMs, the workflows and the community
   files points there.
 - Multi-module reactor under `io.github.robsonkades:mohs-parent`, full Spring Boot
@@ -162,9 +157,8 @@ For any task that changes code:
 - Java packages: `io.mohs.*` — no new code uses the old package (cadrix).
 
 ## Architecture (a map, not an encyclopedia)
-Public API (contracts, M1 — see
-`docs/old/adr/0015-consolidate-public-api-under-core.md`, which revises
-`docs/old/adr/0013-public-api-subpackaging.md`), all under `io.mohs.core`:
+Public API (contracts, M1 — consolidated under one package after an earlier
+sub-packaging was revised), all under `io.mohs.core`:
 - `io.mohs.core` — facade (`Mohs`, `MohsLifecycle`, `EngineState`,
   `ScheduleCommand`) and scheduling receipt (`Batch`, `BatchBuilder`)
 - `io.mohs.core.job` — shared identity (`JobKey`, `JobRef`), extracted apart
@@ -183,8 +177,8 @@ Public API (contracts, M1 — see
 Every package below maps 1:1 to a Maven module (ADR-0044); the module name is
 the package with `.` swapped for `-`, except `io.mohs.autoconfigure` →
 `mohs-spring-boot-starter`, the `io.mohs`/`io.mohs.demo` pair →
-`mohs-demo`, and `io.mohs.core` → `mohs-api` (Phase 2 do redesign renomeou
-o artifact; o PACOTE público de M1 é imutável — §18.1 do plano).
+`mohs-demo`, and `io.mohs.core` → `mohs-api` (the redesign renamed the
+artifact; the public PACKAGE of M1 is immutable).
 
 Outside `core` (not job vocabulary):
 - `io.mohs` (root) — only `mohs-demo`'s Spring Boot bootstrap
@@ -199,10 +193,10 @@ Internals and infrastructure (M0 skeleton, implementation lands in M3, except
 `io.mohs.rest` which is M2, already implemented as a contract):
 - `io.mohs.engine` — engine: claim, runners, misfire, retry,
   `NextFireCalculator`
-- `io.mohs.store.jdbc` — JDBC persistence of jobs and executions (module `mohs-store-jdbc`; era `io.mohs.jdbc` até a Phase 2)
+- `io.mohs.store.jdbc` — JDBC persistence of jobs and executions (module `mohs-store-jdbc`; it was `io.mohs.jdbc` before the redesign)
 - `io.mohs.autoconfigure` — auto-config, properties, boot validations
 - `io.mohs.rest` — operational REST API. One subpackage per controller
-  (1:1 navigability with `docs/REST-API-DESIGN.md`), plus root and `error`
+  (1:1 navigability with `docs/05-api/endpoints.md`), plus root and `error`
   as cross-cutting infra:
   - root — `ActorResolver` (SPI), `HeaderActorResolver`, `CursorPage`,
     `AcceptedExecutionResponse`, `RuntimePatchResponse`
@@ -350,11 +344,11 @@ when it is exactly what the code does:
 - Deterministic concurrency tests: no `Thread.sleep` for synchronization —
   latches, `CompletableFuture` with timeout, or Awaitility.
 - Benchmarks (JMH/load) live apart from the unit suite and always compare
-  against BASELINE.md.
+  against the numbers recorded in `docs/10-performance/`.
 
 ## Git and commits
 - One subject per commit; the message explains the why, not the what.
-- Refactor: one PLAN.md step per commit/PR, reviewable in isolation.
+- Refactor: one step per commit/PR, reviewable in isolation.
 
 ## Invariants
 **ALWAYS:**
@@ -385,8 +379,8 @@ when it is exactly what the code does:
 - Reflection or "magic" where explicit code does the job.
 - Wrappers over JDK APIs without demonstrated need.
 - Configuration/flags for hypothetical scenarios.
-- Edit BASELINE.md retroactively — a baseline only changes with a new
-  baseline.
+- Edit a recorded baseline in `docs/10-performance/` retroactively — a
+  baseline only changes with a new baseline.
 
 ## Maintaining this file
 When you notice a rule here that is stale against the code or a newer ADR,

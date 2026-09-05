@@ -1,6 +1,6 @@
 # Coding standards
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 This document separates **current practice** (what the code does, observably) from **recommended
 practice** (what a contributor should do going forward). Where they coincide, that is said.
@@ -10,11 +10,11 @@ practice** (what a contributor should do going forward). Where they coincide, th
 | Item | Value |
 | --- | --- |
 | Java release | **25** (`maven.compiler.release=25`) |
-| Spring Boot | 4.1.0, imported as a BOM — **not** inherited via `spring-boot-starter-parent` |
+| Spring Boot | 4.1.1, imported as a BOM — **not** inherited via `spring-boot-starter-parent` |
 | Preview features | **None.** `--enable-preview` would lock the host application to one exact JDK |
 | Compiler flags | `-parameters` (Spring MVC resolves `@RequestParam`/`@PathVariable` names reflectively) |
 | Formatter / linter | **Not present.** No Checkstyle, Spotless, PMD, SpotBugs or ErrorProne in the build |
-| Static analysis | ArchUnit only, plus the source-scan tests in `mohs-store-jdbc` |
+| Static analysis | None beyond the three source-scan tests in `mohs-store-jdbc` |
 
 ## Naming
 
@@ -107,7 +107,7 @@ Three rules visible throughout:
 
 | Rule | Detail |
 | --- | --- |
-| Every production `package-info.java` carries `@NullMarked` | Enforced by ArchUnit |
+| Every production `package-info.java` carries `@NullMarked` | Convention; nothing in the build verifies it |
 | Non-null is the default | `@Nullable` marks the exception |
 | Use `@Nullable` only on a genuinely nullable path | `Attempt.finishedAt()` while running; `JobDefinition.name()` with no label. Not "just in case" — noise hides the ones that matter |
 | `Optional` **only** as a return type, when absence is part of the protocol | `NextFireCalculator.nextFireAfter` (empty for on-demand), `Mohs.findJob` |
@@ -147,7 +147,7 @@ itself a member of a batch that does not exist, with nothing to flag it.
 | Unnamed variables (`_`) | Used consistently in lambdas and switch arms that ignore their binding |
 | Text blocks | Every multi-line SQL string |
 | Virtual threads | All I/O-bound execution |
-| `ScopedValue` | **Not used yet.** `ThreadLocal` is banned by ArchUnit; the interceptor chain is the documented place for context propagation |
+| `ScopedValue` | **Not used yet.** `ThreadLocal` is banned by convention; the interceptor chain is the documented place for context propagation |
 | `StructuredTaskScope` | **Not used** (preview). The shape is prepared — see [concurrency](concurrency.md) |
 
 ## Exception discipline
@@ -192,6 +192,6 @@ Not present today; each would close a concrete gap.
 | --- | --- |
 | A formatter (Spotless with a fixed style) | Formatting is currently consistent by convention alone |
 | `maven-enforcer-plugin` with dependency convergence | No enforcement of a single version per transitive dependency |
-| JaCoCo with a per-module threshold | Coverage is asserted qualitatively; no report is produced by the build |
+| JaCoCo aggregation and a per-module threshold | The per-module report exists; nothing merges it across modules or gates the build on it |
 | A `.editorconfig` | Nothing pins indentation or line endings beyond `.gitattributes` |
 | A CONTRIBUTING-level statement of the prose-language migration date | Currently "deferred, date undefined" |

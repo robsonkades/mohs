@@ -1,11 +1,26 @@
 # Technical debt
 
-Status: Active · Last Reviewed: 2026-09-01 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 > **Only open items are listed.** Eleven were closed in the 2026-08-29 release-readiness pass
 > (TD-01, TD-03, TD-04, TD-05, TD-07, TD-08, TD-10, TD-13, TD-16, TD-17, TD-20) and their entries
 > have been removed rather than kept as an archive — what was fixed is visible in the code and the
 > changelog. **Numbers are never reused**, so a gap in the sequence means an item that is gone.
+>
+> **Changed on 2026-09-04 (later).** **TD-09 is closed by removal** — `JobContext#progress` is gone
+> from the public API. Nothing ever observed it (no store column, no REST field, no dashboard
+> component), and a published method that promises a dashboard signal it cannot deliver is worse
+> than no method. Nothing has been released, so there is no compatibility to keep. Its Javadoc was
+> Portuguese, and so were seven more comments in `OnDemandJob`, `RecurringJob`, `Engine` and
+> `MohsImpl` that the same day's review found and translated — the claim below that the Java is
+> done became exact on 2026-09-04, not before. No Medium item remains except the SQL prose.
+>
+> **Changed on 2026-09-04.** **TD-11 is closed** — not with the `node` label, whose deferral stands,
+> but by making the failure loud: `EngineMetrics#bindNodeGauges` and `bindQueueDepthGauge` now throw
+> at construction when their gauge is already bound in the registry, naming the mitigation (one
+> `MeterRegistry` per engine, with its own exporter). Micrometer's own WARN on the collision named
+> neither the engine nor the fix; a dashboard showing one engine's saturation under the other's name
+> was the part worth refusing.
 >
 > **Changed on 2026-09-01 (later).** **TD-02 is closed** — history retention shipped as
 > `mohs.engine.history-retention` (DR-002): opt-in with no default window, swept hourly on the tick
@@ -58,24 +73,11 @@ neglect. Where the code already names a gap, this document quotes it.
 | --- | --- | --- |
 | **Critical** | 0 | — |
 | **High** | 0 | — |
-| **Medium** | 3 | TD-09, TD-11, TD-12 |
+| **Medium** | 1 | TD-12 |
 | **Low** | 2 | TD-18, TD-19 |
-| **Total open** | **5** | |
+| **Total open** | **3** | |
 
 ## Medium
-
-### TD-09 — `JobContext#progress` is a no-op
-
-Published API, documented as "optional, dashboard-oriented; a no-op if nothing observes it". Nothing
-observes it. A handler calling it in a loop pays a virtual call for nothing and gets no dashboard
-signal.
-
-### TD-11 — `mohs.node.*` gauges have no `node` label
-
-Recorded in `EngineMetrics#bindNodeGauges`: with two engines in the same registry (one Mohs per
-`DataSource`), they collide on the meter id and Micrometer **silently ignores the second bind**. The
-deferral is deliberate — the trigger is the first real multi-engine scenario, paying the cardinality
-only then — but the failure is silent, which is the part worth revisiting.
 
 ### TD-12 — The SQL comments are still in Portuguese
 
@@ -133,6 +135,4 @@ Deliberate decisions with recorded reasoning. Listed here so nobody files them a
 | Priority | Item | Effort |
 | --- | --- | --- |
 | 1 | **TD-19** — frontend tests | Medium |
-| 2 | **TD-11** — a `node` label on the `mohs.node.*` gauges, or a loud failure on the second bind | Small |
-| 3 | **TD-09** — deliver `JobContext#progress`, or remove it | Small |
-| 4 | **TD-12** — finish the prose translation, now that the SQL is what an operator reads | Large, mechanical |
+| 2 | **TD-12** — finish the prose translation, now that the SQL is what an operator reads | Large, mechanical |

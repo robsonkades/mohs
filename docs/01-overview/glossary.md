@@ -30,7 +30,7 @@ words look interchangeable in English, they mean different things here.
 | **Visibility rule** | The queue's single admission predicate: `visible_at <= now`. Retry, delay, requeue and immediate enqueue are the same operation with a different `visible_at`. |
 | **Claim** | The transaction that removes a ready entry and inserts an ownership row. Atomic by construction: there is no instant at which an execution is neither queued nor owned. |
 | **Lease** (`mohs_lease`) | Ownership. Exactly the work executing across the cluster. Deleting the lease *is* releasing the slot. |
-| **Fence / fencing token** | The pair `(node_id, epoch)` carried by every write over owned work. A revived zombie carries an old epoch and loses every write. |
+| **Fence / fencing token** | The triple `(node_id, epoch, attempt)` carried by every write over owned work. A revived zombie carries an old epoch, or an old attempt on the same node, and loses every write. |
 | **Epoch** | A node's incarnation counter. Starts at 1 and rises only when the node itself observes that its lease had expired. |
 | **Shard** | `FNV-1a(execution_id) mod 64`. A pure function of the id — never a transported value. |
 | **Shard assignment** | Derived, not negotiated: each node sorts the live node ids, finds its own index `i` of `n`, and owns `{ s : s mod n == i }`. |

@@ -1,9 +1,9 @@
 # Package architecture
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`package-info.java` of each package)
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`package-info.java` of each package)
 
-Every production package carries a `package-info.java` with `@NullMarked` and a prose contract. An
-ArchUnit test fails the build if a package lacks one.
+Every production package carries a `package-info.java` with `@NullMarked` and a prose contract.
+Nothing in the build verifies it since the ArchUnit suite went away; review is the guard.
 
 ## The public API: `io.mohs.core` and its six subpackages
 

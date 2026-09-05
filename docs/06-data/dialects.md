@@ -115,6 +115,7 @@ The dialect with the most divergences, all documented:
 | Aspect | Detail |
 | --- | --- |
 | Row skipping | **No `SKIP LOCKED`.** Uses the table hint `WITH (UPDLOCK, ROWLOCK, READPAST)` — the emulation jOOQ generates for the same purpose |
+| Claim shape | One `DELETE … OUTPUT` self-joined (`INNER LOOP JOIN`) on the `TOP … WITH (UPDLOCK, ROWLOCK, READPAST)` pick, then the lease insert. A separate `DELETE … WHERE execution_id IN (…)` compiled as an index scan under empty statistics and deadlocked against a peer's claim; the fold is driven by the same seek that takes the locks. `OUTPUT` without `INTO` forbids any enabled trigger on `mohs_ready` — the claim fails at the first tick if one is added |
 | Row limit | `TOP (:limit)` immediately after `SELECT` |
 | Text | `NVARCHAR` everywhere — plain `VARCHAR` is not Unicode by default. Guarded by `SqlServerUnicodeScanTest` |
 | Long text | `NVARCHAR(MAX)` — there is no `CLOB` |

@@ -1,6 +1,6 @@
 # Mohs Documentation
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`io.mohs:mohs-parent` 0.0.1-SNAPSHOT)
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`io.github.robsonkades:mohs-parent` 0.0.1-SNAPSHOT)
 
 Mohs is an **embedded job scheduling library for Java 25 / Spring Boot 4**. It is not a server you
 deploy: it is a set of jars an application declares, backed by the application's own relational

@@ -1,6 +1,6 @@
 # 9. Observability
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 | Document | What it covers |
 | --- | --- |
@@ -22,8 +22,6 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 
 | Gap | Impact |
 | --- | --- |
-| No `HealthIndicator` | Kubernetes probes have to be written by the host |
 | No tracing | No span crosses the enqueue boundary; `ExecutionInterceptor` is the integration point |
-| No queue-depth metric | Backlog alerting must poll `GET /overview` |
 | No MDC populated by Mohs | Correlation inside a handler requires an interceptor |
 | `mohs.node.*` gauges lack a `node` label | Two engines in one registry collide silently |

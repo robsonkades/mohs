@@ -1,6 +1,6 @@
 # Modules and publishing
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## What is published, and what is not
 
@@ -23,21 +23,23 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 | Module | Form | Reason |
 | --- | --- | --- |
 | `mohs-cron`, `mohs-api`, `mohs-engine` | Real `module-info.java` | |
-| `mohs-store-jdbc`, `mohs-test`, `mohs-rest` | `Automatic-Module-Name` in the manifest | Each has a recorded reason |
+| `mohs-store-jdbc`, `mohs-test`, `mohs-rest`, `mohs-spring-boot-starter` | `Automatic-Module-Name` in the manifest | Each has a recorded reason |
+| `mohs-ui` | Neither — a resources-only jar with no Java to name | Its module name is filename-derived; nothing imports it |
 
 `mohs-api`'s `module-info` states the point of the exercise in its own comment: the module is 100%
 contract, so it exports everything — **the value is the other side**, establishing that the internal
 modules stop exporting what is `public` today only because the language offered no alternative.
 
-The three modules with a manifest entry only:
+The four modules with a manifest entry only:
 
 | Module | Why no `module-info` |
 | --- | --- |
 | `mohs-store-jdbc` | A **split package**: four engine test classes live under `io.mohs.engine` in this module's test sources, and JPMS forbids one package spanning two modules |
 | `mohs-test` | The same |
 | `mohs-rest` | Nothing internal to hide — it is all controllers and DTOs, and Spring must reach everything reflectively. Also, the servlet API arrives as an *optional transitive* dependency, which the compiler does not put on the module path |
+| `mohs-spring-boot-starter` | Reached reflectively by Spring Boot's auto-configuration import; a stable name (`io.mohs.autoconfigure`) is all a module path needs from it |
 
-In all three cases the name is **fixed in the manifest rather than derived from the jar's filename**,
+In all four cases the name is **fixed in the manifest rather than derived from the jar's filename**,
 so a consumer using JPMS gets a stable module name.
 
 ## The BOM has no parent, on purpose
@@ -58,7 +60,7 @@ The price is a repeated version literal: bumping the reactor's version requires 
 <dependencyManagement>
   <dependencies>
     <dependency>
-      <groupId>io.mohs</groupId>
+      <groupId>io.github.robsonkades</groupId>
       <artifactId>mohs-bom</artifactId>
       <version>${mohs.version}</version>
       <type>pom</type>
@@ -69,19 +71,19 @@ The price is a repeated version literal: bumping the reactor's version requires 
 
 <dependencies>
   <dependency>
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-spring-boot-starter</artifactId>
   </dependency>
 
   <!-- optional: the dashboard bundle -->
   <dependency>
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-ui</artifactId>
   </dependency>
 
   <!-- optional: MutableClock / InMemoryJobStore for your own tests -->
   <dependency>
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-test</artifactId>
     <scope>test</scope>
   </dependency>
@@ -124,7 +126,7 @@ Version is `0.0.1-SNAPSHOT` everywhere, and nothing has been released yet — bu
 | Stable module names | Present |
 | `<scm>`, `<developers>`, `<issueManagement>` | Present, in the parent **and** in `mohs-bom` (which has no parent to inherit from) |
 | `distributionManagement` | Present — the Central Portal's snapshot repository |
-| Sources and Javadoc jars | Present, attached on **every** build |
+| Sources and Javadoc jars | Present, attached on **every** build; `mohs-ui`, which has no Java, ships an empty javadoc jar because Central requires one per artifact |
 | GPG signing | Present, behind `gpg.skip` (default `true`) |
 | Reproducible-build timestamp | Present — `project.build.outputTimestamp` |
 | Upload | `central-publishing-maven-plugin`, `autoPublish=false` |
@@ -136,19 +138,30 @@ time anyone discovers the Javadoc does not compile.
 
 ### Releasing
 
-`.github/workflows/release.yml`, triggered manually with the version. It sets the version
-(`versions:set -DprocessAllModules=true` — without that flag `mohs-bom`, which has no `<parent>`,
-keeps the previous version and the published BOM points at artifacts that do not exist), builds and
-tests, commits and tags, deploys signed with `-pl '!mohs-demo,!mohs-benchmark'`, and opens the GitHub
-release with the jars attached.
+`.github/workflows/release.yml`, triggered manually with the version, in two jobs. **`build`**, with
+no secrets, sets the version (`versions:set -DprocessAllModules=true` — without that flag `mohs-bom`,
+which has no `<parent>`, keeps the previous version and the published BOM points at artifacts that
+do not exist), builds and tests the whole reactor, commits and tags, and hands the built dashboard
+bundle to the next job. **`publish`** checks out that tag, imports the signing key, re-packages
+with tests and the frontend skipped behind the restored bundle, deploys signed with
+`-pl '!mohs-demo,!mohs-benchmark'` and `-Dmohs.test-jar.skip=true` (the `mohs-store-jdbc` tests
+jar is reactor-only, for `mohs-benchmark`), and opens the GitHub release with the jars attached.
 
-Four repository secrets: `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`, `MAVEN_GPG_PRIVATE_KEY`,
-`MAVEN_GPG_PASSPHRASE`.
+The split is deliberate: `verify` runs every Maven plugin, every test and the dashboard's npm
+dependency tree, and none of that executes in the process that holds the private key.
+
+If `publish` fails (the Portal down, a bundle validation), the tag is already pushed: re-run the
+failed job, which rebuilds from the tag and still finds the bundle artifact (kept for seven days). A
+second dispatch of the same version is refused by the tag check.
+
+Four repository secrets, read only by `publish`: `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`,
+`MAVEN_GPG_PRIVATE_KEY`, `MAVEN_GPG_PASSPHRASE`.
 
 ### What is still missing, and is not in this repository
 
-1. The `io.mohs` namespace verified in the Central Portal, against the DNS of mohs.io. OSSRH was
-   retired in June 2025, so the Portal is the only route.
+1. The `io.github.robsonkades` namespace verified in the Central Portal — automatic for an
+   `io.github.*` namespace owned by the GitHub account, no DNS involved. OSSRH was retired in June
+   2025, so the Portal is the only route.
 2. A GPG key published to a keyserver.
 3. Bumping `project.build.outputTimestamp` at each release — it is the release's date, and leaving
    it stale is the only way it can be wrong.
@@ -168,5 +181,5 @@ the part a consumer needs:
 | The shard hash | **Contract, pinned by literal values in a test.** Changing it requires a data migration |
 | Metric names **and label values** | Contract — the first saved dashboard freezes that vocabulary |
 
-One deprecation exists: `JobDefinition`'s 13-argument constructor, `@Deprecated(since = "0.1",
-forRemoval = true)`.
+There are no `@Deprecated` elements in the tree: the compatibility constructor `JobDefinition` once
+carried was removed, because nothing has been released and there is no compatibility to keep.

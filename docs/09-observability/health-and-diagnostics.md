@@ -1,6 +1,6 @@
 # Health and diagnostics
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## Health checks
 
@@ -179,7 +179,8 @@ An idle node is normal — but "idle" has several distinct causes, and they are 
 | `state == PAUSED` | An operator paused this node |
 | A backlog exists but this node claims nothing | Check `mohs_lease` for this node's `node_id`; check whether its shard slice is empty; check `mohs.claim.requeued` for a guard blocking every candidate |
 
-## The single most useful missing signal
+## The most useful missing signal
 
-**Queue depth as a metric.** It is the leading indicator of a backlog and the one number an operator
-currently has to poll `GET /overview` to see. Everything else needed for triage is already exposed.
+**Per-runner occupancy as a metric.** Queue depth, once the missing signal, is `mohs.queue.depth`
+now — sampled by the engine's own tick, not on the scrape. Per-runner occupancy is still only
+visible through `GET /runners`; everything else needed for triage is already exposed.

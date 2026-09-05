@@ -1,6 +1,6 @@
 # Retry and failure handling
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## The budget
 
@@ -43,8 +43,9 @@ jitter they would all come back in lockstep against a resource that is still rec
 The constants are internal, with no configuration property. The exponent is capped at 20 because
 `2^20 × 1s` already exceeds the cap and a larger shift would risk overflow.
 
-`retryPolicy` (a bean name) is **accepted, persisted, and not honoured** — a future SPI. A job
-declaring one gets a WARN at every boot naming the job and the property.
+`retryPolicy` (a bean name) names a `RetryPolicy` bean consulted on both failure paths — a handler
+that threw, and a lease reclaimed from a dead node. While it returns a delay it replaces the
+`retries` budget; a job naming a bean that does not exist fails the boot rather than falling back.
 
 ## Where a retry is written
 
@@ -164,8 +165,8 @@ Where the information about a failure actually lives:
 
 | Sink | Content | Retention |
 | --- | --- | --- |
-| `mohs_attempt.error` | The exception's **message** only | Forever (no retention policy exists) |
-| `mohs_attempt.error_type` | The exception's class name — the number-one operational query | Forever |
+| `mohs_attempt.error` | The exception's **message** only, capped at 256 KB (`… [truncated N chars]` past it — a handler echoing a response body into its exception cannot make an attempt row megabytes wide) | With `mohs.engine.history-retention` unset (the default), forever; otherwise until the hourly sweep removes the terminal execution — see [data lifecycle](../06-data/data-lifecycle.md) |
+| `mohs_attempt.error_type` | The exception's class name — the number-one operational query | Same as `error` |
 | WARN log at the failure | The **full stack trace**. This is the only place a stack trace appears by default | The log's own retention |
 | `Failed` / `AttemptFailed` events | The live `Throwable` | Ephemeral, best-effort delivery |
 | `mohs.attempt.total{job,outcome}` | Counts | Metric retention |

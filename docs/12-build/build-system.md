@@ -1,16 +1,16 @@
 # Build system
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`pom.xml`)
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`pom.xml`)
 
 ## Shape
 
 | Aspect | Value |
 | --- | --- |
 | Tool | Maven, with the wrapper (`./mvnw`, `mvnw.cmd`) |
-| Root | `io.mohs:mohs-parent:0.0.1-SNAPSHOT`, packaging `pom` |
+| Root | `io.github.robsonkades:mohs-parent:0.0.1-SNAPSHOT`, packaging `pom` |
 | Modules | 11 |
 | Java release | **25** |
-| Spring Boot | 4.1.0, **imported as a BOM**, not inherited as a parent |
+| Spring Boot | 4.1.1, **imported as a BOM**, not inherited as a parent |
 | Encoding | UTF-8 |
 | License | Apache 2.0, declared in the POM |
 
@@ -38,18 +38,17 @@ Two consequences that had to be handled explicitly:
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-dependencies</artifactId>
-      <version>4.1.0</version>
+      <version>4.1.1</version>
       <type>pom</type><scope>import</scope>
     </dependency>
     <!-- every io.mohs module at ${project.version} -->
-    <!-- io.github.robsonkades:uuidv7:1.1.0 -->
-    <!-- com.tngtech.archunit:archunit-junit5:1.4.1 -->
+    <!-- io.github.robsonkades:uuidv7:1.2.0 -->
   </dependencies>
 </dependencyManagement>
 ```
 
-Only three versions are pinned outside the Spring Boot BOM: `uuidv7`, `archunit`, and the
-`frontend-maven-plugin` (in `mohs-ui`).
+Only two versions are pinned outside the Spring Boot BOM: `uuidv7` and the `frontend-maven-plugin`
+(in `mohs-ui`).
 
 ## Dependencies every module inherits
 
@@ -97,10 +96,10 @@ notices. `NOTICE` names the adaptation and its one functional divergence from up
 
 | Plugin | Version | Where | Purpose |
 | --- | --- | --- | --- |
-| `maven-compiler-plugin` | 3.14.0 | Managed | Release 25, `-parameters` |
+| `maven-compiler-plugin` | 3.15.0 | Managed | Release 25, `-parameters` |
 | `maven-surefire-plugin` | 3.5.2 | Managed | Tests. Its default include pattern is what keeps `*Scenario` classes out of the normal run |
 | `maven-jar-plugin` | 3.4.2 | Managed; used by four modules | Stamps `Automatic-Module-Name` |
-| `spring-boot-maven-plugin` | 4.1.0 | Managed; used by `mohs-demo` | Repackage |
+| `spring-boot-maven-plugin` | 4.1.1 | Managed; used by `mohs-demo` | Repackage |
 | `frontend-maven-plugin` | 1.15.1 | `mohs-ui` | Installs Node v22.12.0, runs `npm ci` and `npm run build` |
 | `maven-resources-plugin` | 3.3.1 | `mohs-ui` | Copies `frontend/dist` to `target/classes/mohs-ui-webapp` |
 | `spring-boot-configuration-processor` | Managed | `mohs-spring-boot-starter` | IDE metadata for `mohs.*` |
@@ -166,11 +165,11 @@ Only `frontend/` (the source) is in git; `node/`, `node_modules/` and `dist/` ar
 | --- | --- |
 | Compilation | Yes |
 | Tests | Yes |
-| Architecture rules (ArchUnit) | Yes — they are ordinary tests in `mohs-demo` |
+| Architecture rules | Partly — the ArchUnit suite went away with `mohs-demo/src/test`; three source scans in `mohs-store-jdbc` remain, as ordinary tests |
 | Schema round-trip equivalence | Yes — ordinary tests in `mohs-store-jdbc` |
 | Source scans | Yes |
 | TypeScript type checking | Yes — `tsc -b` runs before `vite build` |
-| **Code coverage** | **No** — no JaCoCo, no threshold |
+| **Code coverage** | Reported per module by JaCoCo (0.8.14) under `target/site/jacoco`; no aggregation, no threshold |
 | **Static analysis** | **No** — no Checkstyle, Spotless, PMD, SpotBugs or ErrorProne |
 | **Dependency vulnerability scanning** | **No** |
 | **Dependency convergence** | **No enforcer** |
@@ -188,7 +187,7 @@ Only `frontend/` (the source) is in git; `node/`, `node_modules/` and `dist/` ar
 
 | Recommendation | Gap |
 | --- | --- |
-| JaCoCo with per-module thresholds | Coverage is unmeasurable |
+| JaCoCo aggregation and per-module thresholds | The per-module report exists; nothing merges it across modules or gates the build on it |
 | `maven-enforcer-plugin` (dependency convergence, required Java version, banned duplicate classes) | Nothing enforces a single version per transitive dependency |
 | Spotless or Checkstyle | Formatting is consistent by convention only |
 | OWASP dependency-check | No vulnerability scanning |

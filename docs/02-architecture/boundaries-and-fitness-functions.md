@@ -1,6 +1,6 @@
 # Boundaries and fitness functions
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 Mohs' architectural rules are not prose. They are **executable**, in three independent mechanisms.
 This document is the complete inventory, including the gaps each mechanism admits.
@@ -66,10 +66,10 @@ warning at the moment it is violated:
 | Dashboard with no API | `mohs-ui` on the classpath but `mohs.api.enabled=false`, or a non-default `base-path` | WARN — otherwise the page loads, every fetch 404s, and there is no log at all |
 | `watchdog-timeout <= node-lease-ttl` | Engine assembly | `IllegalArgumentException` — the bound sits *on top of* node liveness, it is not a shorter lease |
 | A job's `timeout >= watchdog-timeout` | Boot, per definition | WARN: the watchdog would release ownership before the job's own deadline |
-| `retryPolicy` declared | Boot, per definition | WARN: not honoured yet; only `retries` counts |
+| `retryPolicy` names a bean that does not exist | Boot, per definition | `IllegalStateException` naming the job and the bean — silently falling back to `retries` would hide the intent |
 | `poll-interval > node-lease-ttl / 3` | `Engine#start` | WARN naming the effective capped cadence — liveness wins, but silently would be a tuning mystery |
 | Duplicate job id, or a method with two job annotations | Boot | `IllegalStateException` naming both declaring methods. **Always fails**, unconditionally — this is identity, not drift |
-| `@OnExecution` present | Boot | `IllegalStateException` — accepting it silently would mean the method never receives an event |
+| `@OnExecution` with an impossible signature or filter | Boot | `IllegalStateException` — a method that could never be called must not boot |
 
 ## Boundary violations found
 

@@ -1,6 +1,6 @@
 # Concurrency model
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 Concurrency is the project's declared priority. This document is the complete inventory of threads,
 shared state, and the reasoning behind each choice.
@@ -49,8 +49,8 @@ semantics: the node's lease expires and a peer's reaper reclaims.
 
 ## Locks and synchronizers
 
-`ReentrantLock` is preferred over `synchronized` throughout, enforced for method modifiers by
-ArchUnit. The rationale is no longer pinning — JDK 24 removed carrier pinning by
+`ReentrantLock` is preferred over `synchronized` throughout, by convention. The rationale is no
+longer pinning — JDK 24 removed carrier pinning by
 `synchronized`/`Object.wait()` — but the capabilities only an explicit lock gives: `tryLock` with a
 timeout, interruptible acquisition, optional fairness, and multiple `Condition`s.
 
@@ -59,7 +59,7 @@ timeout, interruptible acquisition, optional fairness, and multiple `Condition`s
 | `Engine.wakeLock` + `wakeCondition` | `ReentrantLock` + `Condition` | The loop's sleep | A timeout on the await is exactly what the backoff needs. The `wakeRequested` flag absorbs a signal arriving *before* the await — a `signal` with nobody waiting is lost; the flag is not |
 | `CancellationSignal.lock` | `ReentrantLock` | Registration, interrupt delivery, deregistration | One lock shared by all three: the interrupt is delivered only while the thread is registered |
 | `BatchCompletionCallbacks.lock` | `ReentrantLock` | An LRU `LinkedHashMap` | `ConcurrentHashMap` has no eviction, so the map plus a lock is the honest structure |
-| `MohsJobScanner.scanned` | `synchronized` block | The accumulated scan map | Spring Framework 6.2+ background bootstrap can call `postProcessAfterInitialization` on concurrent threads in the host application. This is in the starter, outside the ArchUnit-scoped packages |
+| `MohsJobScanner.scanned` | `synchronized` block | The accumulated scan map | Spring Framework 6.2+ background bootstrap can call `postProcessAfterInitialization` on concurrent threads in the host application |
 
 ### The wake protocol
 
@@ -205,7 +205,8 @@ live completion.
 | Point | Nature | Mitigation |
 | --- | --- | --- |
 | `mohs_rate_limits` row during `charge` | The only unconditional wait on the claim path | A 2 s statement timeout; the round is lost, never the heartbeat |
-| `mohs_ready` claim | Row-level, resolved by `SKIP LOCKED`/`READPAST` | Never waits |
+| Any other lock-waiting statement on the loop thread | Lock waits the tick cannot see coming — a peer's completion, a host transaction on a definition row | A 3 s statement timeout (`JdbcSupport#TICK_STATEMENT_TIMEOUT_SECONDS`) on the heartbeat, the node and lease reads, the cancel poll, the firing CAS, the claim and the requeue, and a 3 s transaction deadline on the reaper's completion; the step is lost, never the lease. The definition scans stay unbounded: their cost is rows, not a lock |
+| `mohs_ready` claim | Row-level, resolved by `SKIP LOCKED`/`READPAST` | Never waits — on SQL Server only since the queue side became one `DELETE … OUTPUT` driven by the locking seek; the separate `DELETE … IN (…)` could be planned as an index scan and wait on a peer's keys |
 | `mohs_lease` completion vs. requeue | Row-level | Canonical ordering by `executionId` |
 | `mohs_nodes` purge | Every node issues the same `DELETE` every tick — a deadlock candidate on SQL Server | Isolated by `runMaintenance`, so a failure does not stop the claim |
 | `mohs_batches` counter | Row-level per batch | Atomic increment; hot only for a single large batch |

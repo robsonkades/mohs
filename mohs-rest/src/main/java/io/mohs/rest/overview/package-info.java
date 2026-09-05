@@ -17,8 +17,8 @@
  * The "overview" resource area: {@link io.mohs.rest.overview.OverviewController}
  * ({@code GET /overview}, the dashboard's polling anchor) and its DTOs —
  * {@link io.mohs.rest.overview.OverviewResponse},
- * {@link io.mohs.rest.overview.ThroughputView}. Depende de
- * {@code io.mohs.core.execution} (tipo reaproveitado direto:
+ * {@link io.mohs.rest.overview.ThroughputView}. Depends on
+ * {@code io.mohs.core.execution} (one type reused directly:
  * {@code ExecutionState}).
  */
 @NullMarked

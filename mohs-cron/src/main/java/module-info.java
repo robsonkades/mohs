@@ -17,7 +17,7 @@
  * The internal/public boundary stops depending on convention.
  *
  * Without a module-info, `public` in io.mohs.cron is public to ANY consumer of the published jar —
- * ArchUnit guards the boundary inside this repository and nothing guards it outside. Here the whole
+ * the reactor guards the boundary in this repository and nothing guards it outside. Here the whole
  * package is exported on purpose: mohs-cron IS a cron parsing library, and has no internals to hide.
  */
 module io.mohs.cron {

@@ -1,6 +1,6 @@
 # Deployment
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## What the repository contains
 
@@ -28,7 +28,7 @@ about its runtime.
 | Requirement | Value |
 | --- | --- |
 | JRE | **Java 25** (`maven.compiler.release=25`) |
-| Spring Boot | 4.1.0 in the host, or a compatible version |
+| Spring Boot | 4.1.1 in the host, or a compatible version |
 | Database | PostgreSQL, MySQL 8.0+ or SQL Server (which **requires `READ_COMMITTED_SNAPSHOT ON`** — the boot refuses without it). **H2 is dev/test only** and warns at boot |
 | JDBC driver | Supplied by the host — Mohs declares none at compile scope |
 | Web server | Only if the REST API or the dashboard is enabled (`spring-boot-starter-webmvc`) |
@@ -121,11 +121,11 @@ startupProbe:
 | --- | --- |
 | Liveness | **Never depend on the database.** A database outage would restart every healthy pod. Do not include the engine's state either: a `DRAINING` node is winding down deliberately, and a `PAUSED` node is an operator's decision |
 | Readiness | `state == RUNNING` is reasonable **if** you want a paused node out of the load balancer. Mohs' work does not arrive through the load balancer, so this affects only REST and the dashboard |
-| Startup | Preferable to a guessed `initialDelaySeconds` — boot includes migrations |
+| Startup | Preferable to a guessed `initialDelaySeconds` — boot includes the first clock sample and the schema checks |
 
-**Mohs registers no `HealthIndicator`.** See
-[health and diagnostics](../09-observability/health-and-diagnostics.md) for one you can write in ten
-lines.
+**Mohs contributes a `HealthIndicator` under the `mohs` key** when the actuator is present, and it
+never reads the database. See [health and diagnostics](../09-observability/health-and-diagnostics.md)
+for how to wire the probes to it.
 
 ## The schema at deploy time
 

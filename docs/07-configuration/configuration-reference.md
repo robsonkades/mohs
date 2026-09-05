@@ -1,6 +1,6 @@
 # Configuration reference
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`io.mohs.autoconfigure.MohsProperties`)
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`io.mohs.autoconfigure.MohsProperties`)
 
 Every `mohs.*` property, bound as **immutable records with constructor binding** — a property is a
 snapshot of the boot, not mutable state. `spring-boot-configuration-processor` is declared, so IDE
@@ -33,7 +33,7 @@ metadata is generated from the `@param` documentation.
 | `mohs.time.sync-interval` | No | `30s` | **`database` mode only.** How often to resample the offset |
 | `mohs.registration.on-conflict` | No | `override` | `override` / `preserve` / `fail` — how definitional drift between code and store is resolved |
 | `mohs.api.enabled` | No | **`false`** | Turns the operational REST API on |
-| `mohs.api.base-path` | No | `/api/mohs/v1` | The prefix for every `io.mohs.rest` route |
+| `mohs.api.base-path` | No | `/api/mohs/v1` | The prefix for every `io.mohs.rest` route and of the `Location` on every 202. Validated at boot: must start with `/` and not end with one — so `/` itself is refused, and the API is never mounted at the host's root (outside the `securityMatcher` the security guide recommends, and colliding with any `/jobs` of your own) |
 | `mohs.runners.<name>.*` | No | — | Additional named runners; see below |
 | `mohs.rate-limits.<name>.max` | **YES**, per entry | — | Firings allowed per window, cluster-wide |
 | `mohs.rate-limits.<name>.window` | **YES**, per entry | — | The window (`1m`, `PT30S`) |
@@ -75,7 +75,6 @@ That is genuinely all that is required. Everything else has a default.
 mohs:
   jdbc:
     dialect: postgresql
-    migrate: true
   engine:
     poll-interval: 50ms
     max-poll-interval: 2s
@@ -118,8 +117,9 @@ These are checked at boot and **fail the boot** when violated:
 | `poll-interval > 0` | `EngineSettings` | The property and the value |
 | `max-poll-interval >= poll-interval` | `EngineSettings` | That it is the ceiling the backoff climbs to, not a second floor |
 | `lease-ttl > 0` | `EngineSettings` | That a non-positive lease is born expired and turns the first tick into a reclaim storm |
-| `node-lease-ttl > 0` | `EngineSettings` | That every peer's reaper would reclaim this node's work |
+| `node-lease-ttl >= 12s` | `MohsAutoConfiguration` | A sanity floor: one tick sleeps up to a third of the TTL and then spends up to 7 s on the always-on maintenance steps, so a shorter promise expires while the node is alive and working — and every peer's reaper would reclaim its work |
 | `watchdog-timeout > node-lease-ttl` | `EngineSettings` | That the bound sits **on top of** node liveness, not as a shorter lease |
+| Hikari `connection-timeout < node-lease-ttl` | `MohsAutoConfiguration` | Checked on the actual Hikari pool, including Spring delegating proxies, before engine startup. Set a shorter acquisition timeout; the pool is never modified. Other pools and opaque wrappers require operator validation |
 | `misfire-threshold > 0` | `EngineSettings` | That a non-positive threshold turns every normally-late fire into a misfire |
 | `idempotency-retention >= 0` | `EngineSettings` | That zero is the opt-out and negative is meaningless — the message says so rather than pruning by a cutoff in the future |
 | `history-retention >= 0` | `EngineSettings` | Same shape as its sibling above: zero is the opt-out, negative is meaningless |
@@ -141,7 +141,7 @@ Not failures, but each one names a real consequence:
 | `poll-interval > node-lease-ttl / 3` | The effective cadence is capped by liveness |
 | The `io` runner overridden below `dispatch-concurrency` | The excess will be rejected by the executor and sit `RUNNING` until the reaper reclaims it |
 | A job's `timeout >= watchdog-timeout` | The watchdog would release ownership before the job's own deadline |
-| A job declares a `retryPolicy` | It is not honoured yet |
+| A job declares a `retryPolicy` | The named bean decides the retry delay; a bean that does not exist fails the boot |
 
 ## Interactions worth knowing
 
@@ -225,8 +225,6 @@ Searched for and absent; several appear in code comments as hypothetical:
 | Absent property | Status |
 | --- | --- |
 | `mohs.engine.node-heartbeat-interval` | Referenced in `NodeStore`'s Javadoc as configuration "that does not exist yet". The cadence is derived from `node-lease-ttl` |
-| A retention or purge window for history | **Not present.** See [data lifecycle](../06-data/data-lifecycle.md) |
-| An idempotency-window property | Not present; the prune method exists but nothing schedules it |
 | A stream-interval property for the SSE tick | Fixed at 2 s in code, with a comment inviting it to become a property |
 | Retry base/cap/jitter properties | Internal constants (1 s / 10 min) with no property |
 | `flushSize` / `flushInterval` for group commit | Fixed at 256 / 5 ms; the only knob is the opt-out |

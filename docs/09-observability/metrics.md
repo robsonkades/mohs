@@ -1,6 +1,6 @@
 # Metrics
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`io.mohs.engine.EngineMetrics`)
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`io.mohs.engine.EngineMetrics`)
 
 Metrics are **always on**. A host with Micrometer in the context (Actuator, Prometheus) sees
 everything under `mohs.*`; with no registry, a local `SimpleMeterRegistry` keeps the engine
@@ -31,7 +31,7 @@ identical — inert for the host, and with **no conditional path in the hot code
 | `outcome` | `succeeded`, `failed`, `cancelled` (and the state names for the terminal counter) |
 | `reason` on `mohs.claim.requeued` | `concurrency-cap`, `rate-limit`, `window-closed`, `stray-lease` |
 | `reason` on `mohs.lease.reclaimed` | `retry`, `attempts_exhausted`, `job_retired`, `cancelled` |
-| `step` on `mohs.tick.failed` | `signal-job-timeouts`, `poll-cancel-requests`, `signal-watchdog-overruns`, `queue-depth-sample`, `idempotency-prune`, `reap-orphaned-leases`, `reconcile-stray-leases`, `stale-node-purge` |
+| `step` on `mohs.tick.failed` | `signal-job-timeouts`, `poll-cancel-requests`, `signal-watchdog-overruns`, `queue-depth-sample`, `idempotency-prune`, `history-prune`, `reap-orphaned-leases` (counted once per failed reclaim chunk of 50, so up to 10 per tick), `reconcile-stray-leases`, `stale-node-purge`, and `tick` — the whole tick dying outside a maintenance step: the heartbeat, the definitions read, the due-trigger read or the claim |
 
 **Label values are contract, just as much as the names**: lower case, `snake_case`. The first saved
 dashboard freezes that vocabulary.
@@ -148,19 +148,24 @@ stopped node**, and the `reason` label already carries the triage.
 
 ## A recorded limitation
 
-`mohs.node.inflight` and `mohs.node.capacity` carry **no `node` label**. With two engines in the same
-registry (one Mohs per `DataSource`), they collide on the meter id and the second bind is silently
-ignored by Micrometer.
+`mohs.node.inflight`, `mohs.node.capacity` and `mohs.queue.depth` carry **no `node` label**. With two
+engines in the same registry (one Mohs per `DataSource`), they collide on the meter id — Micrometer
+keeps the first meter and logs one generic WARN naming neither the engine nor the fix, so a
+dashboard would show one engine's saturation, or backlog, under the other's name.
 
-This is a deliberate deferral: the trigger for adding the tag is the first real multi-engine
-scenario, paying the cardinality only then.
+The engine refuses that at construction instead: the second bind throws an `IllegalStateException`
+naming the gauge and the mitigation, which is one `MeterRegistry` per engine — a registry the
+actuator endpoint does not scrape, so the second engine's `mohs.*` need their own exporter. That is
+the mitigation, not the fix; the fix is the label, and it is a deliberate deferral: the trigger for
+adding it is the first real multi-engine scenario, paying the cardinality only then. The counters and
+timers (`mohs.claim.latency`, `mohs.attempt.total`, ...) do not collide — with two engines in one
+registry they **sum** both engines' samples into one series, under the same limitation.
 
 ## What is not measured
 
 | Gap | Consequence |
 | --- | --- |
-| Queue depth (`mohs_ready` row count) | Only available via `GET /overview`, not as a metric. Backlog alerting must go through the API |
-| Lease-table size | Same |
+| Lease-table size | Only available via `GET /overview`, not as a metric |
 | Rate-limit bucket balance | Only via `GET /rate-limits` |
 | Per-runner occupancy | Only via `GET /runners`. `mohs.node.inflight` is the node-wide total |
 | Trigger-firing counts | Not instrumented |
@@ -168,8 +173,8 @@ scenario, paying the cardinality only then.
 | Event-publication drops | Logged at WARN, not counted |
 | Idle-gate probe hit rate | Not instrumented |
 
-The most useful addition would be **queue depth as a gauge**: it is the leading indicator of a
-backlog, and it is the one number an operator currently has to poll an HTTP endpoint to see.
+Queue depth, once the most useful missing signal, is `mohs.queue.depth` now. The most useful addition
+left would be **per-runner occupancy** — `mohs.node.inflight` is the node-wide total.
 
 ## Micrometer wiring
 
@@ -191,5 +196,5 @@ management:
         include: health,metrics,prometheus
 ```
 
-Mohs adds no Actuator endpoint of its own and registers no `HealthIndicator` — see
-[health and diagnostics](health-and-diagnostics.md).
+Mohs adds no Actuator endpoint of its own; it contributes a `HealthIndicator` under the `mohs` key
+when the host brings the actuator — see [health and diagnostics](health-and-diagnostics.md).

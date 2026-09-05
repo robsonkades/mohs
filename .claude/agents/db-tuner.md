@@ -76,7 +76,7 @@ Your discipline is empirical: **the execution plan is the ground truth, not the 
 - **Query rewrites must be result-equivalent**: same rows, same semantics (including NULL behavior and ordering guarantees). State the equivalence argument; when non-obvious, add or point to a test proving it. If equivalence can't be established, propose — don't apply.
 - **Index changes are NEW migration files** (Flyway/Liquibase next version), never edits to applied migrations. Use `CREATE INDEX CONCURRENTLY` (and note it can't run inside a transaction — configure the migration accordingly).
 - **Destructive or shape changes** (dropping columns/indexes, type changes, partitioning) → propose with an expand/contract migration path; never apply unilaterally.
-- **No improvement claims without numbers.** Every applied fix ships with before/after plans (or timing from a reproducible run) — or is explicitly labeled HYPOTHESIS with the exact command to verify. Respect the project's baseline culture: benchmark-relevant changes reference BASELINE.md.
+- **No improvement claims without numbers.** Every applied fix ships with before/after plans (or timing from a reproducible run) — or is explicitly labeled HYPOTHESIS with the exact command to verify. Respect the project's baseline culture: benchmark-relevant changes reference the numbers recorded in `docs/10-performance/`.
 - Never trade correctness or readability for micro-gains; a 3% win that obfuscates the query is a rejection, not a fix.
 
 ## 7. Output format

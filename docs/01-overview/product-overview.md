@@ -1,12 +1,12 @@
 # Product overview
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## What Mohs is
 
 Mohs is a **job scheduling and execution library** for Java 25 and Spring Boot 4, distributed as a
 set of Maven artifacts under the `io.mohs` group. An application adds
-`io.mohs:mohs-spring-boot-starter` to its build, points a `DataSource` at a relational database,
+`io.github.robsonkades:mohs-spring-boot-starter` to its build, points a `DataSource` at a relational database,
 annotates a method, and gets durable, cluster-safe, at-least-once job execution.
 
 The name comes from the Mohs hardness scale; the project description in the root `pom.xml` is
@@ -24,7 +24,7 @@ requires answers that are hard to get right:
 | Two nodes see the same due trigger. Who fires? | A compare-and-set on `mohs_job_definitions.next_fire_at`; the loser does nothing | `io.mohs.store.jdbc.JdbcTriggerFirer` |
 | Two nodes see the same queued execution. Who runs it? | `SELECT … FOR UPDATE SKIP LOCKED` (or `READPAST` on SQL Server) inside one transaction that also writes ownership | `io.mohs.store.jdbc.dialect.JdbcDelegate` |
 | A node dies mid-execution. What happens to the work? | Its node lease expires; a peer's reaper reclaims the ownership row and reschedules through the retry budget | `Engine#reapOrphanedLeases` |
-| The dead node comes back and finishes the job. | Every write over owned work is fenced by `(node_id, epoch)`; the zombie's result is discarded | `io.mohs.engine.LeaseStore` |
+| The dead node comes back and finishes the job. | Every write over owned work is fenced by `(node_id, epoch, attempt)`; the zombie's result is discarded | `io.mohs.engine.LeaseStore` |
 | The clock jumps backwards. | All "when" values come from an injected `Clock`; all durations use `System.nanoTime()`; a backwards jump is logged with its operational consequence | `Engine#renewNodeLease` |
 | The same request is submitted twice. | `Idempotency-Key` deduplication via a primary-key conflict on `mohs_idempotency` | `io.mohs.store.jdbc.JdbcHistoryStore` |
 
@@ -58,7 +58,7 @@ Four commitments show up repeatedly in the source and are worth stating up front
 explain otherwise-surprising choices:
 
 1. **Operability is a feature.** Warning logs name the property to change and the consequence of not
-   changing it (`MohsEngineLifecycle#warnAboutDeclaredPolicyGaps`, `Engine#renewNodeLease`,
+   changing it (`MohsEngineLifecycle#checkDeclaredPolicies`, `Engine#renewNodeLease`,
    `MohsUiAutoConfiguration#warnIfDashboardHasNoApiToRead`). Metric label values are treated as
    contract (`EngineMetrics`).
 2. **Failure modes are designed first.** Nearly every class Javadoc names the failure it exists to

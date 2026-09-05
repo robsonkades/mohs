@@ -15,9 +15,13 @@
  */
 /**
  * Translation of REST exceptions into RFC 7807 ({@link org.springframework.http.ProblemDetail}):
- * {@link io.mohs.rest.error.JobNotFoundException},
+ * the four 404s ({@link io.mohs.rest.error.JobNotFoundException},
  * {@link io.mohs.rest.error.ExecutionNotFoundException},
- * {@link io.mohs.rest.error.PayloadValidationException} and the {@code @RestControllerAdvice} that
+ * {@link io.mohs.rest.error.BatchNotFoundException},
+ * {@link io.mohs.rest.error.RateLimitNotFoundException}), the 409
+ * {@link io.mohs.rest.error.ExecutionNotRetryableException}, the 400
+ * {@link io.mohs.rest.error.InvalidActorException}, the 422
+ * {@link io.mohs.rest.error.PayloadValidationException}, and the {@code @RestControllerAdvice} that
  * translates them, {@link io.mohs.rest.error.RestExceptionHandler}. Depends on
  * {@code io.mohs.core.job} ({@code JobKey}) and {@code io.mohs.core.execution}
  * ({@code ExecutionId}).

@@ -23,7 +23,7 @@ import org.jspecify.annotations.Nullable;
 import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.ExecutionState;
 
-/** Forma de wire de {@link Attempt}. */
+/** The wire form of {@link Attempt}. */
 public record AttemptResponse(int number, Instant startedAt, @Nullable Instant finishedAt, ExecutionState outcome, @Nullable String error) {
 
     public AttemptResponse {

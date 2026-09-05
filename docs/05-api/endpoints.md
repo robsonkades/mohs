@@ -1,6 +1,6 @@
 # REST endpoints
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`io.mohs.rest`)
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`io.mohs.rest`)
 
 All paths are relative to `mohs.api.base-path` (default `/api/mohs/v1`), which is itself relative to
 the host's `server.servlet.context-path`.
@@ -126,7 +126,7 @@ Invoke a job.
 
 | Parameter | In | Required |
 | --- | --- | --- |
-| `Idempotency-Key` | header | No |
+| `Idempotency-Key` | header | No — a blank header is treated as absent (tolerant reader); longer than 255 characters is a 422 |
 | `X-Mohs-Actor` | header | No — falls back to `anonymous` |
 
 ```json
@@ -160,7 +160,7 @@ it would silently become `at(now − X)`, an execution immediately due with no w
 | 202 | Accepted, or **deduplicated** — a repeat with the same `Idempotency-Key` returns the original receipt |
 | 400 | Invalid `X-Mohs-Actor` (too long, control/bidi characters, or `scheduler`) |
 | 404 | Unknown job |
-| 422 | `at` and `delay` together; negative `delay`; payload incompatible with the handler's parameter type; a payload sent to a job that accepts none |
+| 422 | `at` and `delay` together; negative `delay`; payload incompatible with the handler's parameter type, **an unknown property included** (a misspelt field is refused, never a silent `null`); a payload sent to a job that accepts none; an `Idempotency-Key` longer than 255 characters |
 
 ### `POST /jobs/{jobKey}/pause` · `POST /jobs/{jobKey}/resume`
 
@@ -180,13 +180,9 @@ Response is a `RuntimePatchResponse<JobResponse>`:
 ```json
 {
   "resource": { "jobKey": "...", "schedule": { "type": "INTERVAL", ... }, ... },
-  "notice": "Mudança de emergência: vale até o próximo boot; codifique em properties para torná-la permanente."
+  "notice": "Emergency change: it holds until the next boot; encode it in properties to make it permanent."
 }
 ```
-
-> The `notice` string is currently in Portuguese in the source
-> (`RuntimePatchResponse.BOOT_REVERSION_NOTICE`), while the rest of the API's prose is English. See
-> [technical debt](../technical-debt.md).
 
 The trigger is recomputed from the clock in the same write; `ON_DEMAND` disarms the recurrence. The
 actor is resolved **before** the mutation, so a 4xx genuinely means "nothing changed" — and the
@@ -269,7 +265,18 @@ not necessarily terminal.
 | Terminal | No change; the response shows the state that stood |
 
 Cancellation is never immediate and never guaranteed: a completion may win the race, and in that
-case it stands. 404 for an unknown id.
+case it stands.
+
+The actor is resolved **before** the mutation, like on every mutation of this API, and logged with
+the request at INFO — the execution keeps its original invoker, so the log line is the audit trail
+of who asked.
+
+| Status | Condition |
+| --- | --- |
+| 202 | |
+| 400 | Invalid `X-Mohs-Actor` |
+| 404 | Unknown id |
+| 422 | Blank id |
 
 ### `POST /executions/{id}/retry`
 
@@ -282,11 +289,15 @@ nothing new is inserted.
 Deliberately **no `Idempotency-Key`**: nothing new is inserted, so there is nothing to deduplicate.
 The idempotence is the CAS itself — repeating the POST returns 409 naming the current state.
 
+The actor is resolved **before** the mutation and logged at INFO with the request, as on `cancel`.
+
 | Status | Condition |
 | --- | --- |
 | 202 | |
+| 400 | Invalid `X-Mohs-Actor` |
 | 404 | Unknown id |
 | 409 | Not `FAILED`; belongs to a retired job; **or is a batch member** |
+| 422 | Blank id |
 
 ---
 

@@ -98,11 +98,11 @@ public @interface RecurringJob {
     @AliasFor(annotation = MohsJob.class, attribute = "startPaused")
     boolean startPaused() default false;
 
-    /** Ver {@link MohsJob#allowConcurrentExecutions()}. */
+    /** See {@link MohsJob#allowConcurrentExecutions()}. */
     @AliasFor(annotation = MohsJob.class, attribute = "allowConcurrentExecutions")
     boolean allowConcurrentExecutions() default true;
 
-    /** Ver {@link MohsJob#maxConcurrentExecutions()}. */
+    /** See {@link MohsJob#maxConcurrentExecutions()}. */
     @AliasFor(annotation = MohsJob.class, attribute = "maxConcurrentExecutions")
     int maxConcurrentExecutions() default 0;
 

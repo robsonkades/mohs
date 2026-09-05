@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 Symptom-first. For a known task, use the [runbook](runbook.md).
 
@@ -13,10 +13,12 @@ Symptom-first. For a known task, use the [runbook](runbook.md).
 | `... declares more than one job annotation` | `@MohsJob` plus a stereotype, directly or through a composition | Keep one. **A method is exactly one job** |
 | `@MohsJob method X#y supports at most 2 parameters` | An unsupported handler signature | At most one payload and one `JobContext`, in any order |
 | `@RecurringJob(id="X") on Y declares no trigger` | A recurring job with no schedule | Set `cron`+`zone`, `every`, or `everyAfterFinish` — or use `@OnDemandJob` |
-| `@OnExecution on X#y is not supported yet` | The annotation exists but is not implemented | Register an `ExecutionListener` bean instead. It fails deliberately rather than never delivering an event |
+| `@OnExecution on X#y declares N parameters …` / `… declares event=E, which is delivered as …` / `… filters BATCH_COMPLETED by job=…` | An `@OnExecution` method that could never be called | Take none or exactly one parameter, of the delivered event type; drop the `job` filter on `BATCH_COMPLETED` — a batch belongs to no single job |
+| `no RetryPolicy bean named 'X' — declare one, or drop the …` | A job names a `retryPolicy` bean that does not exist | Declare the bean, or drop the attribute. Silently falling back to `retries` would hide the intent |
 | `job annotation on X has a blank id` | A stereotype without `value`/`id` | `@OnDemandJob("my-job")` |
 | `@MohsJob id 'X' collides with a PROGRAMMATIC definition` | Both an annotation and a `Mohs.define` claim the same key | Pick one source per job |
 | `job 'X' definition diverged from the stored one (on-conflict=fail)` | `on-conflict=fail` and the code changed | Accept the code (`override`), the store (`preserve`), or align them |
+| `mohs.engine.node-lease-ttl must be at least 12s, got …` | The node's promise is shorter than one tick can renew | Raise it to 12 s or above, or drop the property and keep the 15 s default. Below the floor the promise expires while the node is alive and its peers reap its running work |
 | `mohs.engine.watchdog-timeout (...) must be greater than mohs.engine.node-lease-ttl (...)` | The bound is below node liveness | Raise it. The bound sits **on top of** liveness, it is not a shorter lease |
 | `mohs.engine.max-poll-interval (...) must be >= mohs.engine.poll-interval (...)` | Inverted | The ceiling the backoff climbs to, not a second floor |
 | `runner 'X' declared more than once: ... and ...` | The same name in `mohs.runners.*` **and** a `@Bean` | Remove one |

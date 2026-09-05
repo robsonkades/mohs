@@ -20,7 +20,7 @@ import java.util.Objects;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 
-/** Forma de wire de {@link io.mohs.core.schedule.IntervalSpec}. */
+/** The wire form of {@link io.mohs.core.schedule.IntervalSpec}. */
 public record IntervalView(ScheduleType type, Duration interval, boolean afterFinish) implements ScheduleView {
 
     /** See {@link CronView} — the same reason for the explicit {@code @JsonCreator} on the canonical constructor. */

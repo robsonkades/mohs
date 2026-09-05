@@ -8,7 +8,7 @@ The hot path. Everything else in Mohs exists so that this stays cheap and correc
 
 One statement per shard, inside one transaction that removes from the queue and inserts ownership.
 
-### The portable form (H2, MySQL, SQL Server)
+### The portable form (H2, MySQL)
 
 ```sql
 -- 1. candidate selection, holding row locks and skipping locked rows
@@ -17,8 +17,8 @@ SELECT execution_id, job_key, attempt, priority
  WHERE shard = :shard AND visible_at <= :now
    AND job_key NOT IN (:inadmissible)      -- omitted when the list is empty
  ORDER BY priority, visible_at
- LIMIT :limit                              -- SQL Server: TOP (:limit) after SELECT
-   FOR UPDATE SKIP LOCKED;                 -- SQL Server: WITH (UPDLOCK, ROWLOCK, READPAST)
+ LIMIT :limit
+   FOR UPDATE SKIP LOCKED;
 
 -- 2. consume the queue
 DELETE FROM mohs_ready WHERE execution_id IN (:ids);
@@ -27,6 +27,28 @@ DELETE FROM mohs_ready WHERE execution_id IN (:ids);
 INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at)
 VALUES (:executionId, :jobKey, :nodeId, :epoch, :attempt, :priority, :now);
 ```
+
+### The SQL Server form — steps 1 and 2 in one statement
+
+```sql
+DELETE r
+OUTPUT deleted.execution_id, deleted.job_key, deleted.attempt, deleted.priority, deleted.visible_at
+  FROM (SELECT TOP (:limit) execution_id
+          FROM mohs_ready WITH (UPDLOCK, ROWLOCK, READPAST)
+         WHERE shard = :shard AND visible_at <= :now
+           AND job_key NOT IN (:inadmissible)   -- omitted when the list is empty
+         ORDER BY priority, visible_at) p
+  INNER LOOP JOIN mohs_ready r WITH (ROWLOCK, READPAST) ON r.execution_id = p.execution_id;
+-- then step 3 as above
+```
+
+Not an optimisation but a correctness fix, measured with deadlock graphs: the separate
+`DELETE … WHERE execution_id IN (…)` was compiled as a scan of `idx_mohs_ready_claim` whenever the
+table's statistics were empty or stale, and a write plan's scan takes `U` locks on every key it
+passes — a peer's `UPDLOCK` picks — so two claims deadlocked on each other. The fold is driven by the
+same seek that takes the locks, and `READPAST` on the delete target keeps skipping a row a concurrent
+`cancel` holds (a plain updatable CTE waited on it). `OUTPUT` preserves no order, so `visible_at`
+comes back and the delegate restores `(priority, visible_at)` before returning.
 
 ### The PostgreSQL form — one statement
 
@@ -106,8 +128,10 @@ claim, per job, in order:
 | Rate limit | `granted = min(allowed, available)`, then an all-or-nothing `charge` | Trim to `granted`, or to 0 if the charge lost; reason `rate-limit` |
 
 Losers go back to the queue with the **same attempt number** (nothing ran, so the budget is intact)
-and `visible_at = now`. Every loss is counted in `mohs.claim.requeued{reason}`. The churn is
-bounded to one round per guard flip.
+and `visible_at = now` when the filter fits. Above 1,000 inadmissible jobs, losers instead receive
+`visible_at = now + max-poll-interval`: an omitted job cannot immediately win the same claim again.
+The persisted delay also applies to peers, at the cost of waiting up to that interval if a guard
+opens meanwhile. Every loss is counted in `mohs.claim.requeued{reason}`; no attempt is consumed.
 
 Within a lap the headroom is **decremented as it is granted** (`Admission#consume`). Without that,
 each of the up-to-64 shard statements would re-grant the same headroom, and a cap of 1 would admit

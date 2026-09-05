@@ -1,6 +1,6 @@
 # Java API
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`mohs-api`)
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`mohs-api`)
 
 The `Mohs` facade is the entire programmatic surface. One verb per operation, always over an
 **existing** definition.
@@ -49,7 +49,7 @@ than a `ClassCastException`.
 | --- | --- |
 | `.priority(Priority)` | Claim ordering. Default `NORMAL` |
 | `.as(String actor)` | The audit trail. Rejects blank and rejects `"scheduler"` in any casing |
-| `.idempotencyKey(String)` | Deduplication scoped to `(job, key)` |
+| `.idempotencyKey(String)` | Deduplication scoped to `(job, key)`. Not blank, and at most `ScheduleCommand.MAX_IDEMPOTENCY_KEY_LENGTH` (255) characters, the column's width — an `IllegalArgumentException` otherwise |
 | `.now()` | Terminal — due immediately |
 | `.at(Instant)` | Terminal — due at an absolute time |
 | `.after(Duration)` | Terminal — due after a delay |
@@ -67,7 +67,9 @@ warnings that matter.
 
 ### The receipt
 
-Every terminal returns an `Enqueued`, with the `executionId` **already durable**. It is a receipt,
+Every terminal returns an `Enqueued`, with the `executionId` **already durable** — and the same
+record reaches the `ExecutionListener`s (and `@OnExecution(ENQUEUED)`) once it is: immediately, or
+after the host's commit when the call ran inside a host transaction. It is a receipt,
 never a `Future` of the result.
 
 ## Batches
@@ -170,7 +172,6 @@ void importFile(ImportRequest payload, JobContext ctx) throws Exception { … }
 | `scheduledAt()` | When it was due |
 | `firedAt()` | When **this attempt** began dispatching — not the execution's claim instant, which is tens of milliseconds earlier under load |
 | `cancellationRequested()` | Cooperative cancellation from a timeout, shutdown escalation, or a manual cancel |
-| `progress(done, total)` | **A no-op today.** Documented as optional and dashboard-oriented |
 
 `JobContext` is deliberately a plain interface rather than a fluent one: it lives on the hot path,
 and a DSL here would only pollute stack traces.

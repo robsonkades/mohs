@@ -8,12 +8,14 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 
 ## The numbers
 
-**104 files under `src/test`**, of which **98 contain at least one `@Test`**, totalling **711 `@Test`
-methods**. Nine of those 98 are `*Scenario` classes invoked by name only, so **89 classes run in the
-normal suite** — plus 12 executable architecture rules.
+**109 files under `src/test`**, of which **102 contain at least one `@Test` or `@ParameterizedTest`**,
+totalling **764 test methods** (counted 2026-09-04). Ten of those 102 are `*Scenario` classes invoked
+by name only, so **92 classes run in the normal suite** — plus three source-scan guards in
+`mohs-store-jdbc`.
 
-**No coverage report is produced by the build** — there is no JaCoCo and no threshold. Any coverage
-percentage would be unsubstantiated, so none is quoted anywhere in this documentation.
+JaCoCo (0.8.14) produces a per-module report under `target/site/jacoco`; there is no aggregation
+across modules and no threshold, so no single coverage figure is asserted anywhere in this
+documentation.
 
 ## Two things to know before running it
 

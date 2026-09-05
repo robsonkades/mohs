@@ -23,7 +23,7 @@ Every index in the schema, the query it serves, and the measurement behind it wh
 | `ix_mohs_idempotency_created` | `mohs_idempotency` | `created_at`, **CLUSTERED** | Same, plus the table's physical order | SQL Server only |
 | *(PK)* | `mohs_job_definitions` | `id` | | All |
 | *(UNIQUE)* | `mohs_job_definitions` | `job_key` | Every lookup by domain identity | All |
-| `idx_mohs_job_next_fire` | `mohs_job_definitions` | `next_fire_at` | The due-trigger read the engine performs on **every tick**, ahead of the firing and the claim | All |
+| `idx_mohs_job_next_fire` | `mohs_job_definitions` | `next_fire_at` | The due-trigger read the engine performs on **every tick**, ahead of the firing and the claim. Measured on PostgreSQL at 100k definitions with 951 due: 7.63 ms and 1822 buffers as a sequential scan, 0.229 ms and 48 buffers with the index; the write side of 100k trigger advances went from 752 ms to 745 ms | All |
 | *(PK)* | `mohs_rate_limits` | `name` | | All |
 | *(PK)* | `mohs_nodes` | `node_id` | The heartbeat upsert | All |
 | *(PK)* | `mohs_batches` | `id` | The counter increment and the read | All |

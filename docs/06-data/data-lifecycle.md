@@ -132,7 +132,7 @@ unresolvable from history.
 | --- | --- |
 | Serialisation | Jackson, with the payload's **concrete class name** stored in `payload_type` |
 | Deserialisation | Reflective, at claim time |
-| Mapper | A **raw `JsonMapper`**, deliberately not the host's context `ObjectMapper` — the persisted format belongs to Mohs, and using the application's HTTP configuration would let it define a durable format shared between nodes, breaking already-written payloads the day it changed |
+| Mapper | A **raw `JsonMapper`**, deliberately not the host's context `ObjectMapper` — the persisted format belongs to Mohs, and using the application's HTTP configuration would let it define a durable format shared between nodes, breaking already-written payloads the day it changed. The REST layer converts a request body into the job's payload type with the **same** mapper in a strict variant — an unknown property is a 422, not a silent `null` — so what the API accepts is exactly what the store reads back; the store itself stays tolerant, because a payload written by an older version of the class must still be readable after a field is removed |
 | Failure | A payload that will not deserialise (a corrupt row, a class gone from the classpath) is **terminal by nature**, with `attemptsExhausted = false`. It does not heal by re-reading |
 | Schema evolution | **Whatever Jackson tolerates.** Adding a nullable field is safe; renaming or retyping one breaks executions persisted before the deploy. There is no payload versioning mechanism |
 | Empty payloads | Scheduler occurrences persist a concrete `LinkedHashMap`, never `Map.of()` — `payload_type` stores the exact class, and reading it back needs a type Jackson can instantiate again |

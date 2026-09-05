@@ -65,17 +65,23 @@ Three properties of this design:
 | Effective tick cadence | `min(sleep, node-lease-ttl / 3)` | The heartbeat rides on the tick, so the tick cannot be slower than the promise allows |
 | Heartbeat-row retention | `node-lease-ttl × 10` | `purgeStaleNodeRows`. Not death detection — just collecting rows no reader can use, since each boot creates a new `node_id` |
 
-## Fencing: `(node_id, epoch)`
+## Fencing: `(node_id, epoch, attempt)`
 
-Every write over owned work carries the pair. The completion is a fenced `DELETE`:
+Every write over owned work carries the triple. The completion is a fenced `DELETE`:
 
 ```sql
 DELETE FROM mohs_lease
- WHERE execution_id = :id AND node_id = :nodeId AND epoch = :epoch
+ WHERE execution_id = :id AND node_id = :nodeId AND epoch = :epoch AND attempt_number = :attempt
 ```
 
 The row count *is* the verdict. A result whose delete affected zero rows belonged to a lost
 incarnation: **nothing is written and no event is published**, and a WARN records the discard.
+
+The attempt is part of the token because a healthy node's epoch never moves — it only advances when
+the node's own lease expired. After a Watchdog Bound releases an incarnation, the retry can be
+re-claimed by the **same** node with the same `(node_id, epoch)`; the zombie's completion would pass
+a two-part fence and delete the new incarnation's lease. The attempt number is what tells the two
+apart.
 
 This is the classic fencing token. It closes the zombie scenario end to end:
 
@@ -230,12 +236,15 @@ Summarised in the standard vocabulary:
 For clusters where host clocks are not trustworthy, `mohs.time.mode=database` swaps the injected
 `Clock` for `DatabaseClock`:
 
-- `sync()` samples the delegate's now-query with round-trip compensation (the midpoint of the
-  request), computes the offset, and applies a **monotonic clamp** — a sample that would move time
-  backwards is discarded rather than adjusted, and retried next time.
-- `instant()` never performs I/O: it is `systemClock.instant() + offset`, O(1).
-- The clamp uses `accumulateAndGet`, so the comparison and the write are one unit regardless of who
-  calls `sync()`.
+- `sync()` samples the delegate's now-query with midpoint compensation. A round trip above one
+  second is discarded, including connection acquisition time; the statement also has a one-second
+  timeout. A rejected first sample leaves the clock unsynchronised and prevents startup.
+- Accepted offsets may decrease. Clamping the offset itself would preserve an erroneously fast
+  sample forever. Instead, `instant()` returns the greater of `systemClock.instant() + offset` and
+  the last instant returned: it can pause while database time catches up, but does not go backwards.
+  It performs no I/O.
+- Offset changes and returned instants share one atomic state. Sampling calls are serialised
+  independently of reads, so an older slow query cannot overwrite a newer measurement.
 - A first synchronous sync happens at boot, deliberately blocking — the engine must not start with
   an unsynchronised clock — and then `mohs.time.sync-interval` (30 s) schedules the resync.
 
@@ -255,7 +264,7 @@ There are exactly three, and none of them is a lock service:
 | --- | --- | --- |
 | Who fires a due trigger | `UPDATE … SET next_fire_at = :new WHERE next_fire_at = :observed` | Returns `false` and moves on. Routine, not an error |
 | Who runs a queued execution | `SELECT … FOR UPDATE SKIP LOCKED` inside the claim transaction | Never sees the row |
-| Whose completion counts | `DELETE mohs_lease WHERE (execution_id, node_id, epoch)` | Row count 0 → result discarded with a WARN |
+| Whose completion counts | `DELETE mohs_lease WHERE (execution_id, node_id, epoch, attempt_number)` | Row count 0 → result discarded with a WARN |
 
 Because trigger advance and occurrence insert are **atomic**, a crash between them can neither lose
 nor duplicate an occurrence — which is why occurrences carry no `Idempotency-Key` (that key would be

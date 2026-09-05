@@ -1,6 +1,6 @@
 # Architecture overview
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## Architectural style, and the evidence for it
 
@@ -11,7 +11,7 @@ Maven reactor. That classification is not a label applied from outside — it is
 | --- | --- | --- |
 | **Domain / contracts** | `io.mohs.core` (module `mohs-api`): records, sealed interfaces, plain interfaces. No wiring. | `mohs-api`'s only dependency is `spring-core`, for `@AliasFor` and `@CheckReturnValue`. It cannot see the engine. |
 | **Application core** | `io.mohs.engine` (module `mohs-engine`): the `Engine` loop, `Dispatcher`, `MohsImpl`. | Depends on `mohs-api` and `mohs-cron` only. |
-| **Driven ports** | `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `StoreTransactions`, `SyncableClock` — all interfaces in `io.mohs.engine` | The `engine_is_free_of_jdbc` ArchUnit rule forbids `java.sql`/`javax.sql` types from appearing anywhere in the engine, including port signatures. |
+| **Driven ports** | `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `StoreTransactions`, `SyncableClock` — all interfaces in `io.mohs.engine` | No `java.sql`/`javax.sql` type appears anywhere in the engine, port signatures included — `mohs-engine` has no JDBC on its compile classpath. |
 | **Driven adapters** | `io.mohs.store.jdbc` (module `mohs-store-jdbc`): one `Jdbc*` class per port, plus `dialect/`. | The reactor's dependency direction is store → engine; the inverse cannot compile. |
 | **Driving adapters** | `io.mohs.rest` (REST v1), `io.mohs.autoconfigure` (Spring wiring), `io.mohs.test` (test kit) | `rest_only_sees_public_api` forbids `io.mohs.rest` from depending on the engine or the store. |
 | **Composition root** | `io.mohs.autoconfigure` (module `mohs-spring-boot-starter`) | The *only* package allowed to depend on internals, and the only one allowed to speak `org.springframework.boot.autoconfigure` (`only_the_starter_speaks_boot_autoconfigure`). |
@@ -156,13 +156,15 @@ This is what lets the dashboard read a cheap column while correctness-critical p
 These hold everywhere and are worth internalising before reading any other document:
 
 1. **Every "when" comes from an injected `Clock`.** Reading `Instant.now()` or
-   `System.currentTimeMillis()` in the engine or the store is an ArchUnit failure. The single named
+   `System.currentTimeMillis()` in the engine or the store is a convention that nothing in the build
+   verifies since the ArchUnit suite went away; review is the guard. The single named
    exception is `DatabaseClock`, where reading the real clock *is* the class's purpose.
 2. **Every duration uses `System.nanoTime()`.** Monotonic time for elapsed measurement; wall-clock
    only for absolute deadlines.
 3. **Every generated primary key is UUIDv7.** No `IDENTITY`, `SERIAL`, `AUTO_INCREMENT`, `SEQUENCE`,
-   and no `UUID.randomUUID()` (the latter enforced by ArchUnit, including method references).
-4. **Non-null is the default.** Every production package carries `@NullMarked`; an ArchUnit test
-   fails the build if a package lacks it.
+   and no `UUID.randomUUID()` (both enforced in `mohs-store-jdbc` by `KeyGenerationScanTest`, a
+   source scan over that module's Java and SQL).
+4. **Non-null is the default.** Every production package carries `@NullMarked`; nothing in the
+   build verifies it since the ArchUnit suite went away.
 5. **No unbounded queue or unbounded wait.** Every executor has an explicit ceiling and rejects
    above it; every wait has a deadline.

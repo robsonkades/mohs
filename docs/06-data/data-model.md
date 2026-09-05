@@ -1,6 +1,6 @@
 # Data model
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`mohs-store-jdbc/src/main/resources`)
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`mohs-store-jdbc/src/main/resources`)
 
 ## The nine tables
 
@@ -80,7 +80,7 @@ The definition, plus the operational state deliberately kept separate from it.
 | `misfire` | `VARCHAR(20)` | |
 | `start_paused` | boolean | **Definitional** — read only at first registration |
 | `allow_concurrent_executions`, `max_concurrent_executions` | | The second is non-zero only when the first is false |
-| `retries`, `timeout`, `retry_policy` | | `timeout` is an ISO-8601 string; `retry_policy` is accepted but not honoured |
+| `retries`, `timeout`, `retry_policy` | | `timeout` is an ISO-8601 string; `retry_policy` names the `RetryPolicy` bean consulted on failure |
 | `source` | `VARCHAR(20)` | `ANNOTATION` / `PROGRAMMATIC` |
 | `orphaned` | boolean | **Operational** |
 | `paused` | boolean | **Operational** |
@@ -148,7 +148,7 @@ the terminal `UPDATE` can match the row by equality on both columns.
 | `started_at`, `finished_at` | |
 | `outcome` | `SUCCEEDED` / `FAILED` / `CANCELLED` — never `ENQUEUED` or `RETRY_WAITING`, which describe the owning execution |
 | `error_type` | The exception's class name — the number-one operational query |
-| `error` | The exception's **message** only, never the stack trace |
+| `error` | The exception's **message** only, never the stack trace — and at most 256 KB of it, the tail replaced by `… [truncated N chars]` |
 
 ### `mohs_idempotency`
 
@@ -211,8 +211,8 @@ to track**. See [installing and upgrading the schema](migrations.md).
 
 | Rule | Enforcement |
 | --- | --- |
-| Every generated PK is **UUIDv7** (`io.github.robsonkades:uuidv7`) | ArchUnit forbids `UUID.randomUUID` calls **and method references** |
-| No `IDENTITY`, `SERIAL`, `AUTO_INCREMENT`, `SEQUENCE` anywhere | Prose only — ArchUnit does not read SQL. See [technical debt](../technical-debt.md) |
+| Every generated PK is **UUIDv7** (`io.github.robsonkades:uuidv7`) | `KeyGenerationScanTest` in `mohs-store-jdbc` forbids `randomUUID` outside the UUIDv7 library in that module's sources; elsewhere it is convention |
+| No `IDENTITY`, `SERIAL`, `AUTO_INCREMENT`, `SEQUENCE` anywhere | The same scan reads every `.sql` in the store and fails on any of them |
 | Natural keys are fine | `job_key`, `rate_limits.name`, `mohs_attempt.number` |
 | Ids are stored as `VARCHAR(255)` / `NVARCHAR(255)`, not a native UUID type | Portability across four dialects |
 

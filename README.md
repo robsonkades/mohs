@@ -5,7 +5,7 @@ database, built for clustered deployments.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-25-orange.svg)](https://openjdk.org/projects/jdk/25/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.0-green.svg)](https://spring.io/projects/spring-boot)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.1-green.svg)](https://spring.io/projects/spring-boot)
 
 The name comes from the Mohs hardness scale.
 
@@ -43,7 +43,7 @@ boundary.
 | --- | --- |
 | **At-least-once delivery** | Guaranteed when `retries > 0` — which is the default, for exactly this reason |
 | **Cluster-safe by construction** | No leader, no consensus, no lock service. Three database-arbitrated decisions: a CAS on the trigger, `SKIP LOCKED` on the claim, a fenced `DELETE` on the completion |
-| **Automatic recovery** | A dead node's lease expires; a peer's reaper reclaims its work through the retry budget. A revived zombie's writes lose by construction — every owned write carries a `(node_id, epoch)` fencing token |
+| **Automatic recovery** | A dead node's lease expires; a peer's reaper reclaims its work through the retry budget. A revived zombie's writes lose by construction — every owned write carries a `(node_id, epoch, attempt)` fencing token |
 | **Four schedule kinds** | Seconds-first cron with Quartz extensions, fixed rate, fixed delay, on demand — with DST fall-back suppression and three misfire policies |
 | **Cooperative cancellation** | Per-attempt timeouts, a shutdown drain with escalation, and an optional watchdog bound |
 | **Idempotent invocation** | `Idempotency-Key` deduplication that composes with your transaction as a savepoint |
@@ -119,8 +119,8 @@ flowchart TB
     peers -.->|"the database arbitrates claim, ownership and sharding"| db
 ```
 
-Eleven Maven modules, ports and adapters, with the boundaries **executable twice over**: by the
-reactor (`mohs-api` cannot see `mohs-engine`) and by twelve ArchUnit rules.
+Eleven Maven modules, ports and adapters, with the boundaries **executable by the reactor itself**:
+`mohs-api` cannot see `mohs-engine`, and `mohs-rest` cannot see it either.
 
 The hot path is split into four tables by **write profile**, so **history size does not affect claim
 cost** — measured flat between roughly 0 and 2 M history rows.
@@ -129,7 +129,7 @@ cost** — measured flat between roughly 0 and 2 M history rows.
 
 | | |
 | --- | --- |
-| Java 25, Spring Boot 4.1.0 (imported as a BOM, not inherited as a parent) | |
+| Java 25, Spring Boot 4.1.1 (imported as a BOM, not inherited as a parent) | |
 | PostgreSQL · MySQL 8.0+ · SQL Server in production; H2 for dev, with a boot WARN | |
 | Jackson 3, Micrometer, SLF4J, JSpecify, UUIDv7 | |
 | React 19 + TanStack + Tailwind for the dashboard | |
@@ -183,10 +183,11 @@ a regression.
 1. **The REST API has no authentication.** It is off by default, and enabling it logs a WARN naming
    exactly what it can do. Put a `SecurityFilterChain` in front of `/api/mohs/**` and `/mohs-ui/**`.
    See [security](docs/08-security/security-overview.md).
-2. **There is no automatic history retention.** `mohs_execution`, `mohs_attempt` and `mohs_batches`
-   grow forever unless you prune them. The one exception is `mohs_idempotency`, bounded by
-   `mohs.engine.idempotency-retention` (default `7d`) — which is the deduplication window itself, not
-   just housekeeping. See [data lifecycle](docs/06-data/data-lifecycle.md).
+2. **History retention is opt-in.** `mohs_execution`, `mohs_attempt` and `mohs_batches` grow
+   forever unless you set `mohs.engine.history-retention` (default `0s`, meaning keep everything);
+   with a window the engine sweeps terminal history hourly. `mohs_idempotency` is bounded separately
+   by `mohs.engine.idempotency-retention` (default `7d`) — which is the deduplication window itself,
+   not just housekeeping. See [data lifecycle](docs/06-data/data-lifecycle.md).
 
 ## Status
 

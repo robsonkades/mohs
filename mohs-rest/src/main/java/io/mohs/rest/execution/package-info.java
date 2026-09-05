@@ -15,7 +15,8 @@
  */
 /**
  * The "executions" resource area: {@link io.mohs.rest.execution.ExecutionsController} and its DTOs,
- * {@link io.mohs.rest.execution.ExecutionResponse} and
+ * {@link io.mohs.rest.execution.ExecutionSummaryResponse} (the list form),
+ * {@link io.mohs.rest.execution.ExecutionResponse} (the detail) and
  * {@link io.mohs.rest.execution.AttemptResponse}.
  *
  * <p>Batches have a package of their own, {@code io.mohs.rest.batch} — 1:1 with

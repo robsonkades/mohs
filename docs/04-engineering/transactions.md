@@ -12,8 +12,9 @@ operation, and an annotation would hide them.
 | Posture | Propagation | Isolation | Used by |
 | --- | --- | --- | --- |
 | **Own transaction, always** | `REQUIRES_NEW` | Explicit `READ COMMITTED` | Claim, completion, requeue, cancel-queued, manual retry |
-| **Own transaction, joins nothing** | Default (`REQUIRED`) | Explicit `READ COMMITTED` | Trigger firing |
+| **Own transaction, joins nothing** | Default (`REQUIRED`) | Explicit `READ COMMITTED` | Trigger firing — it only ever runs on the engine's loop thread, where there is no outer transaction, so the explicit level is always the one applied |
 | **Joins the host's transaction** | `NESTED` | Inherited | The enqueue unit |
+| **Joins the host's transaction when there is one** | Default (`REQUIRED`) | Explicit `READ COMMITTED` when it opens the transaction itself; inherited inside the host's | `Mohs.remove` — draining the queue and marking the definition retired as one indivisible pair, the only act `JdbcJobStore` wraps in a transaction of its own. Called from the host's code, so a `remove` inside a `@Transactional` rolls back with it — that is the point; inside that transaction Spring silently ignores the requested level and the host's runs. Every other definition write is either one guarded statement (`pause`, `resume`, `reschedule`, arming the next fire) or, for `define`, a trigger-snapshot read plus one guarded UPDATE/INSERT — protected against a lost update by not rewriting `next_fire_at` on an unchanged schedule, never by an isolation level; in autocommit or in whatever transaction the host has bound |
 
 ### Why claim and completion are `REQUIRES_NEW`
 
@@ -96,14 +97,22 @@ through the database — temporal precision does not round-trip identically acro
 ### 3. The claim
 
 ```
-SELECT … FOR UPDATE SKIP LOCKED      (or TOP … WITH (UPDLOCK, ROWLOCK, READPAST))
+SELECT … FOR UPDATE SKIP LOCKED
 DELETE mohs_ready WHERE execution_id IN (…)
 INSERT mohs_lease                     (batched)
 ```
 
-On PostgreSQL these collapse into one statement with CTEs. Either way, the storage guarantees there
-is no instant at which an execution is neither queued nor owned — **not the application's call
-order**.
+PostgreSQL folds all three into one statement (`WITH picked … DELETE … USING … INSERT … SELECT`);
+SQL Server folds the first two into a `DELETE … OUTPUT` self-joined on the `TOP … WITH (UPDLOCK,
+ROWLOCK, READPAST)` pick and keeps the batched lease insert. The SQL Server fold is not an optimisation but a correctness fix: the
+separate `DELETE … WHERE execution_id IN (…)` was compiled as a scan of `idx_mohs_ready_claim` whenever
+the table's statistics were empty (a fresh install, a queue that emptied and refilled), and a
+write-plan scan takes `U` locks on every key it passes — the keys a peer's claim had just locked —
+so two claims deadlocked on each other's picks. The fold is driven by the same seek that takes the
+locks, whatever the statistics say.
+
+Either way, the storage guarantees there is no instant at which an execution is neither queued nor
+owned — **not the application's call order**.
 
 ### 4. The completion
 

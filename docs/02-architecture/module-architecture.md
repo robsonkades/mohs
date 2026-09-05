@@ -1,8 +1,8 @@
 # Module architecture
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository (`pom.xml` of each module)
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository (`pom.xml` of each module)
 
-Eleven Maven modules under `io.mohs:mohs-parent:0.0.1-SNAPSHOT`. The naming rule is mechanical: the
+Eleven Maven modules under `io.github.robsonkades:mohs-parent:0.0.1-SNAPSHOT`. The naming rule is mechanical: the
 module name is the package with `.` replaced by `-`, with four deliberate exceptions listed at the
 end.
 
@@ -109,6 +109,7 @@ flowchart TB
 | **Build** | `frontend-maven-plugin` installs Node v22.12.0, runs `npm ci` and `npm run build`; `maven-resources-plugin` copies `frontend/dist` into `target/classes/mohs-ui-webapp`. |
 | **Escape hatch** | `-Dskip.frontend=true` skips Node entirely. **A published jar must never be built with it** — `mohs-ui` would ship empty. |
 | **Served by** | `MohsUiAutoConfiguration` in the starter, gated by `@ConditionalOnResource` on `index.html` rather than by a marker class — which is why the starter does not depend on this module. |
+| **Caching** | `assets/**` (content-hashed by Vite) is `Cache-Control: max-age=31536000, immutable` — deliberately without `public`, which would let a shared cache store a response the host serves behind authentication; a missing asset is a 404. `index.html`, the icons and the client routes are `no-cache`, so a deploy is picked up on the next load. |
 | **Notes** | Prose in this subtree is English, deliberately diverging from the Portuguese Javadoc convention used elsewhere. |
 
 ### `mohs-test`
@@ -176,7 +177,7 @@ The "module name = package with dots replaced by hyphens" rule has four exceptio
 <dependencyManagement>
   <dependencies>
     <dependency>
-      <groupId>io.mohs</groupId>
+      <groupId>io.github.robsonkades</groupId>
       <artifactId>mohs-bom</artifactId>
       <version>${mohs.version}</version>
       <type>pom</type>
@@ -188,19 +189,19 @@ The "module name = package with dots replaced by hyphens" rule has four exceptio
 <dependencies>
   <!-- engine + store + REST contract + autoconfiguration -->
   <dependency>
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-spring-boot-starter</artifactId>
   </dependency>
 
   <!-- optional: the dashboard bundle -->
   <dependency>
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-ui</artifactId>
   </dependency>
 
   <!-- optional: MutableClock / InMemoryJobStore for your own tests -->
   <dependency>
-    <groupId>io.mohs</groupId>
+    <groupId>io.github.robsonkades</groupId>
     <artifactId>mohs-test</artifactId>
     <scope>test</scope>
   </dependency>

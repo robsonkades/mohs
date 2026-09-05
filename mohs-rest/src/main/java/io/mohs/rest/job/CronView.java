@@ -20,7 +20,7 @@ import java.util.Objects;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 
-/** Forma de wire de {@link io.mohs.core.schedule.CronSpec}. */
+/** The wire form of {@link io.mohs.core.schedule.CronSpec}. */
 public record CronView(ScheduleType type, String expression, ZoneId zone) implements ScheduleView {
 
     /**

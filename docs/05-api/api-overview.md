@@ -1,6 +1,6 @@
 # API overview
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 Mohs exposes two APIs, and they have different audiences and different guarantees.
 
@@ -22,9 +22,9 @@ Turning it on logs a WARN at boot, and the wording is the only guardrail a user 
 exposing the API:
 
 > `mohs.api.enabled=true: the operational API is served at /api/mohs/v1 with NO authentication. It
-> can cancel, retry and pause jobs, drain nodes and change rate limits. Restrict it to an internal
-> network, or put a gateway/mTLS in front of /api/mohs/v1 and /mohs-ui before exposing this
-> instance.`
+> can trigger any registered job with a caller-supplied payload, cancel and retry executions, pause,
+> resume and reschedule jobs, and change rate limits. Restrict it to an internal network, or put a
+> gateway/mTLS in front of /api/mohs/v1 and /mohs-ui before exposing this instance.`
 
 Two further conditions must hold for the controllers to exist:
 
@@ -58,7 +58,7 @@ Each maps 1:1 to a subpackage of `io.mohs.rest`, which is a navigability rule ra
 | Rate limits | `/rate-limits` | `GET`, `PATCH /{name}` |
 | Runners | `/runners` | `GET` |
 | Nodes | `/nodes` | `GET` |
-| Batches | `/batches` | `GET /{id}` — **implemented but not wired**; see [technical debt](../technical-debt.md) |
+| Batches | `/batches` | `GET /{id}` |
 
 ## Cross-cutting conventions
 
@@ -76,7 +76,7 @@ Each maps 1:1 to a subpackage of `io.mohs.rest`, which is a navigability rule ra
 | Header | Direction | Meaning |
 | --- | --- | --- |
 | `X-Mohs-Actor` | Request | Declarative attribution for the audit trail. **Not a credential.** Falls back to `anonymous`. Validated: at most 255 characters, no control or bidi characters, and never `scheduler` |
-| `Idempotency-Key` | Request, on `POST /jobs/{k}/schedule` only | Deduplication scoped to `(job, key)` |
+| `Idempotency-Key` | Request, on `POST /jobs/{k}/schedule` only | Deduplication scoped to `(job, key)`. Validated: at most 255 characters (the column's width), a 422 above it |
 | `Location` | Response, on every 202 | The execution's detail URL |
 
 ### The `Location` header is derived from the request

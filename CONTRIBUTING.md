@@ -40,8 +40,8 @@ CI runs `./mvnw clean verify` on every push, without `-Dskip.frontend=true`.
 
 ## House rules that will come up in review
 
-- Every "when" comes from the injected `Clock`; every duration from `System.nanoTime`. An ArchUnit
-  rule enforces the first.
+- Every "when" comes from the injected `Clock`; every duration from `System.nanoTime`. Nothing in
+  the build verifies either; review does.
 - Every generated primary key is UUIDv7. No `IDENTITY`, `SERIAL`, `AUTO_INCREMENT` or `SEQUENCE`,
   on any dialect.
 - Production code is `@NullMarked` (JSpecify): non-null is the default and `@Nullable` marks the

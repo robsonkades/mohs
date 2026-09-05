@@ -1,6 +1,6 @@
 # 14. Development
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 | Document | What it covers |
 | --- | --- |
@@ -27,4 +27,4 @@ For the dashboard, build once **without** `-Dskip.frontend=true`, then open
 2. **`npm ci` fails with `EPERM` while `npm run dev` is running.** Use `-Dskip.frontend=true` for
    backend work; that is precisely why the flag exists.
 3. **`io.mohs.rest` cannot see the engine.** If a controller needs new data, add a read method to the
-   `Mohs` facade. An ArchUnit rule will fail the build otherwise.
+   `Mohs` facade. The reactor enforces it: `mohs-rest` declares only `mohs-api`.

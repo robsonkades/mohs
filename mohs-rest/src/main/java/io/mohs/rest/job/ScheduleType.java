@@ -15,7 +15,7 @@
  */
 package io.mohs.rest.job;
 
-/** Discriminador de {@link ScheduleView} na borda JSON. */
+/** The discriminator of {@link ScheduleView} at the JSON boundary. */
 public enum ScheduleType {
     CRON,
     INTERVAL,

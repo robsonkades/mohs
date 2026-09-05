@@ -24,7 +24,7 @@ import org.jspecify.annotations.Nullable;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 
-/** Forma de wire de {@link Execution}. */
+/** The wire form of {@link Execution} — the detail view, attempts included. */
 public record ExecutionResponse(
         String executionId,
         String jobKey,

@@ -1,6 +1,6 @@
 # Security overview
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 > **The single most important fact: the Mohs REST API and dashboard perform no authentication and no
 > authorization.** The host application's security configuration is the only protection. This is a
@@ -19,7 +19,7 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 | TLS termination | The **host's** concern |
 | Security headers | The **host's** concern |
 | Rate limiting on the API | **Not present** (a 64-subscriber cap on SSE is the only limit) |
-| CSRF protection | The host's `SecurityFilterChain`, if configured |
+| CSRF protection | The host's `SecurityFilterChain`, if configured — needed only when the browser attaches the credential itself (a session cookie); see "Securing it" |
 | CORS | Not configured by Mohs |
 | Audit log | **Present** — `actor` is persisted per execution; runtime mutations log at INFO with the actor |
 | Data at rest encryption | The database's concern |
@@ -70,11 +70,12 @@ If `/api/mohs/v1/**` is reachable, the caller can:
 The boot WARN states this in the operator's own words:
 
 > `mohs.api.enabled=true: the operational API is served at /api/mohs/v1 with NO authentication. It
-> can cancel, retry and pause jobs, drain nodes and change rate limits. Restrict it to an internal
-> network, or put a gateway/mTLS in front of /api/mohs/v1 and /mohs-ui before exposing this
-> instance.`
+> can trigger any registered job with a caller-supplied payload, cancel and retry executions, pause,
+> resume and reschedule jobs, and change rate limits. Restrict it to an internal network, or put a
+> gateway/mTLS in front of /api/mohs/v1 and /mohs-ui before exposing this instance.`
 
-Note also that `GET /jobs` returns `handlerType` — a fully qualified class name. That is
+Note also that `GET /jobs` returns `handlerType` — a fully qualified class name — and that a 422 on
+`POST .../schedule` echoes Jackson's message, which names the payload class. Both are
 implementation disclosure, useful to an attacker fingerprinting the application.
 
 ## Securing it — the recommended pattern
@@ -171,8 +172,14 @@ Other validated inputs:
 | `?window=` | Explicitly parsed, then clamped to `[1s, 1h]`. Unparseable → 422 |
 | `size` | Clamped to `[1, 200]` — an unbounded page over an unbounded table is a real DoS surface |
 | Request bodies | Record compact constructors; failures surface as 422 with the original message |
-| Payloads | Converted to the handler's declared parameter type; an incompatible one is a 422, and a payload sent to a job that accepts none is rejected |
+| Payloads | Converted to the handler's declared parameter type; an incompatible one is a 422 naming `payload`, without Jackson messages, Java class names or rejected values. A payload sent to a job that accepts none is rejected |
 | Path variables | Wrapped in `JobKey`/`ExecutionId`, which reject blank values |
+
+Missing-resource responses do not echo request identifiers. Constructor validation messages are
+exposed only for Mohs's own request types; arbitrary conversion causes do not become public details.
+The cause walk examines at most 64 exceptions, counting the HTTP exception as the first. If no
+recognised validation appears within that limit, including in a cyclic chain, the response remains
+the generic 400 rather than exposing deeper diagnostics.
 
 ## Injection
 
@@ -188,7 +195,7 @@ Other validated inputs:
 
 | Data | Where it lives | Exposure |
 | --- | --- | --- |
-| Job payloads | `mohs_execution.payload`, plaintext JSON, **forever** (no retention) | Not returned by any REST endpoint. Readable by anyone with database access |
+| Job payloads | `mohs_execution.payload`, plaintext JSON, kept until `mohs.engine.history-retention` sweeps the execution — **forever by default** | Not returned by any REST endpoint. Readable by anyone with database access |
 | Exception messages | `mohs_attempt.error`, and in `Failed` events | Returned by `GET /executions/{id}` |
 | Handler class names | `mohs_job_definitions.handler_type` | Returned by `GET /jobs` |
 | Actors | `mohs_execution.actor` | Returned by execution reads |
@@ -206,15 +213,15 @@ There is **no authentication between nodes** — they coordinate only through sh
 The trust boundary is the database connection. Anyone who can write to `mohs_lease` can steal
 ownership; anyone who can write to `mohs_ready` can enqueue work.
 
-The fencing token `(node_id, epoch)` protects against a **stale** node, not against a **malicious**
+The fencing token `(node_id, epoch, attempt)` protects against a **stale** node, not against a **malicious**
 one.
 
 ## Dependency surface
 
 | Property | Value |
 | --- | --- |
-| Runtime dependencies | Spring Boot 4.1.0 (BOM-managed), Jackson, Micrometer, SLF4J, JSpecify, `io.github.robsonkades:uuidv7`. **No migration engine**, and therefore no code path that runs DDL |
-| Automated dependency scanning | **Not present** — no OWASP dependency-check, no Dependabot config, no CI at all |
+| Runtime dependencies | Spring Boot 4.1.1 (BOM-managed), Jackson, Micrometer, SLF4J, JSpecify, `io.github.robsonkades:uuidv7`. **No migration engine**, and therefore no code path that runs DDL |
+| Automated dependency scanning | Dependabot (Maven, npm and actions) and CodeQL (Java) in `.github/`; no OWASP dependency-check |
 | Version pinning | Spring Boot's BOM plus explicit versions for the few non-managed artifacts |
 | Reflection | Used narrowly, in `MohsJobScanner`/`MohsJobs` (annotated methods) and `JdbcHistoryStore` (payload class resolution) |
 | Java serialization | **Not used** — JSON only |
@@ -226,8 +233,8 @@ one.
 | **Critical** | Never expose `/api/mohs/**` or `/mohs-ui/**` without a `SecurityFilterChain` in front |
 | **High** | Replace `ActorResolver` with one backed by real authentication |
 | **High** | Separate read and write authorization — `GET` and `POST`/`PATCH` are very different privileges |
-| **High** | Add a retention policy: payloads persist forever today, which may be a data-protection obligation |
-| Medium | Add dependency scanning; there is no CI to attach it to yet |
+| **High** | Set `mohs.engine.history-retention`: payloads persist forever by default, which may be a data-protection obligation |
+| Medium | Add a Java dependency-advisory scan (OWASP dependency-check or equivalent) to the CI that exists |
 | Medium | Alert on `PATCH` calls — they are emergency levers |
 | Medium | Consider whether `handlerType` should be exposed in `GET /jobs` in your environment |
 | Low | Consider payload encryption at the application level if payloads carry sensitive data |

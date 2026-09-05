@@ -1,6 +1,6 @@
 # Testing strategy
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## The inventory
 
@@ -8,31 +8,33 @@ Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
 | --- | --- | --- |
 | `mohs-api` | 17 | Pure unit tests over record invariants, validation, sealed-type exhaustiveness |
 | `mohs-cron` | 1 | The vendored parser's behaviour, including the Quartz extensions |
-| `mohs-engine` | 13 | Pure logic — shards, retry, firing plan, metrics, cancellation, executors, registries |
-| `mohs-store-jdbc` | 31 | Integration against real databases via Testcontainers, source-scan guards, plus four engine tests and three `*TestSupport` helpers |
+| `mohs-engine` | 14 | Pure logic — shards, retry, firing plan, metrics, cancellation, executors, registries, the retry-policy registry |
+| `mohs-store-jdbc` | 34 | Integration against real databases via Testcontainers, source-scan guards, the clock-zone and RCSI checks, plus four engine tests and three `*TestSupport` helpers |
 | `mohs-rest` | 16 | Contract tests over a mocked `Mohs`, plus the shared slice configuration |
 | `mohs-test` | 3 | The kit's own behaviour |
-| `mohs-spring-boot-starter` | 9 | Auto-configuration slices, the scanner, and one shutdown harness |
-| `mohs-demo` | 4 | ArchUnit, context load, end-to-end UI and runners |
-| `mohs-benchmark` | 10 | Nine `*Scenario` classes plus `ScenarioCluster` — **run by name only** |
-| **Total** | **104 files** | |
+| `mohs-spring-boot-starter` | 12 | Auto-configuration slices, the scanner, the health indicator, and one shutdown harness |
+| `mohs-demo` | 0 | No tests, by decision — it is an example application |
+| `mohs-benchmark` | 12 | Ten `*Scenario` classes plus their support — **run by name only** |
+| **Total** | **109 files** | |
 
-Counted precisely: **98 of those files contain at least one `@Test`**, totalling **711 `@Test`
-methods**. Nine of the 98 are `*Scenario` classes that Surefire's default include pattern does not
-match, so **89 classes run in the normal suite**. The remaining six files are support code
-(`ScenarioCluster`, three `*TestSupport` classes, `RestSliceConfiguration`,
-`ShutdownWithOpenStreamsHarness`).
+Counted on 2026-09-04: **102 of those files contain at least one `@Test` or `@ParameterizedTest`**,
+totalling **764 test methods**. Ten of the 102 are `*Scenario` classes that Surefire's default
+include pattern does not match, so **92 classes run in the normal suite**. The remaining seven files
+are support code (`ScenarioCluster` and its backend, three `*TestSupport` classes,
+`RestSliceConfiguration`, `ShutdownWithOpenStreamsHarness`). These numbers are the ones that churn
+most in this document; re-derive them with `find */src/test -name '*.java'` before quoting.
 
-**No coverage report is produced by the build.** There is no JaCoCo, no Cobertura, no threshold. Any
-coverage figure quoted anywhere would be unsubstantiated, so none is quoted here.
+**JaCoCo produces a per-module report** under `target/site/jacoco`, with no aggregation and no
+threshold. The engine's own figure understates it badly, because its integration tests live in
+`mohs-store-jdbc` and the per-module `.exec` files are never merged.
 
 ## The test pyramid, as it actually exists
 
 ```
                     /\
-                   /  \        4   end-to-end   (mohs-demo: ArchUnit, context, UI, runners)
+                   /  \        0   end-to-end   (mohs-demo carries no tests, by decision)
                   /----\
-                 /      \      9   scenarios    (mohs-benchmark, by name only)
+                 /      \     10   scenarios    (mohs-benchmark, by name only)
                 /--------\
                /          \   28   integration  (mohs-store-jdbc, Testcontainers + scans)
               /------------\
@@ -42,7 +44,7 @@ coverage figure quoted anywhere would be unsubstantiated, so none is quoted here
           /--------------------\
 ```
 
-Plus a layer that is not a level at all: **executable architecture rules** (ArchUnit, source scans,
+Plus a layer that is not a level at all: **executable architecture rules** (source scans and
 schema round-trips).
 
 ## What is tested at each level
@@ -84,7 +86,10 @@ That last row is deliberate: they are engine tests that need a real store, and t
 store is. The production code does not move.
 
 **Without Docker** these fail with `Could not initialize class *TestSupport`. That is an environment
-failure, not a regression.
+failure, not a regression — and it is distinguishable from one: every container-backed class is
+`@Tag("docker")`, so `./mvnw test -DexcludedGroups=docker` runs everything else (H2, the source
+scans, the REST and starter suites), and a red suite under that flag is a real regression. The CI
+never sets the flag.
 
 ### Contract — the REST layer
 
@@ -95,12 +100,12 @@ failure, not a regression.
 
 Note that a contract test constructs its controller with an explicit `@Bean`, so it cannot notice a
 missing *production* registration — a controller can be fully tested and never served. That is why
-`MohsRestAutoConfigurationTest#everyRestControllerIsRegistered` exists: it asserts the registration
+`MohsRestAutoConfigurationTest#everyRestControllerInThePackageIsRegisteredWhenTheApiIsOn` exists: it asserts the registration
 itself, which no contract test can.
 
 ### Auto-configuration — the wiring
 
-`mohs-spring-boot-starter`, 8 classes.
+`mohs-spring-boot-starter`, 12 files.
 
 | Test | Asserts |
 | --- | --- |
@@ -136,11 +141,11 @@ Surefire's default pattern does not match `*Scenario`. See [benchmarks](../10-pe
 | Principle | Evidence |
 | --- | --- |
 | **No `Thread.sleep` for synchronisation** | Latches, `CompletableFuture` with a timeout, and `MutableClock`. The one sleep in production-adjacent code is `Demo.slowMethod`, and its Javadoc says explicitly it is *"a deliberate bench wait, not synchronisation"* |
-| **Time is injected, always** | `MutableClock` makes scheduling and misfire deterministic. Every "when" in the engine comes from a `Clock`, enforced by ArchUnit — which is what makes this possible at all |
+| **Time is injected, always** | `MutableClock` makes scheduling and misfire deterministic. Every "when" in the engine comes from a `Clock` — a convention with no build rule behind it, and what makes this possible at all |
 | **Real databases for anything touching SQL** | Testcontainers for PostgreSQL, MySQL and SQL Server. H2 covers the fast path |
 | **A test seam rather than a mock, where a seam is honest** | `RunnerRegistry` has a package-private constructor taking a factory, existing *only* to prove failure paths that are unreachable with the real builders. `InMemoryJobStore` is the same idea at port level |
 | **Assertions must be falsifiable** | `BatchCompletionScenario` uses `retries(1)` precisely so that "counted the terminal failure" and "counted every attempt" produce **different** numbers |
-| **Limitations are declared, not hidden** | Every scenario has a "declared limitation" paragraph; every ArchUnit rule with a gap says what the gap is |
+| **Limitations are declared, not hidden** | Every scenario has a "declared limitation" paragraph; every fitness function with a gap says what the gap is |
 | **Guard the invariant where the invariant lives** | `TerminalStateWriteScanTest` reads its own module's source; the schema round-trip tests compare the two installation paths |
 
 ## What is **not** covered
@@ -173,7 +178,7 @@ Stated honestly, from reading the tree:
 
 | Note | Detail |
 | --- | --- |
-| **Docker is required** for `mohs-store-jdbc` and `mohs-benchmark` | Without it, container-backed tests error on `Could not initialize class *TestSupport` |
+| **Docker is required** for `mohs-store-jdbc` and `mohs-benchmark` | Without it, container-backed tests error on `Could not initialize class *TestSupport`. In `mohs-store-jdbc` they carry `@Tag("docker")`, so `-DexcludedGroups=docker` skips exactly those; the benchmark scenarios need no tag — they only run by explicit `-Dtest=` |
 | `-Dskip.frontend=true` skips Node entirely | Useful when a `npm run dev` is holding esbuild binaries. **Never build a published jar with it** — `mohs-ui` would ship empty |
 | A known flake | The SQL Server container occasionally fails to start in a full reactor `verify`, and passes when `mohs-store-jdbc` is built in isolation |
 

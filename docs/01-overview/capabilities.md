@@ -1,6 +1,6 @@
 # Capabilities
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 The complete feature inventory, each row traceable to code. Status markers are defined in the
 [documentation portal](../README.md#conventions-used-in-this-documentation).
@@ -18,8 +18,8 @@ The complete feature inventory, each row traceable to code. Status markers are d
 | Definition drift policy on redeploy (`override` / `preserve` / `fail`) | Implemented | `MohsProperties.Registration.OnConflict`, `MohsJobScanner#reconcile` |
 | Annotated job removed from code becomes `ORPHANED`, history kept | Implemented | `MohsJobScanner#reconcileOrphans`, `JobStore#markOrphaned` |
 | Explicit retirement of programmatic jobs | Implemented | `MohsImpl#remove` performs a soft retire and drains the queue |
-| `@OnExecution` per-method event listener | **Referenced, not implemented** | The scanner *fails the boot* on finding it rather than ignoring it (`MohsJobScanner#scanMethod`) |
-| Custom `retryPolicy` bean name | **Referenced, not implemented** | Accepted, persisted, and warned about at boot (`MohsEngineLifecycle#warnIfRetryPolicyNotHonored`) |
+| `@OnExecution` per-method event listener | **Implemented** | The annotated method subscribes to the engine's event stream, filtered by job and event type (`OnExecutionRegistry`); an impossible signature or filter fails the boot |
+| Custom `retryPolicy` bean name | **Implemented** | The named `RetryPolicy` bean is consulted on both failure paths (`RetryPolicyRegistry`); a job naming a bean that does not exist fails the boot (`MohsEngineLifecycle#checkDeclaredPolicies`) |
 
 ## Scheduling
 
@@ -65,7 +65,7 @@ The complete feature inventory, each row traceable to code. Status markers are d
 | --- | --- | --- |
 | Node heartbeat plus node lease (`epoch`, `expires_at`) | Implemented | `NodeStore#heartbeat`, table `mohs_nodes` |
 | Reaper reclaims dead nodes' leases through the retry budget | Implemented | `Engine#reapOrphanedLeases` |
-| Fencing token `(node_id, epoch)` on every completion | Implemented | `LeaseStore#complete` |
+| Fencing token `(node_id, epoch, attempt)` on every completion | Implemented | `LeaseStore#complete` |
 | Self-diagnosed lease expiry bumps the local epoch | Implemented | `Engine#renewNodeLease` |
 | Stray-lease reconcile for work lost between claim and dispatch | Implemented | `Engine#reconcileOwnStrayLeases` |
 | Watchdog bound: release ownership of an over-running execution | Implemented, off by default | `mohs.engine.watchdog-timeout` |
@@ -89,7 +89,7 @@ The complete feature inventory, each row traceable to code. Status markers are d
 | Server-sent snapshot stream for the dashboard | Implemented | `OverviewStreamBroadcaster` |
 | `GET /batches/{id}` route | Implemented | `MohsRestAutoConfiguration#mohsBatchesController` |
 | Micrometer metrics under `mohs.*` | Implemented, always on | `EngineMetrics` |
-| Spring Boot Actuator health indicator | **Not present** | No `HealthIndicator` anywhere in the reactor |
+| Spring Boot Actuator health indicator | **Implemented** | `MohsHealthIndicator` under the `mohs` key, contributed when the host brings the actuator (`MohsHealthAutoConfiguration`); it never touches the database |
 | OpenAPI / Swagger document | **Not present** | No springdoc dependency |
 
 ## Persistence
@@ -102,4 +102,4 @@ The complete feature inventory, each row traceable to code. Status markers are d
 | Idempotent baseline that adopts an existing hand-created schema | Implemented | `V1__mohs_baseline.sql` per dialect |
 | Any externally managed schema | The only mode there is | Mohs executes no DDL at all |
 | UUIDv7 primary keys everywhere; no sequences, no UUIDv4 | Implemented; **convention, not enforced** | `io.github.robsonkades.uuidv7.UUIDv7` at every call site |
-| Automatic retention or purge of execution history | **Not present** | Only `mohs_idempotency` has a prune method and no caller schedules it — see [data lifecycle](../06-data/data-lifecycle.md) |
+| Automatic retention or purge of execution history | **Implemented, opt-in** | `mohs.engine.history-retention` (default `0s`, keep forever) sweeps terminal history hourly on the tick; `mohs_idempotency` is pruned hourly by `idempotency-retention` — see [data lifecycle](../06-data/data-lifecycle.md) |

@@ -147,8 +147,8 @@ pattern-match exhaustively and a new variant becomes a compiler warning rather t
 
 | Event | Carries | Published when |
 | --- | --- | --- |
-| `Enqueued` | `executionId`, `jobKey`, `scheduledAt`, `actor` | An execution is accepted. **Dual role**: it is also the receipt returned by `ScheduleCommand`'s terminals |
-| `Started` | `executionId`, `jobKey`, `attempt`, `firedAt` | An attempt begins executing |
+| `Enqueued` | `executionId`, `jobKey`, `scheduledAt`, `actor` | An execution is accepted. **Dual role**: it is also the receipt returned by `ScheduleCommand`'s terminals. Published to the listeners once the enqueue is durable — inside a host transaction on Mohs' `DataSource`, after the **host's** commit; a rolled-back enqueue publishes nothing, and neither does a deduplicated repeat (`Idempotency-Key`). Batch members publish one each. One limit, Spring's: a host that wraps the call in its own `NESTED` savepoint and rolls back only that savepoint still commits the outer transaction, and the event goes out for an execution the savepoint erased |
+| `Started` | `executionId`, `jobKey`, `attempt`, `firedAt` | The interceptor chain — and, unless an interceptor short-circuits it, the handler — is about to be invoked. An attempt that ends before the chain runs at all (no handler registered, or a cancellation that arrived before the start) publishes its terminal event with no `Started` before it |
 | `AttemptFailed` | `executionId`, `jobKey`, `attempt`, `error` | An attempt threw |
 | `RetryScheduled` | `executionId`, `jobKey`, `nextAttempt`, `retryAt` | A retry was armed after a failure |
 | `Succeeded` | `executionId`, `jobKey`, `attempt` | Terminal success |

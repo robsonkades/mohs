@@ -28,7 +28,8 @@
  *
  * <p>Everything here and in those subpackages is contract — records, sealed interfaces and plain
  * interfaces, with no engine wiring. The real implementation lives in {@code io.mohs.engine} and
- * {@code io.mohs.store.jdbc}, on which no public type may depend (an ArchUnit rule).
+ * {@code io.mohs.store.jdbc}, on which no public type may depend — the reactor enforces it: this
+ * module has neither on its compile classpath.
  * {@code io.mohs.cron} is a separate utility: it is not job vocabulary, and did not move here.
  *
  * <h2>Compatibility</h2>

@@ -47,7 +47,7 @@ import io.mohs.core.resource.RateLimit;
 @MohsJob(id = "")
 public @interface OnDemandJob {
 
-    /** Alias de {@link #id()} — a forma concisa {@code @OnDemandJob("import-file")}. */
+    /** Alias for {@link #id()} — the concise form {@code @OnDemandJob("import-file")}. */
     @AliasFor(annotation = MohsJob.class, attribute = "id")
     String value() default "";
 
@@ -71,11 +71,11 @@ public @interface OnDemandJob {
     @AliasFor(annotation = MohsJob.class, attribute = "rateLimit")
     String rateLimit() default "";
 
-    /** Ver {@link MohsJob#allowConcurrentExecutions()}. */
+    /** See {@link MohsJob#allowConcurrentExecutions()}. */
     @AliasFor(annotation = MohsJob.class, attribute = "allowConcurrentExecutions")
     boolean allowConcurrentExecutions() default true;
 
-    /** Ver {@link MohsJob#maxConcurrentExecutions()}. */
+    /** See {@link MohsJob#maxConcurrentExecutions()}. */
     @AliasFor(annotation = MohsJob.class, attribute = "maxConcurrentExecutions")
     int maxConcurrentExecutions() default 0;
 

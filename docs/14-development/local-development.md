@@ -1,6 +1,6 @@
 # Local development
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 ## Prerequisites
 
@@ -108,7 +108,7 @@ There is **no `npm test` and no linter** — see [testing strategy](../11-testin
 
 | Note | Detail |
 | --- | --- |
-| **Docker must be running** for `mohs-store-jdbc` | Otherwise: `Could not initialize class *TestSupport` — environment, not regression |
+| **Docker must be running** for `mohs-store-jdbc` | Otherwise: `Could not initialize class *TestSupport` — environment, not regression. Without Docker, skip them explicitly: `./mvnw test -DexcludedGroups=docker` (every container-backed class is `@Tag("docker")`; the H2 tests and the source scans still run, and a red suite then means a regression) |
 | A known flake | The SQL Server container occasionally fails to start in a full-reactor `verify`; it passes when the module is built in isolation |
 | Benchmarks are excluded by default | Surefire's default pattern does not match `*Scenario`. Run them by name |
 
@@ -133,7 +133,7 @@ pwsh mohs-benchmark/scripts/chaos-recovery.ps1 -Scenario S6
 | `Engine#admit` | Why a claimed execution was sent back |
 | `Dispatcher#dispatch` | The handler invocation and the outcome mapping |
 | `LeaseStore#complete` (i.e. `JdbcLeaseStore`) | The fence's verdict |
-| `MohsJobScanner#scanMethod` | Why a job was or was not registered |
+| `MohsJobScanner#scanJob` | Why a job was or was not registered |
 | `FiringPlanner#plan` | What a due trigger will fire |
 
 ### Making the loop slow enough to follow
@@ -192,7 +192,7 @@ Restart. The scanner registers it and the upsert arms its trigger.
 2. Use `${mohs.api.base-path:" + ApiPaths.V1 + "}` in `@RequestMapping`; an annotation cannot read a
    property binding, so the placeholder is the only mechanism there.
 3. **Register a `@Bean` in `MohsRestAutoConfiguration`** — a controller with no bean is never served,
-   and a contract test will not notice. `MohsRestAutoConfigurationTest#everyRestControllerIsRegistered`
+   and a contract test will not notice. `MohsRestAutoConfigurationTest#everyRestControllerInThePackageIsRegisteredWhenTheApiIsOn`
    fails the build if you forget.
 4. Write a `*ContractTest` over a mocked `Mohs`.
 5. Remember the boundary: `io.mohs.rest` may not see the engine or the store. If you need new data,
@@ -226,7 +226,7 @@ See [extensibility](../04-engineering/extensibility.md#how-to-add-a-new-database
 
 Derived from the practices visible throughout the tree:
 
-- [ ] Does an ArchUnit rule cover the boundary you touched? Run `./mvnw test -pl mohs-demo`
+- [ ] Did you keep the boundary you touched? Nothing in the build verifies most of them since the ArchUnit suite went away — see [boundaries and fitness functions](../02-architecture/boundaries-and-fitness-functions.md)
 - [ ] Does every new production package have a `@NullMarked package-info.java`?
 - [ ] Is every "when" from an injected `Clock` and every duration from `System.nanoTime()`?
 - [ ] Are new value objects records with validation in the compact constructor?

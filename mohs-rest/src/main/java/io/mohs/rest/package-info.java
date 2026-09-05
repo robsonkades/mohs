@@ -15,7 +15,8 @@
  */
 /**
  * The operational REST API. It depends only on the public API in {@code io.mohs.core} — never
- * directly on {@code io.mohs.engine} or {@code io.mohs.store.jdbc} (an ArchUnit rule).
+ * directly on {@code io.mohs.engine} or {@code io.mohs.store.jdbc} — the reactor enforces it:
+ * {@code mohs-api} is the only Mohs artifact on this module's compile classpath.
  *
  * <p>This package carries only what is cross-cutting — used by more than one resource subpackage and
  * therefore belonging to none in particular: {@link io.mohs.rest.ActorResolver} (the SPI) and its

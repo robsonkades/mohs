@@ -1,6 +1,6 @@
 # Operational runbook
 
-Status: Active · Last Reviewed: 2026-08-29 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-04 · Source of Truth: Repository
 
 Task-oriented procedures. For diagnosing an unknown problem, start with
 [troubleshooting](troubleshooting.md).
@@ -231,7 +231,7 @@ perfectly well.
 Worth a periodic grep, because each one names a real gap:
 
 ```bash
-grep -E "retryPolicy .* not honored|timeout .* >= mohs.engine.watchdog-timeout|dialect=h2|NO authentication|owns no shard|max-concurrent .* below" app.log
+grep -E "timeout .* >= mohs.engine.watchdog-timeout|dialect=h2|NO authentication|owns no shard|max-concurrent .* below" app.log
 ```
 
 ### Verifying the cluster's view of itself
@@ -272,3 +272,4 @@ the built-in `io` runner. Raise the connection pool with it.
 | Cancelled the wrong execution | `POST .../retry` **if** it is `FAILED`. A `CANCELLED` execution **cannot** be retried — cancelling was an explicit decision. Schedule the job again |
 | Deleted a `@MohsJob` annotation by accident | Restore it and deploy. The upsert clears `ORPHANED` — the source reappearing is proof of life |
 | Called `Mohs.remove` by mistake | `mohs.define(...)` the same key. Retirement is soft; an upsert resurrects it |
+| Edited `mohs_ready`/`mohs_lease` by hand and set `attempt` (or `attempt_number`) to `0` | Every tick ends in `engine tick failed — will retry next tick` at ERROR, with `IllegalArgumentException: attemptNumber must be >= 1` underneath, and **nothing in that claim batch dispatches** until the row is fixed: an attempt below 1 is not fenceable by any path (claim, requeue, reap), so no grant can carry it and the whole batch unwinds. Set it back to `1`, or delete the row. The engine does not guard against it by decision — the column is written by the engine only, and a guard would be a flag for a hypothetical |
