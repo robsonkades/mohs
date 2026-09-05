@@ -161,6 +161,23 @@ class ScheduleCommandImplTest {
         assertThat(executionCount()).isEqualTo(2);
     }
 
+    /** Refused at the call, not at the write: a dialect that truncated it would let two keys collide and deduplicate a new schedule away. */
+    @Test
+    void aBlankIdempotencyKeyIsRefusedBeforeAnyWrite() {
+        assertThatThrownBy(() -> mohs.schedule("welcome-email", "hello").idempotencyKey("  "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("blank");
+        assertThat(executionCount()).isZero();
+    }
+
+    @Test
+    void anIdempotencyKeyWiderThanTheColumnIsRefusedBeforeAnyWrite() {
+        assertThatThrownBy(() -> mohs.schedule("welcome-email", "hello").idempotencyKey("k".repeat(256)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("255");
+        assertThat(executionCount()).isZero();
+    }
+
     @Test
     void executionsWithoutAnIdempotencyKeyNeverCollide() {
         mohs.schedule("welcome-email", "hello").now();

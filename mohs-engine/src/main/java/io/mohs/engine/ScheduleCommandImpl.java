@@ -99,7 +99,17 @@ final class ScheduleCommandImpl implements ScheduleCommand {
 
     @Override
     public ScheduleCommand idempotencyKey(String key) {
-        this.idempotencyKey = Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(key, "key");
+        // A blank key is never an intent to deduplicate — accepted, every keyless-by-mistake schedule
+        // of the job would collapse into the first one, silently
+        if (key.isBlank()) {
+            throw new IllegalArgumentException("idempotency key must not be blank");
+        }
+        if (key.length() > MAX_IDEMPOTENCY_KEY_LENGTH) {
+            throw new IllegalArgumentException("idempotency key must be at most " + MAX_IDEMPOTENCY_KEY_LENGTH
+                    + " characters, got " + key.length());
+        }
+        this.idempotencyKey = key;
         return this;
     }
 

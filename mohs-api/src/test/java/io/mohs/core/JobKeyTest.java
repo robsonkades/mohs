@@ -37,6 +37,16 @@ class JobKeyTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    /** The column is 255 wide on every dialect, and MySQL without strict mode would truncate rather than refuse — so the key refuses first, naming the limit. */
+    @Test
+    void rejectsAValueWiderThanTheColumn() {
+        assertThat(JobKey.of("k".repeat(JobKey.MAX_LENGTH)).value()).hasSize(255);
+        assertThatThrownBy(() -> JobKey.of("k".repeat(JobKey.MAX_LENGTH + 1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("255")
+                .hasMessageContaining("256");
+    }
+
     @Test
     void rejectsNullValue() {
         assertThatThrownBy(() -> new JobKey(null))

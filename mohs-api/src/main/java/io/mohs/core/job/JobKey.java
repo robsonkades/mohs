@@ -27,10 +27,22 @@ import io.mohs.core.definition.JobDefinition;
  */
 public record JobKey(String value) {
 
+    /**
+     * The width of every {@code job_key} column ({@code VARCHAR(255)} on all four dialects). Enforced
+     * here so a key that would not fit fails where it is defined, with a message that names the
+     * limit — not at the first write, where one dialect raises a driver error and another silently
+     * truncates the value and lets two distinct keys collide.
+     */
+    public static final int MAX_LENGTH = 255;
+
     public JobKey {
         Objects.requireNonNull(value, "value");
         if (value.isBlank()) {
             throw new IllegalArgumentException("JobKey value must not be blank");
+        }
+        if (value.length() > MAX_LENGTH) {
+            throw new IllegalArgumentException(
+                    "JobKey value must be at most " + MAX_LENGTH + " characters, got " + value.length());
         }
     }
 

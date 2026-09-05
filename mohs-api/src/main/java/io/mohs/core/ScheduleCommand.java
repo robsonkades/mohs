@@ -24,6 +24,7 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.Priority;
+import io.mohs.core.job.JobKey;
 
 /**
  * A fluent chain over an already existing definition.
@@ -53,6 +54,16 @@ public interface ScheduleCommand {
     ScheduleCommand as(String actor);
 
     /**
+     * The widest key {@link #idempotencyKey} accepts: the width of the column that stores it, on
+     * every dialect — the very ceiling {@link JobKey#MAX_LENGTH} enforces for the job key, because
+     * the two columns are declared with one width. Refused at the call rather than at the write —
+     * one dialect answers an oversized value with a driver error, and MySQL without strict mode
+     * truncates it, so two keys sharing a prefix would collide and the second schedule would be
+     * deduplicated away.
+     */
+    int MAX_IDEMPOTENCY_KEY_LENGTH = JobKey.MAX_LENGTH;
+
+    /**
      * Deduplication by {@code (job, key)} — an Idempotent Receiver: a terminal carrying the same key
      * as an already recorded execution duplicates nothing and returns the original {@link Enqueued}
      * (the same receipt, the same {@code ExecutionId}).
@@ -60,6 +71,10 @@ public interface ScheduleCommand {
      * <p>The key deduplicates for as long as the execution exists — the window is that of execution
      * retention, which is unbounded while no retention policy exists — so reusing an old key returns
      * the old execution.
+     *
+     * @throws IllegalArgumentException if the key is blank, or longer than
+     *         {@link #MAX_IDEMPOTENCY_KEY_LENGTH} — a blank key is never an intent to deduplicate,
+     *         and accepted it would collapse every keyless-by-mistake schedule of the job into one
      */
     @CheckReturnValue
     ScheduleCommand idempotencyKey(String key);
