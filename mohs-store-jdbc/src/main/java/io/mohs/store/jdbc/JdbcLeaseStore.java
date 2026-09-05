@@ -50,7 +50,7 @@ import io.mohs.store.jdbc.delegate.JdbcDelegate;
  * {@link LeaseStore} over {@code mohs_lease}.
  *
  * <p>The completion is the transaction that performs: a {@code DELETE} fenced by
- * {@code (node_id, epoch)} — deleting the lease IS releasing the slot, so there is no counter left to
+ * {@code (node_id, epoch, attempt_number)} — deleting the lease IS releasing the slot, so there is no counter left to
  * decrement — an {@code INSERT} of the confirmed attempts, the advisory terminal {@code UPDATE} of
  * history (matched by the primary key, {@code execution_id}) and, for non-terminal results, the rebirth
  * in the queue in the SAME transaction (see {@link LeaseStore.CompletionResult#retry}'s Javadoc).
@@ -132,7 +132,7 @@ public final class JdbcLeaseStore implements LeaseStore {
 
     private List<CompletionResult> deleteLeasesKeepingFenceWinners(List<CompletionResult> results) {
         int[] deleted = jdbcTemplate.batchUpdate(delegate.fencedLeaseDelete(), results.stream()
-                .map(r -> JdbcSupport.fencedLeaseDeleteParams(r.executionId().value(), r.nodeId(), r.epoch()))
+                .map(r -> JdbcSupport.fencedLeaseDeleteParams(r.executionId().value(), r.nodeId(), r.epoch(), r.attemptNumber()))
                 .toArray(MapSqlParameterSource[]::new));
         List<CompletionResult> winners = new ArrayList<>(results.size());
         for (int i = 0; i < deleted.length; i++) {

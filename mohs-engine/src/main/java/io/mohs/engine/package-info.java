@@ -23,7 +23,7 @@
  * {@link io.mohs.core.definition.JobDefinition} with the operational state kept separate from the
  * definitional one), {@link io.mohs.engine.WorkQueue} (the {@code mohs_ready} queue — claim,
  * requeue, cancelling an enqueued entry, manual rearm), {@link io.mohs.engine.LeaseStore} (the
- * {@code mohs_lease} ownership with the {@code (node_id, epoch)} fence and the completion
+ * {@code mohs_lease} ownership with the {@code (node_id, epoch, attempt_number)} fence and the completion
  * transaction), {@link io.mohs.engine.HistoryStore} ({@code mohs_execution}/{@code mohs_attempt}
  * history and the derived read model), {@link io.mohs.engine.StoreTransactions} (the enqueue unit),
  * {@link io.mohs.engine.BatchStore} (batch counters, {@link io.mohs.engine.BatchCounters}),

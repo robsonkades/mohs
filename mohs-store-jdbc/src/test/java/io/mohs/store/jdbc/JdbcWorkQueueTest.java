@@ -228,7 +228,7 @@ class JdbcWorkQueueTest {
         queue.claim(0, NODE, EPOCH, 10, List.of(), NOW);
 
         int requeued = queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), NODE, EPOCH, entry("exec-1", "job-a", 20, 2, NOW.plusSeconds(30)))));
+                ExecutionId.of("exec-1"), NODE, EPOCH, 1, entry("exec-1", "job-a", 20, 2, NOW.plusSeconds(30)))));
 
         assertThat(requeued).isEqualTo(1);
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isZero();
@@ -243,7 +243,7 @@ class JdbcWorkQueueTest {
         queue.claim(0, NODE, EPOCH, 10, List.of(), NOW);
 
         int requeued = queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), NODE, EPOCH - 1, entry("exec-1", "job-a", 20, 2, NOW))));
+                ExecutionId.of("exec-1"), NODE, EPOCH - 1, 1, entry("exec-1", "job-a", 20, 2, NOW))));
 
         assertThat(requeued).isZero();
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isEqualTo(1);
@@ -255,7 +255,7 @@ class JdbcWorkQueueTest {
         queue.offer(List.of(entry("exec-1", "job-a", 20, 1, NOW.minusSeconds(1))));
         queue.claim(0, NODE, EPOCH, 10, List.of(), NOW);
         queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), NODE, EPOCH, entry("exec-1", "job-a", 20, 2, NOW))));
+                ExecutionId.of("exec-1"), NODE, EPOCH, 1, entry("exec-1", "job-a", 20, 2, NOW))));
 
         List<WorkQueue.ClaimedWork> reclaimed = queue.claim(0, "node-b", 7, 10, List.of(), NOW);
 

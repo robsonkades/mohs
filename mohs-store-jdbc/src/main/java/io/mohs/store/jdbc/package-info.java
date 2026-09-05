@@ -21,7 +21,7 @@
  * {@link io.mohs.store.jdbc.JdbcWorkQueue} implements {@link io.mohs.engine.WorkQueue} — the claim moves
  * {@code mohs_ready} to {@code mohs_lease} under {@code SKIP LOCKED} (a single statement on Postgres, a
  * portable form elsewhere); {@link io.mohs.store.jdbc.JdbcLeaseStore} implements
- * {@link io.mohs.engine.LeaseStore} — the completion transaction, fenced by {@code (node_id, epoch)};
+ * {@link io.mohs.engine.LeaseStore} — the completion transaction, fenced by {@code (node_id, epoch, attempt_number)};
  * {@link io.mohs.store.jdbc.JdbcHistoryStore} implements {@link io.mohs.engine.HistoryStore} (the
  * payload serialised through Jackson, never a field of {@code Execution}; state derived in the read
  * model); {@link io.mohs.store.jdbc.JdbcStoreTransactions} implements

@@ -128,8 +128,8 @@ class JdbcWorkQueueSqlServerTest {
         queue.claim(0, "node-mssql", 1, 10, List.of(), NOW);
 
         assertThat(queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), "node-mssql", 99, entry("exec-1", "job-a", 20, 2, NOW))))).isZero();
+                ExecutionId.of("exec-1"), "node-mssql", 99, 1, entry("exec-1", "job-a", 20, 2, NOW))))).isZero();
         assertThat(queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), "node-mssql", 1, entry("exec-1", "job-a", 20, 2, NOW))))).isEqualTo(1);
+                ExecutionId.of("exec-1"), "node-mssql", 1, 1, entry("exec-1", "job-a", 20, 2, NOW))))).isEqualTo(1);
     }
 }

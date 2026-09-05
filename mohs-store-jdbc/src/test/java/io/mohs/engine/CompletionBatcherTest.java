@@ -59,7 +59,7 @@ import static org.mockito.Mockito.mock;
  * close's drain are observable behaviour; synchronised through latches and timeouts, never sleeps.
  *
  * <p>The ownership is born through the real path (queue, then claim), so the results'
- * {@code (node_id, epoch)} fence is the real one.
+ * {@code (node_id, epoch, attempt_number)} fence is the real one.
  */
 class CompletionBatcherTest {
 

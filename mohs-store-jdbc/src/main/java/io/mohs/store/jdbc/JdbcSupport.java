@@ -75,12 +75,13 @@ final class JdbcSupport {
                 .addValue("visibleAt", delegate.splitTimestamp(entry.visibleAt()));
     }
 
-    /** {@link JdbcDelegate#fencedLeaseDelete()}'s parameters. */
-    static MapSqlParameterSource fencedLeaseDeleteParams(String executionId, String nodeId, long epoch) {
+    /** {@link JdbcDelegate#fencedLeaseDelete()}'s parameters — the whole fencing token, attempt included. */
+    static MapSqlParameterSource fencedLeaseDeleteParams(String executionId, String nodeId, long epoch, int attemptNumber) {
         return new MapSqlParameterSource()
                 .addValue("executionId", executionId)
                 .addValue("nodeId", nodeId)
-                .addValue("epoch", epoch);
+                .addValue("epoch", epoch)
+                .addValue("attemptNumber", attemptNumber);
     }
 
     /** A {@code NamedParameterJdbcTemplate} with {@link #STREAM_FETCH_SIZE} — every store with a {@code queryForStream} method uses this constructor, not {@code new NamedParameterJdbcTemplate(dataSource)} directly. */

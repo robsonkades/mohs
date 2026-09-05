@@ -50,7 +50,7 @@ import io.mohs.core.schedule.IntervalSpec;
  * Invokes a claimed execution's handler — the "dispatch" half of the job flow.
  *
  * <p>Completion is a {@link LeaseStore.CompletionResult} fenced by the {@link Grant}'s ownership
- * {@code (node_id, epoch)} — the fencing token — delivered either directly or through the
+ * {@code (node_id, epoch, attempt_number)} — the fencing token — delivered either directly or through the
  * {@link CompletionBatcher} (group commit).
  *
  * <p>An attempt failure with budget left ({@code JobDefinition.retries}) is reborn in the queue with
@@ -79,7 +79,7 @@ public final class Dispatcher {
     private final @Nullable CompletionBatcher completionBatcher;
 
     /**
-     * The ownership the claim handed over: {@code (nodeId, epoch)} is the fence on every completion;
+     * The ownership the claim handed over: {@code (nodeId, epoch, attemptNumber)} is the fence on every completion;
      * {@code attemptNumber} came from the queue entry (nothing counts attempts on the hot path); and
      * {@code claimedAt} anchors the watchdog's synthetic attempt.
      *
@@ -469,8 +469,9 @@ public final class Dispatcher {
      * released ownership.
      *
      * <p>The local zombie keeps running until it finishes on its own; its completion carries this SAME
-     * ownership, but the lease has already dropped (and a re-claim writes its own owner and epoch), so
-     * its fence loses by construction.
+     * ownership, but the lease has already dropped, and a re-claim — even by this same node, whose
+     * epoch only moves when its own lease expires — writes the next attempt number, so its fence
+     * loses by construction.
      */
     void abandonOwnership(Execution execution, JobDefinition definition, Grant grant, String reason) {
         Objects.requireNonNull(execution, "execution");

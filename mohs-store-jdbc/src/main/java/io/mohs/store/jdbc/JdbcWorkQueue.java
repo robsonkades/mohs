@@ -159,7 +159,8 @@ public final class JdbcWorkQueue implements WorkQueue {
             int requeued = 0;
             for (Requeue order : ordered) {
                 int fenceWon = jdbcTemplate.update(delegate.fencedLeaseDelete(),
-                        JdbcSupport.fencedLeaseDeleteParams(order.executionId().value(), order.nodeId(), order.epoch()));
+                        JdbcSupport.fencedLeaseDeleteParams(order.executionId().value(), order.nodeId(), order.epoch(),
+                                order.attemptNumber()));
                 if (fenceWon == 1) {
                     jdbcTemplate.update(delegate.readyInsert(), JdbcSupport.readyEntryParams(order.entry(), delegate));
                     requeued++;

@@ -124,7 +124,7 @@ public interface JdbcDelegate {
     /** The queue side of the claim: what was swept stops being queued. */
     String readyDelete();
 
-    /** The ownership side of the claim: what was swept becomes this node's, fenced by {@code (node_id, epoch)}. */
+    /** The ownership side of the claim: what was swept becomes this node's, fenced by {@code (node_id, epoch, attempt_number)}. */
     String leaseInsert();
 
     /**
@@ -186,8 +186,12 @@ public interface JdbcDelegate {
     String readyInsert();
 
     /**
-     * The {@code DELETE} from {@code mohs_lease} fenced by {@code (node_id, epoch)} — the fencing token:
-     * the lease only drops if it still belongs to the observed incarnation.
+     * The {@code DELETE} from {@code mohs_lease} fenced by {@code (node_id, epoch, attempt_number)} — the
+     * fencing token: the lease only drops if it still belongs to the observed incarnation. The attempt
+     * is part of it because a node's epoch only moves when its own lease expires: after a Watchdog
+     * Bound released an incarnation, the SAME node re-claims the retry with the same {@code (node_id,
+     * epoch)}, and the zombie's completion would otherwise pass the fence and delete the new
+     * incarnation's lease. The attempt number is what tells the two apart.
      *
      * <p>The SAME statement decides the fence in the requeue ({@code JdbcWorkQueue}) and in the
      * completion ({@code JdbcLeaseStore}) — one statement so the semantics can never diverge between the

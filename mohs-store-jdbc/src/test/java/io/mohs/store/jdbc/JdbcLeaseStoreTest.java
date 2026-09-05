@@ -119,6 +119,34 @@ class JdbcLeaseStoreTest {
                 "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
     }
 
+    /**
+     * The fence's third component. A healthy node's epoch never moves, so after a Watchdog Bound
+     * released attempt 1 the SAME node re-claims attempt 2 with the same {@code (node_id, epoch)} — and
+     * the zombie's completion, carrying attempt 1, must lose to the attempt number alone, leaving the
+     * new incarnation's lease untouched. Before the attempt joined the fence, only the attempt table's
+     * primary key stood in the way, aborting the whole group commit with a misleading error.
+     */
+    @Test
+    void completeWithAStaleAttemptIsFencedOutEvenFromTheSameNodeAndEpoch() {
+        seedLeased("exec-1", "job-a", "node-a", 1, 1);
+        store.complete(List.of(new LeaseStore.CompletionResult(
+                ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-a", 1, 1,
+                NOW.minusSeconds(2), NOW, ExecutionState.FAILED, "java.lang.IllegalStateException", "watchdog bound",
+                null,
+                new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("job-a"), 0, 20, 2, NOW))), jobStore);
+        queue.claim(0, "node-a", 1, 10, List.of(), NOW);
+
+        Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(
+                terminal("exec-1", "job-a", "node-a", 1, 1, ExecutionState.SUCCEEDED, null, null)), jobStore);
+
+        assertThat(verdicts.get(ExecutionId.of("exec-1"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT attempt_number FROM mohs_lease WHERE execution_id = 'exec-1'", Integer.class)).isEqualTo(2);
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_attempt", Integer.class)).isEqualTo(1);
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
+    }
+
     /** A mixed batch: the zombie is discarded row by row and never contaminates its neighbours (the same discipline as completeAll's). */
     @Test
     void completePartitionsFenceWinnersFromLosersWithinOneBatch() {

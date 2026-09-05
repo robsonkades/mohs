@@ -86,7 +86,7 @@ import io.mohs.core.schedule.IntervalSpec;
  *
  * <p><b>Liveness:</b> per NODE — a heartbeat promising {@code now + node-lease-ttl}; this engine's
  * reaper reclaims dead nodes' leases ({@link LeaseStore#findOrphaned}) deciding by the retry budget,
- * and EVERY completion is fenced by {@code (node_id, epoch)}. Under node failure the guarantee is
+ * and EVERY completion is fenced by {@code (node_id, epoch, attempt_number)}. Under node failure the guarantee is
  * <b>at-least-once</b> when {@code retries > 0} — {@link JobDefinition#retries()}'s default; with a
  * zero budget a reclaimed orphan has nowhere to reschedule and the guarantee drops to at-most-once.
  *
@@ -953,7 +953,7 @@ public final class Engine implements MohsLifecycle {
     /**
      * Noticing this node's OWN node lease has expired BEFORE renewing it — this node was "dead" to the
      * cluster (a pause or stall longer than node-lease-ttl) and peers may have reclaimed what was in
-     * flight. The epoch bump records the reincarnation and, since the fence is {@code (node_id, epoch)},
+     * flight. The epoch bump records the reincarnation and, since the fence is {@code (node_id, epoch, attempt_number)},
      * it defeats the zombies' writes by itself.
      *
      * <p>The heartbeat goes out in any state — PAUSED and DRAINING included (a drain is not a cancel).
@@ -1106,7 +1106,7 @@ public final class Engine implements MohsLifecycle {
             }
             absentNow.add(lease.executionId());
             if (strayLeaseCandidates.contains(lease.executionId())) {
-                strays.add(new WorkQueue.Requeue(lease.executionId(), nodeId, lease.epoch(),
+                strays.add(new WorkQueue.Requeue(lease.executionId(), nodeId, lease.epoch(), lease.attemptNumber(),
                         new WorkQueue.ReadyEntry(lease.executionId(), lease.jobKey(), Shards.of(lease.executionId()),
                                 lease.priority(), lease.attemptNumber(), now)));
             }
@@ -1444,7 +1444,7 @@ public final class Engine implements MohsLifecycle {
             admitted.addAll(ofJob.subList(0, share.count()));
             admission.consume(jobKey, share.count());
             for (WorkQueue.ClaimedWork loser : ofJob.subList(share.count(), ofJob.size())) {
-                losers.add(new WorkQueue.Requeue(loser.executionId(), nodeId, nodeEpoch,
+                losers.add(new WorkQueue.Requeue(loser.executionId(), nodeId, nodeEpoch, loser.attemptNumber(),
                         new WorkQueue.ReadyEntry(loser.executionId(), jobKey, Shards.of(loser.executionId()),
                                 loser.priority(), loser.attemptNumber(), now)));
             }

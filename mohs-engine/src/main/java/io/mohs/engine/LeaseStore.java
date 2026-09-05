@@ -36,9 +36,12 @@ import io.mohs.core.job.JobKey;
  * DERIVED concurrency cap ({@link #countByJob}) an index-only scan that is always cached, and what
  * killed the hot {@code running_execution_count} counter.
  *
- * <p>The fence is {@code (node_id, epoch)} — DDIA ch. 8's fencing token: every write over owned work
- * carries the pair, and a zombie (a reaped node that came back) loses ALL of them because it carries
- * an old epoch. Deleting the lease IS releasing the slot — there is no longer a slot to give back.
+ * <p>The fence is {@code (node_id, epoch, attempt_number)} — DDIA ch. 8's fencing token: every write
+ * over owned work carries the triple, and a stale incarnation loses ALL of them. A reaped node that
+ * came back carries an old epoch; an attempt the Watchdog Bound released and the SAME node re-claimed
+ * carries the same {@code (node_id, epoch)} — a healthy node's epoch never moves — and only the
+ * attempt number tells the two apart. Deleting the lease IS releasing the slot — there is no longer
+ * a slot to give back.
  */
 public interface LeaseStore {
 
@@ -122,7 +125,7 @@ public interface LeaseStore {
     }
 
     /**
-     * The completion transaction: a {@code DELETE} of the leases fenced by {@code (node_id, epoch)} —
+     * The completion transaction: a {@code DELETE} of the leases fenced by {@code (node_id, epoch, attempt_number)} —
      * the count says exactly which ones this caller still owned — an {@code INSERT} of the confirmed
      * attempts, the advisory terminal {@code UPDATE} of history — matched by {@code execution_id},
      * which is the primary key on every database, so it touches at most one row — the batch count and

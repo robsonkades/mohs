@@ -102,8 +102,8 @@ class JdbcWorkQueueMySqlTest {
         queue.claim(0, "node-mysql", 1, 10, List.of(), NOW);
 
         assertThat(queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), "node-mysql", 99, entry("exec-1", "job-a", 20, 2, NOW))))).isZero();
+                ExecutionId.of("exec-1"), "node-mysql", 99, 1, entry("exec-1", "job-a", 20, 2, NOW))))).isZero();
         assertThat(queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), "node-mysql", 1, entry("exec-1", "job-a", 20, 2, NOW))))).isEqualTo(1);
+                ExecutionId.of("exec-1"), "node-mysql", 1, 1, entry("exec-1", "job-a", 20, 2, NOW))))).isEqualTo(1);
     }
 }

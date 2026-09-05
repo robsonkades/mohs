@@ -75,7 +75,7 @@ public interface WorkQueue {
     /**
      * The claim: in one transaction, it removes up to {@code limit} visible entries from the shard —
      * ordered by {@code (priority, visible_at)}, skipping rows locked by concurrent claims — and
-     * inserts the {@code (nodeId, epoch)} ownership into {@code mohs_lease}.
+     * inserts the {@code (nodeId, epoch, attempt)} ownership into {@code mohs_lease}.
      *
      * <p>ONE shard per call, never a list (a measured lesson: a multi-shard predicate kills the index's
      * ordering — a measured 25.5 ms/round against 0.43 ms); the caller round-robins the shards it owns.
@@ -142,7 +142,7 @@ public interface WorkQueue {
 
     /**
      * The recovery and admission-loss path: in one transaction, it deletes the given lease — fenced by
-     * the OBSERVED incarnation's {@code (node_id, epoch)}, the fencing token — and reinserts the entry
+     * the OBSERVED incarnation's {@code (node_id, epoch, attempt_number)}, the fencing token — and reinserts the entry
      * into the queue.
      *
      * <p>Losing the fence (the lease no longer exists, or changed owner) skips that entry's
@@ -151,12 +151,20 @@ public interface WorkQueue {
      */
     int requeue(List<Requeue> orders);
 
-    /** A requeue order: the lease to drop (with the observed fence) and the entry that is reborn in the queue. */
-    record Requeue(ExecutionId executionId, String nodeId, long epoch, ReadyEntry entry) {
+    /**
+     * A requeue order: the lease to drop, with the whole observed fencing token
+     * ({@code nodeId}, {@code epoch}, {@code attemptNumber}), and the entry that is reborn in the queue.
+     */
+    record Requeue(ExecutionId executionId, String nodeId, long epoch, int attemptNumber, ReadyEntry entry) {
         public Requeue {
             Objects.requireNonNull(executionId, "executionId");
             Objects.requireNonNull(nodeId, "nodeId");
             Objects.requireNonNull(entry, "entry");
+            // The same guard as Dispatcher.Grant's: a token with an impossible attempt would lose every
+            // fence, silently — a requeue that never requeues, with nothing but a DEBUG line to show
+            if (attemptNumber < 1) {
+                throw new IllegalArgumentException("attemptNumber must be >= 1, got " + attemptNumber);
+            }
         }
     }
 

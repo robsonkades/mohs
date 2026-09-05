@@ -191,7 +191,7 @@ public final class PostgresJdbcDelegate implements JdbcDelegate {
     public String fencedLeaseDelete() {
         return """
                 DELETE FROM mohs_lease
-                WHERE execution_id = :executionId AND node_id = :nodeId AND epoch = :epoch
+                WHERE execution_id = :executionId AND node_id = :nodeId AND epoch = :epoch AND attempt_number = :attemptNumber
                 """;
     }
 
