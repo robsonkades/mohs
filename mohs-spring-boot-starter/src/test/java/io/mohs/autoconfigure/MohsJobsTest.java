@@ -176,10 +176,6 @@ class MohsJobsTest {
             public boolean cancellationRequested() {
                 return false;
             }
-
-            @Override
-            public void progress(int done, int total) {
-            }
         };
     }
 

@@ -485,8 +485,7 @@ public final class Dispatcher {
     /**
      * {@link #cancellationRequested()} reads the incarnation's {@link CancellationSignal} — the sources
      * are the job's timeout, the drain grace expiring, and a {@code POST /executions/{id}/cancel}
-     * observed by the tick. {@link #progress} is a no-op — which is already the documented contract
-     * when nothing observes it.
+     * observed by the tick.
      */
     private record DefaultJobContext(JobKey jobKey, ExecutionId executionId, int attempt, Instant scheduledAt, Instant firedAt,
             CancellationSignal signal) implements JobContext {
@@ -494,10 +493,6 @@ public final class Dispatcher {
         @Override
         public boolean cancellationRequested() {
             return signal.cancellationRequested();
-        }
-
-        @Override
-        public void progress(int done, int total) {
         }
     }
 }

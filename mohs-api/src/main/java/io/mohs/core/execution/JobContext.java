@@ -20,8 +20,8 @@ import java.time.Instant;
 import io.mohs.core.job.JobKey;
 
 /**
- * The handler's optional parameter, carrying per-attempt context: identity, timing, cooperative
- * cancellation and progress reporting.
+ * The handler's optional parameter, carrying per-attempt context: identity, timing and cooperative
+ * cancellation.
  *
  * <p>Deliberately a plain interface rather than a fluent one — this lives on the hot path, and
  * beyond the Effective Java discipline a DSL here would only pollute stack traces.
@@ -56,7 +56,4 @@ public interface JobContext {
      * {@code Thread.interrupt()}; a manual cancel does not, being a pure flag.
      */
     boolean cancellationRequested();
-
-    /** Opcional, voltado ao dashboard. No-op se nada observar. */
-    void progress(int done, int total);
 }

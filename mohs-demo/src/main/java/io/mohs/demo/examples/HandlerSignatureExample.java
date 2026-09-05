@@ -92,8 +92,6 @@ public class HandlerSignatureExample {
      *     timeout, on shutdown once the drain grace expires, or when someone cancels the execution.
      *     Long work must poll it — nothing kills a thread on your behalf. Returning normally after
      *     seeing it records SUCCEEDED (finished work counts); throwing records CANCELLED.</li>
-     * <li>{@link JobContext#progress(int, int)} feeds the dashboard, and is a no-op when nothing is
-     *     watching.</li>
      * </ul>
      */
     @OnDemandJob(id = "example-signature-both", retries = 2, timeout = "PT10M")
@@ -106,7 +104,6 @@ public class HandlerSignatureExample {
                 log.info("cancellation observed at row {} — stopping cleanly", row);
                 return;
             }
-            ctx.progress(row, request.rowCount());
         }
     }
 
