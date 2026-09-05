@@ -33,7 +33,7 @@ const ExecutionActivityChart = lazy(() =>
   import("../components/ExecutionActivityChart").then((module) => ({ default: module.ExecutionActivityChart })),
 );
 
-const CHART_HEIGHT = "h-[220px]";
+const CHART_HEIGHT = "h-[312px]";
 
 /**
  * The windows the selector offers. `PT1M` is first on purpose: it is the one the SSE stream pushes,
@@ -179,12 +179,15 @@ export function OverviewPage() {
       <StatGrid columns={6}>
         <StatCard
           label="Jobs"
+          to="/jobs"
           value={statValue(jobs.isPending, !!jobs.error, jobs.data?.length ?? 0)}
           icon={<IconListChecks className="size-4" />}
           accent
         />
         <StatCard
           label="Paused"
+          to="/jobs"
+          search={{ paused: "true" }}
           value={statValue(jobs.isPending, !!jobs.error, pausedJobs.length)}
           icon={<IconGauge className="size-4" />}
         />
@@ -194,12 +197,16 @@ export function OverviewPage() {
           icon={<IconActivity className="size-4" />}
         />
         <StatCard
-          label={`Running · ${DEFAULT_RUNNER} @ this node`}
+          label="Runner occupancy"
+          detail={`${DEFAULT_RUNNER} · this node`}
+          to="/runners"
           value={statValue(runners.isPending, !!runners.error, concurrencyLabel)}
           icon={<IconGauge className="size-4" />}
         />
         <StatCard
           label="Retry scheduled"
+          to="/executions"
+          search={{ status: "RETRY_WAITING", window: "all" }}
           value={statValue(overview.isPending, !!overview.error, counts?.RETRY_WAITING ?? 0)}
           icon={<IconClock className="size-4" />}
         />
@@ -263,13 +270,11 @@ export function OverviewPage() {
       </Panel>
 
       <Panel title="Activity">
-        <Suspense fallback={<div className={CHART_HEIGHT} aria-hidden />}>
+        <Suspense fallback={<div className={`${CHART_HEIGHT} flex items-center justify-center`}><Spinner label="Loading activity" /></div>}>
           <ExecutionActivityChart />
         </Suspense>
         <p className="pt-2 text-xs text-muted-foreground">
-          Executions per second on the left, queue and concurrency on the right — two scales because
-          a backlog and a concurrency cap share none. The rate is what says the engine is working: a
-          fast job is queued and owned for milliseconds, so the gauges read zero even under load.
+          Live session · executions per second on the left; queued, running and retry counts on the right.
         </p>
       </Panel>
 
@@ -363,4 +368,3 @@ export function OverviewPage() {
     </PageStack>
   );
 }
-

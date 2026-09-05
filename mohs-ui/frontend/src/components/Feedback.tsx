@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
  * the same class of jump as a table that re-measures its columns. A single floor means the panel
  * takes its shape once and keeps it.
  */
-const RESERVED = "flex min-h-40 flex-col items-center justify-center gap-3 py-10 text-center";
+const RESERVED = "flex min-h-40 min-w-0 flex-col items-center justify-center gap-3 px-4 py-10 text-center [overflow-wrap:anywhere]";
 
 export function Spinner({ label = "Loading", className }: { label?: string; className?: string }) {
   return (

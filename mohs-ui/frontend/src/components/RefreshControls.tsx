@@ -1,49 +1,24 @@
-import { useEffect, useState } from "react";
-import { useIsFetching, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { IconRefresh } from "@/components/Icons";
 import { useIsLoadingFresh } from "@/lib/useIsLoadingFresh";
 import type { StreamStatus } from "@/lib/useLiveUpdates";
 
-/** Exhaustive by construction: a new StreamStatus stops compiling here until it has a label. */
-const STATUS_LABEL: Record<StreamStatus, (ageSeconds: number) => string> = {
-  live: () => "live",
-  connecting: () => "connecting…",
-  offline: (age) => `updated ${age}s ago`,
+const CONNECTION: Record<StreamStatus, { label: string; description: string; color: string }> = {
+  live: { label: "Live connection", description: "Connected to live updates. Pausing the execution list does not disconnect the dashboard or stop jobs.", color: "var(--status-good)" },
+  connecting: { label: "Connecting", description: "Connecting or reconnecting to live updates. Displayed values may be older; refresh to request the latest data.", color: "var(--status-warning)" },
+  offline: { label: "Updates interrupted", description: "Live updates are interrupted. Displayed values may be out of date. Reconnection is automatic; you can also refresh manually.", color: "var(--status-critical)" },
 };
 
-/**
- * `streamStatus` is the SSE connection at /overview/stream. While it is `live` the label stops
- * announcing age: the server pushes every 2s, and "updated 14s ago" would misreport data that has
- * already arrived. `connecting` says so rather than claiming either extreme — a reconnect is not
- * an outage, and pretending it is trains the operator to ignore the indicator. The button stays
- * in every state, because not every query on screen lives on the stream — an execution's detail
- * view, for one.
- *
- * The busy state covers first loads and the manual refresh only. Background refetches still move
- * `lastSettled` (the age label has to stay honest when the stream is down) but never flip the
- * label or spin the icon: at a 2s cadence that reads as the page reloading itself.
- */
+/** Connection state is separate from query activity: a failed request must never imply fresh data. */
 export function RefreshControls({ streamStatus }: { streamStatus: StreamStatus }) {
   const queryClient = useQueryClient();
-  const anyFetching = useIsFetching() > 0;
   const loadingFresh = useIsLoadingFresh();
   const [refreshing, setRefreshing] = useState(false);
-  const [lastSettled, setLastSettled] = useState(() => Date.now());
-  const [, forceTick] = useState(0);
-
   const busy = loadingFresh || refreshing;
-
-  useEffect(() => {
-    if (!anyFetching) setLastSettled(Date.now());
-  }, [anyFetching]);
-
-  useEffect(() => {
-    const timer = setInterval(() => forceTick((n) => n + 1), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const age = Math.max(0, Math.round((Date.now() - lastSettled) / 1000));
+  const connection = CONNECTION[streamStatus];
 
   function refresh() {
     setRefreshing(true);
@@ -51,29 +26,23 @@ export function RefreshControls({ streamStatus }: { streamStatus: StreamStatus }
   }
 
   return (
-    <div className="ml-auto flex shrink-0 items-center gap-2.5">
-      {/*
-        Fixed width, right-aligned: the label cycles through "live", "connecting…" and
-        "updated 12s ago", and letting it size itself would slide the refresh button sideways
-        every few seconds — a moving target next to the only button in the header.
-      */}
-      <span
-        className="hidden w-[9.5rem] items-center justify-end gap-1.5 font-mono text-[11px] tabular-nums text-muted-foreground sm:inline-flex"
-        aria-live="off"
-      >
-        {streamStatus === "live" && <span className="live-dot size-1.5 rounded-full bg-good" />}
-        {busy ? "updating…" : STATUS_LABEL[streamStatus](age)}
-      </span>
-      <Button
-        variant="outline"
-        size="icon"
-        onClick={refresh}
-        disabled={busy}
-        aria-label="Refresh data"
-        title="Refresh data"
-      >
-        <IconRefresh className={busy ? "animate-spin" : undefined} />
+    <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button variant="ghost" aria-label={`Connection status: ${connection.label}`} className="gap-2 px-2 sm:w-40">
+            <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: connection.color }} />
+            <span className="hidden text-xs text-muted-foreground sm:inline">{connection.label}</span>
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="end" className="max-w-[calc(100vw-2rem)]">
+          <p className="text-sm font-medium">{connection.label}</p>
+          <p className="text-xs leading-relaxed text-muted-foreground">{connection.description}</p>
+        </PopoverContent>
+      </Popover>
+      <Button variant="outline" size="icon" onClick={refresh} disabled={busy} aria-label="Refresh data" title="Refresh data">
+        <IconRefresh className={busy ? "animate-spin motion-reduce:animate-none" : undefined} />
       </Button>
+      <span role="status" className="sr-only">{refreshing ? "Refreshing data" : ""}</span>
     </div>
   );
 }

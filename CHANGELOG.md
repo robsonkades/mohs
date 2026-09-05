@@ -49,6 +49,11 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 
 ### Fixed
 
+- Refined the dashboard navigation, responsive metric strip and job search. Jobs and executions
+  expose removable filters, keyboard-accessible detail actions, expandable attempt errors and
+  clearer operation feedback. Activity series can be toggled, connection status is distinct from
+  paused list updates, and secondary text remains readable on hover surfaces.
+
 - Completed missing Javadoc comments and parameter, return and exception tags across the API,
   engine, JDBC, REST, Spring integration, test kit and examples. Documentation builds now pass
   with warnings treated as errors; idempotency retention and enclosing-transaction commit

@@ -1,15 +1,13 @@
+import { useState } from "react";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import {
   ChartContainer,
-  ChartLegend,
-  ChartLegendContent,
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
 import { ACTIVITY_SERIES, useExecutionActivity, type ActivitySample } from "../lib/executionActivity";
 import { rateFormatter } from "../lib/format";
-import type { ExecutionState } from "../types/api";
 
 /**
  * The gauges keep the colors the badges use — a chart is a second encoding of the same domain, so
@@ -59,7 +57,7 @@ const GAUGE_AXIS = "gauge";
  * blank — and keeping the three empty gauges to avoid that would produce exactly the overlapping
  * baseline this function exists to prevent.
  */
-function seriesWithWork(samples: ActivitySample[]): readonly ExecutionState[] {
+function seriesWithWork(samples: ActivitySample[]) {
   return ACTIVITY_SERIES.filter((state) => samples.some((sample) => sample[state] > 0));
 }
 
@@ -80,24 +78,43 @@ function seriesWithWork(samples: ActivitySample[]): readonly ExecutionState[] {
  */
 export function ExecutionActivityChart() {
   const samples = useExecutionActivity();
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
+  const series = seriesWithWork(samples);
+  const available = ["ratePerSecond", ...series] as const;
+  function toggle(key: string) {
+    setHidden((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   if (samples.length < MIN_SAMPLES) {
     return (
-      <div className="flex h-[220px] flex-col items-center justify-center gap-1.5 text-center">
-        <span className="size-2 animate-pulse rounded-full bg-info" />
-        <p className="text-sm font-medium">Sampling…</p>
+      <div className="flex h-[312px] flex-col items-center justify-center gap-1.5 text-center">
+        <span className="size-2 animate-pulse rounded-full bg-info motion-reduce:animate-none" />
+        <p className="text-sm font-medium">Waiting for live readings</p>
         <p className="max-w-sm text-xs text-muted-foreground">
-          The series is built from what the stream pushes every 2s, so it starts when this page
-          opens and is not restored on reload.
+          The chart appears after two readings. Check the connection indicator if updates do not arrive.
         </p>
       </div>
     );
   }
 
-  const series = seriesWithWork(samples);
-
   return (
-    <ChartContainer config={chartConfig} className="aspect-auto h-[220px] w-full">
+    <div className="flex h-[312px] flex-col">
+      <div className="mb-3 flex flex-wrap gap-2" role="group" aria-label="Chart series">
+        {available.map((key) => (
+          <button key={key} type="button" aria-pressed={!hidden.has(key)} onClick={() => toggle(key)}
+            className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs transition-colors hover:bg-accent aria-pressed:bg-secondary focus-visible:ring-2 motion-reduce:transition-none">
+            <span aria-hidden className="size-2 rounded-full" style={{ background: hidden.has(key) ? "var(--ink-muted)" : chartConfig[key].color }} />
+            <span className={hidden.has(key) ? "text-muted-foreground line-through" : "text-foreground"}>{chartConfig[key].label}</span>
+          </button>
+        ))}
+      </div>
+      {available.every((key) => hidden.has(key)) && <p role="status" className="mb-2 text-xs text-muted-foreground">All series hidden. Select a series above to show it.</p>}
+    <ChartContainer config={chartConfig} className="min-h-0 w-full flex-1 aspect-auto">
       <AreaChart accessibilityLayer data={samples} margin={{ left: 4, right: 12, top: 4 }}>
         <defs>
           <linearGradient id="fill-ratePerSecond" x1="0" y1="0" x2="0" y2="1">
@@ -115,10 +132,8 @@ export function ExecutionActivityChart() {
             moment the two axes were named there was no axis 0 left for the grid to measure, and the
             horizontal lines vanish without an error. */}
         <CartesianGrid vertical={false} yAxisId={RATE_AXIS} />
-        {/* Eixo de TEMPO, não de categoria: sem `type="number"` o recharts espaça os pontos
-            igualmente por índice, e um stall do stream some: as leituras antes e depois do buraco
-            ficariam lado a lado, com a mesma largura de dois pontos consecutivos, escondendo
-            exatamente o que vale a pena ver. */}
+        {/* A numeric time axis preserves gaps when readings stall; categorical spacing would
+            draw the samples before and after an interruption as if they were consecutive. */}
         <XAxis
           dataKey="at"
           type="number"
@@ -158,7 +173,7 @@ export function ExecutionActivityChart() {
           tick={{ fill: "var(--muted-foreground)", fontSize: 11, fontFamily: "var(--font-mono)" }}
         />
         <ChartTooltip
-          cursor={false}
+          cursor={{ stroke: "var(--ink-muted)", strokeDasharray: "3 3" }}
           content={<ChartTooltipContent indicator="dot" labelFormatter={(_, payload) =>
             timeFormatter.format(Number(payload?.[0]?.payload?.at))} />}
         />
@@ -167,6 +182,8 @@ export function ExecutionActivityChart() {
         <Area
           yAxisId={RATE_AXIS}
           dataKey="ratePerSecond"
+          hide={hidden.has("ratePerSecond")}
+          activeDot={{ r: 4, strokeWidth: 2 }}
           type="monotone"
           fill="url(#fill-ratePerSecond)"
           stroke="var(--color-ratePerSecond)"
@@ -179,6 +196,8 @@ export function ExecutionActivityChart() {
             key={state}
             yAxisId={GAUGE_AXIS}
             dataKey={state}
+            hide={hidden.has(state)}
+            activeDot={{ r: 4, strokeWidth: 2 }}
             type="monotone"
             stackId="live"
             fill={`url(#fill-${state})`}
@@ -189,8 +208,8 @@ export function ExecutionActivityChart() {
             isAnimationActive={false}
           />
         ))}
-        <ChartLegend content={<ChartLegendContent />} />
       </AreaChart>
     </ChartContainer>
+    </div>
   );
 }
