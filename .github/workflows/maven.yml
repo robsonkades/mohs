@@ -45,7 +45,7 @@ jobs:
       # own hash on every run and the cache would never hit.
       - name: Restore the dashboard bundle
         id: bundle
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: mohs-ui/target/classes/mohs-ui-webapp
           key: mohs-ui-bundle-${{ hashFiles('mohs-ui/frontend/**', 'mohs-ui/pom.xml') }}
@@ -57,7 +57,7 @@ jobs:
       # silently serve another commit's dashboard.
       - name: Cache Node and the npm download cache
         if: steps.bundle.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             mohs-ui/frontend/node
@@ -110,14 +110,14 @@ jobs:
       # every later run on the same frontend hash.
       - name: Save the dashboard bundle
         if: success() && steps.bundle.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: mohs-ui/target/classes/mohs-ui-webapp
           key: ${{ steps.bundle.outputs.cache-primary-key }}
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: surefire-reports
           path: '**/target/surefire-reports/*.xml'

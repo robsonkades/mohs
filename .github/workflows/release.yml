@@ -99,7 +99,7 @@ jobs:
       # The same path maven.yml caches: the built dashboard, and nothing else, crosses the job
       # boundary. Everything Java is rebuilt from the tag by the publish job.
       - name: Hand the dashboard bundle to the publish job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mohs-ui-bundle
           path: mohs-ui/target/classes/mohs-ui-webapp
@@ -133,7 +133,7 @@ jobs:
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
       - name: Restore the dashboard bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: mohs-ui-bundle
           path: mohs-ui/target/classes/mohs-ui-webapp

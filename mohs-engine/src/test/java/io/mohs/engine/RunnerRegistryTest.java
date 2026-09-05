@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -215,15 +216,16 @@ class RunnerRegistryTest {
 
     /** A handler that blows up has to give the slot back: without that the counter only rises and the number becomes fiction. */
     @Test
-    void runningIsReleasedWhenTheTaskThrows() throws InterruptedException {
+    void runningIsReleasedWhenTheTaskThrows() throws Exception {
         CountDownLatch ran = new CountDownLatch(1);
         try (RunnerRegistry registry = new RunnerRegistry(List.of(io("io")))) {
-            registry.resolve("io").execute(() -> {
+            Future<?> failed = registry.resolve("io").submit(() -> {
                 ran.countDown();
                 throw new IllegalStateException("handler blew up");
             });
 
             assertThat(ran.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThatThrownBy(failed::get).hasCauseInstanceOf(IllegalStateException.class);
             Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> runningOf(registry, "io") == 0);
         }
     }
