@@ -2236,6 +2236,81 @@ class EngineTest {
         }
     }
 
+    /**
+     * One reincarnation per observed death. A heartbeat that keeps failing (a network partition)
+     * leaves the last persisted promise in the past on every tick; the epoch must bump — and the
+     * WARN must fire — once, when the expiry is first noticed, not once per tick until the database
+     * is reachable again.
+     */
+    @Test
+    void aLostHeartbeatBumpsTheEpochOncePerObservedExpiryNotOncePerTick() throws Exception {
+        AtomicBoolean partitioned = new AtomicBoolean();
+        CountDownLatch firstHeartbeat = new CountDownLatch(1);
+        CountDownLatch failedHeartbeats = new CountDownLatch(5);
+        CountDownLatch recovered = new CountDownLatch(1);
+        List<Long> epochsOffered = new CopyOnWriteArrayList<>();
+        NodeStore flaky = new NodeStore() {
+            @Override
+            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+                epochsOffered.add(epoch);
+                if (partitioned.get()) {
+                    failedHeartbeats.countDown();
+                    throw new IllegalStateException("simulated network partition: the heartbeat never reaches the database");
+                }
+                nodeStore.heartbeat(nodeId, state, epoch, at, expiresAt);
+                firstHeartbeat.countDown();
+                if (failedHeartbeats.getCount() == 0) {
+                    recovered.countDown();
+                }
+            }
+
+            @Override
+            public List<StoredNode> findAll() {
+                return nodeStore.findAll();
+            }
+
+            @Override
+            public int deleteHeartbeatsBefore(Instant cutoff) {
+                return nodeStore.deleteHeartbeatsBefore(cutoff);
+            }
+        };
+        AtomicInteger bumpsLogged = new AtomicInteger();
+        AppenderBase<ILoggingEvent> bumpWatcher = new AppenderBase<>() {
+            @Override
+            protected void append(ILoggingEvent event) {
+                if (event.getFormattedMessage().contains("epoch bumped")) {
+                    bumpsLogged.incrementAndGet();
+                }
+            }
+        };
+        bumpWatcher.start();
+        engineLogger.addAppender(bumpWatcher);
+        Engine engine = newEngine(flaky, List.of());
+
+        engine.start();
+        try {
+            assertThat(firstHeartbeat.await(5, TimeUnit.SECONDS)).isTrue();
+            // The clock moves first: a tick that slips in between the two lines then observes the
+            // expiry with the database still reachable and bumps once all the same — the assertions
+            // below hold in either interleaving
+            clock.advance(LEASE_TTL.plusSeconds(1));
+            partitioned.set(true);
+            assertThat(failedHeartbeats.await(10, TimeUnit.SECONDS)).isTrue();
+            partitioned.set(false);
+            assertThat(recovered.await(10, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+            engineLogger.detachAppender(bumpWatcher);
+        }
+
+        assertThat(bumpsLogged).hasValue(1);
+        // One transition, 1 → 2, never back: however many ticks ran before the clock moved, and
+        // however many heartbeats failed, every offer after the bump carried the reincarnated epoch
+        assertThat(epochsOffered).isSorted().containsOnly(1L, 2L);
+        assertThat(epochsOffered.getFirst()).isEqualTo(1L);
+        assertThat(epochsOffered.getLast()).isEqualTo(2L);
+    }
+
     /** A decorator purely to give the test a deterministic way to wait for N real ticks, without Thread.sleep. */
     private static final class CountingNodeStore implements NodeStore {
         private final NodeStore delegate;

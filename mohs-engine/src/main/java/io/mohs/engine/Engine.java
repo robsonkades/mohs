@@ -981,6 +981,11 @@ public final class Engine implements MohsLifecycle {
             log.warn("node lease expired at {} while this node was stalled — epoch bumped to {}; peers may have "
                     + "reclaimed in-flight work (their re-runs stand; this node's fenced completions will be discarded)",
                     nodeLeaseExpiresAt, nodeEpoch);
+            // One reincarnation per observed death: the expired promise is consumed here, so a heartbeat
+            // that keeps failing (a network partition) does not bump the epoch — and log this WARN — on
+            // every tick until the database is reachable again. The next promise the cluster actually
+            // sees is recorded below, after a successful heartbeat.
+            nodeLeaseExpiresAt = null;
         }
         // A NEGATIVE clock jump: the node's lease is wall-clock by nature (it is a promise peers read),
         // so nanoTime does not help here. What can be done is to make it diagnosable — without this,
@@ -995,8 +1000,9 @@ public final class Engine implements MohsLifecycle {
         }
         nodeStore.heartbeat(nodeId, current, nodeEpoch, now, promised);
         // Only the promise the cluster ACTUALLY saw counts for detecting one's own death: if the
-        // heartbeat fails (the tick's catch), the field retains the last persisted promise and the bump
-        // fires on the first successful renewal after more than a TTL
+        // heartbeat fails (the tick's catch), the field retains the last persisted promise — or the
+        // null an observed expiry left — and the bump fires once, on the first tick that finds the
+        // persisted promise in the past
         nodeLeaseExpiresAt = promised;
     }
 
