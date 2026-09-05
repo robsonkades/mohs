@@ -26,5 +26,8 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    // assetsDir stays at Vite's default "assets/": the starter serves /mohs-ui/assets/** as immutable
+    // (a missing one is a 404) and everything else as no-cache with the SPA fallback — moving the
+    // hashed files out of it would silently hand them to the fallback again.
   },
 });

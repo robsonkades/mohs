@@ -29,6 +29,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -87,7 +88,8 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
      * amplification, because every new connection pays a full {@code buildFrames()} before joining
      * and the API has no built-in authentication. 64 is generous for real use (a handful of
      * operators with the dashboard open) and low enough that abuse hits the limit before the
-     * database does.
+     * database does. Enforced by {@code seats}, taken BEFORE the snapshot's reads: a size check was
+     * check-then-act (JCIP §2.2), and N concurrent joins all passed it and each paid the reads.
      */
     static final int MAX_SUBSCRIBERS = 64;
 
@@ -99,7 +101,11 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
 
     private final Mohs mohs;
     private final Clock clock;
+    /** One emitter per subscriber — in production with no timeout ({@code 0L}), so the stream lives until the client disconnects. */
+    private final Supplier<SseEmitter> newEmitter;
     private final CopyOnWriteArrayList<Subscriber> subscribers = new CopyOnWriteArrayList<>();
+    /** One permit per seat under {@link #MAX_SUBSCRIBERS}; a seat is taken by the join and given back by {@link #release}, exactly once. */
+    private final Semaphore seats = new Semaphore(MAX_SUBSCRIBERS);
     private final ScheduledExecutorService scheduler;
     private final ExecutorService senders = Executors.newThreadPerTaskExecutor(
             Thread.ofVirtual().name("mohs-overview-sse-send-", 0).factory());
@@ -109,8 +115,14 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
 
     /** Package-visible for the tests: it builds WITHOUT a timer, so {@code tick()} can be called directly for full determinism (no sleeping, the house rule). */
     OverviewStreamBroadcaster(Mohs mohs, Clock clock) {
+        this(mohs, clock, () -> new SseEmitter(0L));
+    }
+
+    /** The seam for the conflation test: an emitter whose send blocks is the only way to hold a frame in flight without a real socket. */
+    OverviewStreamBroadcaster(Mohs mohs, Clock clock, Supplier<SseEmitter> newEmitter) {
         this.mohs = Objects.requireNonNull(mohs, "mohs");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.newEmitter = Objects.requireNonNull(newEmitter, "newEmitter");
         this.scheduler = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().name("mohs-overview-sse").daemon().factory());
     }
@@ -154,38 +166,57 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
      * {@code close} finds it in the list, or we find the flag, never neither.
      */
     public SseEmitter subscribe() {
-        SseEmitter emitter = new SseEmitter(0L);
-        if (closed.get() || subscribers.size() >= MAX_SUBSCRIBERS) {
-            // An explicit ceiling: every CONNECTION pays a whole buildFrames() (four database reads,
-            // including the backlog scan) before registering, and the API has no authentication —
-            // without a ceiling, a curl loop amplifies against the same database the engine's claim
-            // uses. The TICK's cost is shared, and measured; the cost of JOINING is per connection,
-            // and was never measured.
+        SseEmitter emitter = newEmitter.get();
+        if (closed.get() || !seats.tryAcquire()) {
+            // A closed door or a full house — why the house has a ceiling, and why the seat is taken
+            // BEFORE the cost of joining, is on MAX_SUBSCRIBERS
             return endedStream(emitter);
         }
         // Born BUSY: the initial snapshot goes out outside the conflation CAS, so a concurrent tick
         // could interleave its frames with these and deliver the OLD frame last. The API contract
         // admits that reorder and at the same time tells the client not to defend against it by
         // comparing asOf — the one able to not produce it is the server.
-        Subscriber subscriber = new Subscriber(emitter, new AtomicBoolean(true));
-        emitter.onCompletion(() -> subscribers.remove(subscriber));
-        emitter.onError(_ -> subscribers.remove(subscriber));
-        // The snapshot BEFORE registering: if the read fails (a degraded database), the exception
-        // becomes the subscribe's 500 without leaving an orphan subscriber in the list — an emitter
-        // that was never initialised fires no callback and would buffer every future tick's sends
-        // with no ceiling.
-        List<Frame> initialSnapshot = buildFrames();
-        subscribers.add(subscriber);
-        if (closed.get()) {
-            subscribers.remove(subscriber);
-            return endedStream(emitter);
-        }
+        Subscriber subscriber = new Subscriber(emitter);
+        emitter.onCompletion(() -> release(subscriber));
+        emitter.onError(_ -> release(subscriber));
         try {
-            send(subscriber, initialSnapshot);
-        } finally {
-            subscriber.inFlight().set(false);
+            // The snapshot BEFORE registering: if the read fails (a degraded database), the exception
+            // becomes the subscribe's 500 without leaving an orphan subscriber in the list — an
+            // emitter that was never initialised fires no callback and would buffer every future
+            // tick's sends with no ceiling
+            List<Frame> initialSnapshot = buildFrames();
+            subscribers.add(subscriber);
+            if (closed.get()) {
+                release(subscriber);
+                return endedStream(emitter);
+            }
+            try {
+                send(subscriber, initialSnapshot);
+            } finally {
+                subscriber.inFlight().set(false);
+            }
+            return emitter;
+        } catch (RuntimeException | Error e) {
+            // Every abnormal exit gives the seat back, an Error included — buildFrames rethrows one
+            // on purpose, and a seat lost to it would be lost for the process's lifetime (JCIP §7.3:
+            // a resource taken before a point that can fail is released on EVERY way out, not on the
+            // expected one). Idempotent against the closed-door release above.
+            release(subscriber);
+            throw e;
         }
-        return emitter;
+    }
+
+    /**
+     * The one way out for a subscriber, from every route (the emitter's callbacks, a failed initial
+     * snapshot, a failed send, a closed door, {@link #close}): off the list and its seat back — once,
+     * whichever route runs first, because a completion's callback and a failed send can both fire
+     * for the same client.
+     */
+    private void release(Subscriber subscriber) {
+        if (subscriber.seated().compareAndSet(true, false)) {
+            subscribers.remove(subscriber);
+            seats.release();
+        }
     }
 
     /** What {@link #subscribe} returns at a closed door: a stream born already finished — the client reads end-of-stream and the async request closes immediately. */
@@ -383,7 +414,7 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
             } else {
                 log.warn("dropping SSE subscriber after server-side send failure", failure);
             }
-            subscribers.remove(subscriber);
+            release(subscriber);
             completeQuietly(subscriber.emitter());
         }
     }
@@ -475,10 +506,11 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
             return;
         }
         scheduler.shutdownNow();
+        // The iteration is over the list's snapshot; release edits the live list, never the snapshot
         for (Subscriber subscriber : subscribers) {
             senders.submit(() -> completeQuietly(subscriber.emitter()));
+            release(subscriber);
         }
-        subscribers.clear();
         senders.shutdown();
     }
 
@@ -493,7 +525,15 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
     record SnapshotEnvelope(Instant asOf, Object data) {
     }
 
-    /** An emitter plus the conflation flag — {@code inFlight} is the CAS guaranteeing at most one send in flight per client. */
-    private record Subscriber(SseEmitter emitter, AtomicBoolean inFlight) {
+    /**
+     * An emitter plus two flags: {@code inFlight} is the CAS guaranteeing at most one send in flight
+     * per client; {@code seated} is the CAS guaranteeing its seat is given back exactly once.
+     */
+    private record Subscriber(SseEmitter emitter, AtomicBoolean inFlight, AtomicBoolean seated) {
+
+        /** Born seated (its seat is already taken when it is built) and busy (the initial snapshot is about to go out). */
+        Subscriber(SseEmitter emitter) {
+            this(emitter, new AtomicBoolean(true), new AtomicBoolean(true));
+        }
     }
 }

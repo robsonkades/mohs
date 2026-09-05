@@ -24,7 +24,10 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -42,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -106,6 +110,114 @@ class OverviewStreamBroadcasterTest {
         clearInvocations(mohs);
         broadcaster.tick();
         verifyNoInteractions(mohs);
+    }
+
+    /**
+     * Conflation: a client whose previous frame is still being written is skipped by the tick — the
+     * slow client delays only itself, and the next frame is the whole snapshot again. The emitter's
+     * send blocks on the first frame of the first tick, which is the only way to hold a frame in
+     * flight without a socket; the initial snapshot (five frames, on the subscribe thread) goes
+     * through untouched.
+     */
+    @Test
+    void aTickSkipsTheClientWhosePreviousFrameIsStillInFlight() throws Exception {
+        stubSnapshotReads();
+        CountDownLatch firstTickFrameStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstTickFrame = new CountDownLatch(1);
+        CountDownLatch laterTickDelivered = new CountDownLatch(1);
+        AtomicInteger sentFrames = new AtomicInteger();
+        AtomicInteger sendsInProgress = new AtomicInteger();
+        AtomicBoolean overlappingSends = new AtomicBoolean();
+        SseEmitter slowClient = new SseEmitter(0L) {
+            @Override
+            public void send(SseEventBuilder builder) throws IOException {
+                // Two sends inside this method at once is exactly what conflation forbids for one
+                // client — the gauge stays raised until the end of the test, so a broken tick is
+                // caught whenever it happened, not only if the counter is read at the right instant
+                if (sendsInProgress.incrementAndGet() > 1) {
+                    overlappingSends.set(true);
+                }
+                try {
+                    int frame = sentFrames.incrementAndGet();
+                    if (frame == 6) {
+                        firstTickFrameStarted.countDown();
+                        try {
+                            // No assertion on this thread: an AssertionError here would die in a
+                            // Future nobody reads; the test thread's latches bound the outcome
+                            releaseFirstTickFrame.await(5, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    super.send(builder);
+                    if (frame == 15) {
+                        laterTickDelivered.countDown();
+                    }
+                } finally {
+                    sendsInProgress.decrementAndGet();
+                }
+            }
+        };
+        try (OverviewStreamBroadcaster conflating =
+                new OverviewStreamBroadcaster(mohs, Clock.fixed(NOW, ZoneOffset.UTC), () -> slowClient)) {
+            conflating.subscribe();
+            assertThat(sentFrames).hasValue(5);
+
+            conflating.tick();
+            assertThat(firstTickFrameStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            conflating.tick();
+            // The second tick paid its reads (they are shared) but sent this client nothing
+            assertThat(sentFrames).hasValue(6);
+
+            releaseFirstTickFrame.countDown();
+            // The in-flight flag clears on the sender's thread AFTER its last frame; ticks issued
+            // before that are conflated away exactly like the second one, so keep ticking until one
+            // gets through — bounded by the latch, never by a sleep. Nothing is asserted about the
+            // counter after this point: a later sender may still be running, and a concurrent test
+            // asserts on quiescence or not at all
+            for (int attempt = 0; attempt < 1_000 && laterTickDelivered.getCount() > 0; attempt++) {
+                conflating.tick();
+            }
+            assertThat(laterTickDelivered.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(overlappingSends).as("two sends never overlap for one client").isFalse();
+        }
+    }
+
+    /**
+     * The ceiling is a seat taken BEFORE the snapshot's reads, not a size checked before them: the
+     * client beyond it costs the database nothing — the amplification the ceiling exists to contain.
+     */
+    @Test
+    void theClientBeyondTheCeilingNeverReachesTheDatabase() {
+        stubSnapshotReads();
+        for (int i = 0; i < OverviewStreamBroadcaster.MAX_SUBSCRIBERS; i++) {
+            broadcaster.subscribe();
+        }
+        clearInvocations(mohs);
+
+        assertThat(broadcaster.subscribe()).isNotNull();
+
+        verifyNoInteractions(mohs);
+    }
+
+    /** A join that failed in its reads gives its seat back — otherwise a degraded database would eat the ceiling one failed subscribe at a time. */
+    @Test
+    void aFailedInitialSnapshotGivesItsSeatBack() {
+        when(mohs.overview(any())).thenThrow(new IllegalStateException("database unavailable"));
+        for (int i = 0; i < OverviewStreamBroadcaster.MAX_SUBSCRIBERS; i++) {
+            assertThatThrownBy(broadcaster::subscribe).isInstanceOf(IllegalStateException.class);
+        }
+        // doReturn: the when(...) form would invoke the throwing stub while re-stubbing it
+        doReturn(new OverviewSnapshot(Map.of(), new ThroughputReading(Duration.ofSeconds(60), 0L, 0L), RECENT))
+                .when(mohs).overview(any());
+        when(mohs.jobs()).thenReturn(List.of());
+        when(mohs.nodes()).thenReturn(List.of());
+        when(mohs.executions(any())).thenReturn(List.of());
+        clearInvocations(mohs);
+
+        assertThat(broadcaster.subscribe()).isNotNull();
+
+        verify(mohs).overview(OverviewController.DEFAULT_THROUGHPUT_WINDOW);
     }
 
     /**

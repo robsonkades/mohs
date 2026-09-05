@@ -16,6 +16,7 @@
 package io.mohs.autoconfigure;
 
 import java.io.IOException;
+import java.time.Duration;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +27,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnResource;
 import org.springframework.context.annotation.Bean;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
+import org.springframework.http.CacheControl;
 import org.springframework.web.servlet.DispatcherServlet;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
@@ -87,9 +89,22 @@ public class MohsUiAutoConfiguration {
             }
 
             /**
-             * {@code resourceChain(false)}: no {@code CachingResourceResolver}. It is a
+             * Two handlers, because the bundle has two kinds of file with opposite caching needs.
+             * Vite writes every script and stylesheet under {@code assets/} with a content hash in
+             * the name, so those are immutable for a year and a missing one is a plain 404 — a
+             * browser holding a stale {@code index.html} after a deploy must learn that its script
+             * is gone, not receive HTML in its place and fail with an obscure syntax error. Everything
+             * else ({@code index.html}, the icons, and the client routes that fall back to the page)
+             * is {@code no-cache}: revalidated on every load, so a deploy is picked up at once.
+             * Deliberately no {@code public}: the host is told to put this path behind its own
+             * authentication, and {@code public} is the one directive that lets a shared cache store
+             * a response to an authenticated request — the browser's private cache honours
+             * {@code max-age} and {@code immutable} without it, and a host with a CDN adds
+             * {@code public} at its proxy.
+             *
+             * <p>{@code resourceChain(false)}: no {@code CachingResourceResolver}. It is a
              * {@code ConcurrentMapCache} with neither TTL nor ceiling, keyed by the request path —
-             * and the fallback below makes EVERY path under {@code /mohs-ui/**} resolve
+             * and the fallback makes EVERY non-asset path under {@code /mohs-ui/**} resolve
              * successfully, including nonexistent ones. With no 404, the valve that normally keeps
              * the cache from growing disappears: a crawler hitting random paths would create a
              * permanent entry per path, for the life of the process. And nothing is lost in
@@ -98,8 +113,13 @@ public class MohsUiAutoConfiguration {
              */
             @Override
             public void addResourceHandlers(ResourceHandlerRegistry registry) {
+                registry.addResourceHandler(UI_PATH + "/assets/**")
+                        .addResourceLocations(WEBAPP_LOCATION + "assets/")
+                        .setCacheControl(CacheControl.maxAge(Duration.ofDays(365)).immutable())
+                        .resourceChain(false);
                 registry.addResourceHandler(UI_PATH + "/**")
                         .addResourceLocations(WEBAPP_LOCATION)
+                        .setCacheControl(CacheControl.noCache())
                         .resourceChain(false)
                         .addResolver(new SpaFallbackResourceResolver());
             }
@@ -126,9 +146,12 @@ public class MohsUiAutoConfiguration {
     }
 
     /**
-     * A sub-path that is not a real asset falls back to {@code index.html}, so that refreshing on a
+     * A sub-path that is not a real file falls back to {@code index.html}, so that refreshing on a
      * client route ({@code /mohs-ui/jobs}) resolves instead of 404ing — the router mounted at that
-     * same basepath then renders it.
+     * same basepath then renders it. The rule is by location, not by the shape of the path: a
+     * client route can carry a dot ({@code /mohs-ui/jobs/welcome.email} is a job key), so "has an
+     * extension" would be the wrong test — the hashed scripts live under {@code assets/}, which has
+     * its own handler and never reaches this resolver.
      */
     private static final class SpaFallbackResourceResolver extends PathResourceResolver {
 
