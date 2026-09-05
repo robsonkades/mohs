@@ -1,6 +1,6 @@
 Achados vetados, por alavancagem
 
-Atualização de 2026-09-05: ajustes dos itens 19, 21, 25 e 35 implementados no working tree.
+Atualização de 2026-09-05: ajustes dos itens 19, 21, 25 e 35 implementados, validados e commitados localmente, sem push.
 
 - 19: no excedente do filtro, requeue adia a visibilidade por `max-poll-interval`, preservando a tentativa.
 - 21: validação de `connection-timeout < node-lease-ttl` para Hikari direto e proxies delegadores Spring; outros pools exigem conferência operacional.
@@ -15,10 +15,14 @@ Validação de 2026-09-05, após liberar as permissões, usando Temurin 25.0.3:
 - `mvnw.cmd verify -DskipTests`: BUILD SUCCESS, incluindo empacotamento, Javadoc e frontend (`npm ci`, TypeScript e Vite). Os testes não foram repetidos nessa etapa.
 - `git diff --check`: passou. Revisões de refatoração, persistência e REST/starter: nenhum defeito de código bloqueador encontrado; nenhuma refatoração adicional nem tuning aplicado nesta validação.
 
-Pendências da revisão, sem mudanças de comportamento adicionais:
+Conclusão após aprovação das duas pendências pelo usuário:
 
-- As extrações preexistentes de métodos em `Engine` ficam preservadas no working tree, fora dos commits, por não terem aprovação. `ClusterEngineTest` é um teste novo, não uma extração de `EngineTest`; seu cenário de concorrência não exige que os dois nós executem trabalho, portanto não prova participação de ambos.
-- O trecho novo sobre CSRF em `docs/08-security/security-overview.md` fica fora dos commits aguardando decisão: mTLS em navegador não deve ser classificado como credencial necessariamente enviada de forma explícita, e a troca de cookie por bearer no gateway exige proteção contra CSRF no próprio gateway. Referências: [Spring Security](https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html) e [OWASP](https://owasp.org/www-community/attacks/csrf).
+- As extrações preexistentes de métodos em `Engine` foram incluídas em commit separado. O SHA-256 do arquivo corresponde exatamente ao código que passou nos 860 testes e no `verify` acima; não houve nova alteração de Java nem repetição desses testes.
+- O trecho sobre CSRF em `docs/08-security/security-overview.md` foi corrigido: o exemplo mantém a proteção padrão, inclui HTTP Basic e mTLS de navegador entre as credenciais automáticas e exige proteção na entrada do gateway quando ele troca cookie por bearer. Referências: [Spring Security](https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html) e [OWASP](https://owasp.org/www-community/attacks/csrf).
+
+Pendências remanescentes, sem mudanças adicionais:
+
+- `ClusterEngineTest` é um teste novo, não uma extração de `EngineTest`; seu cenário de concorrência não exige que os dois nós executem trabalho, portanto não prova participação de ambos.
 - `npm audit` informou duas dependências transitivas vulneráveis: `fast-uri` (alta) e `qs` (moderada). O lockfile não foi alterado; atualizar dependências está fora do escopo aprovado.
 - A geração de Javadoc passou com avisos, inclusive marcadores de entrada inválida. Esses avisos não foram corrigidos nesta validação.
 

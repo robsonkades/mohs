@@ -91,10 +91,34 @@ SecurityFilterChain mohsOperations(HttpSecurity http) throws Exception {
         .authorizeHttpRequests(a -> a
             .requestMatchers(HttpMethod.GET, "/api/mohs/**").hasRole("MOHS_VIEWER")
             .anyRequest().hasRole("MOHS_OPERATOR"))
-        .csrf(csrf -> csrf.ignoringRequestMatchers("/api/mohs/**"))   // token-authenticated clients
         .build();
 }
 ```
+
+**Keep CSRF protection enabled when browsers attach credentials automatically.** The body-less
+mutations (`POST .../cancel`, `.../retry`, `.../pause`, `.../resume`) are *simple requests* in the
+CORS sense: a cross-origin HTML form can fire them without a preflight, and the browser attaches
+whatever credential it holds on its own — a session cookie, HTTP Basic it remembered — while a
+missing `X-Mohs-Actor` simply falls back to `anonymous`. That is exactly what CSRF protection exists
+for. The JSON mutations (`.../schedule`, the `PATCH`es) do trigger a preflight, but that is a CORS
+side effect, not a guarantee to build on.
+
+| Your clients authenticate with | CSRF on `/api/mohs/**` |
+| --- | --- |
+| Only bearer tokens or API keys explicitly supplied in headers, with no automatically attached credentials accepted | The host may explicitly ignore CSRF for these API routes with `.csrf(csrf -> csrf.ignoringRequestMatchers("/api/mohs/**"))` |
+| Session cookies, browser-managed HTTP Basic, or browser client certificates (mTLS) | **Keep it on**, as in the example. Clients must send a CSRF token; configure the host and SPA together using [Spring Security's SPA integration](https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html#csrf-integration-javascript-spa) |
+
+mTLS authenticates the client; it does not establish that a browser request was intentional. A
+machine-only mTLS integration has no browser CSRF flow, but enabling browser access changes that
+assumption. The relevant distinction is whether the browser supplies credentials automatically,
+as described by [OWASP](https://owasp.org/www-community/attacks/csrf).
+
+The bundled dashboard is a same-origin SPA that sends no CSRF token and no header of its own; under
+a cookie session with CSRF on, its mutations (cancel, retry, pause, resume) get a 403 until the
+host adds the token to its requests. A gateway that swaps the session for a bearer token must
+validate CSRF protection at the browser-facing boundary before forwarding mutations. Replacing
+the credential on the downstream hop alone does not protect the original cookie-authenticated
+request.
 
 Then wire real identity into the audit trail by replacing the default resolver:
 
