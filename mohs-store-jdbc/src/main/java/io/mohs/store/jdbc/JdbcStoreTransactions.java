@@ -21,6 +21,8 @@ import javax.sql.DataSource;
 
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.engine.StoreTransactions;
@@ -54,9 +56,41 @@ public final class JdbcStoreTransactions implements StoreTransactions {
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_NESTED);
     }
 
+    /**
+     * {@code status.isNewTransaction()} is the one honest signal of "durable now" versus "durable
+     * with the host": the thread-level "is a transaction active" would also say yes for a host
+     * transaction on ANOTHER DataSource, inside which this template opens and commits a transaction
+     * of its own — and an event tied to that host's commit would then trail the execution, or be
+     * lost to a rollback that never touched it.
+     */
     @Override
-    public void inTransaction(Runnable work) {
+    public void inTransaction(Runnable work, Runnable onDurable) {
         Objects.requireNonNull(work, "work");
-        transactionTemplate.executeWithoutResult(_ -> work.run());
+        Objects.requireNonNull(onDurable, "onDurable");
+        boolean joinedHost = Boolean.TRUE.equals(transactionTemplate.execute(status -> {
+            // Checked BEFORE the writes: a host transaction without synchronization (a manager set to
+            // SYNCHRONIZATION_NEVER, a connection bound by hand) cannot carry the after-commit hook,
+            // and finding that out after the enqueue would be a rollback with Spring's generic message
+            if (!status.isNewTransaction() && !TransactionSynchronizationManager.isSynchronizationActive()) {
+                throw new IllegalStateException("the enqueue joined a host transaction that has no transaction"
+                        + " synchronization, so Mohs cannot publish Enqueued after its commit — keep synchronization"
+                        + " on the host's PlatformTransactionManager (the default) or schedule outside the transaction");
+            }
+            work.run();
+            if (status.isNewTransaction()) {
+                return false;
+            }
+            // A savepoint inside the host's transaction: durable only with the host's commit
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    onDurable.run();
+                }
+            });
+            return true;
+        }));
+        if (!joinedHost) {
+            onDurable.run();
+        }
     }
 }

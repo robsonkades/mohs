@@ -25,6 +25,7 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -35,7 +36,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import tools.jackson.databind.json.JsonMapper;
 
@@ -44,7 +47,9 @@ import io.mohs.core.MohsLifecycle;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.JobSpec;
 import io.mohs.core.event.Enqueued;
+import io.mohs.core.event.ExecutionEvent;
 import io.mohs.core.execution.Execution;
+import io.mohs.core.job.JobRef;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.store.jdbc.JdbcBatchStore;
 import io.mohs.store.jdbc.JdbcHistoryStore;
@@ -75,6 +80,8 @@ class ScheduleCommandImplTest {
     private DataSource dataSource;
     private Mohs mohs;
     private final AtomicInteger wakes = new AtomicInteger();
+    /** Delivered synchronously ({@code Runnable::run} as the event executor), so publication order is observable without latches. */
+    private final List<ExecutionEvent> published = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void setUp() {
@@ -88,7 +95,7 @@ class ScheduleCommandImplTest {
         mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
                 new JdbcNodeStore(dataSource, new H2JdbcDelegate()), mock(RateLimitStore.class), new HandlerRegistry(), clock,
                 mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks(),
-                new RunnerRegistry(List.of(MohsRunner.io("io").build())), wakes::incrementAndGet);
+                new RunnerRegistry(List.of(MohsRunner.io("io").build())), wakes::incrementAndGet, List.of(published::add), Runnable::run);
         mohs.define(JobDefinition.of("welcome-email", Handler.class, JobSpec::onDemand));
     }
 
@@ -104,6 +111,11 @@ class ScheduleCommandImplTest {
     private int executionCount() {
         Integer count = new JdbcTemplate(dataSource).queryForObject("SELECT COUNT(*) FROM mohs_execution", Integer.class);
         return count == null ? 0 : count;
+    }
+
+    /** The host application's own transaction, the one the enqueue unit joins. */
+    private TransactionTemplate hostTransaction() {
+        return new TransactionTemplate(new DataSourceTransactionManager(dataSource));
     }
 
     /** The local wake-up tier: an already-due terminal fires the local signal; a future schedule does not — waking the loop for a row that is still invisible would be a wasted lap. */
@@ -150,6 +162,69 @@ class ScheduleCommandImplTest {
         assertThat(retry.executionId()).isEqualTo(first.executionId());
         assertThat(retry.scheduledAt()).isEqualTo(first.scheduledAt());
         assertThat(executionCount()).isEqualTo(1);
+        // The deduplicated repeat accepted nothing, so it announces nothing
+        assertThat(published).containsExactly(first);
+    }
+
+    /** The receipt is also the event: with no transaction bound, the enqueue is durable when the terminal returns and the listeners hear it then. */
+    @Test
+    void aTerminalPublishesTheEnqueuedReceiptToTheListeners() {
+        Enqueued receipt = mohs.schedule("welcome-email", "hello").as("ana").now();
+
+        assertThat(published).containsExactly(receipt);
+    }
+
+    /**
+     * Inside a host transaction the enqueue unit joins it, so the execution is not durable until the
+     * HOST commits — and the listeners must not hear of an execution a rollback could still erase.
+     */
+    @Test
+    void insideAHostTransactionEnqueuedIsPublishedOnlyAfterTheHostsCommit() {
+        Enqueued receipt = hostTransaction().execute(_ -> {
+            Enqueued inside = mohs.schedule("welcome-email", "hello").now();
+            assertThat(published).as("not before the host commits").isEmpty();
+            assertThat(wakes).as("the local wake waits for the same commit").hasValue(0);
+            return inside;
+        });
+
+        assertThat(published).containsExactly(receipt);
+        assertThat(wakes).hasValue(1);
+    }
+
+    /** A batch is N executions accepted at once: one {@code Enqueued} per member, and only once the batch is durable. */
+    @Test
+    void aBatchPublishesOneEnqueuedPerMemberOnceDurable() {
+        mohs.batch("nightly", members -> {
+            members.add(JobRef.of("welcome-email", String.class), "a");
+            members.add(JobRef.of("welcome-email", String.class), "b");
+        });
+
+        assertThat(published).hasSize(2).allMatch(Enqueued.class::isInstance);
+        assertThat(published).map(event -> ((Enqueued) event).executionId().value())
+                .containsExactlyInAnyOrderElementsOf(
+                        new JdbcTemplate(dataSource).queryForList("SELECT execution_id FROM mohs_execution", String.class));
+    }
+
+    @Test
+    void aHostRollbackOfABatchPublishesNoMemberEnqueued() {
+        hostTransaction().executeWithoutResult(status -> {
+            mohs.batch("nightly", members -> members.add(JobRef.of("welcome-email", String.class), "a"));
+            status.setRollbackOnly();
+        });
+
+        assertThat(executionCount()).isZero();
+        assertThat(published).isEmpty();
+    }
+
+    @Test
+    void aHostRollbackErasesTheExecutionAndItsEnqueuedIsNeverPublished() {
+        hostTransaction().executeWithoutResult(status -> {
+            mohs.schedule("welcome-email", "hello").now();
+            status.setRollbackOnly();
+        });
+
+        assertThat(executionCount()).isZero();
+        assertThat(published).isEmpty();
     }
 
     @Test
@@ -196,12 +271,9 @@ class ScheduleCommandImplTest {
      */
     @Test
     void duplicateIdempotencyKeyInsideAHostTransactionLeavesItCommittable() {
-        org.springframework.transaction.support.TransactionTemplate host =
-                new org.springframework.transaction.support.TransactionTemplate(
-                        new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
         Enqueued[] receipts = new Enqueued[2];
 
-        host.executeWithoutResult(_ -> {
+        hostTransaction().executeWithoutResult(_ -> {
             receipts[0] = mohs.schedule("welcome-email", "hello").idempotencyKey("req-1").now();
             receipts[1] = mohs.schedule("welcome-email", "hello").idempotencyKey("req-1").now();
         });

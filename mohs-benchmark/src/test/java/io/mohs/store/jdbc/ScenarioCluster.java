@@ -233,7 +233,7 @@ final class ScenarioCluster implements AutoCloseable {
         }
         return new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
                 nodeStore, rateLimitStore, node.handlers(), clock, node.engine(), batchStore,
-                callbacks, node.runners(), node.engine()::signalWorkScheduled);
+                callbacks, node.runners(), node.engine()::signalWorkScheduled, List.of(), Runnable::run);
     }
 
     /** Registers the same handler on every node created so far. */

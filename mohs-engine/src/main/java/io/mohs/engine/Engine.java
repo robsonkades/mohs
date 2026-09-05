@@ -46,8 +46,6 @@ import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.task.AsyncTaskExecutor;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import io.mohs.core.EngineState;
 import io.mohs.core.MohsLifecycle;
@@ -783,22 +781,13 @@ public final class Engine implements MohsLifecycle {
 
     /**
      * The local wake-up tier: an enqueue from THIS JVM that is already due wakes the loop without
-     * waiting for the poll — after the commit when the caller is in a transaction (waking before the
-     * commit would be a lap that still does not see the row), and immediately when it is not (the
-     * enqueue unit's transaction has already committed). Best-effort by contract: a lost signal is
+     * waiting for the poll. The enqueue unit calls this once its writes are durable — after the
+     * host's commit when it joined one, right after its own otherwise — so a wake never precedes the
+     * row it announces (a lap that still does not see it). Best-effort by contract: a lost signal is
      * covered by the poll tier, never by correctness here.
      */
     public void signalWorkScheduled() {
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    wake();
-                }
-            });
-        } else {
-            wake();
-        }
+        wake();
     }
 
     /**

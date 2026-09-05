@@ -54,6 +54,7 @@ final class ScheduleCommandImpl implements ScheduleCommand {
     private final JobKey jobKey;
     private final Object payload;
     private final Runnable localWakeSignal;
+    private final ExecutionEventPublisher events;
 
     private Priority priority = Priority.NORMAL;
     private String actor = MohsImpl.DEFAULT_ACTOR;
@@ -61,7 +62,7 @@ final class ScheduleCommandImpl implements ScheduleCommand {
 
     ScheduleCommandImpl(JobStore jobStore, HistoryStore historyStore, WorkQueue workQueue,
             StoreTransactions storeTransactions, Clock clock, JobKey jobKey, Object payload,
-            Runnable localWakeSignal) {
+            Runnable localWakeSignal, ExecutionEventPublisher events) {
         this.jobStore = jobStore;
         this.historyStore = historyStore;
         this.workQueue = workQueue;
@@ -70,6 +71,7 @@ final class ScheduleCommandImpl implements ScheduleCommand {
         this.jobKey = jobKey;
         this.payload = payload;
         this.localWakeSignal = localWakeSignal;
+        this.events = events;
     }
 
     @Override
@@ -128,30 +130,51 @@ final class ScheduleCommandImpl implements ScheduleCommand {
 
         ExecutionId id = ExecutionId.of(UUIDv7.randomUUIDString());
         Instant createdAt = clock.instant();
+        // The receipt is also the event — published once the writes are durable. A deduplicated
+        // repeat below publishes nothing: no execution was accepted
+        Enqueued receipt = new Enqueued(id, jobKey, when, actor);
         try {
-            storeTransactions.inTransaction(() -> {
-                int shard = Shards.of(id);
-                historyStore.record(List.of(new HistoryStore.NewExecution(id, jobKey, shard, priority.value(),
-                        when, createdAt, actor, null, idempotencyKey, payload)));
-                workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, jobKey, shard, priority.value(), 1, when)));
-            });
-            // Already due, so wake the local loop; a future one is left to the poll — waking now would
-            // be a lap that still does not see it
-            if (!when.isAfter(clock.instant())) {
-                localWakeSignal.run();
-            }
-            return new Enqueued(id, jobKey, when, actor);
+            storeTransactions.inTransaction(() -> enqueue(id, when, createdAt), () -> onDurable(receipt));
+            return receipt;
         } catch (DuplicateKeyException e) {
-            if (idempotencyKey == null) {
+            String key = idempotencyKey;
+            if (key == null) {
                 throw e;
             }
-            // Idempotent Receiver (EIP): mohs_idempotency's primary-key conflict resolved the race —
-            // return the original execution's receipt, the same answer for the client's retry, with
-            // zero duplication. The race is decided by the database, never by a prior SELECT.
-            ExecutionId winner = historyStore.findByIdempotencyKey(jobKey, idempotencyKey).orElseThrow(() -> e);
-            Execution existing = historyStore.find(winner, clock.instant()).orElseThrow(() -> e);
-            return new Enqueued(existing.id(), existing.jobKey(), existing.scheduledAt(), existing.actor());
+            return receiptOfTheWinner(key, e);
         }
+    }
+
+    /** History plus queue — the two writes the enqueue unit binds into one transaction. */
+    private void enqueue(ExecutionId id, Instant when, Instant createdAt) {
+        int shard = Shards.of(id);
+        historyStore.record(List.of(new HistoryStore.NewExecution(id, jobKey, shard, priority.value(),
+                when, createdAt, actor, null, idempotencyKey, payload)));
+        workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, jobKey, shard, priority.value(), 1, when)));
+    }
+
+    /**
+     * The {@link StoreTransactions#inTransaction} hook: runs after the writes are durable — inside a
+     * host transaction, after ITS commit — so a listener never sees an Enqueued that a rollback then
+     * erases. An execution already due wakes the local loop; a future one is left to the poll —
+     * waking before the row is visible would be a lap that still does not see it.
+     */
+    private void onDurable(Enqueued receipt) {
+        events.publish(receipt);
+        if (!receipt.scheduledAt().isAfter(clock.instant())) {
+            localWakeSignal.run();
+        }
+    }
+
+    /**
+     * Idempotent Receiver (EIP): mohs_idempotency's primary-key conflict resolved the race — the
+     * original execution's receipt is the same answer for the client's retry, with zero duplication.
+     * The race is decided by the database, never by a prior SELECT.
+     */
+    private Enqueued receiptOfTheWinner(String key, DuplicateKeyException conflict) {
+        ExecutionId winner = historyStore.findByIdempotencyKey(jobKey, key).orElseThrow(() -> conflict);
+        Execution existing = historyStore.find(winner, clock.instant()).orElseThrow(() -> conflict);
+        return new Enqueued(existing.id(), existing.jobKey(), existing.scheduledAt(), existing.actor());
     }
 
     @Override

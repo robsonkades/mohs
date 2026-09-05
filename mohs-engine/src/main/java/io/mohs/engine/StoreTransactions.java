@@ -21,8 +21,12 @@ package io.mohs.engine;
  * transaction, and the async contract requires it to join the host's transaction when there is one.
  *
  * <p>This port is the minimal Unit of Work (PoEAA) for that: {@code io.mohs.store.jdbc} implements
- * it with {@code REQUIRED} propagation — joining the caller's active transaction, or opening and
- * committing one of its own.
+ * it with {@code NESTED} propagation — a savepoint inside the caller's active transaction, or a
+ * transaction of its own when there is none. The savepoint is load-bearing, not incidental: the
+ * enqueue unit must be able to FAIL and be recovered from inside a caller's transaction, which is
+ * what the idempotency conflict relies on — the duplicate-key insert rolls back to the savepoint and
+ * the winner is read afterwards, in the same outer transaction. Under plain {@code REQUIRED} that
+ * read would hit PostgreSQL's "current transaction is aborted" and poison the caller's transaction.
  *
  * <p>It is not a general-purpose {@code TransactionTemplate} for hire: the only legitimate caller is
  * the facade composing the enqueue unit (one-off, batch; occurrences do not come through here — the
@@ -31,5 +35,11 @@ package io.mohs.engine;
  */
 public interface StoreTransactions {
 
-    void inTransaction(Runnable work);
+    /**
+     * Runs {@code work} atomically and {@code onDurable} once its writes are committed: right after,
+     * when this call opened the transaction, or after the host's commit when it joined one — the
+     * only party that knows which of the two happened is the implementation, which is why the
+     * "after commit" hook lives here and not with the caller. A rollback runs nothing.
+     */
+    void inTransaction(Runnable work, Runnable onDurable);
 }

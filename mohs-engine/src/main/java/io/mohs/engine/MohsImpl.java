@@ -28,6 +28,7 @@ import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.task.AsyncTaskExecutor;
 
 import io.github.robsonkades.uuidv7.UUIDv7;
 
@@ -47,6 +48,8 @@ import io.mohs.core.ThroughputReading;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.event.BatchCompleted;
+import io.mohs.core.event.Enqueued;
+import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
@@ -107,11 +110,14 @@ public final class MohsImpl implements Mohs {
     private final RunnerRegistry runnerRegistry;
     /** The local wake-up tier: wakes the local engine's loop after the commit — {@code Engine#signalWorkScheduled}; best-effort by contract. */
     private final Runnable localWakeSignal;
+    /** The same listeners the dispatcher publishes to — {@code Enqueued} is the one event born on this side of the engine. */
+    private final ExecutionEventPublisher events;
 
     public MohsImpl(JobStore jobStore, WorkQueue workQueue, HistoryStore historyStore, LeaseStore leaseStore,
             StoreTransactions storeTransactions, NodeStore nodeStore, RateLimitStore rateLimitStore,
             HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle, BatchStore batchStore,
-            BatchCompletionCallbacks callbacks, RunnerRegistry runnerRegistry, Runnable localWakeSignal) {
+            BatchCompletionCallbacks callbacks, RunnerRegistry runnerRegistry, Runnable localWakeSignal,
+            List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.workQueue = Objects.requireNonNull(workQueue, "workQueue");
         this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
@@ -126,6 +132,8 @@ public final class MohsImpl implements Mohs {
         this.callbacks = Objects.requireNonNull(callbacks, "callbacks");
         this.runnerRegistry = Objects.requireNonNull(runnerRegistry, "runnerRegistry");
         this.localWakeSignal = Objects.requireNonNull(localWakeSignal, "localWakeSignal");
+        this.events = new ExecutionEventPublisher(Objects.requireNonNull(listeners, "listeners"),
+                Objects.requireNonNull(eventExecutor, "eventExecutor"));
     }
 
     @Override
@@ -133,7 +141,7 @@ public final class MohsImpl implements Mohs {
         Objects.requireNonNull(ref, "ref");
         Objects.requireNonNull(payload, "payload");
         return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, ref.key(), payload,
-                localWakeSignal);
+                localWakeSignal, events);
     }
 
     @Override
@@ -141,7 +149,7 @@ public final class MohsImpl implements Mohs {
         Objects.requireNonNull(jobId, "jobId");
         Objects.requireNonNull(payload, "payload");
         return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, JobKey.of(jobId), payload,
-                localWakeSignal);
+                localWakeSignal, events);
     }
 
     /**
@@ -152,21 +160,9 @@ public final class MohsImpl implements Mohs {
      */
     @Override
     public Batch batch(String name, Consumer<BatchBuilder> configurer) {
-        // Validated HERE, and not only in BatchSnapshot/BatchCompleted's compact constructor: a blank
-        // name crossed the write, became durable, and only blew up on READ — BatchCompleted's
-        // constructor threw inside the event channel, where the exception is swallowed by design, and
-        // the user's onCompletion never ran. A value the API accepts must not be a value it cannot
-        // read back
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(configurer, "configurer");
-        if (name.isBlank()) {
-            throw new IllegalArgumentException("a batch name must not be blank — it is the label the operator reads"
-                    + " instead of the batchId");
-        }
-        if (name.length() > MAX_BATCH_NAME_LENGTH) {
-            throw new IllegalArgumentException("a batch name must be at most " + MAX_BATCH_NAME_LENGTH
-                    + " characters (the column limit on every supported database), got " + name.length());
-        }
+        requireBatchName(name);
         List<Member> members = collectMembers(configurer);
         if (members.isEmpty()) {
             throw new IllegalArgumentException("a batch needs at least one member — an empty batch would never complete");
@@ -178,13 +174,36 @@ public final class MohsImpl implements Mohs {
         // The batch row plus its members (history AND queue) in a single transaction: the partial
         // failure that left the batch written with M < N members — and a BatchCompleted that never
         // comes — dies by construction
+        // Each member is an execution accepted: the unit publishes one Enqueued per member once the
+        // batch is durable, which inside a host transaction means after ITS commit — a listener must
+        // never see an Enqueued that a rollback then erases
+        List<Enqueued> receipts = new ArrayList<>(members.size());
         storeTransactions.inTransaction(() -> {
             batchStore.insert(batchId, name, members.size());
-            enqueueMembers(members, batchId);
+            receipts.addAll(enqueueMembers(members, batchId));
+        }, () -> {
+            receipts.forEach(events::publish);
+            // members are born due (scheduledAt = now) — tier 1 wakes the loop
+            localWakeSignal.run();
         });
-        // membros nascem devidos (scheduledAt = now) — tier 1 acorda o loop
-        localWakeSignal.run();
         return new BatchImpl(batchId, callbacks);
+    }
+
+    /**
+     * Validated HERE, and not only in BatchSnapshot/BatchCompleted's compact constructor: a blank name
+     * crossed the write, became durable, and only blew up on READ — BatchCompleted's constructor
+     * threw inside the event channel, where the exception is swallowed by design, and the user's
+     * onCompletion never ran. A value the API accepts must not be a value it cannot read back.
+     */
+    private static void requireBatchName(String name) {
+        if (name.isBlank()) {
+            throw new IllegalArgumentException("a batch name must not be blank — it is the label the operator reads"
+                    + " instead of the batchId");
+        }
+        if (name.length() > MAX_BATCH_NAME_LENGTH) {
+            throw new IllegalArgumentException("a batch name must be at most " + MAX_BATCH_NAME_LENGTH
+                    + " characters (the column limit on every supported database), got " + name.length());
+        }
     }
 
     private static List<Member> collectMembers(Consumer<BatchBuilder> configurer) {
@@ -198,15 +217,18 @@ public final class MohsImpl implements Mohs {
      * completion count towards the batch — and they all share the same {@code scheduledAt}, because
      * the batch was requested in one go.
      */
-    private void enqueueMembers(List<Member> members, String batchId) {
+    private List<Enqueued> enqueueMembers(List<Member> members, String batchId) {
         Instant scheduledAt = clock.instant();
+        List<Enqueued> receipts = new ArrayList<>(members.size());
         for (Member member : members) {
             ExecutionId id = ExecutionId.of(UUIDv7.randomUUIDString());
             int shard = Shards.of(id);
             historyStore.record(List.of(new HistoryStore.NewExecution(id, member.key(), shard, Priority.NORMAL.value(),
                     scheduledAt, scheduledAt, DEFAULT_ACTOR, batchId, null, member.payload())));
             workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, member.key(), shard, Priority.NORMAL.value(), 1, scheduledAt)));
+            receipts.add(new Enqueued(id, member.key(), scheduledAt, DEFAULT_ACTOR));
         }
+        return receipts;
     }
 
     /**

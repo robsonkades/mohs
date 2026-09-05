@@ -293,7 +293,7 @@ public class MohsAutoConfiguration {
         return new JdbcLeaseStore(dataSource, delegate, mohsBatchStore);
     }
 
-    /** The transactional boundary of the enqueue unit — REQUIRED: it joins the host's transaction when there is one, or opens its own. */
+    /** The transactional boundary of the enqueue unit — NESTED: a savepoint inside the host's transaction, or a transaction of its own; {@link JdbcStoreTransactions} says why the savepoint is load-bearing. */
     @Bean
     public StoreTransactions mohsStoreTransactions(DataSource dataSource) {
         return new JdbcStoreTransactions(dataSource);
@@ -496,11 +496,14 @@ public class MohsAutoConfiguration {
             LeaseStore mohsLeaseStore, StoreTransactions mohsStoreTransactions, NodeStore mohsNodeStore,
             RateLimitStore mohsRateLimitStore, HandlerRegistry mohsHandlerRegistry,
             @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine, BatchStore mohsBatchStore,
-            BatchCompletionCallbacks mohsBatchCompletionCallbacks, RunnerRegistry mohsRunnerRegistry) {
+            BatchCompletionCallbacks mohsBatchCompletionCallbacks, RunnerRegistry mohsRunnerRegistry,
+            List<ExecutionListener> listeners, @Qualifier("mohsEventExecutor") AsyncTaskExecutor mohsEventExecutor) {
+        // The same listeners and executor the dispatcher publishes to: Enqueued is born on the
+        // facade's side and must reach the same observers as every other event
         return new MohsImpl(mohsJobStore, mohsWorkQueue, mohsHistoryStore, mohsLeaseStore, mohsStoreTransactions,
                 mohsNodeStore, mohsRateLimitStore, mohsHandlerRegistry,
                 mohsClock, mohsEngine, mohsBatchStore, mohsBatchCompletionCallbacks, mohsRunnerRegistry,
-                mohsEngine::signalWorkScheduled);
+                mohsEngine::signalWorkScheduled, listeners, mohsEventExecutor);
     }
 
     /**

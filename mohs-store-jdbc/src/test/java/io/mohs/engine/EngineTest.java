@@ -1275,7 +1275,7 @@ class EngineTest {
         try {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue(); // the first (empty) tick has already passed
             recordAndOffer("exec-1", "welcome-email", "hello", NOW.minusSeconds(1));
-            engine.signalWorkScheduled(); // outside a transaction, so an immediate wake
+            engine.signalWorkScheduled(); // what the enqueue unit calls once the row is durable
             assertThat(succeeded.await(1, TimeUnit.SECONDS)).isTrue();
         } finally {
             engine.stop(Duration.ofSeconds(5));
