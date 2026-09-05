@@ -76,6 +76,13 @@ public final class JdbcHistoryStore implements HistoryStore {
      */
     private static final int SWEEP_TIMEOUT_SECONDS = 1;
 
+    /**
+     * Creates a {@code JdbcHistoryStore} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     * @param objectMapper the JSON mapper used for payload conversion
+     * @param delegate the database-specific SQL and timestamp adapter
+     */
     public JdbcHistoryStore(DataSource dataSource, JsonMapper objectMapper, JdbcDelegate delegate) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);

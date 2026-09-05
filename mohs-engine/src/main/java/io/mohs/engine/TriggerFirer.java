@@ -49,6 +49,12 @@ public interface TriggerFirer {
      * <p>{@code now} is the firing instant (and leads history's primary key); each occurrence's
      * {@code scheduledAt} becomes the queue's {@code visible_at}.
      *
+     * @param key the stable identity of the job
+     * @param observedNextFireAt the trigger instant expected by the compare-and-set
+     * @param newNextFireAt the replacement trigger instant, or {@code null} to disarm it
+     * @param occurrences the firing occurrences to materialize
+     * @param payload the input passed to the job handler
+     * @param now the current instant from the configured time source
      * @return {@code true} if THIS call advanced the trigger (and inserted); {@code false} if another
      *         node won the race — nothing was inserted.
      */

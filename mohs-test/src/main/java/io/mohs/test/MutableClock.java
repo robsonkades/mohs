@@ -39,6 +39,12 @@ public final class MutableClock extends Clock {
     private final ZoneId zone;
     private final AtomicReference<Instant> now;
 
+    /**
+     * Creates a {@code MutableClock} with the supplied values.
+     *
+     * @param initial the initial clock instant
+     * @param zone the time zone used to evaluate the schedule
+     */
     public MutableClock(Instant initial, ZoneId zone) {
         this(new AtomicReference<>(Objects.requireNonNull(initial, "initial")), zone);
     }
@@ -49,10 +55,21 @@ public final class MutableClock extends Clock {
         this.zone = Objects.requireNonNull(zone, "zone");
     }
 
+    /**
+     * Creates a mutable UTC clock at the supplied instant.
+     *
+     * @param initial the initial clock instant
+     * @return a mutable clock in UTC
+     */
     public static MutableClock startingAt(Instant initial) {
         return new MutableClock(initial, ZoneId.of("UTC"));
     }
 
+    /**
+     * Moves the test clock to the supplied instant.
+     *
+     * @param instant the instant to evaluate
+     */
     public void setTo(Instant instant) {
         now.set(Objects.requireNonNull(instant, "instant"));
     }
@@ -62,6 +79,8 @@ public final class MutableClock extends Clock {
      *
      * <p>{@code updateAndGet} keeps the advance atomic, so two concurrent calls cannot lose an
      * increment (JCIP §2.2 — the same fix applied as CONC-3 in {@code DatabaseClock}).
+     *
+     * @param duration the duration by which to advance time
      */
     public void advance(Duration duration) {
         Objects.requireNonNull(duration, "duration");

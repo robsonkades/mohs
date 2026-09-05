@@ -59,6 +59,12 @@ public final class FiringPlanner {
     private final NextFireCalculator calculator;
     private final Duration misfireThreshold;
 
+    /**
+     * Creates a {@code FiringPlanner} with the supplied values.
+     *
+     * @param calculator the schedule calculator
+     * @param misfireThreshold the lateness beyond which the misfire policy applies
+     */
     public FiringPlanner(NextFireCalculator calculator, Duration misfireThreshold) {
         this.calculator = Objects.requireNonNull(calculator, "calculator");
         this.misfireThreshold = Objects.requireNonNull(misfireThreshold, "misfireThreshold");
@@ -68,8 +74,14 @@ public final class FiringPlanner {
     }
 
     /**
+     * Plans due occurrences and the next trigger instant.
+     *
      * @param nextFireAt the observed {@code next_fire_at} — due ({@code <= now}) by the caller's
      *        contract ({@code JobStore#findDueRecurring})
+     * @param schedule the firing schedule to evaluate
+     * @param misfire the policy for missed automatic firings
+     * @param now the current instant from the configured time source
+     * @return the occurrences to enqueue, next trigger instant and misfire indication
      * @throws IllegalArgumentException for an {@link OnDemandSpec} (never due — a caller bug) or an
      *         unrealisable cron (one that never fires)
      */
@@ -166,9 +178,20 @@ public final class FiringPlanner {
      * each occurrence's {@code scheduled_at}), the new {@code next_fire_at} ({@code null} means
      * fixed-delay awaiting the end; {@code <= now} means a capped batch, still due) and whether any
      * occurrence was missed ({@code misfired} — the trigger for the caller's WARN).
+     *
+     * @param occurrences the planned firing instants in chronological order
+     * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
+     * @param misfired whether the plan includes a missed firing
      */
     public record Plan(List<Instant> occurrences, @Nullable Instant nextFireAt, boolean misfired) {
 
+        /**
+         * Creates a {@code Plan} with the supplied values.
+         *
+         * @param occurrences the planned firing instants in chronological order
+         * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
+         * @param misfired whether the plan includes a missed firing
+         */
         public Plan {
             occurrences = List.copyOf(occurrences);
         }

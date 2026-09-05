@@ -40,6 +40,9 @@ public interface StoreTransactions {
      * when this call opened the transaction, or after the host's commit when it joined one — the
      * only party that knows which of the two happened is the implementation, which is why the
      * "after commit" hook lives here and not with the caller. A rollback runs nothing.
+     *
+     * @param work the writes to execute atomically
+     * @param onDurable the callback invoked after the transaction commits
      */
     void inTransaction(Runnable work, Runnable onDurable);
 }

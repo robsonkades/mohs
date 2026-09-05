@@ -30,6 +30,12 @@ import io.mohs.store.jdbc.JdbcTimestamps;
  */
 public final class H2JdbcDelegate implements JdbcDelegate {
 
+    /**
+     * Creates a {@code H2JdbcDelegate} instance.
+     */
+    public H2JdbcDelegate() {
+    }
+
     /** H2 answers {@code CURRENT_TIMESTAMP} with a zone, so the offset is exact without asking for UTC. */
     @Override
     public String nowQuery() {

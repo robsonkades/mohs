@@ -31,10 +31,23 @@ import io.mohs.core.definition.JobDefinition;
  * fixed-delay awaiting the end of the previous execution. The per-job mutex counter of an earlier
  * era is gone: the cap now derives from {@code mohs_lease} ({@link LeaseStore#countByJob}) — a live
  * ownership IS the occupied slot.
+ *
+ * @param definition the registered job definition
+ * @param orphaned whether an annotation-sourced job is absent from the local code
+ * @param paused whether automatic firing is suspended
+ * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
  */
 public record StoredJob(JobDefinition definition, boolean orphaned, boolean paused,
         @Nullable Instant nextFireAt) {
 
+    /**
+     * Creates a {@code StoredJob} with the supplied values.
+     *
+     * @param definition the registered job definition
+     * @param orphaned whether an annotation-sourced job is absent from the local code
+     * @param paused whether automatic firing is suspended
+     * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
+     */
     public StoredJob {
         Objects.requireNonNull(definition, "definition");
     }

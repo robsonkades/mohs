@@ -55,6 +55,11 @@ public final class EngineMetrics {
     private final Timer claimLatency;
     private final DistributionSummary claimBatchSize;
 
+    /**
+     * Creates a {@code EngineMetrics} with the supplied values.
+     *
+     * @param registry the metrics registry
+     */
     public EngineMetrics(MeterRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.claimLatency = Timer.builder("mohs.claim.latency")

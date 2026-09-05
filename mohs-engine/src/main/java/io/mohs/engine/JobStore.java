@@ -46,9 +46,18 @@ public interface JobStore {
      *
      * <p>An unchanged recurring schedule with a disarmed trigger is healed (rearmed) — for
      * fixed-delay, only when there is no live scheduler occurrence.
+     *
+     * @param definition the registered job definition
+     * @return the persisted definition
      */
     JobDefinition upsert(JobDefinition definition);
 
+    /**
+     * Looks up a stored job and its trigger state.
+     *
+     * @param key the stable identity of the job
+     * @return the stored job, or empty when the key does not exist
+     */
     Optional<StoredJob> find(JobKey key);
 
     /**
@@ -59,6 +68,8 @@ public interface JobStore {
      * <p>On Postgres this only holds if the call runs inside a transaction (autocommit off) — outside
      * one, the driver materialises the entire result before returning the first item, despite the
      * {@code fetchSize} configured on the template's side.
+     *
+     * @return an open cursor stream that the caller must close
      */
     Stream<StoredJob> findAll();
 
@@ -68,6 +79,8 @@ public interface JobStore {
      * reconciles orphans only against this subset; {@code PROGRAMMATIC} definitions never become
      * {@code ORPHANED} (see {@link #markOrphaned}), so fetching them along would be read bandwidth
      * with no use.
+     *
+     * @return an open cursor stream of annotation-sourced jobs that the caller must close
      */
     Stream<StoredJob> findAllAnnotationSourced();
 
@@ -75,6 +88,10 @@ public interface JobStore {
      * Due recurring jobs: {@code next_fire_at <= now}, excluding {@code paused}, {@code orphaned} and
      * {@code retired} — a pause blocks exactly the trigger, and on-demand still works while paused.
      * Oldest first, at most {@code limit} (the surplus stays due and drains over the following ticks).
+     *
+     * @param now the current instant from the configured time source
+     * @param limit the maximum number of results in one batch
+     * @return up to the limit of active recurring jobs with due triggers
      */
     List<StoredJob> findDueRecurring(Instant now, int limit);
 
@@ -83,6 +100,9 @@ public interface JobStore {
      * a cancelled occurrence still {@code ENQUEUED} never goes through the completion path that
      * rearms, and this guard guarantees the cure never clobbers a series a schedule-change upsert has
      * already rearmed.
+     *
+     * @param key the stable identity of the job
+     * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
      */
     void armNextFire(JobKey key, Instant nextFireAt);
 
@@ -94,15 +114,31 @@ public interface JobStore {
      * beats a concurrent firing". Guarded by {@code retired} — a retired job is invisible to the whole
      * API.
      *
+     * @param key the stable identity of the job
+     * @param schedule the replacement firing schedule
      * @return {@code true} if the row existed (and was not retired)
      */
     boolean reschedule(JobKey key, Schedule schedule);
 
-    /** An {@code ANNOTATION} job present in the store and absent from the code — it does not fire, and it does not erase history. */
+    /**
+     * An {@code ANNOTATION} job present in the store and absent from the code — it does not fire, and it does not erase history.
+     *
+     * @param key the stable identity of the job
+     */
     void markOrphaned(JobKey key);
 
+    /**
+     * Suspends automatic firing for the identified job.
+     *
+     * @param key the stable identity of the job
+     */
     void pause(JobKey key);
 
+    /**
+     * Resumes automatic firing for the identified job.
+     *
+     * @param key the stable identity of the job
+     */
     void resume(JobKey key);
 
     /**
@@ -116,6 +152,8 @@ public interface JobStore {
      *
      * <p>The concurrency slot is not this port's business: the cap derives from {@code mohs_lease} —
      * deleting the lease IS releasing the slot.
+     *
+     * @param key the stable identity of the job
      */
     void remove(JobKey key);
 }

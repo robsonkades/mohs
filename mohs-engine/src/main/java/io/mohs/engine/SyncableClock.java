@@ -32,6 +32,10 @@ public interface SyncableClock {
     /** Samples the external source; implementations preserve monotonic returned instants when correcting the offset. */
     void sync();
 
-    /** The current offset (external source minus application), exposed for when the metrics infrastructure exists. */
+    /**
+     * The current offset (external source minus application), exposed for when the metrics infrastructure exists.
+     *
+     * @return the current external-source offset relative to application time
+     */
     Duration currentOffset();
 }

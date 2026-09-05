@@ -63,6 +63,10 @@ public final class MohsExecutors {
      * {@code shutdown()} — whoever received the executor needs the concrete type to be able to close
      * it, the same reason {@link #cpuBoundExecutor} and {@link #scheduler} return their concrete
      * types.
+     *
+     * @param namePrefix the prefix of worker thread names
+     * @param concurrencyLimit the maximum concurrent tasks
+     * @return the configured executor using bounded virtual-thread concurrency
      */
     public static SimpleAsyncTaskExecutor ioBoundExecutor(String namePrefix, int concurrencyLimit) {
         requireNotBlank(namePrefix, "namePrefix");
@@ -87,6 +91,13 @@ public final class MohsExecutors {
      * the bean, nobody else would ({@code ExecutorConfigurationSupport}'s initialisation normally
      * comes from {@code InitializingBean#afterPropertiesSet}). From here on the lifecycle belongs to
      * the caller: this factory does not shut down what it creates.
+     *
+     * @param namePrefix the prefix of worker thread names
+     * @param coreSize the number of core CPU worker threads
+     * @param maxSize the maximum CPU worker thread count
+     * @param queueCapacity the capacity of the CPU runner waiting queue
+     * @param keepAlive how long excess CPU workers may remain idle
+     * @return the initialized executor with bounded platform threads and queue
      */
     public static ThreadPoolTaskExecutor cpuBoundExecutor(String namePrefix, int coreSize, int maxSize, int queueCapacity, Duration keepAlive) {
         requireNotBlank(namePrefix, "namePrefix");
@@ -130,6 +141,10 @@ public final class MohsExecutors {
      * {@code setVirtualThreads(true)} only swaps the worker's thread type, and {@code poolSize}
      * remains the real ceiling on concurrent executions (confirmed in Spring 7.0.8's source, not only
      * in the Javadoc).
+     *
+     * @param namePrefix the prefix of worker thread names
+     * @param poolSize the number of scheduler threads
+     * @return the initialized dedicated task scheduler
      */
     public static ThreadPoolTaskScheduler scheduler(String namePrefix, int poolSize) {
         requireNotBlank(namePrefix, "namePrefix");

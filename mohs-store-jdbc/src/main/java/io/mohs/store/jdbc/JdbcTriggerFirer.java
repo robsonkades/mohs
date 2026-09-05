@@ -57,6 +57,14 @@ public final class JdbcTriggerFirer implements TriggerFirer {
     private final WorkQueue workQueue;
     private final JdbcDelegate delegate;
 
+    /**
+     * Creates a {@code JdbcTriggerFirer} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     * @param historyStore the persistence port for execution history
+     * @param workQueue the persistence port for ready work
+     * @param delegate the database-specific SQL and timestamp adapter
+     */
     public JdbcTriggerFirer(DataSource dataSource, HistoryStore historyStore, WorkQueue workQueue,
             JdbcDelegate delegate) {
         Objects.requireNonNull(dataSource, "dataSource");

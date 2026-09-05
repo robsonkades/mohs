@@ -87,6 +87,13 @@ public final class JdbcJobStore implements JobStore {
     private final JdbcDelegate delegate;
     private final NextFireCalculator nextFireCalculator = new NextFireCalculator();
 
+    /**
+     * Creates a {@code JdbcJobStore} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     * @param clock the time source used by the component
+     * @param delegate the database-specific SQL and timestamp adapter
+     */
     public JdbcJobStore(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
         this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));

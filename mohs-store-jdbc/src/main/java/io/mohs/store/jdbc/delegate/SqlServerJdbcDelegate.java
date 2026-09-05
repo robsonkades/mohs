@@ -46,6 +46,12 @@ import io.mohs.store.jdbc.JdbcTimestamps;
 public final class SqlServerJdbcDelegate implements JdbcDelegate {
 
     /**
+     * Creates a {@code SqlServerJdbcDelegate} instance.
+     */
+    public SqlServerJdbcDelegate() {
+    }
+
+    /**
      * {@code CURRENT_TIMESTAMP} is a zoneless {@code DATETIME} read back in the JVM's zone, so it
      * measured the distance between two zones rather than between two clocks. {@code SYSUTCDATETIME}
      * states UTC, and is a {@code datetime2} besides — {@code DATETIME} rounds to about 3.3 ms.

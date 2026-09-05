@@ -47,11 +47,22 @@ public final class JdbcTimestamps {
     private JdbcTimestamps() {
     }
 
-    /** Public: also used by {@code io.mohs.store.jdbc.delegate} (each delegate's {@code splitTimestamp}) — both are internal packages, so this never becomes the module's public API. */
+    /**
+     * Public: also used by {@code io.mohs.store.jdbc.delegate} (each delegate's {@code splitTimestamp}) — both are internal packages, so this never becomes the module's public API.
+     *
+     * @param instant the instant to evaluate
+     * @return the instant expressed as a UTC local timestamp
+     */
     public static LocalDateTime toUtcLocalDateTime(Instant instant) {
         return LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
     }
 
+    /**
+     * Interprets a JDBC local timestamp in UTC.
+     *
+     * @param dateTime the local date and time to interpret in UTC
+     * @return the instant represented by the UTC timestamp
+     */
     public static Instant fromUtcLocalDateTime(LocalDateTime dateTime) {
         return dateTime.toInstant(ZoneOffset.UTC);
     }
@@ -61,7 +72,12 @@ public final class JdbcTimestamps {
         return instant == null ? null : toUtcLocalDateTime(instant);
     }
 
-    /** The read of a nullable column: an SQL {@code NULL} comes back as {@code null}, never as an epoch. Public for the delegates' {@code readSplitTimestamp}. */
+    /**
+     * The read of a nullable column: an SQL {@code NULL} comes back as {@code null}, never as an epoch. Public for the delegates' {@code readSplitTimestamp}.
+     *
+     * @param dateTime the date and time to interpret in UTC
+     * @return the UTC instant, or {@code null} for a null timestamp
+     */
     public static @Nullable Instant fromUtcLocalDateTimeOrNull(@Nullable LocalDateTime dateTime) {
         return dateTime == null ? null : fromUtcLocalDateTime(dateTime);
     }
@@ -75,11 +91,20 @@ public final class JdbcTimestamps {
      * regardless of the session's {@code TimeZone}. The databases with no tz-aware column (H2, MySQL, SQL
      * Server, the split's functional equivalents) stay on the LocalDateTime crossing — the choice belongs
      * to {@code JdbcDelegate}.
+     *
+     * @param instant the instant to evaluate
+     * @return the instant expressed with a UTC offset
      */
     public static OffsetDateTime toUtcOffsetDateTime(Instant instant) {
         return instant.atOffset(ZoneOffset.UTC);
     }
 
+    /**
+     * Converts a JDBC offset timestamp to an instant.
+     *
+     * @param dateTime the date and time with its explicit offset
+     * @return the instant represented by the offset timestamp
+     */
     public static Instant fromUtcOffsetDateTime(OffsetDateTime dateTime) {
         return dateTime.toInstant();
     }

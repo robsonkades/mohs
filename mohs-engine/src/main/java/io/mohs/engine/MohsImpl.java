@@ -113,6 +113,26 @@ public final class MohsImpl implements Mohs {
     /** The same listeners the dispatcher publishes to — {@code Enqueued} is the one event born on this side of the engine. */
     private final ExecutionEventPublisher events;
 
+    /**
+     * Creates a {@code MohsImpl} with the supplied values.
+     *
+     * @param jobStore the persistence port for job definitions and triggers
+     * @param workQueue the persistence port for ready work
+     * @param historyStore the persistence port for execution history
+     * @param leaseStore the persistence port for execution ownership
+     * @param storeTransactions the transaction boundary shared by store operations
+     * @param nodeStore the persistence port for node heartbeats
+     * @param rateLimitStore the persistence port for shared rate-limit buckets
+     * @param handlerRegistry the registry of local job handlers and payload types
+     * @param clock the time source used by the component
+     * @param lifecycle the local engine lifecycle controls
+     * @param batchStore the persistence port for batch counters
+     * @param callbacks the process-local batch completion callbacks
+     * @param runnerRegistry the registry of local execution resources
+     * @param localWakeSignal the callback that wakes the local poll loop after durable enqueue
+     * @param listeners the listeners receiving execution events
+     * @param eventExecutor the executor that delivers execution events
+     */
     public MohsImpl(JobStore jobStore, WorkQueue workQueue, HistoryStore historyStore, LeaseStore leaseStore,
             StoreTransactions storeTransactions, NodeStore nodeStore, RateLimitStore rateLimitStore,
             HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle, BatchStore batchStore,

@@ -95,8 +95,21 @@ public final class Dispatcher {
      * read to the completion, for no reason other than matching a primary key that led with time.
      * With the key normalised to {@code execution_id}, the completion matches by id and the value
      * has nowhere left to be used.
+     *
+     * @param nodeId the identity of the engine node
+     * @param epoch the ownership generation used by the completion fence
+     * @param attemptNumber the one-based attempt number
+     * @param claimedAt the instant ownership was granted
      */
     public record Grant(String nodeId, long epoch, int attemptNumber, Instant claimedAt) {
+        /**
+         * Creates a {@code Grant} with the supplied values.
+         *
+         * @param nodeId the identity of the engine node
+         * @param epoch the ownership generation used by the completion fence
+         * @param attemptNumber the one-based attempt number
+         * @param claimedAt the instant ownership was granted
+         */
         public Grant {
             Objects.requireNonNull(nodeId, "nodeId");
             Objects.requireNonNull(claimedAt, "claimedAt");
@@ -106,7 +119,18 @@ public final class Dispatcher {
         }
     }
 
-    /** No custom retry policy and no group commit (synchronous completion per result) — the convenience for tests and one-off callers. */
+    /**
+     * No custom retry policy and no group commit (synchronous completion per result) — the convenience for tests and one-off callers.
+     *
+     * @param leaseStore the persistence port for execution ownership
+     * @param jobStore the persistence port for job definitions and triggers
+     * @param handlerRegistry the registry of local job handlers and payload types
+     * @param clock the time source used by the component
+     * @param interceptors the ordered interceptors surrounding handler invocation
+     * @param listeners the listeners receiving execution events
+     * @param eventExecutor the executor that delivers execution events
+     * @param metrics the engine metrics recorder
+     */
     public Dispatcher(LeaseStore leaseStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
             List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
             EngineMetrics metrics) {
@@ -114,6 +138,19 @@ public final class Dispatcher {
                 RetryPolicyRegistry.empty());
     }
 
+    /**
+     * Creates a {@code Dispatcher} with the supplied values.
+     *
+     * @param leaseStore the persistence port for execution ownership
+     * @param jobStore the persistence port for job definitions and triggers
+     * @param handlerRegistry the registry of local job handlers and payload types
+     * @param clock the time source used by the component
+     * @param interceptors the ordered interceptors surrounding handler invocation
+     * @param listeners the listeners receiving execution events
+     * @param eventExecutor the executor that delivers execution events
+     * @param metrics the engine metrics recorder
+     * @param completionBatcher the component that groups completion writes
+     */
     public Dispatcher(LeaseStore leaseStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
             List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
             EngineMetrics metrics, @Nullable CompletionBatcher completionBatcher) {
@@ -121,6 +158,20 @@ public final class Dispatcher {
                 completionBatcher, RetryPolicyRegistry.empty());
     }
 
+    /**
+     * Creates a {@code Dispatcher} with the supplied values.
+     *
+     * @param leaseStore the persistence port for execution ownership
+     * @param jobStore the persistence port for job definitions and triggers
+     * @param handlerRegistry the registry of local job handlers and payload types
+     * @param clock the time source used by the component
+     * @param interceptors the ordered interceptors surrounding handler invocation
+     * @param listeners the listeners receiving execution events
+     * @param eventExecutor the executor that delivers execution events
+     * @param metrics the engine metrics recorder
+     * @param completionBatcher the component that groups completion writes
+     * @param retryPolicies the named retry-policy registry
+     */
     public Dispatcher(LeaseStore leaseStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
             List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
             EngineMetrics metrics, @Nullable CompletionBatcher completionBatcher, RetryPolicyRegistry retryPolicies) {
@@ -135,11 +186,27 @@ public final class Dispatcher {
         this.completionBatcher = completionBatcher;
     }
 
-    /** The form with no external cancellation source — its own signal, which nothing raises. A convenience for tests and one-off callers. */
+    /**
+     * The form with no external cancellation source — its own signal, which nothing raises. A convenience for tests and one-off callers.
+     *
+     * @param execution the claimed execution with its decoded payload
+     * @param definition the registered job definition
+     * @param payload the input passed to the job handler
+     * @param grant the fenced ownership granted by the claim
+     */
     public void dispatch(Execution execution, JobDefinition definition, Object payload, Grant grant) {
         dispatch(execution, definition, payload, new CancellationSignal(), grant);
     }
 
+    /**
+     * Submits a claimed execution under its ownership fence.
+     *
+     * @param execution the claimed execution with its decoded payload
+     * @param definition the registered job definition
+     * @param payload the input passed to the job handler
+     * @param signal the wake-up callback
+     * @param grant the fenced ownership granted by the claim
+     */
     public void dispatch(Execution execution, JobDefinition definition, Object payload, CancellationSignal signal,
             Grant grant) {
         Objects.requireNonNull(execution, "execution");

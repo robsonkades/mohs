@@ -30,10 +30,25 @@ import io.mohs.core.EngineState;
  * <p>{@code epoch} is the node's incarnation (bumped on the node itself when it notices its lease
  * expired); {@code expiresAt} is the NODE's lease, renewed by the heartbeat — {@code null} only on
  * a row written by an older jar (the reaper then falls back to the heartbeat's staleness).
+ *
+ * @param nodeId the identity of the engine node
+ * @param state the current lifecycle state
+ * @param lastHeartbeatAt the instant of the last recorded heartbeat
+ * @param epoch the ownership generation used by the completion fence
+ * @param expiresAt the instant when the liveness lease expires
  */
 public record StoredNode(String nodeId, EngineState state, Instant lastHeartbeatAt, long epoch,
         @Nullable Instant expiresAt) {
 
+    /**
+     * Creates a {@code StoredNode} with the supplied values.
+     *
+     * @param nodeId the identity of the engine node
+     * @param state the current lifecycle state
+     * @param lastHeartbeatAt the instant of the last recorded heartbeat
+     * @param epoch the ownership generation used by the completion fence
+     * @param expiresAt the instant when the liveness lease expires
+     */
     public StoredNode {
         Objects.requireNonNull(nodeId, "nodeId");
         Objects.requireNonNull(state, "state");

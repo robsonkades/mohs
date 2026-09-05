@@ -90,6 +90,14 @@ public final class CompletionBatcher implements AutoCloseable {
     /** The drain already happened — Spring's {@code close}, after the {@code stop}, does not pay for the join twice. */
     private volatile boolean drained;
 
+    /**
+     * Creates a {@code CompletionBatcher} with the supplied values.
+     *
+     * @param leaseStore the persistence port for execution ownership
+     * @param jobStore the persistence port for job definitions and triggers
+     * @param flushSize the maximum number of completion results per flush
+     * @param flushInterval the maximum interval between completion flushes
+     */
     public CompletionBatcher(LeaseStore leaseStore, JobStore jobStore, int flushSize, Duration flushInterval) {
         this.leaseStore = Objects.requireNonNull(leaseStore, "leaseStore");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
@@ -118,6 +126,9 @@ public final class CompletionBatcher implements AutoCloseable {
      * Enqueues the result; {@code onOutcome} runs on the flusher's thread with the CAS verdict, AFTER
      * the batch commits — the same "publish only what became durable" guarantee as the synchronous
      * path. After {@code close()}, it completes synchronously on the calling thread.
+     *
+     * @param result the completion result to persist
+     * @param onOutcome the callback receiving the durable completion outcome
      */
     public void submit(CompletionResult result, Consumer<Completion> onOutcome) {
         Objects.requireNonNull(result, "result");
@@ -286,6 +297,8 @@ public final class CompletionBatcher implements AutoCloseable {
      * {@code grace}: without it, the drain added a FIXED 10s after the {@code DrainDeadline} had
      * already been spent, overrunning the Boot shutdown phase that {@code stop}'s Javadoc promises to
      * respect.
+     *
+     * @param drainBudget the time allowed for pending writes to finish on shutdown
      */
     public void close(Duration drainBudget) {
         closed = true;

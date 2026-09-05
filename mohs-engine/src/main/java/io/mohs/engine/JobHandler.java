@@ -26,5 +26,12 @@ import io.mohs.core.execution.JobContext;
 @FunctionalInterface
 public interface JobHandler {
 
+    /**
+     * Invokes the handler with its payload and execution context.
+     *
+     * @param payload the input passed to the job handler
+     * @param ctx the context of the current execution attempt
+     * @throws java.lang.Exception if an interceptor or the job handler fails
+     */
     void invoke(Object payload, JobContext ctx) throws Exception;
 }

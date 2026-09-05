@@ -37,6 +37,13 @@ public final class JdbcBatchStore implements BatchStore {
     private final Clock clock;
     private final JdbcDelegate delegate;
 
+    /**
+     * Creates a {@code JdbcBatchStore} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     * @param clock the time source used by the component
+     * @param delegate the database-specific SQL and timestamp adapter
+     */
     public JdbcBatchStore(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
         this.jdbcTemplate = new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource"));
         this.clock = Objects.requireNonNull(clock, "clock");

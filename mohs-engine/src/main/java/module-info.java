@@ -22,6 +22,9 @@
  * Dispatcher and CompletionBatcher as if they were API. With `exports ... to`, they become
  * internal again in fact.
  */
+/**
+ * Polling, dispatch, ownership and persistence ports for the scheduling engine.
+ */
 module io.mohs.engine {
     requires static org.jspecify;
     requires io.mohs.core;

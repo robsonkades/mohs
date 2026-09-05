@@ -70,6 +70,13 @@ public final class JdbcLeaseStore implements LeaseStore {
     private final JdbcDelegate delegate;
     private final BatchStore batchStore;
 
+    /**
+     * Creates a {@code JdbcLeaseStore} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     * @param delegate the database-specific SQL and timestamp adapter
+     * @param batchStore the persistence port for batch counters
+     */
     public JdbcLeaseStore(DataSource dataSource, JdbcDelegate delegate, BatchStore batchStore) {
         Objects.requireNonNull(dataSource, "dataSource");
         // Two templates: the completion runs on the flusher thread inside its own transaction and a

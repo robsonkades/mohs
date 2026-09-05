@@ -38,6 +38,9 @@ public interface RateLimitStore {
      * a rolling deploy hand back a full bucket, turning a deploy into a burst. The same reasoning as
      * {@code paused} in {@link JobStore#upsert}: boot configuration governs the spec, never the
      * current state.
+     *
+     * @param rateLimit the declared cluster-wide throughput limit
+     * @return the persisted rate-limit specification
      */
     RateLimit upsert(RateLimit rateLimit);
 
@@ -52,6 +55,8 @@ public interface RateLimitStore {
      *
      * @param now the instant from the caller's injected {@code Clock}; the refill is computed against
      *        it, never against the database's clock
+     * @param name the stable name of the rate limit
+     * @return the currently available whole tokens without consuming them
      */
     int available(String name, Instant now);
 
@@ -74,16 +79,28 @@ public interface RateLimitStore {
      * balance left: the caller MUST undo the round, because the executions have already been claimed
      * and delivering them without a token would be over-delivery, the one unacceptable violation of
      * the contract.
+     *
+     * @param name the stable name of the rate limit
+     * @param permits the exact number of tokens to charge
+     * @param now the current instant from the configured time source
+     * @return whether all requested permits were charged
      */
     boolean charge(String name, int permits, Instant now);
 
-    /** The spec plus the bucket's current balance, with the refill applied in memory — a pure read that neither writes nor consumes. */
+    /**
+     * The spec plus the bucket's current balance, with the refill applied in memory — a pure read that neither writes nor consumes.
+     *
+     * @param name the stable name of the rate limit
+     * @return the specification and refilled balance, or empty when the name is unknown
+     */
     Optional<RateLimitSnapshot> find(String name);
 
     /**
      * A stream over an open cursor — the caller owns the lifecycle (try-with-resources). On Postgres
      * this only holds inside a transaction (autocommit off) — outside one, the driver materialises
      * the entire result before returning the first item.
+     *
+     * @return an open cursor stream that the caller must close
      */
     Stream<RateLimitSnapshot> findAll();
 }

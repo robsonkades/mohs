@@ -262,6 +262,23 @@ public final class Engine implements MohsLifecycle {
     private volatile long nodeEpoch = 1;
     private @Nullable Instant nodeLeaseExpiresAt;
 
+    /**
+     * Creates a {@code Engine} with the supplied values.
+     *
+     * @param workQueue the persistence port for ready work
+     * @param dispatcher the component that submits claimed executions to handlers
+     * @param historyStore the persistence port for execution history
+     * @param leaseStore the persistence port for execution ownership
+     * @param jobStore the persistence port for job definitions and triggers
+     * @param nodeStore the persistence port for node heartbeats
+     * @param triggerFirer the atomic trigger-advance and enqueue operation
+     * @param windowRegistry the registry of firing exclusion windows
+     * @param rateLimitStore the persistence port for shared rate-limit buckets
+     * @param clock the time source used by the component
+     * @param settings the engine timing and batching configuration
+     * @param runnerRegistry the registry of local execution resources
+     * @param metrics the engine metrics recorder
+     */
     public Engine(
             WorkQueue workQueue,
             Dispatcher dispatcher,
@@ -281,7 +298,24 @@ public final class Engine implements MohsLifecycle {
                 rateLimitStore, clock, settings, runnerRegistry, metrics, RetryPolicyRegistry.empty());
     }
 
-    /** The form that knows the declared {@link io.mohs.core.execution.RetryPolicy} beans — what the starter builds. */
+    /**
+     * The form that knows the declared {@link io.mohs.core.execution.RetryPolicy} beans — what the starter builds.
+     *
+     * @param workQueue the persistence port for ready work
+     * @param dispatcher the component that submits claimed executions to handlers
+     * @param historyStore the persistence port for execution history
+     * @param leaseStore the persistence port for execution ownership
+     * @param jobStore the persistence port for job definitions and triggers
+     * @param nodeStore the persistence port for node heartbeats
+     * @param triggerFirer the atomic trigger-advance and enqueue operation
+     * @param windowRegistry the registry of firing exclusion windows
+     * @param rateLimitStore the persistence port for shared rate-limit buckets
+     * @param clock the time source used by the component
+     * @param settings the engine timing and batching configuration
+     * @param runnerRegistry the registry of local execution resources
+     * @param metrics the engine metrics recorder
+     * @param retryPolicies the named retry-policy registry
+     */
     public Engine(
             WorkQueue workQueue,
             Dispatcher dispatcher,

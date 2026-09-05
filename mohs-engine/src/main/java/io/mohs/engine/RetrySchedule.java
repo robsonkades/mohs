@@ -50,6 +50,11 @@ public final class RetrySchedule {
      * The time of the next retry after attempt {@code failedAttempt} (1-based) fails — empty when the
      * budget has run out ({@code retries} being attempts beyond the first, per
      * {@code JobDefinition.retries}'s contract: total attempts = retries + 1).
+     *
+     * @param failedAttempt the one-based number of the failed attempt
+     * @param retries the allowed retry attempts beyond the first
+     * @param now the current instant from the configured time source
+     * @return the retry instant, or empty when the retry budget is exhausted
      */
     public static Optional<Instant> nextRetryAt(int failedAttempt, int retries, Instant now) {
         if (failedAttempt < 1) {

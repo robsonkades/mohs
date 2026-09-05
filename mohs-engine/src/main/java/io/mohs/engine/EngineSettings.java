@@ -79,6 +79,18 @@ import org.jspecify.annotations.Nullable;
  * {@code claimRounds x claim-latency} close to the TTL would let a long tick expire the node's lease
  * mid-round and have another node's reaper duplicate everything in flight. A longer tick also delays
  * the timeout and cancel signals — one more reason for rounds to be few.
+ *
+ * @param pollInterval the minimum interval between polling ticks
+ * @param maxPollInterval the ceiling of the idle polling backoff
+ * @param batchSize the maximum number of entries in one batch
+ * @param dispatchConcurrency the maximum in-flight executions on this node
+ * @param claimRounds the maximum claim rounds in one polling tick
+ * @param leaseTtl the execution lease duration and legacy-node staleness threshold
+ * @param nodeLeaseTtl the duration of the node liveness promise
+ * @param watchdogTimeout the optional runtime ceiling; {@code null} disables it
+ * @param misfireThreshold the lateness beyond which the misfire policy applies
+ * @param idempotencyRetention the deduplication retention window; zero retains keys indefinitely
+ * @param historyRetention the terminal-history retention window; zero disables pruning
  */
 public record EngineSettings(Duration pollInterval, Duration maxPollInterval, int batchSize, int dispatchConcurrency,
         int claimRounds, Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout,
@@ -100,6 +112,21 @@ public record EngineSettings(Duration pollInterval, Duration maxPollInterval, in
      */
     private static final int UNBOUNDED_DISPATCH = Integer.MAX_VALUE;
 
+    /**
+     * Creates a {@code EngineSettings} with the supplied values.
+     *
+     * @param pollInterval the minimum interval between polling ticks
+     * @param maxPollInterval the ceiling of the idle polling backoff
+     * @param batchSize the maximum number of entries in one batch
+     * @param dispatchConcurrency the maximum in-flight executions on this node
+     * @param claimRounds the maximum claim rounds in one polling tick
+     * @param leaseTtl the execution lease duration and legacy-node staleness threshold
+     * @param nodeLeaseTtl the duration of the node liveness promise
+     * @param watchdogTimeout the optional runtime ceiling; {@code null} disables it
+     * @param misfireThreshold the lateness beyond which the misfire policy applies
+     * @param idempotencyRetention the deduplication retention window; zero retains keys indefinitely
+     * @param historyRetention the terminal-history retention window; zero disables pruning
+     */
     public EngineSettings {
         Objects.requireNonNull(pollInterval, "pollInterval");
         Objects.requireNonNull(maxPollInterval, "maxPollInterval");
@@ -157,6 +184,17 @@ public record EngineSettings(Duration pollInterval, Duration maxPollInterval, in
      * Every parameter but the history sweep, which stays off — history retention is opt-in
      * (an embedded scheduler must not delete history nobody asked it to), so only the caller that
      * binds the operator's property passes it explicitly.
+     *
+     * @param pollInterval the minimum interval between polling ticks
+     * @param maxPollInterval the ceiling of the idle polling backoff
+     * @param batchSize the maximum number of entries in one batch
+     * @param dispatchConcurrency the maximum in-flight executions on this node
+     * @param claimRounds the maximum claim rounds in one polling tick
+     * @param leaseTtl the execution lease duration and legacy-node staleness threshold
+     * @param nodeLeaseTtl the duration of the node liveness promise
+     * @param watchdogTimeout the optional runtime ceiling; {@code null} disables it
+     * @param misfireThreshold the lateness beyond which the misfire policy applies
+     * @param idempotencyRetention the deduplication retention window; zero retains keys indefinitely
      */
     public EngineSettings(Duration pollInterval, Duration maxPollInterval, int batchSize, int dispatchConcurrency,
             int claimRounds, Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout,
@@ -165,7 +203,19 @@ public record EngineSettings(Duration pollInterval, Duration maxPollInterval, in
                 watchdogTimeout, misfireThreshold, idempotencyRetention, Duration.ZERO);
     }
 
-    /** Every parameter but the deduplication window, which takes its default — the convenience for callers that do not exercise pruning. */
+    /**
+     * Every parameter but the deduplication window, which takes its default — the convenience for callers that do not exercise pruning.
+     *
+     * @param pollInterval the minimum interval between polling ticks
+     * @param maxPollInterval the ceiling of the idle polling backoff
+     * @param batchSize the maximum number of entries in one batch
+     * @param dispatchConcurrency the maximum in-flight executions on this node
+     * @param claimRounds the maximum claim rounds in one polling tick
+     * @param leaseTtl the execution lease duration and legacy-node staleness threshold
+     * @param nodeLeaseTtl the duration of the node liveness promise
+     * @param watchdogTimeout the optional runtime ceiling; {@code null} disables it
+     * @param misfireThreshold the lateness beyond which the misfire policy applies
+     */
     public EngineSettings(Duration pollInterval, Duration maxPollInterval, int batchSize, int dispatchConcurrency,
             int claimRounds, Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout,
             Duration misfireThreshold) {
@@ -173,19 +223,41 @@ public record EngineSettings(Duration pollInterval, Duration maxPollInterval, in
                 watchdogTimeout, misfireThreshold, DEFAULT_IDEMPOTENCY_RETENTION);
     }
 
-    /** One claim per tick and a node lease equal to the execution lease — a convenience for callers that only configure the dispatch ceiling. */
+    /**
+     * One claim per tick and a node lease equal to the execution lease — a convenience for callers that only configure the dispatch ceiling.
+     *
+     * @param pollInterval the minimum interval between polling ticks
+     * @param batchSize the maximum number of entries in one batch
+     * @param dispatchConcurrency the maximum in-flight executions on this node
+     * @param leaseTtl the execution lease duration and legacy-node staleness threshold
+     * @param watchdogTimeout the optional runtime ceiling; {@code null} disables it
+     * @param misfireThreshold the lateness beyond which the misfire policy applies
+     */
     public EngineSettings(Duration pollInterval, int batchSize, int dispatchConcurrency, Duration leaseTtl,
             @Nullable Duration watchdogTimeout, Duration misfireThreshold) {
         this(pollInterval, pollInterval, batchSize, dispatchConcurrency, 1, leaseTtl, leaseTtl, watchdogTimeout,
                 misfireThreshold, DEFAULT_IDEMPOTENCY_RETENTION);
     }
 
-    /** The default misfire threshold, a claim with no dispatch ceiling and one claim per tick — a test convenience. */
+    /**
+     * The default misfire threshold, a claim with no dispatch ceiling and one claim per tick — a test convenience.
+     *
+     * @param pollInterval the minimum interval between polling ticks
+     * @param batchSize the maximum number of entries in one batch
+     * @param leaseTtl the execution lease duration and legacy-node staleness threshold
+     * @param watchdogTimeout the optional runtime ceiling; {@code null} disables it
+     */
     public EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl, @Nullable Duration watchdogTimeout) {
         this(pollInterval, batchSize, UNBOUNDED_DISPATCH, leaseTtl, watchdogTimeout, DEFAULT_MISFIRE_THRESHOLD);
     }
 
-    /** No Watchdog Bound, the default misfire threshold, a claim with no dispatch ceiling and one claim per tick — a test convenience. */
+    /**
+     * No Watchdog Bound, the default misfire threshold, a claim with no dispatch ceiling and one claim per tick — a test convenience.
+     *
+     * @param pollInterval the minimum interval between polling ticks
+     * @param batchSize the maximum number of entries in one batch
+     * @param leaseTtl the execution lease duration and legacy-node staleness threshold
+     */
     public EngineSettings(Duration pollInterval, int batchSize, Duration leaseTtl) {
         this(pollInterval, batchSize, leaseTtl, null);
     }

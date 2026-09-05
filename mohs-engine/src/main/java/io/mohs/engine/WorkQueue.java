@@ -48,8 +48,25 @@ public interface WorkQueue {
      * enters the type (Effective Java 49): a row written outside [0, 64) would never be claimed — the
      * lap only probes shards the derived partition distributes, and the entry would rot in the queue
      * in silence.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param shard the deterministic queue partition
+     * @param priority the ordering priority used when claiming work
+     * @param attempt the one-based attempt number
+     * @param visibleAt the instant when the queue entry becomes claimable
      */
     record ReadyEntry(ExecutionId executionId, JobKey jobKey, int shard, int priority, int attempt, Instant visibleAt) {
+        /**
+         * Creates a {@code ReadyEntry} with the supplied values.
+         *
+         * @param executionId the identity of the execution
+         * @param jobKey the stable identity of the job
+         * @param shard the deterministic queue partition
+         * @param priority the ordering priority used when claiming work
+         * @param attempt the one-based attempt number
+         * @param visibleAt the instant when the queue entry becomes claimable
+         */
         public ReadyEntry {
             Objects.requireNonNull(executionId, "executionId");
             Objects.requireNonNull(jobKey, "jobKey");
@@ -64,8 +81,23 @@ public interface WorkQueue {
         }
     }
 
-    /** What the claim returns: identity, never the payload — the dispatcher follows with ONE batched read of history. {@code priority} travels back so an admission-loss requeue can rebuild the entry without an extra read. */
+    /**
+     * What the claim returns: identity, never the payload — the dispatcher follows with ONE batched read of history. {@code priority} travels back so an admission-loss requeue can rebuild the entry without an extra read.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param attemptNumber the one-based attempt number
+     * @param priority the ordering priority used when claiming work
+     */
     record ClaimedWork(ExecutionId executionId, JobKey jobKey, int attemptNumber, int priority) {
+        /**
+         * Creates a {@code ClaimedWork} with the supplied values.
+         *
+         * @param executionId the identity of the execution
+         * @param jobKey the stable identity of the job
+         * @param attemptNumber the one-based attempt number
+         * @param priority the ordering priority used when claiming work
+         */
         public ClaimedWork {
             Objects.requireNonNull(executionId, "executionId");
             Objects.requireNonNull(jobKey, "jobKey");
@@ -89,6 +121,14 @@ public interface WorkQueue {
      * (contract, not accident). A sizing invariant: {@code limit} is at most the dispatch headroom
      * (~1k), which is below 2000 — SQL Server's parameter ceiling; the portable form deliberately does
      * not chunk the DELETE's {@code IN}.
+     *
+     * @param shard the deterministic queue partition
+     * @param nodeId the identity of the engine node
+     * @param epoch the ownership generation used by the completion fence
+     * @param limit the maximum number of results in one batch
+     * @param inadmissible the claimed entries that cannot currently be dispatched
+     * @param now the current instant from the configured time source
+     * @return the work entries whose ownership was acquired
      */
     List<ClaimedWork> claim(int shard, String nodeId, long epoch, int limit, Collection<JobKey> inadmissible, Instant now);
 
@@ -112,6 +152,10 @@ public interface WorkQueue {
      * {@code false} is an ASSERTION — it may only come from a fresh read of the real state, never from
      * a cache or an in-memory flag. When in doubt, {@code true}: a persistently wrong {@code false}
      * does not cost a poll, it stops this node's queue.
+     *
+     * @param shards the queue partitions eligible for this operation
+     * @param now the current instant from the configured time source
+     * @return whether any eligible queue entry is visible
      */
     boolean hasVisibleWork(Collection<Integer> shards, Instant now);
 
@@ -126,6 +170,9 @@ public interface WorkQueue {
      * <p>The cost is proportional to the BACKLOG, never to history: {@code mohs_ready} holds only
      * work that has not finished. It is still a count rather than an existence check, so the caller
      * samples it on a cadence of its own — never once per tick.
+     *
+     * @param now the current instant from the configured time source
+     * @return the number of visible queue entries
      */
     long countVisible(Instant now);
 
@@ -137,6 +184,8 @@ public interface WorkQueue {
      * <p>Calling it outside a transaction breaks the enqueue's unit: a partial failure leaves either an
      * orphan idempotency key (deduplicating against nothing for the whole window) or an unreachable
      * {@code PENDING} execution — not a supported mode.
+     *
+     * @param entries the queue entries to persist
      */
     void offer(List<ReadyEntry> entries);
 
@@ -148,14 +197,32 @@ public interface WorkQueue {
      * <p>Losing the fence (the lease no longer exists, or changed owner) skips that entry's
      * reinsertion: the new incarnation is the authority. It returns how many entries actually made it
      * back into the queue.
+     *
+     * @param orders the observed lease fences and replacement ready entries
+     * @return the number of entries successfully fenced and requeued
      */
     int requeue(List<Requeue> orders);
 
     /**
      * A requeue order: the lease to drop, with the whole observed fencing token
      * ({@code nodeId}, {@code epoch}, {@code attemptNumber}), and the entry that is reborn in the queue.
+     *
+     * @param executionId the identity of the execution
+     * @param nodeId the identity of the engine node
+     * @param epoch the ownership generation used by the completion fence
+     * @param attemptNumber the one-based attempt number
+     * @param entry the replacement queue entry
      */
     record Requeue(ExecutionId executionId, String nodeId, long epoch, int attemptNumber, ReadyEntry entry) {
+        /**
+         * Creates a {@code Requeue} with the supplied values.
+         *
+         * @param executionId the identity of the execution
+         * @param nodeId the identity of the engine node
+         * @param epoch the ownership generation used by the completion fence
+         * @param attemptNumber the one-based attempt number
+         * @param entry the replacement queue entry
+         */
         public Requeue {
             Objects.requireNonNull(executionId, "executionId");
             Objects.requireNonNull(nodeId, "nodeId");
@@ -175,6 +242,8 @@ public interface WorkQueue {
      * <p>It loses to any concurrent claim (the entry has already left the queue) — the caller then
      * falls back to ownership's cooperative flag ({@code LeaseStore#requestCancellation}).
      *
+     * @param id the identity of the execution
+     * @param now the current instant from the configured time source
      * @return {@code true} if THIS call removed the entry
      */
     boolean cancelQueued(ExecutionId id, Instant now);
@@ -185,6 +254,8 @@ public interface WorkQueue {
      * rebirth in the queue with {@code attempt = recorded attempts + 1} and the original priority. It
      * bypasses the budget on purpose: the operator decides.
      *
+     * @param id the identity of the execution
+     * @param now the current instant from the configured time source
      * @return {@code true} if THIS call armed it; {@code false} means a nonexistent id, a state other
      *         than {@code FAILED}, or a retired job — the caller tells them apart with a read
      */

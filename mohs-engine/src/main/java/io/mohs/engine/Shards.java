@@ -53,7 +53,12 @@ public final class Shards {
     private Shards() {
     }
 
-    /** This execution's shard — deterministic across JVMs and versions (a contract pinned in {@code ShardsTest}). */
+    /**
+     * This execution's shard — deterministic across JVMs and versions (a contract pinned in {@code ShardsTest}).
+     *
+     * @param executionId the identity of the execution
+     * @return the stable shard index of this execution
+     */
     public static int of(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
         int hash = FNV_OFFSET_BASIS;
@@ -72,6 +77,10 @@ public final class Shards {
      * <p>A node outside the set (one that has just joined and does not yet see itself in the read)
      * owns ALL shards — the safe degenerate case: a temporary overlap is the pre-shard behaviour,
      * whereas "owning nothing" would leave the queue stalled.
+     *
+     * @param nodeId the identity of the engine node
+     * @param eligibleNodeIds the nodes eligible to own shards
+     * @return the shard indices assigned to this node
      */
     public static List<Integer> ownedBy(String nodeId, List<String> eligibleNodeIds) {
         Objects.requireNonNull(nodeId, "nodeId");

@@ -31,17 +31,38 @@ import java.util.Optional;
  */
 public interface BatchStore {
 
-    /** {@code name} is the caller's label — persisted, never derived. */
+    /**
+     * {@code name} is the caller's label — persisted, never derived.
+     *
+     * @param batchId the identity of the batch
+     * @param name the human-readable name
+     * @param total the total number of batch members
+     */
     void insert(String batchId, String name, int total);
 
+    /**
+     * Looks up the current batch counters.
+     *
+     * @param batchId the identity of the batch
+     * @return the batch counters, or empty when the batch does not exist
+     */
     Optional<BatchCounters> find(String batchId);
 
     /**
+     * Increments the successful-member count for the batch.
+     *
+     * @param batchId the identity of the batch
      * @return the batch's balance after this increment; {@code pending() == 0} identifies this call
      *         as the one that closed the batch
      */
     BatchCounters incrementSucceeded(String batchId);
 
-    /** @see #incrementSucceeded */
+    /**
+     * Increments the failed-member count for the batch.
+     *
+     * @param batchId the identity of the batch
+     * @return the updated batch counters
+     * @see #incrementSucceeded
+     */
     BatchCounters incrementFailed(String batchId);
 }

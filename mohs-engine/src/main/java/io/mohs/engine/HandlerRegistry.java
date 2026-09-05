@@ -40,23 +40,54 @@ import io.mohs.core.job.JobKey;
  */
 public final class HandlerRegistry {
 
+    /**
+     * Creates an empty local handler registry.
+     */
+    public HandlerRegistry() {
+    }
+
     private final Map<JobKey, Registration> invocations = new ConcurrentHashMap<>();
 
+    /**
+     * Registers a local handler and its payload contract.
+     *
+     * @param key the stable identity of the job
+     * @param invocation the callable job handler
+     */
     public void register(JobKey key, JobHandler invocation) {
         register(key, invocation, null);
     }
 
+    /**
+     * Registers a local handler and its payload contract.
+     *
+     * @param key the stable identity of the job
+     * @param invocation the callable job handler
+     * @param payloadType the runtime payload class, or {@code null} when the handler declares none
+     */
     public void register(JobKey key, JobHandler invocation, @Nullable Class<?> payloadType) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(invocation, "invocation");
         invocations.put(key, new Registration(invocation, payloadType));
     }
 
+    /**
+     * Looks up the locally registered handler.
+     *
+     * @param key the stable identity of the job
+     * @return the handler, or empty when the key is not registered
+     */
     public Optional<JobHandler> find(JobKey key) {
         Objects.requireNonNull(key, "key");
         return Optional.ofNullable(invocations.get(key)).map(Registration::handler);
     }
 
+    /**
+     * Looks up the declared payload type of a local handler.
+     *
+     * @param key the stable identity of the job
+     * @return the payload class, or empty when no payload type is registered
+     */
     public Optional<Class<?>> payloadType(JobKey key) {
         Objects.requireNonNull(key, "key");
         return Optional.ofNullable(invocations.get(key)).map(Registration::payloadType);

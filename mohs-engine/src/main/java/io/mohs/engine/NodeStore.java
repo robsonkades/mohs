@@ -37,6 +37,12 @@ public interface NodeStore {
      * <p>The heartbeat now carries the NODE's lease: {@code epoch} (its incarnation) and
      * {@code expiresAt} (the "I am alive until here" promise the reaper consults — the liveness
      * authority that replaced per-execution renewal).
+     *
+     * @param nodeId the identity of the engine node
+     * @param state the current lifecycle state
+     * @param epoch the ownership generation used by the completion fence
+     * @param at the instant of the operation
+     * @param expiresAt the instant when the liveness lease expires
      */
     void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt);
 
@@ -46,6 +52,8 @@ public interface NodeStore {
      *
      * <p>A {@code List}, not a {@code Stream}: this table's size is bounded by the cluster's size and
      * does not grow without limit as {@link Execution} does.
+     *
+     * @return all recorded nodes, including stale nodes
      */
     List<StoredNode> findAll();
 
@@ -57,6 +65,7 @@ public interface NodeStore {
      * staleness at read time); the purge merely collects what has already become unreadable through
      * age.
      *
+     * @param cutoff the exclusive retention cutoff
      * @return how many rows were removed
      */
     int deleteHeartbeatsBefore(Instant cutoff);

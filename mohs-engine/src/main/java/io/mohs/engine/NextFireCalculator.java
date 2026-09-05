@@ -47,6 +47,12 @@ import io.mohs.cron.CronExpression;
 public final class NextFireCalculator {
 
     /**
+     * Creates a schedule calculator with an empty cron cache.
+     */
+    public NextFireCalculator() {
+    }
+
+    /**
      * The expression cache's ceiling. The key is operator-controlled ({@code PATCH /jobs/{key}} to
      * {@code reschedule} with a new expression), so without a ceiling a loop of reschedules with
      * distinct expressions would grow the map forever. In practice it is bounded by the number of
@@ -60,6 +66,9 @@ public final class NextFireCalculator {
     /**
      * The next firing strictly after {@code reference}. Empty only for an {@link OnDemandSpec}.
      *
+     * @param schedule the firing schedule to evaluate
+     * @param reference the exclusive lower bound for the next firing
+     * @return the next firing instant, or empty for an on-demand schedule
      * @throws IllegalArgumentException if the cron expression never fires (30 February, say) —
      *         syntactically valid, but unrealisable
      */

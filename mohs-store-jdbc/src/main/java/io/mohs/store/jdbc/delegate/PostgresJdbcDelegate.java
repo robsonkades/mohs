@@ -35,6 +35,12 @@ import io.mohs.store.jdbc.JdbcTimestamps;
  */
 public final class PostgresJdbcDelegate implements JdbcDelegate {
 
+    /**
+     * Creates a {@code PostgresJdbcDelegate} instance.
+     */
+    public PostgresJdbcDelegate() {
+    }
+
     /** {@code TIMESTAMPTZ}: the server answers with a zone, so the offset is exact without asking for UTC. */
     @Override
     public String nowQuery() {

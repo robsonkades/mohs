@@ -48,6 +48,11 @@ public final class JdbcStoreTransactions implements StoreTransactions {
 
     private final TransactionTemplate transactionTemplate;
 
+    /**
+     * Creates a {@code JdbcStoreTransactions} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     */
     public JdbcStoreTransactions(DataSource dataSource) {
         // DataSourceTransactionManager is created with nestedTransactionAllowed=true — NESTED here is a
         // pure JDBC savepoint, supported by all four databases

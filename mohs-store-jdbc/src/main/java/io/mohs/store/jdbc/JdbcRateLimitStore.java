@@ -84,6 +84,13 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     private final JdbcDelegate delegate;
     private final Set<String> unknownLimitsAlreadyWarned = ConcurrentHashMap.newKeySet();
 
+    /**
+     * Creates a {@code JdbcRateLimitStore} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     * @param clock the time source used by the component
+     * @param delegate the database-specific SQL and timestamp adapter
+     */
     public JdbcRateLimitStore(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
         // Its own template, not JdbcSupport.namedTemplateWithStreamFetchSize: this store's ceiling is its
         // own (BUCKET_LOCK_TIMEOUT, the one unconditional lock wait on the claim path), tighter than the

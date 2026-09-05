@@ -49,6 +49,7 @@ public final class SqlServerRcsiRequirement {
     /**
      * Refuses the boot unless {@code READ_COMMITTED_SNAPSHOT} is ON in the connection's database.
      *
+     * @param dataSource the configured database connection source
      * @throws IllegalStateException when the setting is OFF — the message carries the exact
      *         {@code ALTER DATABASE} to run — or when the database could not be inspected at all,
      *         with the {@link SQLException} as the cause

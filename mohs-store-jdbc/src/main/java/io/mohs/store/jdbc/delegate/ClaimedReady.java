@@ -21,6 +21,11 @@ import java.sql.SQLException;
 /**
  * One row claimed from the queue ({@code mohs_ready} to {@code mohs_lease}) — identity and the attempt
  * the entry becomes, never the payload (the dispatcher follows with ONE batched read of history).
+ *
+ * @param executionId the identity of the execution
+ * @param jobKey the stable identity of the job
+ * @param attempt the one-based attempt number
+ * @param priority the ordering priority used when claiming work
  */
 public record ClaimedReady(String executionId, String jobKey, int attempt, int priority) {
 

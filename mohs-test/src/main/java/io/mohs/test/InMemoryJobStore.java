@@ -67,10 +67,18 @@ public final class InMemoryJobStore implements JobStore {
     private final Clock clock;
     private final NextFireCalculator nextFireCalculator = new NextFireCalculator();
 
+    /**
+     * Creates a {@code InMemoryJobStore} with the supplied values.
+     */
     public InMemoryJobStore() {
         this(Clock.systemUTC());
     }
 
+    /**
+     * Creates a {@code InMemoryJobStore} with the supplied values.
+     *
+     * @param clock the time source used by the component
+     */
     public InMemoryJobStore(Clock clock) {
         this.clock = Objects.requireNonNull(clock, "clock");
     }

@@ -30,6 +30,12 @@ import io.mohs.store.jdbc.JdbcTimestamps;
 public final class MySqlJdbcDelegate implements JdbcDelegate {
 
     /**
+     * Creates a {@code MySqlJdbcDelegate} instance.
+     */
+    public MySqlJdbcDelegate() {
+    }
+
+    /**
      * {@code CURRENT_TIMESTAMP} is evaluated in the session's {@code time_zone} and materialised by
      * Connector/J in the JVM's zone, so it measured the distance between two zones rather than between
      * two clocks. {@code UTC_TIMESTAMP} states the zone instead of implying one; the explicit {@code (6)}

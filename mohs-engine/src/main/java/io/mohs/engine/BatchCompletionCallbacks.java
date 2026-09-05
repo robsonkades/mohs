@@ -52,6 +52,12 @@ import io.mohs.core.event.ExecutionListener;
  */
 public final class BatchCompletionCallbacks implements ExecutionListener {
 
+    /**
+     * Creates an empty batch callback registry.
+     */
+    public BatchCompletionCallbacks() {
+    }
+
     private static final Logger log = LoggerFactory.getLogger(BatchCompletionCallbacks.class);
 
     /** The LRU's ceiling — live batches observed in this JVM; above it, the oldest is evicted. */

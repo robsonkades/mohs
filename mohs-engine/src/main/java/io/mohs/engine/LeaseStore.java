@@ -45,9 +45,32 @@ import io.mohs.core.job.JobKey;
  */
 public interface LeaseStore {
 
-    /** A live lease. {@code attemptNumber} and {@code priority} came from the queue entry the claim consumed — which is what lets the reaper rebuild the requeue entry without reading history. */
+    /**
+     * A live lease. {@code attemptNumber} and {@code priority} came from the queue entry the claim consumed — which is what lets the reaper rebuild the requeue entry without reading history.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param nodeId the identity of the engine node
+     * @param epoch the ownership generation used by the completion fence
+     * @param attemptNumber the one-based attempt number
+     * @param priority the ordering priority used when claiming work
+     * @param claimedAt the instant ownership was granted
+     * @param cancelRequested whether cooperative cancellation has been requested
+     */
     record Lease(ExecutionId executionId, JobKey jobKey, String nodeId, long epoch, int attemptNumber, int priority,
             Instant claimedAt, boolean cancelRequested) {
+        /**
+         * Creates a {@code Lease} with the supplied values.
+         *
+         * @param executionId the identity of the execution
+         * @param jobKey the stable identity of the job
+         * @param nodeId the identity of the engine node
+         * @param epoch the ownership generation used by the completion fence
+         * @param attemptNumber the one-based attempt number
+         * @param priority the ordering priority used when claiming work
+         * @param claimedAt the instant ownership was granted
+         * @param cancelRequested whether cooperative cancellation has been requested
+         */
         public Lease {
             Objects.requireNonNull(executionId, "executionId");
             Objects.requireNonNull(jobKey, "jobKey");
@@ -74,11 +97,44 @@ public interface LeaseStore {
      * <p>{@code batchId} makes a terminal completion count towards the batch in the SAME transaction,
      * and {@code rearmNextFireAt} rearms the fixed-delay chain likewise — a separate write between the
      * commit and a crash would be lost.
+     *
+     * @param executionId the identity of the execution
+     * @param jobKey the stable identity of the job
+     * @param nodeId the identity of the engine node
+     * @param epoch the ownership generation used by the completion fence
+     * @param attemptNumber the one-based attempt number
+     * @param startedAt the instant this attempt began
+     * @param finishedAt the instant the attempt finished
+     * @param outcome the recorded outcome of the attempt
+     * @param errorType the failure class name, or {@code null} on success
+     * @param error the recorded failure text, or {@code null} when unavailable
+     * @param terminalState the terminal execution state, or {@code null} when retrying
+     * @param retry the retry queue entry, or {@code null} for a terminal result
+     * @param batchId the identity of the batch
+     * @param rearmNextFireAt the fixed-delay rearm instant, or {@code null} for no rearm
      */
     record CompletionResult(ExecutionId executionId, JobKey jobKey, String nodeId, long epoch, int attemptNumber,
             Instant startedAt, Instant finishedAt, ExecutionState outcome, @Nullable String errorType, @Nullable String error,
             @Nullable ExecutionState terminalState,
             WorkQueue.@Nullable ReadyEntry retry, @Nullable String batchId, @Nullable Instant rearmNextFireAt) {
+        /**
+         * Creates a {@code CompletionResult} with the supplied values.
+         *
+         * @param executionId the identity of the execution
+         * @param jobKey the stable identity of the job
+         * @param nodeId the identity of the engine node
+         * @param epoch the ownership generation used by the completion fence
+         * @param attemptNumber the one-based attempt number
+         * @param startedAt the instant this attempt began
+         * @param finishedAt the instant the attempt finished
+         * @param outcome the recorded outcome of the attempt
+         * @param errorType the failure class name, or {@code null} on success
+         * @param error the recorded failure text, or {@code null} when unavailable
+         * @param terminalState the terminal execution state, or {@code null} when retrying
+         * @param retry the retry queue entry, or {@code null} for a terminal result
+         * @param batchId the identity of the batch
+         * @param rearmNextFireAt the fixed-delay rearm instant, or {@code null} for no rearm
+         */
         public CompletionResult {
             Objects.requireNonNull(executionId, "executionId");
             Objects.requireNonNull(jobKey, "jobKey");
@@ -98,7 +154,22 @@ public interface LeaseStore {
             }
         }
 
-        /** The form with neither batch nor rearm — the majority of completions. */
+        /**
+         * The form with neither batch nor rearm — the majority of completions.
+         *
+         * @param executionId the identity of the execution
+         * @param jobKey the stable identity of the job
+         * @param nodeId the identity of the engine node
+         * @param epoch the ownership generation used by the completion fence
+         * @param attemptNumber the one-based attempt number
+         * @param startedAt the instant this attempt began
+         * @param finishedAt the instant the attempt finished
+         * @param outcome the recorded outcome of the attempt
+         * @param errorType the failure class name, or {@code null} on success
+         * @param error the recorded failure text, or {@code null} when unavailable
+         * @param terminalState the terminal execution state, or {@code null} when retrying
+         * @param retry the retry queue entry, or {@code null} for a terminal result
+         */
         public CompletionResult(ExecutionId executionId, JobKey jobKey, String nodeId, long epoch, int attemptNumber,
                 Instant startedAt, Instant finishedAt, ExecutionState outcome, @Nullable String errorType,
                 @Nullable String error, @Nullable ExecutionState terminalState,
@@ -114,11 +185,20 @@ public interface LeaseStore {
      * written; {@code closedBatch} is filled only for the SINGLE completion that zeroed the batch's
      * pending count — the balance comes up from the transaction itself, never from a re-read (two
      * concurrent re-reads would both believe they closed it).
+     *
+     * @param owned whether the ownership fence accepted this completion
+     * @param closedBatch the counters when this completion closes the batch, or {@code null}
      */
     record Completion(boolean owned, @Nullable BatchCounters closedBatch) {
 
         public static final Completion FENCED_OUT = new Completion(false, null);
 
+        /**
+         * Creates an accepted completion, optionally carrying the batch it closed.
+         *
+         * @param closedBatch the counters when this completion closes the batch, or {@code null}
+         * @return an accepted fence outcome with the supplied batch counters
+         */
         public static Completion owned(@Nullable BatchCounters closedBatch) {
             return new Completion(true, closedBatch);
         }
@@ -134,6 +214,10 @@ public interface LeaseStore {
      * <p>A result with {@code owned = false} belonged to a lost incarnation and is discarded —
      * detected, never silently lost. {@code jobStore} comes in for the same reason as before: the
      * rearm takes part in the transaction by sharing the {@code DataSource}.
+     *
+     * @param results the completion results to persist
+     * @param jobStore the persistence port for job definitions and triggers
+     * @return the fence outcome for each submitted execution
      */
     Map<ExecutionId, Completion> complete(List<CompletionResult> results, JobStore jobStore);
 
@@ -143,10 +227,19 @@ public interface LeaseStore {
      * that waits on a lock (a peer reaping the same orphan, a host transaction on the definition
      * row the rearm touches) must give up before the node's own promise expires, where the flusher's
      * completion may wait as long as it needs.
+     *
+     * @param results the completion results to persist
+     * @param jobStore the persistence port for job definitions and triggers
+     * @return the fence outcome for each submitted execution
      */
     Map<ExecutionId, Completion> reclaim(List<CompletionResult> results, JobStore jobStore);
 
-    /** These nodes' leases — the raw material of the drain visible in {@code GET /nodes}. */
+    /**
+     * These nodes' leases — the raw material of the drain visible in {@code GET /nodes}.
+     *
+     * @param nodeIds the node identities to query
+     * @return the leases owned by the requested nodes
+     */
     List<Lease> findByNodes(Collection<String> nodeIds);
 
     /**
@@ -156,15 +249,34 @@ public interface LeaseStore {
      *
      * <p>Bounded to {@code limit} per call, oldest first ({@code claimed_at}) — a mass death drains
      * over several passes, never in one unbounded transaction.
+     *
+     * @param aliveNodeIds the nodes whose liveness leases have not expired
+     * @param limit the maximum number of results in one batch
+     * @return the leases whose owners are no longer alive
      */
     List<Lease> findOrphaned(Collection<String> aliveNodeIds, int limit);
 
-    /** The derived cap: a per-job count of the live leases, read ONCE per round — never per candidate. */
+    /**
+     * The derived cap: a per-job count of the live leases, read ONCE per round — never per candidate.
+     *
+     * @param jobKeys the job identities to query
+     * @return the live lease count for each requested job
+     */
     Map<JobKey, Integer> countByJob(Collection<JobKey> jobKeys);
 
-    /** Cooperative cancellation over the ownership: it raises the flag if the lease exists; {@code false} means it is not executing. */
+    /**
+     * Cooperative cancellation over the ownership: it raises the flag if the lease exists; {@code false} means it is not executing.
+     *
+     * @param id the identity of the execution
+     * @return whether a live lease was marked for cancellation
+     */
     boolean requestCancellation(ExecutionId id);
 
-    /** The tick's poll: of these in-flight ids, which have a pending cancel order. */
+    /**
+     * The tick's poll: of these in-flight ids, which have a pending cancel order.
+     *
+     * @param ids the execution identities to look up
+     * @return the leased execution identities with cancellation requested
+     */
     Set<ExecutionId> findCancelRequested(Collection<ExecutionId> ids);
 }

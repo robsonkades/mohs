@@ -49,11 +49,20 @@ public final class RetryPolicyRegistry {
 
     private final Map<String, RetryPolicy> policies;
 
+    /**
+     * Creates a {@code RetryPolicyRegistry} with the supplied values.
+     *
+     * @param policies the named retry policies
+     */
     public RetryPolicyRegistry(Map<String, RetryPolicy> policies) {
         this.policies = Map.copyOf(Objects.requireNonNull(policies, "policies"));
     }
 
-    /** The registry a deployment with no custom policy gets — every job on the built-in backoff. */
+    /**
+     * The registry a deployment with no custom policy gets — every job on the built-in backoff.
+     *
+     * @return a registry with no custom policies
+     */
     public static RetryPolicyRegistry empty() {
         return new RetryPolicyRegistry(Map.of());
     }
@@ -61,6 +70,9 @@ public final class RetryPolicyRegistry {
     /**
      * Fails when the name has no policy, so the gap surfaces at boot rather than at the first
      * failure of the job that declared it.
+     *
+     * @param name the registered retry-policy name
+     * @return the registered policy
      */
     public RetryPolicy require(String name) {
         RetryPolicy policy = policies.get(name);
@@ -76,6 +88,12 @@ public final class RetryPolicyRegistry {
         return policies.isEmpty() ? "(no RetryPolicy bean is declared at all)" : "(declared: " + policies.keySet() + ")";
     }
 
+    /**
+     * Checks whether a named retry policy is registered.
+     *
+     * @param name the registered retry-policy name
+     * @return whether the name is registered
+     */
     public boolean contains(String name) {
         return policies.containsKey(name);
     }
@@ -87,6 +105,12 @@ public final class RetryPolicyRegistry {
      * the execution falls back to the built-in schedule and the policy's throw is logged. Anything
      * else would let a bug in a user's Strategy strand executions in {@code RUNNING} — the one
      * outcome the completion path must never produce.
+     *
+     * @param definition the registered job definition
+     * @param failedAttempt the one-based number of the failed attempt
+     * @param error the failure that ended the attempt
+     * @param now the current instant from the configured time source
+     * @return the retry instant, or empty when the failure is terminal
      */
     public Optional<Instant> nextRetryAt(JobDefinition definition, int failedAttempt, @Nullable Throwable error,
             Instant now) {

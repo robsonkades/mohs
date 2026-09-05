@@ -81,6 +81,13 @@ public final class DatabaseClock extends Clock implements SyncableClock {
         }
     }
 
+    /**
+     * Creates a {@code DatabaseClock} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     * @param skewWarnThreshold the offset magnitude above which a warning is logged
+     * @param delegate the database-specific time query and timestamp adapter
+     */
     public DatabaseClock(DataSource dataSource, Duration skewWarnThreshold, JdbcDelegate delegate) {
         this(dataSource, skewWarnThreshold, delegate, ZoneId.of("UTC"), Clock.systemUTC());
     }
@@ -143,6 +150,8 @@ public final class DatabaseClock extends Clock implements SyncableClock {
      * decision, not this class's: a failed resample must not stop an engine that is already running,
      * while a failed FIRST sample means the engine would start on the very clock the operator said not
      * to trust.
+     *
+     * @return whether at least one database time sample has been accepted
      */
     public boolean isSynchronised() {
         return sample.get().measured();

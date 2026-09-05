@@ -69,6 +69,11 @@ public final class RunnerRegistry implements AutoCloseable {
         }
     }
 
+    /**
+     * Creates a {@code RunnerRegistry} with the supplied values.
+     *
+     * @param runners the declared runner configurations
+     */
     public RunnerRegistry(List<MohsRunner> runners) {
         this(runners, RunnerRegistry::build);
     }
@@ -200,6 +205,8 @@ public final class RunnerRegistry implements AutoCloseable {
      * <p>Ordered by name because {@code executors} is a {@code Map.copyOf} — with no defined order. A
      * list that changes order between two reads would make the dashboard's table dance on every
      * refresh; alphabetical is stable and needs no explanation.
+     *
+     * @return the local runner configurations and current occupancy
      */
     public List<RunnerSnapshot> snapshots() {
         return executors.values().stream()
@@ -221,6 +228,9 @@ public final class RunnerRegistry implements AutoCloseable {
      * {@code JobDefinition.runner()}: "null uses the default runner". An unknown name throws, and the
      * caller (today, {@link Engine#submitDispatch}) decides what to do (fail only the execution, not
      * the whole node).
+     *
+     * @param runnerName the runner name, or {@code null} for the default runner
+     * @return the executor for the selected runner
      */
     public AsyncTaskExecutor resolve(@Nullable String runnerName) {
         String name = runnerName == null ? DEFAULT_RUNNER : runnerName;

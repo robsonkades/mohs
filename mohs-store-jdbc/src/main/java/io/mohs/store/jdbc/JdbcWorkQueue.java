@@ -64,6 +64,13 @@ public final class JdbcWorkQueue implements WorkQueue {
     private final JdbcDelegate delegate;
     private final BatchStore batchStore;
 
+    /**
+     * Creates a {@code JdbcWorkQueue} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     * @param delegate the database-specific SQL and timestamp adapter
+     * @param batchStore the persistence port for batch counters
+     */
     public JdbcWorkQueue(DataSource dataSource, JdbcDelegate delegate, BatchStore batchStore) {
         Objects.requireNonNull(dataSource, "dataSource");
         // The offer joins the caller's enqueue transaction, and cancel/rearm serve the API: none of

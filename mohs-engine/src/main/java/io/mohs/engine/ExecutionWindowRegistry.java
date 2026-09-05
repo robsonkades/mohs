@@ -41,6 +41,11 @@ public final class ExecutionWindowRegistry {
 
     private final Map<String, ExecutionWindow> windows;
 
+    /**
+     * Creates a {@code ExecutionWindowRegistry} with the supplied values.
+     *
+     * @param windows the declared firing exclusion windows
+     */
     public ExecutionWindowRegistry(List<ExecutionWindow> windows) {
         Objects.requireNonNull(windows, "windows");
         Map<String, ExecutionWindow> byName = new LinkedHashMap<>();
@@ -58,6 +63,10 @@ public final class ExecutionWindowRegistry {
      * excludes: fail-safe, since a typo in the configuration must not let a job slip past the
      * intended exclusion window (silently permitting would be worse than blocking until the
      * configuration is fixed) — with a WARN on every occurrence.
+     *
+     * @param windowName the named exclusion window, or {@code null} for no exclusion
+     * @param now the current instant from the configured time source
+     * @return whether the named window excludes the instant; false for no matching window
      */
     public boolean excludes(@Nullable String windowName, Instant now) {
         if (windowName == null) {

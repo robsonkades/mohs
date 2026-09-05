@@ -43,6 +43,12 @@ public final class JdbcNodeStore implements NodeStore {
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final JdbcDelegate delegate;
 
+    /**
+     * Creates a {@code JdbcNodeStore} with the supplied values.
+     *
+     * @param dataSource the configured database connection source
+     * @param delegate the database-specific SQL and timestamp adapter
+     */
     public JdbcNodeStore(DataSource dataSource, JdbcDelegate delegate) {
         // One template, the tick's: the heartbeat is the statement that must never wait out the lease,
         // and the purge runs on the same thread. The peers read also serves the facade's node listing —
