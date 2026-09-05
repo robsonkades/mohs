@@ -30,7 +30,7 @@
   --surface-bright: #38393b; /* hover layer inside cards */
   --ink: #e3e2e5; /* on-surface */
   --ink-secondary: #c5c5d8; /* on-surface-variant */
-  --ink-muted: #8f8fa1; /* outline */
+  --ink-muted: #a6a6b7; /* readable secondary text, including on the hover layer */
   --gridline: #1f2124; /* border-subtle */
   --baseline: #444655; /* outline-variant */
   --border-hairline: #1f2124;
@@ -211,6 +211,20 @@
 }
 
 @layer components {
+  .metric-cell {
+    box-shadow: 1px 1px 0 var(--gridline);
+  }
+
+  .workspace-content {
+    scroll-margin-top: 5.5rem;
+    animation: workspace-enter 180ms ease-out;
+  }
+
+  @keyframes workspace-enter {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
   /* "Machine data" label: JetBrains Mono 11px, wide-tracked uppercase. */
   .mono-label {
     font-family: var(--font-mono);
@@ -267,6 +281,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .workspace-content { animation: none; }
+    .metric-cell, .metric-cell svg { transition: none; }
     .progress-bar-fill {
       animation: none;
     }

@@ -16,11 +16,13 @@ export function SiteHeader({ streamStatus }: { streamStatus: StreamStatus }) {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      const typing = /^(input|textarea|select)$/i.test((e.target as HTMLElement)?.tagName ?? "");
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const typing = target?.isContentEditable || !!target?.closest("input, textarea, select, [role='textbox']");
+      if (e.isComposing || e.defaultPrevented || e.repeat) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((open) => !open);
-      } else if (e.key === "/" && !typing) {
+      } else if (e.key === "/" && !typing && !e.altKey && !e.ctrlKey && !e.metaKey && !document.querySelector('[role="dialog"]')) {
         e.preventDefault();
         setPaletteOpen(true);
       }
@@ -30,24 +32,24 @@ export function SiteHeader({ streamStatus }: { streamStatus: StreamStatus }) {
   }, []);
 
   return (
-    <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur-md lg:px-6">
+    <header className="sticky top-0 z-30 flex h-18 shrink-0 items-center gap-2 border-b bg-background/90 px-3 backdrop-blur-md sm:gap-3 lg:px-6">
       <SidebarTrigger />
       <Separator orientation="vertical" className="h-4" />
       <div className="flex min-w-0 flex-col">
-        <h1 className="text-sm font-semibold leading-tight">{currentItem?.label}</h1>
+        <h1 className="text-base font-semibold leading-tight tracking-tight sm:text-lg">{currentItem?.label}</h1>
         {currentItem?.subtitle && (
-          <p className="truncate text-xs leading-tight text-muted-foreground">{currentItem.subtitle}</p>
+          <p className="mt-1 hidden truncate text-xs leading-tight text-muted-foreground sm:block">{currentItem.subtitle}</p>
         )}
       </div>
       <Button
         variant="outline"
         onClick={() => setPaletteOpen(true)}
-        className="ml-3 hidden gap-2 text-xs text-muted-foreground md:flex"
+        className="ml-1 shrink-0 gap-2 text-xs text-muted-foreground md:ml-5 md:w-48 md:justify-start"
         aria-label="Open global search"
       >
         <IconSearch className="size-3.5" />
-        Search
-        <kbd className="rounded-sm border bg-background px-1 font-mono text-[10px]">/</kbd>
+        <span className="hidden md:inline">Search pages & jobs</span>
+        <kbd className="ml-auto hidden rounded-sm border bg-background px-1 font-mono text-[10px] md:inline">/</kbd>
       </Button>
       <RefreshControls streamStatus={streamStatus} />
 

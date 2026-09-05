@@ -21,12 +21,11 @@ export function Section({ children, className }: { children: ReactNode; classNam
 }
 
 /**
- * The metric row every page opens with. Fixed at two columns on phones and growing to `columns`
- * on wide screens: the cards are equal-weight by definition, so they get equal width, and the
- * `gap-4` matches the grid the panels below sit on.
+ * A shared metric strip: two columns on phones, expanding with the available space.
+ * Hairline dividers group the readings without framing each number as a separate panel.
  */
 export function StatGrid({ columns, children }: { columns: 3 | 4 | 6; children: ReactNode }) {
-  return <div className={cn("grid grid-cols-2 gap-4", STAT_GRID_COLUMNS[columns])}>{children}</div>;
+  return <div className={cn("metric-strip grid grid-cols-2 overflow-hidden rounded-xl border bg-card/40", STAT_GRID_COLUMNS[columns])}>{children}</div>;
 }
 
 /** Written out rather than interpolated — Tailwind only sees class names it can find in the source. */

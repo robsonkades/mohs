@@ -4,6 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { fetchJobs } from "../lib/api";
 import { queryKeys } from "../lib/queryKeys";
 import { NAV_ITEMS } from "@/components/AppSidebar";
+import { IconArrowRight, IconListChecks } from "@/components/Icons";
+import { Button } from "@/components/ui/button";
 import {
   Command,
   CommandDialog,
@@ -69,14 +71,25 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       <Command shouldFilter={false}>
         <CommandInput placeholder="Search pages and jobs…" value={query} onValueChange={setQuery} />
         <CommandList>
+          {jobs.isError && (
+            <div role="status" className="flex items-center justify-between gap-3 border-b px-3 py-3 text-xs text-muted-foreground">
+              <span>Job search is unavailable. You can still navigate to pages.</span>
+              <Button size="sm" variant="outline" disabled={jobs.isFetching} onClick={() => void jobs.refetch()}>Retry</Button>
+            </div>
+          )}
           {pages.length === 0 && matchingJobs.length === 0 && (
-            <CommandEmpty>{jobs.isFetching ? "Searching…" : `Nothing matches “${query}”.`}</CommandEmpty>
+            <CommandEmpty>{jobs.isFetching ? "Searching…" : jobs.isError ? "No matching pages. Retry job search above." : `Nothing matches “${query}”.`}</CommandEmpty>
           )}
           {pages.length > 0 && (
             <CommandGroup heading="Pages">
               {pages.map((page) => (
-                <CommandItem key={page.to} value={"page:" + page.to} onSelect={() => goToPage(page.to)}>
-                  <span className="font-medium">{page.label}</span>
+                <CommandItem key={page.to} value={"page:" + page.to} onSelect={() => goToPage(page.to)} className="gap-3 py-3">
+                  <page.icon className="size-4 text-muted-foreground" />
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <span className="font-medium">{page.label}</span>
+                    <span className="truncate text-xs text-muted-foreground">{page.subtitle}</span>
+                  </span>
+                  <IconArrowRight className="ml-auto size-3.5 text-muted-foreground" />
                 </CommandItem>
               ))}
             </CommandGroup>
@@ -84,13 +97,21 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
           {matchingJobs.length > 0 && (
             <CommandGroup heading="Jobs">
               {matchingJobs.map((job) => (
-                <CommandItem key={job.jobKey} value={"job:" + job.jobKey} onSelect={() => goToJob(job.jobKey)}>
-                  <span className="font-mono text-xs">{job.jobKey}</span>
+                <CommandItem key={job.jobKey} value={"job:" + job.jobKey} onSelect={() => goToJob(job.jobKey)} className="gap-3 py-3">
+                  <IconListChecks className="size-4 text-muted-foreground" />
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <span className="truncate font-medium">{job.name}</span>
+                    <span className="truncate font-mono text-xs text-muted-foreground">{job.jobKey}</span>
+                  </span>
+                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">{job.paused ? "Paused" : "Active"}</span>
                 </CommandItem>
               ))}
             </CommandGroup>
           )}
         </CommandList>
+        <div className="flex gap-4 border-t px-3 py-2.5 text-[11px] text-muted-foreground" aria-hidden="true">
+          <span>↑ ↓ to navigate</span><span>↵ to open</span><span className="ml-auto">Esc to close</span>
+        </div>
       </Command>
     </CommandDialog>
   );
