@@ -85,6 +85,28 @@
                     </execution>
                 </executions>
             </plugin>
+            <!-- Maven Central requires a javadoc jar on every jar artifact of a deployment. This module
+                 has no Java, so the inherited javadoc:jar runs and produces nothing — the deployment
+                 would be rejected as a whole. An empty jar under the javadoc classifier is the
+                 conventional answer for a resources-only artifact. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>empty-javadoc-jar</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>javadoc</classifier>
+                            <classesDirectory>${project.build.directory}/javadoc-placeholder</classesDirectory>
+                            <skipIfEmpty>false</skipIfEmpty>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 </project>

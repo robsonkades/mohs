@@ -1,11 +1,19 @@
 name: Release
 
-# Manually triggered release pipeline:
-#   1. sets the project version in pom.xml
-#   2. builds and runs the full test suite
-#   3. commits the version bump, tags it (v<version>) and pushes
-#   4. deploys the signed artifacts to Maven Central (central-publishing-maven-plugin)
-#   5. creates the GitHub Release with the jars attached and generated notes
+# Manually triggered release pipeline, in two jobs so the signing key is never in the same
+# process as the code the build executes:
+#   build   (no secrets) 1. sets the project version in pom.xml
+#                        2. builds and runs the full test suite
+#                        3. commits the version bump, tags it (v<version>) and pushes
+#                        4. hands the built dashboard bundle to the next job
+#   publish (secrets)    5. checks out the tag, imports the signing key, deploys the signed
+#                           artifacts to Maven Central (central-publishing-maven-plugin)
+#                        6. creates the GitHub Release with the jars attached and generated notes
+#
+# The split is the point, not an optimisation: `verify` runs every Maven plugin, every test and
+# the whole npm dependency tree of the dashboard. None of that should execute with the private
+# key in the runner's keyring and the Central credentials one step away. The publish job only
+# re-packages: tests are skipped, the frontend is skipped behind the bundle the build job produced.
 #
 # Required repository secrets:
 #   CENTRAL_USERNAME       - Sonatype Central Portal token username
@@ -24,12 +32,16 @@ on:
         description: "Release version (e.g. 0.1.0)"
         required: true
 
-permissions:
-  contents: write
+# Two releases dispatched together would race on the tag and on the version commit.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       VERSION: ${{ inputs.version }}
     steps:
@@ -53,16 +65,12 @@ jobs:
 
       # The reactor pins maven.compiler.release=25 (see pom.xml) — javac's --release can't
       # target a version newer than the JDK actually running it, so this can only build on 25+.
+      # No server-id and no gpg-private-key here: this job never signs and never deploys.
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 25
           cache: maven
-          server-id: central
-          server-username: CENTRAL_USERNAME
-          server-password: CENTRAL_PASSWORD
-          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
-          gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
       # mohs-bom has no <parent> (see its pom.xml) and versions:set therefore does not reach it
       # from the reactor alone — -DprocessAllModules covers the aggregated modules regardless of
@@ -70,8 +78,8 @@ jobs:
       - name: Set release version
         run: mvn -B -ntp versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false -DprocessAllModules=true
 
-      # Never -Dskip.frontend=true: mohs-ui's jar is the built dashboard bundle and nothing else,
-      # so skipping the frontend publishes an empty artifact.
+      # Never -Dskip.frontend=true here: this is the one build of the dashboard bundle the release
+      # gets, and the publish job packages exactly what this step produced.
       - name: Build and test
         run: mvn -B -ntp verify -Dgpg.skip=true
 
@@ -88,12 +96,68 @@ jobs:
           git tag -a "v$VERSION" -m "Release $VERSION"
           git push origin HEAD "v$VERSION"
 
+      # The same path maven.yml caches: the built dashboard, and nothing else, crosses the job
+      # boundary. Everything Java is rebuilt from the tag by the publish job.
+      - name: Hand the dashboard bundle to the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: mohs-ui-bundle
+          path: mohs-ui/target/classes/mohs-ui-webapp
+          if-no-files-found: error
+          # Long enough to re-run a failed publish job after a weekend: the tag is already pushed by
+          # then, and this artifact is the only thing the re-run cannot rebuild from it.
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      # The tag the build job pushed, so what is signed is what was tested.
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ inputs.version }}
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Restore the dashboard bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: mohs-ui-bundle
+          path: mohs-ui/target/classes/mohs-ui-webapp
+
+      # -Dskip.frontend=true below is only safe because the bundle was just restored; an empty
+      # restore would sign and publish an empty mohs-ui jar, which is what this guard refuses.
+      - name: Verify the dashboard bundle is present
+        run: |
+          bundle=mohs-ui/target/classes/mohs-ui-webapp
+          if [ ! -f "$bundle/index.html" ]; then
+            echo "::error::$bundle/index.html is missing — the bundle artifact from the build job restored nothing."
+            exit 1
+          fi
+
       # mohs-demo is a runnable reference app and mohs-benchmark is a load/chaos harness: neither
       # is published (both set maven.deploy.skip and skipPublishing in their poms; excluding them
       # here keeps them out of the build too). Every other module, mohs-bom included, is deployed.
       # -Dgpg.skip=false overrides the safe local-dev default (see pom.xml) to actually sign.
+      # -Dmohs.test-jar.skip=true keeps mohs-store-jdbc's tests jar (Testcontainers support for
+      # mohs-benchmark, reactor-only) out of the deployed set: Central artifacts cannot be withdrawn.
       - name: Deploy to Maven Central
-        run: mvn -B -ntp deploy -DskipTests -Dgpg.skip=false -pl '!mohs-demo,!mohs-benchmark'
+        run: >
+          mvn -B -ntp deploy -DskipTests -Dskip.frontend=true -Dgpg.skip=false -Dmohs.test-jar.skip=true
+          -pl '!mohs-demo,!mohs-benchmark'
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
@@ -104,9 +168,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # One jar/sources/javadoc triple per published module (mohs-*/target), excluding the two
-          # unpublished modules and mohs-bom (packaging=pom, no jar produced).
+          # unpublished modules and mohs-bom (packaging=pom, no jar produced). The tests jar is
+          # not built in this job at all, and the -not -name keeps that true should it ever be.
           mapfile -t assets < <(find mohs-*/target -maxdepth 1 -name "mohs-*-${VERSION}*.jar" \
-            -not -path "mohs-demo/*" -not -path "mohs-benchmark/*")
+            -not -name "*-tests.jar" -not -path "mohs-demo/*" -not -path "mohs-benchmark/*")
           gh release create "v$VERSION" \
             "${assets[@]}" \
             --title "v$VERSION" \

@@ -32,8 +32,9 @@ jobs:
       # The BUILT bundle, keyed on everything that decides its content: the frontend sources AND
       # mohs-ui/pom.xml, which pins the Node version and the output directory. A hit means the
       # cached bundle is what a build would have produced, so restoring it is not a shortcut past
-      # the dashboard's tests — MohsUiIntegrationTest still asserts the real Vite index and its
-      # hashed assets, against a real bundle.
+      # the dashboard's tests — MohsUiAutoConfigurationTest exercises the serving rules (immutable
+      # assets, 404 for a missing one, the SPA fallback) over the starter's stub bundle, and
+      # SchemaPostgresRoundTripTest & co. never touch the bundle at all.
       #
       # Restore and save are split on purpose (see the save step at the end): a single cache step
       # would also save from a FAILED run, and a bundle-less save on this key would make every

@@ -15,6 +15,10 @@
     <name>Mohs :: Store JDBC</name>
     <description>JDBC persistence for jobs and executions, with per-database SQL and the DDL schemas.</description>
 
+    <properties>
+        <mohs.test-jar.skip>false</mohs.test-jar.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>io.github.robsonkades</groupId>
@@ -95,10 +99,16 @@
                     </archive>
                 </configuration>
                 <executions>
+                    <!-- The tests jar exists for one consumer inside the reactor: mohs-benchmark reuses the
+                         Testcontainers support classes. It is not API and must not reach Maven Central,
+                         so the release deploy skips it with -Dmohs.test-jar.skip=true. -->
                     <execution>
                         <goals>
                             <goal>test-jar</goal>
                         </goals>
+                        <configuration>
+                            <skip>${mohs.test-jar.skip}</skip>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
