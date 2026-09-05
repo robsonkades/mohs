@@ -523,7 +523,7 @@ public final class SqlServerJdbcDelegate implements JdbcDelegate {
     @Override
     public String findDueRecurringJobs() {
         return """
-                SELECT * FROM mohs_job_definitions
+                SELECT TOP (:limit) * FROM mohs_job_definitions
                 WHERE retired = :retired AND paused = :paused AND orphaned = :orphaned
                   AND next_fire_at IS NOT NULL AND next_fire_at <= :now
                 ORDER BY next_fire_at

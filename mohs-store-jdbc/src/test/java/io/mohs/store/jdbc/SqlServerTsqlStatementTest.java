@@ -16,6 +16,7 @@
 package io.mohs.store.jdbc;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -88,6 +89,23 @@ class SqlServerTsqlStatementTest {
         historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), delegate);
         new JdbcJobStore(dataSource, clock, delegate).upsert(
                 JobDefinition.of("job-a", Handler.class, spec -> spec.onDemand().runner("io")));
+    }
+
+    /**
+     * {@code findDueRecurringJobs}: {@code TOP (:limit)} leads the sweep now that the ceiling lives in
+     * the SQL. The ceiling and the {@code ORDER BY next_fire_at} are asserted together, with keys whose
+     * lexicographic order contradicts the firing order — the same trick as the reaper's sweep below.
+     */
+    @Test
+    void findDueRecurringBoundsWithTopAndFiresOldestFirst() {
+        JdbcJobStore jobStore = new JdbcJobStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC), new SqlServerJdbcDelegate());
+        jobStore.upsert(JobDefinition.of("job-b-due-later", Handler.class, spec -> spec.every(Duration.ofMinutes(5))));
+        jobStore.upsert(JobDefinition.of("job-a-due-first", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+
+        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 1))
+                .extracting(job -> job.definition().key().value())
+                .containsExactly("job-a-due-first");
+        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 10)).hasSize(2);
     }
 
     /**

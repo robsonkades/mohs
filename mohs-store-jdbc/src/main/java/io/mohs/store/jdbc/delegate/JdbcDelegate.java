@@ -448,9 +448,10 @@ public interface JdbcDelegate {
     String findAllAnnotationSourcedJobs();
 
     /**
-     * The due recurring triggers, ordered. The ceiling is applied in Java over the cursor
-     * ({@code Stream.limit}), not in SQL — the table is small by nature (definitions, not executions),
-     * and no index leads with {@code next_fire_at} for the same reason.
+     * The due recurring triggers, oldest first, at most {@code :limit} — the ceiling is in the SQL so
+     * the planner walks {@code idx_mohs_job_next_fire} in order and stops, instead of the driver
+     * materialising every due row before Java can cut the list (see {@code JdbcJobStore#findDueRecurring}
+     * for the measurement that moved it).
      */
     String findDueRecurringJobs();
 

@@ -530,6 +530,7 @@ public final class H2JdbcDelegate implements JdbcDelegate {
                 WHERE retired = :retired AND paused = :paused AND orphaned = :orphaned
                   AND next_fire_at IS NOT NULL AND next_fire_at <= :now
                 ORDER BY next_fire_at
+                LIMIT :limit
                 """;
     }
 
