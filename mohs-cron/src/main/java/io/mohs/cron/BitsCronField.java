@@ -17,7 +17,10 @@
  * (https://github.com/spring-projects/spring-framework), under the same license. Changes: moved
  * to this package; dropped the org.springframework.util.Assert/StringUtils dependency
  * (Assert/StringUtils in this package cover the same calls) — org.jspecify.annotations.Nullable
- * is back, now that this project depends on JSpecify directly; no other functional changes.
+ * is back, now that this project depends on JSpecify directly. ONE functional divergence: a
+ * day-of-week range of width zero written as "7-7" (or "SUN-SUN") is Sunday, not every day —
+ * upstream's rewrite of a leading 7 to 0 fires for it too and expands the range to 0..7 (see
+ * parseRange).
  */
 package io.mohs.cron;
 
@@ -159,8 +162,11 @@ final class BitsCronField extends CronField {
                 int max = Integer.parseInt(value, hyphenPos + 1, value.length(), 10);
                 min = type.checkValidValue(min);
                 max = type.checkValidValue(max);
-                if (type == Type.DAY_OF_WEEK && min == 7) {
-                    // If used as a minimum in a range, Sunday means 0 (not 7)
+                // If used as a minimum in a WRAPPING range, Sunday means 0 (not 7): "7-1" is Sunday to
+                // Monday. Upstream applied the rewrite to "7-7" as well, turning a range of width zero
+                // into 0..7 — every day of the week for an expression that says Sunday (the divergence
+                // this file's header records)
+                if (type == Type.DAY_OF_WEEK && min == 7 && max != 7) {
                     min = 0;
                 }
                 return ValueRange.of(min, max);

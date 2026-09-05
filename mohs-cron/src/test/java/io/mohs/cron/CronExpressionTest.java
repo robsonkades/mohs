@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.DayOfWeek;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 
@@ -175,6 +176,39 @@ class CronExpressionTest {
         assertThat(CronExpression.isValidExpression("0 0 2 * * *")).isTrue();
         assertThat(CronExpression.isValidExpression("garbage")).isFalse();
         assertThat(CronExpression.isValidExpression(null)).isFalse();
+    }
+
+    /**
+     * A day-of-week range of width zero on Sunday — {@code 7-7}, or {@code SUN-SUN} once the ordinals
+     * are replaced — is Sunday, not every day. The rewrite that makes a WRAPPING {@code 7-1} mean
+     * Sunday-to-Monday used to fire for it too, and "weekly on Sunday" ran seven times a week.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"0 0 3 * * 7-7", "0 0 3 * * SUN-SUN"})
+    void aSundayOnlyRangeFiresOnSundaysOnly(String expression) {
+        CronExpression cron = CronExpression.parse(expression);
+        ZonedDateTime monday = ZonedDateTime.of(2026, 1, 5, 0, 0, 0, 0, ZoneOffset.UTC);
+
+        ZonedDateTime first = cron.next(monday);
+
+        assertThat(first).isNotNull();
+        assertThat(first.getDayOfWeek()).isEqualTo(DayOfWeek.SUNDAY);
+        assertThat(cron.next(first)).isEqualTo(first.plusDays(7));
+    }
+
+    /** The counterpart the fix must preserve: a wrapping range that starts on Sunday still means Sunday and Monday. */
+    @Test
+    void aWrappingSundayRangeStillMeansSundayAndMonday() {
+        CronExpression cron = CronExpression.parse("0 0 3 * * 7-1");
+        ZonedDateTime monday = ZonedDateTime.of(2026, 1, 5, 0, 0, 0, 0, ZoneOffset.UTC);
+
+        ZonedDateTime first = cron.next(monday);
+        ZonedDateTime second = cron.next(first);
+        ZonedDateTime third = cron.next(second);
+
+        assertThat(first.getDayOfWeek()).isEqualTo(DayOfWeek.MONDAY);
+        assertThat(second.getDayOfWeek()).isEqualTo(DayOfWeek.SUNDAY);
+        assertThat(third.getDayOfWeek()).isEqualTo(DayOfWeek.MONDAY);
     }
 
     /**
