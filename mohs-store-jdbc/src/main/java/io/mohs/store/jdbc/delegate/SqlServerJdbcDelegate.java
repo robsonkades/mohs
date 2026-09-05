@@ -67,8 +67,7 @@ public final class SqlServerJdbcDelegate implements JdbcDelegate {
 
     @Override
     public @Nullable Instant readSplitTimestamp(ResultSet rs, String column) throws SQLException {
-        LocalDateTime value = rs.getObject(column, LocalDateTime.class);
-        return value == null ? null : JdbcTimestamps.fromUtcLocalDateTime(value);
+        return JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject(column, LocalDateTime.class));
     }
 
     // --- the claim ---------------------------------------------------------------------------------

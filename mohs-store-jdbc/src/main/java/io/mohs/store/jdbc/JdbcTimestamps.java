@@ -20,6 +20,8 @@ import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * Binding and reading instants against zoneless temporal columns (H2's and Postgres's
  * {@code TIMESTAMP}, MySQL's {@code DATETIME}, SQL Server's {@code DATETIME2}): the crossing is
@@ -52,6 +54,16 @@ public final class JdbcTimestamps {
 
     public static Instant fromUtcLocalDateTime(LocalDateTime dateTime) {
         return dateTime.toInstant(ZoneOffset.UTC);
+    }
+
+    /** The binding of a nullable column ({@code next_fire_at} of a disarmed trigger): {@code null} crosses as SQL {@code NULL}. */
+    static @Nullable LocalDateTime toUtcLocalDateTimeOrNull(@Nullable Instant instant) {
+        return instant == null ? null : toUtcLocalDateTime(instant);
+    }
+
+    /** The read of a nullable column: an SQL {@code NULL} comes back as {@code null}, never as an epoch. Public for the delegates' {@code readSplitTimestamp}. */
+    public static @Nullable Instant fromUtcLocalDateTimeOrNull(@Nullable LocalDateTime dateTime) {
+        return dateTime == null ? null : fromUtcLocalDateTime(dateTime);
     }
 
     /**

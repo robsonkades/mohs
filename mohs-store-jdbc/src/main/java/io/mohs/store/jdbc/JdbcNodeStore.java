@@ -88,10 +88,9 @@ public final class JdbcNodeStore implements NodeStore {
     }
 
     private static StoredNode mapRow(ResultSet rs) throws SQLException {
-        LocalDateTime expiresAt = rs.getObject("expires_at", LocalDateTime.class);
         return new StoredNode(rs.getString("node_id"), EngineState.valueOf(rs.getString("state")),
                 JdbcTimestamps.fromUtcLocalDateTime(rs.getObject("last_heartbeat_at", LocalDateTime.class)),
                 rs.getLong("epoch"),
-                expiresAt == null ? null : JdbcTimestamps.fromUtcLocalDateTime(expiresAt));
+                JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject("expires_at", LocalDateTime.class)));
     }
 }

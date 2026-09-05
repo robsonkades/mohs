@@ -50,8 +50,9 @@ import io.mohs.engine.JobStore;
 import io.mohs.engine.StoredJob;
 
 /**
- * Scans singleton beans for {@link MohsJob} methods and translates them into
- * {@link JobDefinition}/{@link JobHandler} pairs.
+ * Scans singleton beans for {@link MohsJob} methods, translating them into
+ * {@link JobDefinition}/{@link JobHandler} pairs, and for {@link OnExecution} methods, handing
+ * them to the {@link OnExecutionRegistry}.
  *
  * <p>It uses the same two-phase pattern as Spring's {@code ScheduledAnnotationBeanPostProcessor}
  * for {@code @Scheduled}: accumulate while each bean initialises ({@link BeanPostProcessor}), and
@@ -129,23 +130,30 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
             return bean;
         }
         Class<?> targetClass = AopUtils.getTargetClass(bean);
-        ReflectionUtils.doWithMethods(targetClass, method -> scanMethod(bean, targetClass, method));
+        ReflectionUtils.doWithMethods(targetClass, method -> {
+            scanObserver(bean, method);
+            scanJob(bean, targetClass, method);
+        });
         return bean;
     }
 
-    private void scanMethod(Object bean, Class<?> targetClass, Method targetMethod) {
+    private void scanObserver(Object bean, Method targetMethod) {
         OnExecution observer = targetMethod.getAnnotation(OnExecution.class);
-        if (observer != null) {
-            String declaring = describe(targetMethod);
-            // The signature and the filter are checked HERE rather than at delivery: both failures
-            // are silent at runtime — a method that never fires looks exactly like one whose event
-            // never happened
-            OnExecutionRegistry.validate(observer, targetMethod, declaring);
-            synchronized (scanned) {
-                observers.add(new ScannedObserver(observer, bean,
-                        AopUtils.selectInvocableMethod(targetMethod, bean.getClass()), declaring));
-            }
+        if (observer == null) {
+            return;
         }
+        String declaring = describe(targetMethod);
+        // The signature and the filter are checked HERE rather than at delivery: both failures
+        // are silent at runtime — a method that never fires looks exactly like one whose event
+        // never happened
+        OnExecutionRegistry.validate(observer, targetMethod, declaring);
+        synchronized (scanned) {
+            observers.add(new ScannedObserver(observer, bean,
+                    AopUtils.selectInvocableMethod(targetMethod, bean.getClass()), declaring));
+        }
+    }
+
+    private void scanJob(Object bean, Class<?> targetClass, Method targetMethod) {
         // Merged, not a raw getAnnotation: the stereotypes (@RecurringJob/@OnDemandJob, and consumer
         // compositions over them) carry @MohsJob as a meta-annotation with @AliasFor, which only
         // merged-annotation resolution honours.
@@ -230,7 +238,7 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
     /**
      * {@code annotation x programmatic} always fails, unconditionally — that is not what
      * {@code on-conflict} governs, being an identity collision rather than definitional drift.
-     * {@code annotation x annotation} already failed earlier, in {@link #scanMethod}. Real drift
+     * {@code annotation x annotation} already failed earlier, in {@link #scanJob}. Real drift
      * within the same {@code ANNOTATION} lineage follows
      * {@link MohsProperties.Registration.OnConflict}.
      */

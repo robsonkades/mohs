@@ -186,6 +186,42 @@ class FiringPlannerTest {
             assertThat(plan.occurrences()).containsExactly(
                     NOW.minusSeconds(180), NOW.minusSeconds(120), NOW.minusSeconds(60), NOW);
         }
+
+        /**
+         * The calculator's DST policy is pinned in {@code NextFireCalculatorTest}; what THIS test and
+         * the next pin is the replay walking its cursor through the transition without inventing or
+         * losing an occurrence. Spring forward in New York, 2026-03-08: 02:00 becomes 03:00 and a
+         * 02:30 cron has no occurrence that day. Replaying the misfire neither invents one nor
+         * substitutes 03:30 — the series resumes the next day, at the new offset.
+         */
+        @Test
+        void fireAllMissedAcrossASpringForwardGapReplaysNothingForTheMissingWallClockTime() {
+            CronSpec halfPastTwo = new CronSpec("0 30 2 * * *", ZoneId.of("America/New_York"));
+            Instant lastBeforeTheGap = Instant.parse("2026-03-07T07:30:00Z"); // 02:30 EST
+            Instant now = Instant.parse("2026-03-09T07:00:00Z");
+
+            FiringPlanner.Plan plan = planner.plan(halfPastTwo, Misfire.FIRE_ALL_MISSED, lastBeforeTheGap, now);
+
+            assertThat(plan.occurrences()).containsExactly(
+                    Instant.parse("2026-03-07T07:30:00Z"), // 02:30 EST
+                    Instant.parse("2026-03-09T06:30:00Z")); // 02:30 EDT — March 8 had no 02:30
+            assertThat(plan.nextFireAt()).isEqualTo(Instant.parse("2026-03-10T06:30:00Z"));
+        }
+
+        /** Fall back, 2026-11-01: 01:30 happens twice; the replay fires it once, and the series continues at the standard-time offset. */
+        @Test
+        void fireAllMissedAcrossAFallBackOverlapReplaysTheRepeatedWallClockTimeOnce() {
+            CronSpec halfPastOne = new CronSpec("0 30 1 * * *", ZoneId.of("America/New_York"));
+            Instant lastBeforeTheOverlap = Instant.parse("2026-10-31T05:30:00Z"); // 01:30 EDT
+            Instant now = Instant.parse("2026-11-01T08:00:00Z");
+
+            FiringPlanner.Plan plan = planner.plan(halfPastOne, Misfire.FIRE_ALL_MISSED, lastBeforeTheOverlap, now);
+
+            assertThat(plan.occurrences()).containsExactly(
+                    Instant.parse("2026-10-31T05:30:00Z"), // 01:30 EDT
+                    Instant.parse("2026-11-01T05:30:00Z")); // 01:30 EDT, the first of the two — its repeat at 06:30Z is the same wall-clock time
+            assertThat(plan.nextFireAt()).isEqualTo(Instant.parse("2026-11-02T06:30:00Z")); // 01:30 EST
+        }
     }
 
     @Nested

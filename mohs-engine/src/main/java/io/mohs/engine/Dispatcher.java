@@ -106,8 +106,7 @@ public final class Dispatcher {
         }
     }
 
-    /** Synchronous completion per result — the shape used by the tests and by {@code completion-flush-on-every-result}. */
-    /** No custom retry policy and no group commit — the convenience for tests and one-off callers. */
+    /** No custom retry policy and no group commit (synchronous completion per result) — the convenience for tests and one-off callers. */
     public Dispatcher(LeaseStore leaseStore, JobStore jobStore, HandlerRegistry handlerRegistry, Clock clock,
             List<ExecutionInterceptor> interceptors, List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor,
             EngineMetrics metrics) {
@@ -246,6 +245,10 @@ public final class Dispatcher {
             case SHUTDOWN -> fail(execution, definition, firedAt, new IllegalStateException(
                     "node shutdown: drain grace elapsed before attempt " + grant.attemptNumber() + " finished", error), grant);
             case MANUAL -> cancelled(execution, definition, firedAt, error, grant);
+            // The same guard as failBeforeStart's: a statement switch does not enforce exhaustiveness,
+            // and a reason with no arm would return with NO completion written — the one outcome the
+            // completion path must never produce
+            default -> throw new IllegalStateException("unmapped cancellation reason: " + reason);
         }
     }
 
@@ -263,12 +266,21 @@ public final class Dispatcher {
     private void cancelled(Execution execution, JobDefinition definition, Instant firedAt, Exception error, Grant grant) {
         log.info("execution {} of job '{}' cancelled on attempt {} — cooperative cancellation honoured (handler exited with: {})",
                 execution.id().value(), execution.jobKey().value(), grant.attemptNumber(), error.toString());
-        Instant finishedAt = clock.instant();
-        completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
-                grant.attemptNumber(), firedAt, finishedAt, ExecutionState.CANCELLED, null, null,
-                ExecutionState.CANCELLED, null, execution.batchId(),
-                rearmNextFireAt(execution, definition, finishedAt)),
+        completeOrDiscard(terminalResult(execution, definition, grant, firedAt, clock.instant(), ExecutionState.CANCELLED, null),
                 () -> events.publish(new Cancelled(execution.id(), execution.jobKey(), grant.attemptNumber())));
+    }
+
+    /**
+     * A terminal completion: the outcome IS the terminal state, no retry entry travels with it, and a
+     * fixed-delay occurrence rearms its chain from {@code finishedAt}. {@code error} is what
+     * {@code Attempt.error} keeps — {@code null} for a success and for a cancellation.
+     */
+    private static LeaseStore.CompletionResult terminalResult(Execution execution, @Nullable JobDefinition definition,
+            Grant grant, Instant firedAt, Instant finishedAt, ExecutionState outcome, @Nullable Exception error) {
+        return new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
+                grant.attemptNumber(), firedAt, finishedAt, outcome,
+                error == null ? null : error.getClass().getName(), error == null ? null : errorMessage(error),
+                outcome, null, execution.batchId(), rearmNextFireAt(execution, definition, finishedAt));
     }
 
     /**
@@ -318,11 +330,7 @@ public final class Dispatcher {
     }
 
     private void succeed(Execution execution, JobDefinition definition, Instant firedAt, Grant grant) {
-        Instant finishedAt = clock.instant();
-        completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
-                grant.attemptNumber(), firedAt, finishedAt, ExecutionState.SUCCEEDED, null, null,
-                ExecutionState.SUCCEEDED, null, execution.batchId(),
-                rearmNextFireAt(execution, definition, finishedAt)),
+        completeOrDiscard(terminalResult(execution, definition, grant, firedAt, clock.instant(), ExecutionState.SUCCEEDED, null),
                 () -> events.publish(new Succeeded(execution.id(), execution.jobKey(), grant.attemptNumber())));
     }
 
@@ -355,17 +363,18 @@ public final class Dispatcher {
             return;
         }
         Instant retryAt = nextRetry.orElseThrow();
+        int nextAttempt = attemptNumber + 1;
         log.warn("execution {} of job '{}' failed on attempt {} — retry {} scheduled for {}", execution.id().value(),
-                execution.jobKey().value(), attemptNumber, attemptNumber + 1, retryAt, error);
+                execution.jobKey().value(), attemptNumber, nextAttempt, retryAt, error);
         completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
                 attemptNumber, firedAt, clock.instant(), ExecutionState.FAILED, error.getClass().getName(), errorMessage(error),
                 null,
                 new WorkQueue.ReadyEntry(execution.id(), execution.jobKey(), Shards.of(execution.id()),
-                        execution.priority().value(), attemptNumber + 1, retryAt),
+                        execution.priority().value(), nextAttempt, retryAt),
                 execution.batchId(), null),
                 () -> {
                     events.publish(new AttemptFailed(execution.id(), execution.jobKey(), attemptNumber, error));
-                    events.publish(new RetryScheduled(execution.id(), execution.jobKey(), attemptNumber + 1, retryAt));
+                    events.publish(new RetryScheduled(execution.id(), execution.jobKey(), nextAttempt, retryAt));
                 },
                 throughBatcher);
     }
@@ -389,11 +398,7 @@ public final class Dispatcher {
             Exception error, boolean attemptsExhausted, Grant grant, boolean throughBatcher) {
         log.warn("execution {} of job '{}' failed on attempt {}", execution.id().value(),
                 execution.jobKey().value(), grant.attemptNumber(), error);
-        Instant finishedAt = clock.instant();
-        completeOrDiscard(new LeaseStore.CompletionResult(execution.id(), execution.jobKey(), grant.nodeId(), grant.epoch(),
-                grant.attemptNumber(), firedAt, finishedAt, ExecutionState.FAILED, error.getClass().getName(), errorMessage(error),
-                ExecutionState.FAILED, null, execution.batchId(),
-                rearmNextFireAt(execution, definition, finishedAt)),
+        completeOrDiscard(terminalResult(execution, definition, grant, firedAt, clock.instant(), ExecutionState.FAILED, error),
                 () -> events.publish(new Failed(execution.id(), execution.jobKey(), grant.attemptNumber(), error, attemptsExhausted)),
                 throughBatcher);
     }

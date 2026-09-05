@@ -326,34 +326,46 @@ public final class JdbcHistoryStore implements HistoryStore {
         return jdbcTemplate.query(delegate.findExecutionPage(where), params, (rs, _) -> mapDerived(rs, now, List.of()));
     }
 
-    /** The derivation — see {@link HistoryStore#find}'s Javadoc. */
+    /** Row to {@link Execution}; the state, owner and firing instant come from {@link #deriveState}. */
     private Execution mapDerived(ResultSet rs, Instant now, List<Attempt> attempts) throws SQLException {
         ExecutionId id = ExecutionId.of(rs.getString("execution_id"));
+        DerivedState derived = deriveState(rs, now);
+        return new Execution(id, JobKey.of(rs.getString("job_key")), derived.state(),
+                Objects.requireNonNull(delegate.readSplitTimestamp(rs, "scheduled_at"), "scheduled_at"),
+                derived.firedAt(), attempts, rs.getString("actor"), Priority.fromValue(rs.getInt("priority")),
+                rs.getString("idempotency_key"), rs.getString("correlation_id"), derived.owner());
+    }
+
+    /**
+     * Terminal lives in the column; RUNNING lives in the ownership; ENQUEUED/RETRY_WAITING live in the
+     * queue, separated by the visibility rule — the Java twin of the SQL filter in {@link #findPage},
+     * and of the contract in {@link HistoryStore#find}. The two must agree.
+     */
+    private DerivedState deriveState(ResultSet rs, Instant now) throws SQLException {
         String column = rs.getString("state");
         String leaseNode = rs.getString("lease_node");
         boolean queued = rs.getString("ready_id") != null;
-
-        ExecutionState state;
-        String owner = null;
-        Instant firedAt = null;
         if (!"PENDING".equals(column)) {
-            state = ExecutionState.valueOf(column);
-        } else if (leaseNode != null) {
-            state = ExecutionState.RUNNING;
-            owner = leaseNode;
-            firedAt = delegate.readSplitTimestamp(rs, "lease_claimed_at");
-        } else if (queued && rs.getInt("ready_attempt") > 1
-                && Objects.requireNonNull(delegate.readSplitTimestamp(rs, "ready_visible_at"), "ready_visible_at").isAfter(now)) {
-            state = ExecutionState.RETRY_WAITING;
-        } else {
-            // queued and visible — or inside the window of a completion flush in
-            // progress (an orphan PENDING): ENQUEUED, the read model's accepted staleness
-            state = ExecutionState.ENQUEUED;
+            return DerivedState.unowned(ExecutionState.valueOf(column));
         }
-        return new Execution(id, JobKey.of(rs.getString("job_key")), state,
-                Objects.requireNonNull(delegate.readSplitTimestamp(rs, "scheduled_at"), "scheduled_at"),
-                firedAt, attempts, rs.getString("actor"), Priority.fromValue(rs.getInt("priority")),
-                rs.getString("idempotency_key"), rs.getString("correlation_id"), owner);
+        if (leaseNode != null) {
+            return new DerivedState(ExecutionState.RUNNING, leaseNode, delegate.readSplitTimestamp(rs, "lease_claimed_at"));
+        }
+        if (queued && rs.getInt("ready_attempt") > 1
+                && Objects.requireNonNull(delegate.readSplitTimestamp(rs, "ready_visible_at"), "ready_visible_at").isAfter(now)) {
+            return DerivedState.unowned(ExecutionState.RETRY_WAITING);
+        }
+        // queued and visible — or inside the window of a completion flush in
+        // progress (an orphan PENDING): ENQUEUED, the read model's accepted staleness
+        return DerivedState.unowned(ExecutionState.ENQUEUED);
+    }
+
+    /** What the joined row says beyond the {@code state} column: only a RUNNING execution has an owner and a firing instant. */
+    private record DerivedState(ExecutionState state, @Nullable String owner, @Nullable Instant firedAt) {
+
+        static DerivedState unowned(ExecutionState state) {
+            return new DerivedState(state, null, null);
+        }
     }
 
     @Override

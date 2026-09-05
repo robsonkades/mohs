@@ -57,8 +57,12 @@ final class MohsRunners {
      */
     static List<MohsRunner> assemble(MohsProperties properties, List<MohsRunner> beanRunners) {
         Map<String, SourcedRunner> byName = new LinkedHashMap<>();
-        byName.put(RunnerRegistry.DEFAULT_RUNNER, new SourcedRunner(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(properties.engine().dispatchConcurrency()).build(), BUILT_IN));
-        byName.put("cpu", new SourcedRunner(MohsRunner.cpu("cpu").build(), BUILT_IN));
+        MohsRunner builtInIo = MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER)
+                .maxConcurrent(properties.engine().dispatchConcurrency())
+                .build();
+        byName.put(RunnerRegistry.DEFAULT_RUNNER, new SourcedRunner(builtInIo, BUILT_IN));
+        MohsRunner builtInCpu = MohsRunner.cpu("cpu").build();
+        byName.put("cpu", new SourcedRunner(builtInCpu, BUILT_IN));
 
         properties
                 .runners()

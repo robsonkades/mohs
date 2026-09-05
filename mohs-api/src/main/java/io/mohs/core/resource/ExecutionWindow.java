@@ -20,6 +20,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -71,7 +72,7 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
 
         public Builder excludeWeekends() {
             exclusions.add(instant -> {
-                DayOfWeek day = instant.atZone(ZoneOffset.UTC).getDayOfWeek();
+                DayOfWeek day = inUtc(instant).getDayOfWeek();
                 return day == DayOfWeek.SATURDAY || day == DayOfWeek.SUNDAY;
             });
             return this;
@@ -79,7 +80,7 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
 
         public Builder excludeDates(Collection<LocalDate> dates) {
             Set<LocalDate> copy = Set.copyOf(dates);
-            exclusions.add(instant -> copy.contains(instant.atZone(ZoneOffset.UTC).toLocalDate()));
+            exclusions.add(instant -> copy.contains(inUtc(instant).toLocalDate()));
             return this;
         }
 
@@ -99,16 +100,21 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
                 exclusions.add(instant -> false);
             } else if (from.isBefore(to)) {
                 exclusions.add(instant -> {
-                    LocalTime time = instant.atZone(ZoneOffset.UTC).toLocalTime();
+                    LocalTime time = inUtc(instant).toLocalTime();
                     return !time.isBefore(from) && time.isBefore(to);
                 });
             } else {
                 exclusions.add(instant -> {
-                    LocalTime time = instant.atZone(ZoneOffset.UTC).toLocalTime();
+                    LocalTime time = inUtc(instant).toLocalTime();
                     return !time.isBefore(from) || time.isBefore(to);
                 });
             }
             return this;
+        }
+
+        /** The one place the contract's "evaluated in UTC" lives — every exclusion reads the instant through it. */
+        private static ZonedDateTime inUtc(Instant instant) {
+            return instant.atZone(ZoneOffset.UTC);
         }
 
         public Builder exclude(Predicate<Instant> predicate) {

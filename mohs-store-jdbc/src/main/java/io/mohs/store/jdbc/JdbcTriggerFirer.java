@@ -85,7 +85,7 @@ public final class JdbcTriggerFirer implements TriggerFirer {
                     new MapSqlParameterSource()
                             .addValue("jobKey", key.value())
                             .addValue("observedNextFireAt", JdbcTimestamps.toUtcLocalDateTime(observedNextFireAt))
-                            .addValue("newNextFireAt", newNextFireAt == null ? null : JdbcTimestamps.toUtcLocalDateTime(newNextFireAt))
+                            .addValue("newNextFireAt", JdbcTimestamps.toUtcLocalDateTimeOrNull(newNextFireAt))
                             .addValue("retired", false));
             if (advanced == 0) {
                 return false;

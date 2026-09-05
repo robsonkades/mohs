@@ -63,7 +63,7 @@ import io.mohs.store.jdbc.delegate.JdbcDelegate;
 /**
  * {@link JobStore} over {@code mohs_job_definitions} (a Data Mapper, PoEAA).
  * {@code updated_at}/{@code created_at} come from the injected {@link Clock} — never a direct read
- * (an ArchUnit rule for {@code io.mohs.engine}/{@code io.mohs.store.jdbc}).
+ * (a convention across {@code io.mohs.engine} and {@code io.mohs.store.jdbc}).
  *
  * <p>{@link NamedParameterJdbcTemplate} rather than a raw {@code JdbcTemplate}: {@link #upsert}'s
  * INSERT alone has more than twenty columns — counting positional {@code ?} against an argument list
@@ -90,8 +90,21 @@ public final class JdbcJobStore implements JobStore {
     public JdbcJobStore(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
         this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        // The same reasoning as in JdbcWorkQueue: a guarded write assumes "last write wins"
-        // (READ COMMITTED), and does not inherit the database's default.
+        // Default propagation, on purpose and unlike the claim: this template wraps one act, remove()
+        // — draining the queue and marking retired as an indivisible pair — and a remove called from
+        // the host's code JOINS the host's transaction when there is one, so a remove inside a
+        // @Transactional rolls back with it. The isolation below therefore holds only when the
+        // template opens the transaction itself (a remove with no outer transaction), where the
+        // guarded DELETE assumes "last write wins" and must not inherit the database's default
+        // (MySQL's is REPEATABLE READ); inside the host's transaction it is the host's level, which
+        // Spring ignores here rather than validating. The other writes of this store fall in two
+        // shapes, neither wrapped here: pause, resume, reschedule, markOrphaned and arming the next
+        // fire are one guarded UPDATE each, in autocommit or in whatever transaction the host has
+        // bound; define (upsert) is a trigger snapshot followed by one guarded UPDATE or INSERT,
+        // whose lost-update protection is NOT rewriting next_fire_at on an unchanged schedule —
+        // never an isolation level. Under the host's REPEATABLE READ the re-decide after a lost
+        // INSERT race sees the pre-INSERT snapshot and overwrites with a value computed from the
+        // same instant; benign, and documented at upsert().
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.clock = Objects.requireNonNull(clock, "clock");
         this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -100,55 +113,55 @@ public final class JdbcJobStore implements JobStore {
     @Override
     public JobDefinition upsert(JobDefinition definition) {
         Objects.requireNonNull(definition, "definition");
-        Instant nowInstant = clock.instant();
-        LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(nowInstant);
-
+        Instant now = clock.instant();
         ScheduleColumns scheduleColumns = ScheduleColumns.of(definition.schedule());
-        NextFireDecision nextFire = upsertNextFire(definition, scheduleColumns, nowInstant);
-        MapSqlParameterSource params = upsertParams(definition, scheduleColumns, nextFire, now);
-        // The id is generated here but only enters the INSERT — if the UPDATE path is taken, the
-        // generated value goes unused; the existing row keeps the id it already had (a stable primary
-        // key for the job_key's lifetime, never rewritten).
-        // UUIDv7 (io.github.robsonkades:uuidv7) — the same generation as mohs_execution.execution_id.
-        String id = UUIDv7.randomUUIDString();
+        NextFireDecision nextFire = upsertNextFire(definition, scheduleColumns, now);
+        MapSqlParameterSource params = upsertParams(definition, scheduleColumns, nextFire,
+                JdbcTimestamps.toUtcLocalDateTime(now));
 
         // Try the UPDATE first; 0 rows affected means a new key, so INSERT. That avoids the extra round
         // trip (and the time-of-check/time-of-use race) of a prior SELECT COUNT to decide which of the
         // two paths to take.
-        //
-        // That does not close the race on its own: two nodes registering the same job at boot may both
-        // see 0 rows and both attempt an INSERT — the loser receives a DuplicateKeyException (job_key
-        // already exists, the other won) and turns into an UPDATE, not an error propagated to the
-        // bootstrap.
         //
         // orphaned/retired = FALSE even on an UPDATE: unlike paused (an operator decision the upsert
         // never touches), both are consequences of "the source is gone" (an annotation removed, or
         // Mohs.remove) — the upsert happening at all is proof that a real source (a scan, or
         // Mohs.define) wants this job again, so define() after remove() resurrects the definition with
         // its history intact.
-        //
         int updated = jdbcTemplate.update(
                 delegate.upsertJobUpdate(nextFire instanceof NextFireDecision.Write), params);
+        return updated == 0 ? insertOrRedecide(definition, params, now) : definition;
+    }
 
-        if (updated == 0) {
-            // A new row: Preserve is impossible here by construction (the snapshot saw the row exist,
-            // and a row is never deleted — remove is a soft retire); the guard reconstructs the initial
-            // value so that a violation of that invariant does not become a cryptic bind error in an
-            // INSERT that creates the row from scratch anyway.
-            if (!params.hasValue("nextFireAt")) {
-                Instant initial = initialNextFire(definition.schedule(), nowInstant);
-                params.addValue("nextFireAt", initial == null ? null : JdbcTimestamps.toUtcLocalDateTime(initial));
-            }
-            try {
-                jdbcTemplate.update(delegate.insertJob(), params.addValue("id", id).addValue("createdAt", now)
-                        .addValue("paused", definition.startPaused()));
-            } catch (DuplicateKeyException _) {
-                // The other node won the INSERT: re-decide against the row that now exists — a decision
-                // taken against a snapshot dies with the snapshot (an identical schedule becomes
-                // Preserve, and the re-UPDATE does not touch next_fire_at). It terminates in one level:
-                // the row exists, and the second pass's UPDATE always finds it.
-                return upsert(definition);
-            }
+    /**
+     * The INSERT of a new key. The UPDATE-first shape does not close the race on its own: two nodes
+     * registering the same job at boot may both see 0 rows and both attempt an INSERT — the loser
+     * receives a {@link DuplicateKeyException} (job_key already exists, the other won) and turns into
+     * an UPDATE, not an error propagated to the bootstrap.
+     */
+    private JobDefinition insertOrRedecide(JobDefinition definition, MapSqlParameterSource params, Instant now) {
+        // A new row: Preserve is impossible here by construction (the snapshot saw the row exist, and
+        // a row is never deleted — remove is a soft retire); the guard reconstructs the initial value
+        // so that a violation of that invariant does not become a cryptic bind error in an INSERT that
+        // creates the row from scratch anyway.
+        if (!params.hasValue("nextFireAt")) {
+            params.addValue("nextFireAt",
+                    JdbcTimestamps.toUtcLocalDateTimeOrNull(initialNextFire(definition.schedule(), now)));
+        }
+        // The id enters only the INSERT: an existing row keeps the id it already had (a stable primary
+        // key for the job_key's lifetime, never rewritten).
+        // UUIDv7 (io.github.robsonkades:uuidv7) — the same generation as mohs_execution.execution_id.
+        params.addValue("id", UUIDv7.randomUUIDString())
+                .addValue("createdAt", JdbcTimestamps.toUtcLocalDateTime(now))
+                .addValue("paused", definition.startPaused());
+        try {
+            jdbcTemplate.update(delegate.insertJob(), params);
+        } catch (DuplicateKeyException _) {
+            // The other node won the INSERT: re-decide against the row that now exists — a decision
+            // taken against a snapshot dies with the snapshot (an identical schedule becomes
+            // Preserve, and the re-UPDATE does not touch next_fire_at). It terminates in one level:
+            // the row exists, and the second pass's UPDATE always finds it.
+            return upsert(definition);
         }
         return definition;
     }
@@ -159,7 +172,7 @@ public final class JdbcJobStore implements JobStore {
      * ({@code delegate.upsertJobUpdate(false)}), which is how {@code Preserve} preserves.
      */
     private static MapSqlParameterSource upsertParams(JobDefinition definition, ScheduleColumns scheduleColumns,
-            NextFireDecision nextFire, LocalDateTime now) {
+            NextFireDecision nextFire, LocalDateTime updatedAt) {
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("jobKey", definition.key().value())
                 .addValue("name", definition.name())
@@ -182,10 +195,10 @@ public final class JdbcJobStore implements JobStore {
                 .addValue("source", definition.source().name())
                 .addValue("orphaned", false)
                 .addValue("retired", false)
-                .addValue("updatedAt", now);
+                .addValue("updatedAt", updatedAt);
         // A record pattern Write(Instant v) would not match a null component (a type pattern) — bind the whole record
         if (nextFire instanceof NextFireDecision.Write write) {
-            params.addValue("nextFireAt", write.value() == null ? null : JdbcTimestamps.toUtcLocalDateTime(write.value()));
+            params.addValue("nextFireAt", JdbcTimestamps.toUtcLocalDateTimeOrNull(write.value()));
         }
         return params;
     }
@@ -243,13 +256,10 @@ public final class JdbcJobStore implements JobStore {
     private @Nullable TriggerSnapshot selectTriggerSnapshot(JobKey key) {
         return JdbcSupport.findOne(jdbcTemplate, delegate.findTriggerSnapshot(),
                 new MapSqlParameterSource("jobKey", key.value()),
-                rs -> {
-                    LocalDateTime nextFire = rs.getObject("next_fire_at", LocalDateTime.class);
-                    return new TriggerSnapshot(rs.getString("schedule_type"), rs.getString("cron_expression"),
-                            rs.getString("cron_zone"), rs.getString("interval_duration"),
-                            rs.getObject("interval_after_finish", Boolean.class),
-                            nextFire == null ? null : JdbcTimestamps.fromUtcLocalDateTime(nextFire));
-                })
+                rs -> new TriggerSnapshot(rs.getString("schedule_type"), rs.getString("cron_expression"),
+                        rs.getString("cron_zone"), rs.getString("interval_duration"),
+                        rs.getObject("interval_after_finish", Boolean.class),
+                        JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject("next_fire_at", LocalDateTime.class))))
                 .orElse(null);
     }
 
@@ -283,7 +293,7 @@ public final class JdbcJobStore implements JobStore {
         // or the claim, only the row remains for the foreign key.
         Optional<StoredJob> result = JdbcSupport.findOne(jdbcTemplate, delegate.findJobByKey(),
                 new MapSqlParameterSource("jobKey", key.value()).addValue("retired", false),
-                rs -> mapRowOrNull(rs, 1, unresolvedHandlerJobKeys));
+                rs -> mapRowOrNull(rs, unresolvedHandlerJobKeys));
         markOrphanedForUnresolvedHandlers(unresolvedHandlerJobKeys);
         return result;
     }
@@ -350,7 +360,7 @@ public final class JdbcJobStore implements JobStore {
                         .addValue("cronZone", columns.cronZone())
                         .addValue("intervalDuration", columns.intervalDuration())
                         .addValue("intervalAfterFinish", columns.intervalAfterFinish())
-                        .addValue("nextFireAt", nextFireAt == null ? null : JdbcTimestamps.toUtcLocalDateTime(nextFireAt))
+                        .addValue("nextFireAt", JdbcTimestamps.toUtcLocalDateTimeOrNull(nextFireAt))
                         .addValue("updatedAt", JdbcTimestamps.toUtcLocalDateTime(now))
                         .addValue("retired", false));
         return updated == 1;
@@ -359,7 +369,7 @@ public final class JdbcJobStore implements JobStore {
     private Stream<StoredJob> queryForJobStream(String sql, MapSqlParameterSource params) {
         List<String> unresolvedHandlerJobKeys = new ArrayList<>();
         return jdbcTemplate.queryForStream(sql, params,
-                        (rs, rowNum) -> mapRowOrNull(rs, rowNum, unresolvedHandlerJobKeys))
+                        (rs, _) -> mapRowOrNull(rs, unresolvedHandlerJobKeys))
                 .filter(Objects::nonNull)
                 // Registered after queryForStream's internal cursor — it runs only once that cursor has
                 // closed, so the UPDATE below never contends for the connection with a ResultSet that is
@@ -416,76 +426,90 @@ public final class JdbcJobStore implements JobStore {
     public void remove(JobKey key) {
         Objects.requireNonNull(key, "key");
         transactionTemplate.executeWithoutResult(_ -> {
-            MapSqlParameterSource jobParam = new MapSqlParameterSource("jobKey", key.value());
-            List<String> queued = jdbcTemplate.queryForList(
-                    delegate.findQueuedExecutionIdsByJob(), jobParam, String.class);
-            List<String> drained = new ArrayList<>(queued.size());
-            for (String executionId : queued) {
-                // The DELETE decides the race against a concurrent claim: 0 rows means the claim took the
-                // entry and its lease ends on its own — never CANCELLED over a claimed execution (a
-                // subquery predicate evaluates against a snapshot and serialises nothing; the DELETE's
-                // row lock serialises — DDIA ch. 7). A cold path: N round trips per retirement do not
-                // matter
-                if (jdbcTemplate.update(delegate.deleteReadyById(),
-                        new MapSqlParameterSource("executionId", executionId)) == 1) {
-                    drained.add(executionId);
-                }
-            }
+            List<String> drained = drainQueue(key);
             // ONE clock read for the whole logical act: two calls to clock.instant() in the same
             // transaction used to write two different instants
             LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
-            if (!drained.isEmpty()) {
-                // Chunking is mandatory: `drained` is EVERYTHING that was in this job's queue, and an
-                // on-demand job with 3,000 queued executions (a burst, or a queue dammed by a pause)
-                // blew past SQL Server's ~2100 parameters. The whole transaction rolled back and the job
-                // was NOT retired — a permanent failure, not a transient one.
-                //
-                // The count ACCUMULATES per batch across the chunks and is only applied afterwards: a
-                // per-chunk increment would touch the same mohs_batches in an order dictated by the
-                // arrival order of entries in the queue, and two concurrent removes over overlapping
-                // batches would cross — the stable order the SortedMap returns is what keeps the pair of
-                // UPDATEs free of deadlock
-                SortedMap<String, Integer> cancelledPerBatch = new TreeMap<>();
-                for (List<String> chunk : JdbcSupport.chunksOf(drained)) {
-                    jdbcTemplate.update(delegate.cancelDrainedExecutions(),
-                            new MapSqlParameterSource("ids", chunk).addValue("now", now));
-                    for (Map<String, Object> member : drainedBatchMembers(chunk)) {
-                        cancelledPerBatch.merge((String) member.get("batch_id"),
-                                ((Number) member.get("pending")).intValue(), Integer::sum);
-                    }
-                }
-                countCancelledMembers(cancelledPerBatch);
-            }
-            jdbcTemplate.update(delegate.retireJob(),
-                    new MapSqlParameterSource("jobKey", key.value())
-                            .addValue("retired", true)
-                            .addValue("now", now));
+            countCancelledMembers(cancelDrained(drained, now));
+            markRetired(key, now);
         });
     }
 
+    /** The queue entries this transaction took — the set the cancellation is allowed to touch. */
+    private List<String> drainQueue(JobKey key) {
+        List<String> queued = jdbcTemplate.queryForList(delegate.findQueuedExecutionIdsByJob(),
+                new MapSqlParameterSource("jobKey", key.value()), String.class);
+        List<String> drained = new ArrayList<>(queued.size());
+        for (String executionId : queued) {
+            // The DELETE decides the race against a concurrent claim: 0 rows means the claim took the
+            // entry and its lease ends on its own — never CANCELLED over a claimed execution (a
+            // subquery predicate evaluates against a snapshot and serialises nothing; the DELETE's
+            // row lock serialises — DDIA ch. 7). A cold path: N round trips per retirement do not
+            // matter
+            if (jdbcTemplate.update(delegate.deleteReadyById(),
+                    new MapSqlParameterSource("executionId", executionId)) == 1) {
+                drained.add(executionId);
+            }
+        }
+        return drained;
+    }
+
     /**
-     * Retiring a job cancels what was IN THE QUEUE, and cancelling is terminal: without counting, the
-     * member disappears from the batch and {@code pending} never reaches zero — the batch stays open
-     * forever, with no reconciliation sweep to cure it.
+     * Cancels the drained executions and returns how many members each batch lost — cancelling is
+     * terminal, and without counting, the member disappears from the batch and {@code pending} never
+     * reaches zero: the batch stays open forever, with no reconciliation sweep to cure it.
      *
      * <p>Grouped over the set the drain ACTUALLY took (not over a pre-drain snapshot): whatever a
      * concurrent claim tore out of the queue will run and count in its own completion — counting it here
      * would be the double counting the old era accepted as a window.
      *
-     * <p>{@code mohs_batches} SQL lives here rather than in {@code BatchStore} because the increment is
-     * done in bulk ({@code + :n} per batch, not N calls), a shape the port does not have. If a third
-     * case appears, it becomes {@code incrementFailedBy} on the port.
+     * <p>Chunking is mandatory: {@code drained} is EVERYTHING that was in this job's queue, and an
+     * on-demand job with 3,000 queued executions (a burst, or a queue dammed by a pause) blew past SQL
+     * Server's ~2100 parameters. The whole transaction rolled back and the job was NOT retired — a
+     * permanent failure, not a transient one.
+     *
+     * <p>The count ACCUMULATES per batch across the chunks and is only applied afterwards: a per-chunk
+     * increment would touch the same {@code mohs_batches} in an order dictated by the arrival order of
+     * entries in the queue, and two concurrent removes over overlapping batches would cross — the
+     * stable order the {@link SortedMap} returns is what keeps the pair of UPDATEs free of deadlock.
      */
+    private SortedMap<String, Integer> cancelDrained(List<String> drained, LocalDateTime now) {
+        SortedMap<String, Integer> cancelledPerBatch = new TreeMap<>();
+        for (List<String> chunk : JdbcSupport.chunksOf(drained)) {
+            jdbcTemplate.update(delegate.cancelDrainedExecutions(),
+                    new MapSqlParameterSource("ids", chunk).addValue("now", now));
+            for (Map<String, Object> member : drainedBatchMembers(chunk)) {
+                cancelledPerBatch.merge((String) member.get("batch_id"),
+                        ((Number) member.get("pending")).intValue(), Integer::sum);
+            }
+        }
+        return cancelledPerBatch;
+    }
+
     private List<Map<String, Object>> drainedBatchMembers(List<String> drained) {
         return jdbcTemplate.queryForList(delegate.drainedBatchMembers(), new MapSqlParameterSource("ids", drained));
     }
 
-    /** A stable order by {@code batch_id} (the caller's {@link SortedMap} order): two concurrent removes touching the same batches do not cross. */
+    /**
+     * A stable order by {@code batch_id} (the caller's {@link SortedMap} order): two concurrent removes
+     * touching the same batches do not cross.
+     *
+     * <p>{@code mohs_batches} SQL lives here rather than in {@code BatchStore} because the increment is
+     * done in bulk ({@code + :n} per batch, not N calls), a shape the port does not have. If a third
+     * case appears, it becomes {@code incrementFailedBy} on the port.
+     */
     private void countCancelledMembers(SortedMap<String, Integer> cancelledPerBatch) {
         for (Map.Entry<String, Integer> batch : cancelledPerBatch.entrySet()) {
             jdbcTemplate.update(delegate.countCancelledBatchMembers(),
                     new MapSqlParameterSource("id", batch.getKey()).addValue("pending", batch.getValue()));
         }
+    }
+
+    private void markRetired(JobKey key, LocalDateTime now) {
+        jdbcTemplate.update(delegate.retireJob(),
+                new MapSqlParameterSource("jobKey", key.value())
+                        .addValue("retired", true)
+                        .addValue("now", now));
     }
 
     private static String scheduleType(Schedule schedule) {
@@ -519,7 +543,7 @@ public final class JdbcJobStore implements JobStore {
      * {@code unresolvedHandlerJobKeys} for {@link #markOrphanedForUnresolvedHandlers} to mark
      * afterwards.
      */
-    private static @Nullable StoredJob mapRowOrNull(ResultSet rs, int rowNum, List<String> unresolvedHandlerJobKeys) throws SQLException {
+    private static @Nullable StoredJob mapRowOrNull(ResultSet rs, List<String> unresolvedHandlerJobKeys) throws SQLException {
         String jobKey = rs.getString("job_key");
         String handlerTypeName = rs.getString("handler_type");
         Class<?> handlerType;
@@ -531,17 +555,9 @@ public final class JdbcJobStore implements JobStore {
             return null;
         }
 
-        String scheduleType = rs.getString("schedule_type");
-        Schedule schedule = switch (scheduleType) {
-            case "CRON" -> new CronSpec(rs.getString("cron_expression"), ZoneId.of(rs.getString("cron_zone")));
-            case "INTERVAL" -> new IntervalSpec(Duration.parse(rs.getString("interval_duration")), rs.getBoolean("interval_after_finish"));
-            case "ON_DEMAND" -> new OnDemandSpec();
-            default -> throw new IllegalStateException("unknown schedule_type '" + scheduleType + "' for job '" + jobKey + "'");
-        };
-
+        Schedule schedule = readSchedule(rs, jobKey);
         String timeoutValue = rs.getString("timeout");
         Duration timeout = timeoutValue == null ? null : Duration.parse(timeoutValue);
-
         JobDefinition definition = new JobDefinition(
                 JobKey.of(jobKey), rs.getString("name"), handlerType, schedule,
                 rs.getString("runner"), rs.getString("window_name"), rs.getString("rate_limit"),
@@ -549,9 +565,18 @@ public final class JdbcJobStore implements JobStore {
                 rs.getBoolean("allow_concurrent_executions"), rs.getInt("max_concurrent_executions"),
                 rs.getInt("retries"), timeout, rs.getString("retry_policy"),
                 DefinitionSource.valueOf(rs.getString("source")));
-
-        LocalDateTime nextFireAt = rs.getObject("next_fire_at", LocalDateTime.class);
         return new StoredJob(definition, rs.getBoolean("orphaned"), rs.getBoolean("paused"),
-                nextFireAt == null ? null : JdbcTimestamps.fromUtcLocalDateTime(nextFireAt));
+                JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject("next_fire_at", LocalDateTime.class)));
+    }
+
+    /** The inverse of {@link ScheduleColumns#of}: the four schedule columns back into the {@link Schedule} variant {@code schedule_type} names. */
+    private static Schedule readSchedule(ResultSet rs, String jobKey) throws SQLException {
+        String scheduleType = rs.getString("schedule_type");
+        return switch (scheduleType) {
+            case "CRON" -> new CronSpec(rs.getString("cron_expression"), ZoneId.of(rs.getString("cron_zone")));
+            case "INTERVAL" -> new IntervalSpec(Duration.parse(rs.getString("interval_duration")), rs.getBoolean("interval_after_finish"));
+            case "ON_DEMAND" -> new OnDemandSpec();
+            default -> throw new IllegalStateException("unknown schedule_type '" + scheduleType + "' for job '" + jobKey + "'");
+        };
     }
 }

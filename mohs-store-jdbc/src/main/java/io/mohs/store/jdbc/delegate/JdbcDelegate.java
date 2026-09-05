@@ -320,6 +320,15 @@ public interface JdbcDelegate {
      * therefore unpruned) member, so "no member remains" already spares it — and it spares equally
      * the closed batch whose members' history is still inside the window, keeping
      * {@code GET /batches/{id}} consistent with the members a reader can still see.
+     *
+     * <p>Unlike the terminal sweep, the emptiness predicate is NOT repeated in the DELETE's own
+     * {@code WHERE}: it reads another table, and a subplan over another table keeps the statement's
+     * snapshot even when the target row is re-evaluated under its lock (measured on PostgreSQL 17 —
+     * the outer copy never saw a member committed concurrently). What closes that race is the
+     * write path, not the statement: a batch and all of its members are inserted in one
+     * transaction, and nothing adds a member to an existing batch later (a retry reuses the same
+     * execution row; the CAS that rearms one requires {@code correlation_id IS NULL}). A visible
+     * batch with no member is therefore one whose members the previous statement already pruned.
      */
     String pruneEmptyBatchesBefore();
 

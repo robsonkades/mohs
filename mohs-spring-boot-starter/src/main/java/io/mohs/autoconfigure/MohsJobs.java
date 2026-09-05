@@ -26,6 +26,8 @@ import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.StringJoiner;
+import java.util.function.Predicate;
+import java.util.stream.Stream;
 
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
@@ -225,24 +227,21 @@ final class MohsJobs {
      * WHERE to fix it teaches nothing.
      */
     private static @Nullable Schedule triggerOrNull(String label, String cron, String zone, String every, String everyAfterFinish) {
-        boolean hasCron = !cron.isBlank();
-        boolean hasEvery = !every.isBlank();
-        boolean hasEveryAfterFinish = !everyAfterFinish.isBlank();
-        int triggerCount = (hasCron ? 1 : 0) + (hasEvery ? 1 : 0) + (hasEveryAfterFinish ? 1 : 0);
-        if (triggerCount > 1) {
+        long declaredTriggers = Stream.of(cron, every, everyAfterFinish).filter(Predicate.not(String::isBlank)).count();
+        if (declaredTriggers > 1) {
             throw new IllegalStateException(label + " sets more than one trigger — "
                     + "cron/every/everyAfterFinish are mutually exclusive");
         }
-        if (hasCron) {
+        if (!cron.isBlank()) {
             if (zone.isBlank()) {
                 throw new IllegalStateException(label + " sets cron() without zone() — zone is required for cron");
             }
             return new CronSpec(cron, parseZone(label, zone));
         }
-        if (hasEvery) {
+        if (!every.isBlank()) {
             return new IntervalSpec(parseIsoDuration(label, "every", every), false);
         }
-        if (hasEveryAfterFinish) {
+        if (!everyAfterFinish.isBlank()) {
             return new IntervalSpec(parseIsoDuration(label, "everyAfterFinish", everyAfterFinish), true);
         }
         return null;

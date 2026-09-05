@@ -46,28 +46,36 @@ public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int co
         Objects.requireNonNull(mode, "mode");
         Objects.requireNonNull(keepAlive, "keepAlive");
         if (mode == RunnerMode.IO) {
-            if (maxConcurrent < 1) {
-                throw new IllegalArgumentException("maxConcurrent must be at least 1");
-            }
-            if (coreSize != 0 || maxSize != 0 || queueCapacity != 0 || !keepAlive.isZero()) {
-                throw new IllegalArgumentException("CPU-only fields (coreSize/maxSize/queueCapacity/keepAlive) must be zero for an IO runner");
-            }
+            requireIoShape(maxConcurrent, coreSize, maxSize, queueCapacity, keepAlive);
         } else {
-            if (coreSize < 1) {
-                throw new IllegalArgumentException("coreSize must be at least 1");
-            }
-            if (maxSize < coreSize) {
-                throw new IllegalArgumentException("maxSize must be >= coreSize");
-            }
-            if (queueCapacity < 0) {
-                throw new IllegalArgumentException("queueCapacity must not be negative");
-            }
-            if (keepAlive.isNegative()) {
-                throw new IllegalArgumentException("keepAlive must not be negative");
-            }
-            if (maxConcurrent != 0) {
-                throw new IllegalArgumentException("maxConcurrent (IO-only field) must be zero for a CPU runner");
-            }
+            requireCpuShape(maxConcurrent, coreSize, maxSize, queueCapacity, keepAlive);
+        }
+    }
+
+    private static void requireIoShape(int maxConcurrent, int coreSize, int maxSize, int queueCapacity, Duration keepAlive) {
+        if (maxConcurrent < 1) {
+            throw new IllegalArgumentException("maxConcurrent must be at least 1");
+        }
+        if (coreSize != 0 || maxSize != 0 || queueCapacity != 0 || !keepAlive.isZero()) {
+            throw new IllegalArgumentException("CPU-only fields (coreSize/maxSize/queueCapacity/keepAlive) must be zero for an IO runner");
+        }
+    }
+
+    private static void requireCpuShape(int maxConcurrent, int coreSize, int maxSize, int queueCapacity, Duration keepAlive) {
+        if (coreSize < 1) {
+            throw new IllegalArgumentException("coreSize must be at least 1");
+        }
+        if (maxSize < coreSize) {
+            throw new IllegalArgumentException("maxSize must be >= coreSize");
+        }
+        if (queueCapacity < 0) {
+            throw new IllegalArgumentException("queueCapacity must not be negative");
+        }
+        if (keepAlive.isNegative()) {
+            throw new IllegalArgumentException("keepAlive must not be negative");
+        }
+        if (maxConcurrent != 0) {
+            throw new IllegalArgumentException("maxConcurrent (IO-only field) must be zero for a CPU runner");
         }
     }
 
