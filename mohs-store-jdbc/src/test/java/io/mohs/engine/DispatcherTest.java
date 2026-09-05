@@ -387,7 +387,7 @@ class DispatcherTest {
     }
 
     @Test
-    void dispatchFailsTerminallyWhenNoHandlerIsRegistered() {
+    void dispatchFailsTerminallyWhenNoHandlerIsRegistered() throws Exception {
         Execution execution = seedRunningExecution("exec-1", "welcome-email");
 
         newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
@@ -395,6 +395,9 @@ class DispatcherTest {
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
         Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
         assertThat(found.attempts().get(0).error()).contains("no handler registered").contains("welcome-email");
+        // Nothing ran, so nothing started: Started means "the handler is about to run"
+        listener.awaitEvent(Failed.class);
+        assertThat(listener.events()).noneMatch(Started.class::isInstance);
     }
 
     /** ExecutionInterceptor's own Javadoc: its exception IS an attempt failure, treated exactly like a handler's. */
@@ -559,6 +562,7 @@ class DispatcherTest {
         assertThat(handlerRan).isFalse();
         assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
         listener.awaitEvent(Cancelled.class);
+        assertThat(listener.events()).as("a cancellation before the start publishes no Started").noneMatch(Started.class::isInstance);
     }
 
     /** The pre-start check: SHUTDOWN on a queued task — work not done fails NodeShutdown without running and becomes a clean retry on another node (not starting new work is the first step of a graceful shutdown). */

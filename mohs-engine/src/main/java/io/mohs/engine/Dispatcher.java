@@ -154,7 +154,6 @@ public final class Dispatcher {
 
         int attemptNumber = grant.attemptNumber();
         JobContext ctx = new DefaultJobContext(execution.jobKey(), execution.id(), attemptNumber, execution.scheduledAt(), firedAt, signal);
-        events.publish(new Started(execution.id(), execution.jobKey(), attemptNumber, firedAt));
 
         Optional<JobHandler> handler = handlerRegistry.find(execution.jobKey());
         if (handler.isEmpty()) {
@@ -170,6 +169,11 @@ public final class Dispatcher {
             return;
         }
 
+        // Started means "the interceptor chain, and through it the handler, is about to run" —
+        // published only once the two exits above are behind: an attempt that fails for want of a
+        // handler, or is cancelled before starting, ran nothing, and a Started followed by a Failed
+        // would tell a listener that work began
+        events.publish(new Started(execution.id(), execution.jobKey(), attemptNumber, firedAt));
         // succeed() sits outside the try on purpose: the catch maps by the signal's reason, and its
         // precondition is "the HANDLER exited abnormally" — a failure of the success write is not a
         // handler failure, so it propagates (the Engine logs it, the lease stays up and the reaper

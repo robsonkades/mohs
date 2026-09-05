@@ -21,7 +21,12 @@ import java.util.Objects;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
 
-/** An attempt began executing. */
+/**
+ * An attempt began executing: its interceptor chain — and, unless an interceptor short-circuits it,
+ * the handler — is about to be invoked. An attempt that ends before the chain runs at all (no
+ * handler registered for the job, or a cancellation that arrived before the start) publishes its
+ * terminal event without a {@code Started}.
+ */
 public record Started(ExecutionId executionId, JobKey jobKey, int attempt, Instant firedAt)
         implements ExecutionEvent {
 
