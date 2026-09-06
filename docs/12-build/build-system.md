@@ -28,7 +28,7 @@ Two consequences that had to be handled explicitly:
 | Lost default | Restored by |
 | --- | --- |
 | `-parameters` on the compiler (Spring MVC resolves `@RequestParam`/`@PathVariable` names reflectively) | Declared in `pluginManagement` |
-| A pinned `maven-jar-plugin` version | Pinned to 3.4.2 — without it, the version came from the super-POM of whatever Maven was installed, so a **published jar would change plugin depending on the machine that built it** |
+| A pinned `maven-jar-plugin` version | Pinned to 3.5.1 — without it, the version came from the super-POM of whatever Maven was installed, so a **published jar would change plugin depending on the machine that built it** |
 
 ## Dependency management
 
@@ -97,11 +97,11 @@ notices. `NOTICE` names the adaptation and its one functional divergence from up
 | Plugin | Version | Where | Purpose |
 | --- | --- | --- | --- |
 | `maven-compiler-plugin` | 3.15.0 | Managed | Release 25, `-parameters` |
-| `maven-surefire-plugin` | 3.5.2 | Managed | Tests. Its default include pattern is what keeps `*Scenario` classes out of the normal run |
-| `maven-jar-plugin` | 3.4.2 | Managed; used by four modules | Stamps `Automatic-Module-Name` |
+| `maven-surefire-plugin` | 3.6.0 | Managed | Tests. Its default include pattern is what keeps `*Scenario` classes out of the normal run |
+| `maven-jar-plugin` | 3.5.1 | Managed; used by four modules | Stamps `Automatic-Module-Name` |
 | `spring-boot-maven-plugin` | 4.1.1 | Managed; used by `mohs-demo` | Repackage |
-| `frontend-maven-plugin` | 1.15.1 | `mohs-ui` | Installs Node v22.12.0, runs `npm ci` and `npm run build` |
-| `maven-resources-plugin` | 3.3.1 | `mohs-ui` | Copies `frontend/dist` to `target/classes/mohs-ui-webapp` |
+| `frontend-maven-plugin` | 2.0.2 | `mohs-ui` | Installs Node v22.12.0, runs `npm ci` and `npm run build` |
+| `maven-resources-plugin` | 3.5.0 | `mohs-ui` | Copies `frontend/dist` to `target/classes/mohs-ui-webapp` |
 | `spring-boot-configuration-processor` | Managed | `mohs-spring-boot-starter` | IDE metadata for `mohs.*` |
 
 ## Commands

@@ -23,7 +23,7 @@ jobs:
 
       # The reactor pins maven.compiler.release=25 (see pom.xml) — javac's --release can't
       # target a version newer than the JDK actually running it, so this can only build on 25+.
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 25
