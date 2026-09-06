@@ -89,11 +89,11 @@ no `lint`.**
 | Plugin | Version | Purpose |
 | --- | --- | --- |
 | `maven-compiler-plugin` | 3.15.0 | Release 25, `-parameters` |
-| `maven-surefire-plugin` | 3.5.2 | Tests; its default include pattern keeps `*Scenario` out |
-| `maven-jar-plugin` | **3.4.2** | `Automatic-Module-Name`. Pinned so a published jar does not vary by build machine |
+| `maven-surefire-plugin` | 3.6.0 | Tests; its default include pattern keeps `*Scenario` out |
+| `maven-jar-plugin` | **3.5.1** | `Automatic-Module-Name`. Pinned so a published jar does not vary by build machine |
 | `spring-boot-maven-plugin` | 4.1.1 | Repackage, `mohs-demo` only |
-| `frontend-maven-plugin` | 1.15.1 | Node, `npm ci`, `npm run build` |
-| `maven-resources-plugin` | 3.3.1 | Copies the bundle onto the classpath |
+| `frontend-maven-plugin` | 2.0.2 | Node, `npm ci`, `npm run build` |
+| `maven-resources-plugin` | 3.5.0 | Copies the bundle onto the classpath |
 | `spring-boot-configuration-processor` | BOM-managed | IDE metadata for `mohs.*` |
 
 ## Licensing
