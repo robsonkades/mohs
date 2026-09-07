@@ -15,6 +15,16 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 
 ### Added
 
+- `mohs.lifecycle.startup-delay` (default `0s`): a nonblocking, node-local wait from
+  automatic or manual `start()` before the engine's first tick. Shutdown cancels the wait;
+  work signals cannot shorten it. Component initialization and API calls remain available.
+- `EngineState.STARTING` exposes the pending startup delay and maps to `OUT_OF_SERVICE`
+  in the health indicator. Consumers with exhaustive engine-state switches must handle it.
+  `EngineSettings` and `MohsProperties.Lifecycle` gain `startupDelay` components; the previous
+  constructor signatures remain available with zero delay.
+- `mohs-benchmark/scripts/api-load.ps1`: finite execution load through the existing REST API,
+  with bounded request concurrency, waves, idempotency keys, CSV receipts and dry-run support.
+
 - `RetryPolicy` (`io.mohs.core.execution`): the per-job retry SPI a definition names through
   `@MohsJob(retryPolicy = "beanName")`. It replaces the `retries` budget while it returns a delay,
   is consulted on both failure paths — a handler that threw and a lease reclaimed from a dead node —
@@ -48,6 +58,9 @@ Nothing has been released yet. This section is the running record of what `0.1.0
   timestamp and an opt-in `release` profile (sources, Javadoc, GPG, Central Portal upload).
 
 ### Fixed
+
+- Restore and synchronize the frontend lockfile so Maven's `npm ci` can install dependencies,
+  removing a stale local self-dependency and resolving the incompatible `cn` entry.
 
 - Refined the dashboard navigation, responsive metric strip and job search. Jobs and executions
   expose removable filters, keyboard-accessible detail actions, expandable attempt errors and

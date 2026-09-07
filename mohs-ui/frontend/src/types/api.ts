@@ -129,7 +129,7 @@ export interface RateLimitResponse {
 }
 
 /** io.mohs.core.EngineState */
-export type EngineState = "CREATED" | "RUNNING" | "PAUSED" | "DRAINING" | "STOPPED";
+export type EngineState = "CREATED" | "STARTING" | "RUNNING" | "PAUSED" | "DRAINING" | "STOPPED";
 
 /** io.mohs.rest.runner.RunnerResponse — node-local: describes the process that answered, not the cluster. */
 export interface RunnerResponse {

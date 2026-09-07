@@ -91,10 +91,11 @@ import org.jspecify.annotations.Nullable;
  * @param misfireThreshold the lateness beyond which the misfire policy applies
  * @param idempotencyRetention the deduplication retention window; zero retains keys indefinitely
  * @param historyRetention the terminal-history retention window; zero disables pruning
+ * @param startupDelay one-time wait from start before the first tick; zero starts immediately
  */
 public record EngineSettings(Duration pollInterval, Duration maxPollInterval, int batchSize, int dispatchConcurrency,
         int claimRounds, Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout,
-        Duration misfireThreshold, Duration idempotencyRetention, Duration historyRetention) {
+        Duration misfireThreshold, Duration idempotencyRetention, Duration historyRetention, Duration startupDelay) {
 
     /**
      * The same default as {@code mohs.engine.idempotency-retention} ({@code MohsProperties}). Seven
@@ -126,8 +127,18 @@ public record EngineSettings(Duration pollInterval, Duration maxPollInterval, in
      * @param misfireThreshold the lateness beyond which the misfire policy applies
      * @param idempotencyRetention the deduplication retention window; zero retains keys indefinitely
      * @param historyRetention the terminal-history retention window; zero disables pruning
+     * @param startupDelay one-time wait from start before the first tick; zero starts immediately
      */
     public EngineSettings {
+        Objects.requireNonNull(startupDelay, "startupDelay");
+        if (startupDelay.isNegative()) {
+            throw new IllegalArgumentException("mohs.lifecycle.startup-delay must not be negative");
+        }
+        try {
+            startupDelay.toNanos();
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("mohs.lifecycle.startup-delay is too large", e);
+        }
         Objects.requireNonNull(pollInterval, "pollInterval");
         Objects.requireNonNull(maxPollInterval, "maxPollInterval");
         Objects.requireNonNull(leaseTtl, "leaseTtl");
@@ -178,6 +189,28 @@ public record EngineSettings(Duration pollInterval, Duration maxPollInterval, in
             throw new IllegalArgumentException("mohs.engine.history-retention must not be negative, got "
                     + historyRetention + " — zero turns the sweep off and keeps every terminal execution forever, which is as far as it goes");
         }
+    }
+
+    /**
+     * Preserves immediate startup for callers using the original settings constructor.
+     *
+     * @param pollInterval the minimum interval between polling ticks
+     * @param maxPollInterval the ceiling of the idle polling backoff
+     * @param batchSize the maximum number of entries in one batch
+     * @param dispatchConcurrency the maximum in-flight executions on this node
+     * @param claimRounds the maximum claim rounds in one polling tick
+     * @param leaseTtl the execution lease duration and legacy-node staleness threshold
+     * @param nodeLeaseTtl the duration of the node liveness promise
+     * @param watchdogTimeout the optional runtime ceiling; null disables it
+     * @param misfireThreshold the lateness beyond which the misfire policy applies
+     * @param idempotencyRetention the deduplication retention window
+     * @param historyRetention the terminal-history retention window
+     */
+    public EngineSettings(Duration pollInterval, Duration maxPollInterval, int batchSize, int dispatchConcurrency,
+            int claimRounds, Duration leaseTtl, Duration nodeLeaseTtl, @Nullable Duration watchdogTimeout,
+            Duration misfireThreshold, Duration idempotencyRetention, Duration historyRetention) {
+        this(pollInterval, maxPollInterval, batchSize, dispatchConcurrency, claimRounds, leaseTtl, nodeLeaseTtl,
+                watchdogTimeout, misfireThreshold, idempotencyRetention, historyRetention, Duration.ZERO);
     }
 
     /**

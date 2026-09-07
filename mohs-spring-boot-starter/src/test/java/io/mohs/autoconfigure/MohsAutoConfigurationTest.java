@@ -78,6 +78,37 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class MohsAutoConfigurationTest {
 
+    @Test
+    void startupDelayAppliesToAutomaticStartAndContextCloseCancelsIt() {
+        AtomicReference<Mohs> reference = new AtomicReference<>();
+        runnerWith(freshH2DataSource(), "mohs.lifecycle.startup-delay=1h").run(context -> {
+            assertThat(context).hasNotFailed();
+            Mohs mohs = context.getBean(Mohs.class);
+            reference.set(mohs);
+            assertThat(mohs.lifecycle().state()).isEqualTo(EngineState.STARTING);
+            assertThat(context.getBean(MohsProperties.class).lifecycle().startupDelay()).isEqualTo(Duration.ofHours(1));
+        });
+        assertThat(reference.get().lifecycle().state()).isEqualTo(EngineState.STOPPED);
+    }
+
+    @Test
+    void manualStartupBeginsTheConfiguredDelayOnlyWhenRequested() {
+        runnerWith(freshH2DataSource(), "mohs.lifecycle.start-mode=manual", "mohs.lifecycle.startup-delay=1h")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    Mohs mohs = context.getBean(Mohs.class);
+                    assertThat(mohs.lifecycle().state()).isEqualTo(EngineState.CREATED);
+                    mohs.lifecycle().start();
+                    assertThat(mohs.lifecycle().state()).isEqualTo(EngineState.STARTING);
+                });
+    }
+
+    @Test
+    void negativeStartupDelayFailsBoot() {
+        runnerWith(freshH2DataSource(), "mohs.lifecycle.startup-delay=-1s").run(context ->
+                assertThat(context).hasFailed());
+    }
+
     record Handler() {
     }
 

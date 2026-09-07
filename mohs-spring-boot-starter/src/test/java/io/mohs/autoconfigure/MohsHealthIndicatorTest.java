@@ -37,6 +37,7 @@ class MohsHealthIndicatorTest {
     @ParameterizedTest(name = "{0} -> {1}")
     @CsvSource({
             "RUNNING,  UP",
+            "STARTING, OUT_OF_SERVICE",
             "PAUSED,   OUT_OF_SERVICE",
             "DRAINING, OUT_OF_SERVICE",
             "CREATED,  DOWN",

@@ -13,6 +13,7 @@ application without an actuator inherits nothing and the auto-configuration stay
 | `RUNNING` | `UP` | Claiming and heartbeating |
 | `PAUSED`, `DRAINING` | `OUT_OF_SERVICE` | Alive and heartbeating, deliberately not claiming — an operator's decision or a shutdown in progress, neither of which is a fault |
 | `CREATED`, `STOPPED` | `DOWN` | No loop is running: work assigned to this node will not move |
+| `STARTING` | `OUT_OF_SERVICE` | Waiting for `mohs.lifecycle.startup-delay`; no processing or heartbeat yet |
 
 `OUT_OF_SERVICE` rather than a custom `DEGRADED`, because Boot already maps it to 503 and already
 orders it below `UP` — a status Boot does not know would answer 200 and quietly keep a paused node
@@ -41,6 +42,7 @@ The other signals:
 | State | Meaning | Claims? | Heartbeats? |
 | --- | --- | --- | --- |
 | `CREATED` | Constructed, not started | No | No |
+| `STARTING` | Waiting for the startup delay | No | No |
 | `RUNNING` | Normal operation | Yes | Yes |
 | `PAUSED` | This node stopped claiming; the cluster continues | No | Yes |
 | `DRAINING` | Shutdown in progress, waiting for in-flight work | No | Yes |

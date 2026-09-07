@@ -33,6 +33,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Same shape as {@link MohsRestAutoConfigurationTest}: an {@code ApplicationContextRunner} over a real H2. */
 class MohsHealthAutoConfigurationTest {
 
+    @Test
+    void delayedStartupIsOutOfServiceWithStartingDetail() {
+        runnerWith(freshH2DataSource(), "mohs.lifecycle.startup-delay=1h").run(context -> {
+            assertThat(context).hasNotFailed();
+            var health = context.getBean(MohsHealthIndicator.class).health();
+            assertThat(health.getStatus().getCode()).isEqualTo("OUT_OF_SERVICE");
+            assertThat(health.getDetails()).containsEntry("state", "STARTING");
+        });
+    }
+
     private static DataSource freshH2DataSource() {
         JdbcDataSource h2 = new JdbcDataSource();
         h2.setURL("jdbc:h2:mem:mohs-health-autoconfig-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");

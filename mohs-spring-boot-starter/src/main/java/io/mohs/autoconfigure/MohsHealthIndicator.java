@@ -38,6 +38,7 @@ import io.mohs.core.MohsLifecycle;
  *   <caption>Engine state to health status</caption>
  *   <tr><th>State</th><th>Status</th><th>Why</th></tr>
  *   <tr><td>{@code RUNNING}</td><td>{@code UP}</td><td>Claiming and heartbeating</td></tr>
+ *   <tr><td>{@code STARTING}</td><td>{@code OUT_OF_SERVICE}</td><td>Waiting for the startup delay, no heartbeat yet</td></tr>
  *   <tr><td>{@code PAUSED}, {@code DRAINING}</td><td>{@code OUT_OF_SERVICE}</td>
  *       <td>Alive and heartbeating, deliberately not claiming — an operator's decision or a
  *           shutdown in progress, neither of which is a fault</td></tr>
@@ -72,7 +73,7 @@ public class MohsHealthIndicator implements HealthIndicator {
         EngineState state = lifecycle.state();
         Status status = switch (state) {
             case RUNNING -> Status.UP;
-            case PAUSED, DRAINING -> Status.OUT_OF_SERVICE;
+            case STARTING, PAUSED, DRAINING -> Status.OUT_OF_SERVICE;
             case CREATED, STOPPED -> Status.DOWN;
         };
         return Health.status(status).withDetail("state", state.name()).build();

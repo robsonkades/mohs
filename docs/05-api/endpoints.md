@@ -375,7 +375,9 @@ never the table's physical order.
 
 **Death is not a field.** A crash writes nothing; the reader derives alive-versus-suspect from the
 age of `lastHeartbeatAt`. `STOPPED` is the only self-reported outcome, and the purge keeps the list
-to recent nodes. `state` is one of `CREATED`, `RUNNING`, `PAUSED`, `DRAINING`, `STOPPED`.
+to recent nodes. `state` is one of `CREATED`, `STARTING`, `RUNNING`, `PAUSED`, `DRAINING`, `STOPPED`.
+`STARTING` is a local lifecycle state: a node waiting for its startup delay has no heartbeat row yet
+and therefore does not appear in this database-backed list until processing starts.
 
 Bounded cardinality — the cluster's size plus whatever residue the purge has not yet collected — so
 no pagination.

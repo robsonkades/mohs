@@ -21,6 +21,7 @@ import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 import io.mohs.core.resource.RunnerMode;
 import io.mohs.rest.ApiPaths;
@@ -119,11 +120,32 @@ public record MohsProperties(
      * Controls automatic startup and graceful shutdown.
      *
      * @param startMode {@code auto} calls {@link io.mohs.core.MohsLifecycle#start()} by itself at boot; {@code manual} waits for the consumer to call it
+     * @param startupDelay one-time wait after start is requested, before any engine tick; nonnegative, default zero
      * @param shutdown the graceful shutdown settings
      */
     public record Lifecycle(
             @DefaultValue("auto") StartMode startMode,
-            @DefaultValue Shutdown shutdown) {
+            @DefaultValue Shutdown shutdown,
+            @DefaultValue("0s") Duration startupDelay) {
+
+        /**
+         * Binds the canonical constructor even when the compatibility constructor is present.
+         * @param startMode whether startup is automatic or manual
+         * @param shutdown the graceful shutdown settings
+         * @param startupDelay the one-time delay before processing
+         */
+        @ConstructorBinding
+        public Lifecycle {
+        }
+
+        /**
+         * Preserves immediate startup for existing programmatic configurations.
+         * @param startMode whether startup is automatic or manual
+         * @param shutdown the graceful shutdown settings
+         */
+        public Lifecycle(StartMode startMode, Shutdown shutdown) {
+            this(startMode, shutdown, Duration.ZERO);
+        }
 
         /**
          * Whether Spring starts the engine automatically.

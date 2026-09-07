@@ -561,7 +561,7 @@ public class MohsAutoConfiguration {
                 engineProperties.batchSize(), engineProperties.dispatchConcurrency(), engineProperties.claimRounds(),
                 engineProperties.leaseTtl(), engineProperties.nodeLeaseTtl(), engineProperties.watchdogTimeout(),
                 engineProperties.misfireThreshold(), engineProperties.idempotencyRetention(),
-                engineProperties.historyRetention());
+                engineProperties.historyRetention(), properties.lifecycle().startupDelay());
         return new Engine(mohsWorkQueue, mohsDispatcher, mohsHistoryStore, mohsLeaseStore, mohsJobStore, mohsNodeStore,
                 mohsTriggerFirer, mohsExecutionWindowRegistry, mohsRateLimitStore, mohsClock, settings,
                 mohsRunnerRegistry, mohsEngineMetrics, mohsRetryPolicyRegistry);
