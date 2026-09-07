@@ -26,6 +26,7 @@ metadata is generated from the `@param` documentation.
 | `mohs.engine.event-concurrency` | No | `16` | The event publisher's concurrency ceiling |
 | `mohs.engine.completion-flush-on-every-result` | No | `false` | `true` turns off group commit, returning to a synchronous commit per result |
 | `mohs.lifecycle.start-mode` | No | `auto` | `auto` starts the engine at boot; `manual` waits for `mohs.lifecycle().start()` |
+| `mohs.lifecycle.startup-delay` | No | `0s` | Nonnegative, one-time delay from the local engine's `start()` call before any processing or heartbeat. Applies to automatic and manual start |
 | `mohs.lifecycle.shutdown.grace-period` | No | `30s` | How long shutdown waits for in-flight executions before interrupting them |
 | `mohs.time.mode` | No | `application` | `application` uses the system clock; `database` uses `DatabaseClock` |
 | `mohs.time.skew-warn-threshold` | No | `1s` | **`database` mode only.** WARN threshold for measured clock skew |
@@ -36,6 +37,29 @@ metadata is generated from the `@param` documentation.
 | `mohs.runners.<name>.*` | No | — | Additional named runners; see below |
 | `mohs.rate-limits.<name>.max` | **YES**, per entry | — | Firings allowed per window, cluster-wide |
 | `mohs.rate-limits.<name>.window` | **YES**, per entry | — | The window (`1m`, `PT30S`) |
+
+### Startup delay
+
+```yaml
+mohs:
+  lifecycle:
+    start-mode: auto
+    startup-delay: 30s
+```
+
+The application continues starting while the engine stays `STARTING`. After 30 seconds measured
+from `start()`, the engine begins its normal loop. Until then it performs no claims, trigger firing,
+job execution, heartbeat or loop maintenance. Work signals cannot shorten the wait. Shutdown
+cancels pending startup; pause/resume do not apply during `STARTING`, and resume never repeats the delay.
+Zero preserves immediate startup; negative durations and durations that overflow nanoseconds fail boot.
+
+This gate covers engine processing, not bean initialization, definition registration, database clock
+synchronization or API calls. In manual mode the countdown begins only when the consumer calls
+`mohs.lifecycle().start()`. Each node waits independently; other nodes continue processing. Existing
+schedule times remain unchanged and overdue firings follow the configured misfire policy.
+
+Health reports `OUT_OF_SERVICE` with state `STARTING` during the wait. Because the engine has not
+written a heartbeat, the new node does not appear in the database-backed node list until it starts.
 
 ### Runner map entries
 

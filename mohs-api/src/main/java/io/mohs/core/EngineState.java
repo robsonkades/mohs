@@ -16,7 +16,7 @@
 package io.mohs.core;
 
 /**
- * The engine's lifecycle state on this node — {@code CREATED -> RUNNING <-> PAUSED -> DRAINING ->
+ * The engine's lifecycle state on this node — {@code CREATED -> [STARTING ->] RUNNING <-> PAUSED -> DRAINING ->
  * STOPPED}.
  *
  * <p>Node-local by nature; not to be confused with pausing a job, which is cluster-wide and
@@ -27,6 +27,8 @@ public enum EngineState {
      * Constructed but not yet started.
      */
     CREATED,
+    /** Waiting for the startup delay; no heartbeat or processing has begun. */
+    STARTING,
     /**
      * Heartbeating and accepting new claims.
      */

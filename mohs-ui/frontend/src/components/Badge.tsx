@@ -79,6 +79,7 @@ export function ExecutionStateBadge({ state }: { state: ExecutionState }) {
 
 export const ENGINE_STATE_TONE: Record<EngineState, Tone> = {
   CREATED: "neutral",
+  STARTING: "neutral",
   RUNNING: "good",
   PAUSED: "warning",
   DRAINING: "serious",

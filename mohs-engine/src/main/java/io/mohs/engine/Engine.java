@@ -363,7 +363,9 @@ public final class Engine implements MohsLifecycle {
     /** A guarded CAS (the project's discipline throughout), not a lock: a transition only applies if the source state is still the expected one. */
     @Override
     public void start() {
-        if (!state.compareAndSet(EngineState.CREATED, EngineState.RUNNING)) {
+        long startupBegan = System.nanoTime();
+        EngineState initial = settings.startupDelay().isZero() ? EngineState.RUNNING : EngineState.STARTING;
+        if (!state.compareAndSet(EngineState.CREATED, initial)) {
             throw new IllegalStateException("start() only valid from CREATED, was " + state.get());
         }
         warnIfPollIntervalOutrunsHeartbeat();
@@ -371,11 +373,45 @@ public final class Engine implements MohsLifecycle {
         // starvation, and it appears with a name of its own in any profiler or thread dump — which is
         // what matters at 3 a.m. Daemon: a leaked engine never holds up the JVM's exit (a crash is
         // already covered semantics — the node's lease expires and the reaper reclaims).
-        Thread thread = Thread.ofPlatform().name("mohs-engine-loop").daemon(true).unstarted(this::runLoop);
+        Thread thread = Thread.ofPlatform().name("mohs-engine-loop").daemon(true).unstarted(() -> {
+            if (awaitStartup(startupBegan)) {
+                runLoop();
+            }
+        });
         loopThread = thread;
         thread.start();
         if (state.get() == EngineState.STOPPED) { // stop() won the race during start-up — wake the loop it never saw
             wake();
+        }
+    }
+
+    /** Monotonic, one-time gate. Work signals and spurious wakes cannot shorten the delay. */
+    private boolean awaitStartup(long startupBegan) {
+        if (settings.startupDelay().isZero()) {
+            return state.get() != EngineState.STOPPED;
+        }
+        log.info("engine waiting for startup delay {}", settings.startupDelay());
+        long delayNanos = settings.startupDelay().toNanos();
+        wakeLock.lock();
+        try {
+            while (state.get() == EngineState.STARTING) {
+                long remaining = delayNanos - (System.nanoTime() - startupBegan);
+                if (remaining <= 0) {
+                    if (state.compareAndSet(EngineState.STARTING, EngineState.RUNNING)) {
+                        log.info("engine startup delay completed");
+                        return true;
+                    }
+                    return false;
+                }
+                try {
+                    wakeCondition.awaitNanos(remaining);
+                } catch (InterruptedException e) {
+                    // Same owner policy as awaitWork: stop is state plus wake, not interruption.
+                }
+            }
+            return false;
+        } finally {
+            wakeLock.unlock();
         }
     }
 
@@ -478,6 +514,12 @@ public final class Engine implements MohsLifecycle {
     @Override
     public void stop(Duration grace) {
         Objects.requireNonNull(grace, "grace");
+        if (state.compareAndSet(EngineState.STARTING, EngineState.STOPPED)) {
+            wake();
+            joinLoopThread();
+            log.info("engine stopped during startup delay");
+            return;
+        }
         EngineState current = state.get();
         if (current == EngineState.STOPPED) {
             throw new IllegalStateException("already STOPPED");

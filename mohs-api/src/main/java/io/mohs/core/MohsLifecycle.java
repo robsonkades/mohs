@@ -31,7 +31,9 @@ public interface MohsLifecycle {
     EngineState state();
 
     /**
-     * Starts this engine from its created state.
+     * Starts this engine from its created state without blocking the caller. A configured startup
+     * delay keeps it in {@link EngineState#STARTING} before processing begins. The delay is local
+     * to this node and begins with this call, including in manual mode.
      */
     void start();
 
@@ -54,6 +56,7 @@ public interface MohsLifecycle {
 
     /**
      * {@link #drain} followed by shutting the runners down.
+     * During {@link EngineState#STARTING}, cancels startup without processing or heartbeating.
      *
      * @param grace the maximum time allowed for in-flight work to finish
      */

@@ -143,7 +143,7 @@ executions with `id < cursor` are returned.
 
 ```java
 MohsLifecycle lifecycle = mohs.lifecycle();
-lifecycle.state();               // CREATED → RUNNING ⇄ PAUSED → DRAINING → STOPPED
+lifecycle.state();               // CREATED → [STARTING →] RUNNING ⇄ PAUSED → DRAINING → STOPPED
 lifecycle.pause();               // this NODE stops claiming; not the same as pausing a job
 lifecycle.resume();
 lifecycle.drain(Duration.ofSeconds(30));   // stop claiming, wait for in-flight work
