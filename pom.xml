@@ -68,7 +68,7 @@
         <spring-boot.version>4.1.1</spring-boot.version>
         <project.build.outputTimestamp>2026-08-29T00:00:00Z</project.build.outputTimestamp>
         <gpg.skip>true</gpg.skip>
-        <uuidv7.version>1.2.0</uuidv7.version>
+        <uuidv7.version>1.3.0</uuidv7.version>
     </properties>
 
     <dependencyManagement>
