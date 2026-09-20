@@ -18,7 +18,7 @@ them. Invoke them by name.
 ## Scenarios
 
 All run against `ScenarioCluster` — **N engines in one JVM** against the real PostgreSQL container.
-Each `Engine` has its own `nodeId`, epoch, lease and tick loop, so from the database's point of view
+Each `Engine` has its own session identity, expiry and tick loop, so from the database's point of view
 they are N nodes and the **database arbitrates** claim, ownership and sharding. That is the fidelity
 correctness scenarios need, and the one the shell scripts do not give for free: here the test
 observes what each handler saw, **in memory**, rather than inferring it from logs.
@@ -78,10 +78,10 @@ pwsh mohs-benchmark/scripts/chaos-recovery.ps1 -Scenario SUSPEND -SuspendSeconds
 | Scenario | Injection | Pass criterion |
 | --- | --- | --- |
 | `S6` | `kill -9` mid-drain | 100% of the seed reaches a terminal state; re-executions **only** for what was `RUNNING` at the kill |
-| `S8` | `docker pause` the database mid-drain | No loss, no exception storm, drain resumes, **no self-reap** |
-| `SUSPEND` | Freeze node 1 for longer than `node-lease-ttl`; node 2's reaper reclaims; node 1 resumes as a zombie | Seed fully terminal; reclaim actually happened; **zero** executions with more than one `SUCCEEDED` attempt |
+| `S8` | `docker pause` the database mid-drain | Process survives and every seeded execution reaches a terminal state; expiry may legitimately cause redelivery |
+| `SUSPEND` | Freeze node 1 beyond `node-lease-ttl` while node 2 continues | Seed fully terminal; inspect recovery evidence. Latest-attempt history alone cannot prove absence of duplicate effects |
 
-Measurement is by `mohs_attempt` timestamps, with a unique seed prefix per round.
+Current scripts measure terminal executions using execution/latest-attempt timestamps, with canonical UUIDv7 execution IDs and a unique actor cohort per round. Latest-only storage cannot audit every reclaim or duplicate completion; the chaos script explicitly reports those limits, and `ClusterEngineTest` asserts fencing while owners overlap.
 
 **A known mode of `SUSPEND`, documented rather than hidden**: if the freeze catches the node
 *mid-claim-transaction*, the batch's rows stay locked-but-uncommitted — invisible to the reaper (not
@@ -104,10 +104,10 @@ foreach ($n in 1,2,4,4,2,1) {
 | Mode | Measures |
 | --- | --- |
 | `Idle` | Pauses every definition (a genuinely idle cluster), waits for the backoff to settle at its ceiling, then reads `pg_stat_statements` for queries/s with a top-by-calls attribution |
-| `Drain` | Seeds `SeedSize` ready executions with uniform shard distribution and measures throughput from the `mohs_attempt` window |
+| `Drain` | Seeds `SeedSize` ready executions with uniform shard distribution and measures throughput from the execution window |
 | `Latency` | Enqueues **one** execution at a time through node 0's REST API, spaced enough for the backoff to return to its ceiling, and attributes `scheduled_at → started_at` per dispatching node — which is how the local hand-off versus shard-owner poll split was measured |
 
-Two methodological rules the script encodes, and both matter:
+Two methodological rules matter:
 
 - **`-Reset`** truncates queue and history between cells. Without it the last cell measures a larger
   base than the first.
@@ -115,7 +115,7 @@ Two methodological rules the script encodes, and both matter:
   1/2/4 in the *same* session with the *same* per-node configuration: what scales is the cluster, not
   the sizing of each node.
 
-The first round of each cell is warm-up and is discarded.
+Treat the first round of each cell as warm-up when comparing results; the script prints every round.
 
 ### `write-amplification.ps1`
 
@@ -123,8 +123,36 @@ Measures commits, tuple versions and WAL bytes per execution, with the demo appl
 
 ```powershell
 pwsh mohs-benchmark/scripts/write-amplification.ps1
-pwsh mohs-benchmark/scripts/write-amplification.ps1 -JobKey slow-job   # renewal-heavy workload
+pwsh mohs-benchmark/scripts/write-amplification.ps1 -JobKey slow-job   # handler spends 500 ms per attempt
 ```
+
+### SQL seeding and interpretation
+
+`benchmark-support.ps1` validates the current schema/job and inserts history plus READY work in
+one transaction. It copies `input_contract` from the registered definition, uses canonical UUIDv7
+identities and computes the same FNV-1a shard as production (except an explicit `-ShardMode zero`
+hotspot). Cohorts are tracked by `actor`, never by a noncanonical execution-ID prefix.
+`-PayloadJson` must match the chosen handler; this direct SQL path deliberately bypasses API
+validation, receipts and acceptance admission. For API acceptance measurements use
+[api-load.ps1](../../mohs-benchmark/scripts/api-load.ps1) or the cluster `Latency` mode.
+
+Write-amplification includes one bulk seed transaction, observer queries and background activity;
+it does not establish one acceptance commit per execution. PostgreSQL WAL counters are
+instance-wide. Idle calibration estimates background noise, not an exact subtraction.
+
+Use a dedicated disposable database/instance, with history retention disabled or longer than the
+whole run. Drain checks verify both terminal state and the expected retained count; expired history
+must not be mistaken for a successful drain. SQL errors stop the scripts through `ON_ERROR_STOP`
+and native-process exit-code checks. Chaos cleanup resumes/unpauses and stops owned processes
+in `finally`, including startup failures. The scripts do not delete other nodes' session rows.
+
+### `soak.ps1`
+
+Runs finite waves over the configured duration, appends periodic CSV measurements, then stops
+arrivals and performs a bounded final drain. Its summary separates pending work from missing
+retained history and counts only this run's actor cohorts. Heap samples request the heap area;
+missing Actuator samples are NaN. Compare the full series for trends; endpoint values do not prove
+a memory leak or its absence. Read latency/throughput metrics alongside these samples.
 
 ## Prerequisites
 
@@ -134,7 +162,9 @@ pwsh mohs-benchmark/scripts/write-amplification.ps1 -JobKey slow-job   # renewal
 | `pwsh` | PowerShell 7+; the scripts use syntax 5.1 does not have |
 | A built demo | `./mvnw -pl mohs-demo -am install`, then `dependency:build-classpath -DincludeScope=runtime -Dmdep.outputFile=target/cp.txt` |
 | Free ports | 8080 and upwards, one per node |
-| A `postgres` container | The scripts expect a container of that name |
+| A disposable PostgreSQL instance | `-Container`, `-Database` and `-DbUser` select the target; defaults use `postgres`. SQL seeding requires PostgreSQL 13+, write-amplification requires 14+ for `pg_stat_wal` |
+| Matching app/database | The running demo must use the same target. Cluster/chaos start the demo against localhost:5432 and the selected database/user |
+| Retained evidence | Keep history retention disabled or longer than the experiment |
 
 ## Harnesses that no longer exist
 

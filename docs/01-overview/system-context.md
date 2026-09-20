@@ -45,7 +45,7 @@ flowchart TB
 | **Application developer** | `@MohsJob` methods, the `Mohs` facade, `ExecutionListener`/`ExecutionInterceptor` beans | The primary user. Never touches the engine or the store packages — the reactor enforces it: `mohs-api` has neither on its compile classpath. |
 | **Operator / SRE** | REST v1 and the `/mohs-ui` dashboard | Pause/resume jobs, cancel and retry executions, adjust rate limits, inspect nodes and runners. |
 | **Another internal service** | `POST /jobs/{jobKey}/schedule` with an optional `Idempotency-Key` | Fire-and-forget invocation of an on-demand job. |
-| **The engine itself** | Writes with `actor = "scheduler"` | A reserved actor name; `ScheduleCommand.as` and `HeaderActorResolver` both reject it so a manual schedule can never impersonate a trigger. |
+| **The engine itself** | Creates SCHEDULED executions with a trigger revision | Actor is audit data. The persisted origin/revision, not an actor string, controls recurring rearm. |
 
 ## External systems
 

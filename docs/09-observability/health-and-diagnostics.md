@@ -12,7 +12,7 @@ application without an actuator inherits nothing and the auto-configuration stay
 | --- | --- | --- |
 | `RUNNING` | `UP` | Claiming and heartbeating |
 | `PAUSED`, `DRAINING` | `OUT_OF_SERVICE` | Alive and heartbeating, deliberately not claiming — an operator's decision or a shutdown in progress, neither of which is a fault |
-| `CREATED`, `STOPPED` | `DOWN` | No loop is running: work assigned to this node will not move |
+| `CREATED`, `FAILED`, `STOPPED` | `DOWN` | No loop is running: work assigned to this node will not move |
 | `STARTING` | `OUT_OF_SERVICE` | Waiting for `mohs.lifecycle.startup-delay`; no processing or heartbeat yet |
 
 `OUT_OF_SERVICE` rather than a custom `DEGRADED`, because Boot already maps it to 503 and already
@@ -46,7 +46,12 @@ The other signals:
 | `RUNNING` | Normal operation | Yes | Yes |
 | `PAUSED` | This node stopped claiming; the cluster continues | No | Yes |
 | `DRAINING` | Shutdown in progress, waiting for in-flight work | No | Yes |
+| `FAILED` | Coordinator terminated unexpectedly; stop and restart the application to recover | No | No |
 | `STOPPED` | The loop has ended | No | One final heartbeat, then no |
+
+`FAILED` is recorded before an unexpected coordinator failure escapes. It cannot be resumed;
+`stop(grace)` still joins the coordinator, drains attempts and finishes shutdown. Database query
+failures handled by the normal tick retry path do not by themselves enter this terminal state.
 
 `PAUSED` and `DRAINING` nodes **still heartbeat** — which is why `GET /nodes` can show a draining
 node — but they are excluded from shard assignment, so they hold no slice of the queue.
@@ -135,31 +140,31 @@ in JDK 24, and the remaining causes are native/JNI frames and class initialisers
 
 ```sql
 -- Backlog, by shard
-SELECT shard, COUNT(*) FROM mohs_ready WHERE visible_at <= now() GROUP BY shard ORDER BY 2 DESC;
+SELECT shard, COUNT(*) FROM mohs_work WHERE work_state = 'READY' AND visible_at <= (clock_timestamp() AT TIME ZONE 'UTC') GROUP BY shard ORDER BY 2 DESC;
 
 -- What is executing across the cluster, and who owns it
-SELECT node_id, epoch, COUNT(*) FROM mohs_lease GROUP BY node_id, epoch;
+SELECT node_id, COUNT(*) FROM mohs_work WHERE work_state = 'LEASED' GROUP BY node_id;
 
 -- Who the cluster believes is alive
-SELECT node_id, state, last_heartbeat_at, epoch, expires_at,
-       expires_at > now() AS alive
+SELECT node_id, state, last_heartbeat_at, revoked, expires_at,
+       NOT revoked AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC') AS alive
   FROM mohs_nodes ORDER BY last_heartbeat_at DESC;
 
 -- Armed triggers
-SELECT job_key, next_fire_at, paused, orphaned, retired
+SELECT job_key, next_fire_at, paused, retired
   FROM mohs_job_definitions
  WHERE next_fire_at IS NOT NULL ORDER BY next_fire_at;
 
--- The most common failure classes in the last hour
-SELECT error_type, COUNT(*) FROM mohs_attempt
- WHERE outcome = 'FAILED' AND finished_at > now() - interval '1 hour'
- GROUP BY error_type ORDER BY 2 DESC;
+-- The most common latest-attempt failure classes in the last hour (earlier failures are overwritten)
+SELECT last_attempt_error_type, COUNT(*) FROM mohs_execution
+ WHERE last_attempt_outcome = 'FAILED' AND last_attempt_finished_at > now() - interval '1 hour'
+ GROUP BY last_attempt_error_type ORDER BY 2 DESC;
 
 -- Rate-limit buckets
-SELECT name, max_count, window_duration, tokens, refilled_at FROM mohs_rate_limits;
+SELECT name, max_count, window_micros, tokens, refilled_at FROM mohs_rate_limits;
 ```
 
-`error_type` exists precisely because "which exception class is failing" is the number-one
+`last_attempt_error_type` exists precisely because "which exception class is failing" is the number-one
 operational query.
 
 ### The dashboard
@@ -173,13 +178,13 @@ An idle node is normal — but "idle" has several distinct causes, and they are 
 
 | Observation | Cause |
 | --- | --- |
-| `mohs.claim.batch.size` at 0, no `tick.failed`, an empty `mohs_ready` | Genuinely idle |
+| `mohs.claim.batch.size` at 0, no `tick.failed`, an empty READY `mohs_work` | Genuinely idle |
 | `mohs.tick.failed{step}` climbing | A tick step is failing — check the WARN naming the step |
 | A "this node owns no shard of 64" WARN | More than 64 `RUNNING` nodes |
 | `inflight / capacity` near 1.0 | Dispatch-saturated, not idle |
 | No `mohs-engine-loop` thread | The loop died — restart |
 | `state == PAUSED` | An operator paused this node |
-| A backlog exists but this node claims nothing | Check `mohs_lease` for this node's `node_id`; check whether its shard slice is empty; check `mohs.claim.requeued` for a guard blocking every candidate |
+| A backlog exists but this node claims nothing | Check LEASED `mohs_work` for this node's `node_id`; check whether its shard slice is empty; check `mohs.claim.requeued` for a guard blocking every candidate |
 
 ## The most useful missing signal
 

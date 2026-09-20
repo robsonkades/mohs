@@ -15,6 +15,17 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 
 ### Added
 
+- Typed executable declarations through Spring `JobRegistration<T>` beans, and direct `Mohs.enqueue`,
+  `scheduleAt`, `scheduleAfter` and `scheduleRecurring` methods. Named recurrences reuse one handler
+  with independent persisted inputs. Immutable options expose execution policy and submission overrides.
+  Existing annotations remain supported. See [Programmatic jobs](docs/05-api/programmatic-jobs.md).
+- First-release canonical installers for PostgreSQL, MySQL, SQL Server and H2. Eight tables
+  retain executable definitions, active work, execution snapshots and independently expiring receipts.
+  No upgrade chain for previous development schemas is shipped; see [schema installation](docs/06-data/migrations.md).
+- Prevent retirement of executables while active recurring schedules depend on them.
+- Programmatic submission reuses validated input snapshots. Current performance measurement
+  entry points are documented in the [benchmark guide](docs/10-performance/benchmarks.md).
+
 - `mohs.lifecycle.startup-delay` (default `0s`): a nonblocking, node-local wait from
   automatic or manual `start()` before the engine's first tick. Shutdown cancels the wait;
   work signals cannot shorten it. Component initialization and API calls remain available.
@@ -41,7 +52,7 @@ Nothing has been released yet. This section is the running record of what `0.1.0
   engine's own tick every 10 s rather than on the scrape, so a metrics pipeline cannot decide the
   load it is measuring. Aggregate it across instances with `max`, never `sum`.
 - `mohs.engine.history-retention` (default `0s`, meaning forever): how long a terminal execution's
-  history — its row, its attempts, and a batch none of whose members remain — survives after
+  history — its row with the latest completed attempt, and a batch none of whose members remain — survives after
   finishing. Opt-in: deleting history is the operator's decision, never the scheduler's surprise. A
   positive window is swept hourly on the tick, in bounded batches ranged by the UUIDv7 primary key,
   so no new index is paid for it. `mohs_idempotency` is not touched — it answers to
@@ -58,6 +69,12 @@ Nothing has been released yet. This section is the running record of what `0.1.0
   timestamp and an opt-in `release` profile (sources, Javadoc, GPG, Central Portal upload).
 
 ### Fixed
+
+- Allow Spring configurations that declare `RateLimit` beans and job handlers to constructor-inject
+  `Mohs`. Handler policy validation resolves rate-limit declarations after bean construction and
+  caches their names, avoiding a startup cycle while retaining startup validation.
+- Give the demo a default Hikari connection timeout of 3 seconds, below Mohs's default node lease,
+  so it starts without extra pool arguments. External configuration still takes precedence.
 
 - Restore and synchronize the frontend lockfile so Maven's `npm ci` can install dependencies,
   removing a stale local self-dependency and resolving the incompatible `cn` entry.
@@ -185,6 +202,9 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 
 ### Removed
 
+- `ScheduleCommand`, `JobSpec` and `PolicySpec`: migrate staged scheduling calls to
+  `Mohs.enqueue`, `scheduleAt`, `scheduleAfter` or `scheduleRecurring`, with `SubmissionOptions`,
+  `JobOptions` and `JobRegistration` for submission policy and executable declarations.
 - `JobContext#progress(done, total)`. It was published as "optional, dashboard-oriented, a no-op
   when nothing observes it" — and nothing ever observed it: no store column, no REST field, no
   dashboard component. A handler calling it in a loop paid a virtual call for nothing. Delete the
@@ -192,21 +212,30 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 - **Flyway, and with it every line of DDL Mohs used to execute.** `MohsFlyway`, the
   `mohs.jdbc.migrate` property, the `mohs_schema_history` table, `JdbcDelegate#migrationLocation()`
   and the four Flyway artifacts are gone. **You now install the schema before starting the
-  application** — apply `schema-<dialect>.sql`, which still ships inside `mohs-store-jdbc`'s jar, and
-  apply the `V*.sql` deltas yourself when upgrading. An embedded library should not run DDL against a
-  database it does not own — and in most organisations that run one at scale, to a team that does
-  not accept an application changing the schema at startup, still less a third-party jar inside it.
-
-  **What this asks of you.** Starting against a database with no schema now fails at boot with the
-  driver's own message (`relation "mohs_rate_limits" does not exist` on PostgreSQL) rather than
-  creating anything. Nothing records which versions a database has already seen, so folding the
-  `V*.sql` files into the migration tooling you already run is the recommended path — see
-  [installing and upgrading the schema](docs/06-data/migrations.md). Delete `mohs.jdbc.migrate` from
-  your configuration: an unknown `mohs.*` property is ignored, so it will not fail your boot, and it
-  will not do anything either.
+  application** with the canonical `schema-<dialect>.sql` installer shipped inside the JDBC jar.
+  No V*.sql upgrade chain is provided for previous development layouts. Preserve any required
+  data before an explicit recreation; see [schema installation](docs/06-data/migrations.md).
 
 ### Changed
 
+- Unexpected coordinator termination now exposes `EngineState.FAILED` and health DOWN; normal
+  stop still drains resources. It cannot be resumed.
+- The `job` metric tag keeps its name and identifies the registered executable, aggregating
+  dynamic recurrences. Update filters that previously selected recurrence IDs.
+- Annotated handlers must return void and finish synchronously; `@Async` declarations fail
+  startup. Known lazy singleton declarations are initialized before catalog publication.
+- Dashboard HTML includes context-aware paths and optional host CSRF configuration in a
+  request-specific, noncacheable JSON bootstrap. SSE arrays remain the default; opt-in
+  execution invalidations let the dashboard refresh its own filtered page.
+
+- The first-release schema retains only the latest completed attempt inside `mohs_execution`, reducing the schema to
+  eight tables. Completion replaces all attempt fields under the existing ownership fence;
+  manual retry uses the preserved number plus one. Independent idempotency receipts remain.
+- Breaking execution-detail contract: Java `Execution.lastAttempt(): Optional<Attempt>` replaces
+  `attempts(): List<Attempt>` and its constructor component; REST returns nullable `lastAttempt`.
+  The UI shows latest-attempt diagnostics.
+- Overview counts terminal executions in its window, excluding intermediate retry failures and
+  cancellations. Manual retry removes the previous failed result from this snapshot.
 - `Enqueued` is now published to the `ExecutionListener`s, and to `@OnExecution(ENQUEUED)`, once
   the enqueue is durable: with no transaction bound, when the terminal returns; inside a host
   transaction, after the host's commit — a rollback publishes nothing, and neither does a request
@@ -225,8 +254,8 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 - `JobKey` refuses a value longer than 255 characters, the width of every `job_key` column, with a
   message naming the limit — at definition time, not at the first write, where one dialect raises a
   driver error and MySQL without strict mode truncates the value and lets two keys collide. The
-  idempotency key is bounded the same way, in the Java API — `ScheduleCommand.idempotencyKey`
-  refuses a blank key and one longer than `ScheduleCommand.MAX_IDEMPOTENCY_KEY_LENGTH` — and the `Idempotency-Key`
+  idempotency key is bounded the same way, in the Java API — `SubmissionOptions.withIdempotencyKey`
+  validates the technical-key alphabet and the 255-character limit — and the `Idempotency-Key`
   header answers a 422 above it, for the same reason: a truncated key would deduplicate a genuinely
   new schedule away.
 - `POST /executions/{id}/cancel` and `/retry` resolve the actor **before** the mutation, like every
@@ -241,26 +270,15 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 - `mohs.api.base-path` is validated at boot: it must start with `/` and must not end with one. It is
   concatenated into every route and into the `Location` of every 202, and an empty value mounted the
   API at the host's root, outside the `securityMatcher` the documentation recommends.
-- **A new delta for MySQL, `V10__utf8mb4_table_split.sql`.** `V3` created the five tables of the
-  table split without the `DEFAULT CHARACTER SET utf8mb4` that every other table declares, so on a
-  server whose default is not `utf8mb4` their `job_key` columns ended up in a different character
-  set from `mohs_job_definitions.job_key` and the two statements that compare them across tables
-  failed with an illegal mix of collations, or coerced one side and lost the index. The installer
-  and `V3` now carry the clause; `V10` converts a database that ran the old `V3` to the collation
-  the `V1` tables have (a no-op where the five already share it) and keeps `payload`/`error` as
-  `MEDIUMTEXT`. It is a copying rebuild that blocks writers for its whole duration — minutes per
-  million rows of `mohs_execution`, measured — so it has its own section in
-  `docs/06-data/migrations.md`, like `V5`.
+- MySQL installers declare consistent utf8mb4 key comparison and retain payload/error columns
+  sized for supported inputs. Database recreation follows the canonical installer contract.
 - **SQL Server requires `READ_COMMITTED_SNAPSHOT`, and the boot refuses without it.** The
   `sqlserver` dialect used to degrade behind `WITH (NOLOCK)` hints on its idle-gate probe; those
   hints are gone and the probe is byte-identical across the four dialects. Before starting, run
   `ALTER DATABASE [<name>] SET READ_COMMITTED_SNAPSHOT ON` — the boot error carries the exact
   statement for the database it inspected.
-- **A new delta to apply on upgrade, on all four dialects: `V9__due_trigger_index.sql`.** It adds
-  `idx_mohs_job_next_fire` on `mohs_job_definitions (next_fire_at)`; the due-trigger scan that runs
-  on every tick had no index at all and was a full scan of every definition. Measured on PostgreSQL
-  at 100k definitions: 7.63 ms and 1822 buffers before, 0.229 ms and 48 buffers after. The
-  installers already carry it; an existing database gets it only through the delta.
+- All canonical installers include `idx_mohs_job_next_fire` on
+  `mohs_job_definitions (next_fire_at)` for due-trigger reads.
 - A second engine bound to the same `MeterRegistry` now fails at construction with an
   `IllegalStateException` naming the colliding gauge (`mohs.node.inflight` or `mohs.queue.depth`) and
   the mitigation (one registry per engine, with its own exporter). Micrometer used to keep the first
@@ -275,23 +293,3 @@ Nothing has been released yet. This section is the running record of what `0.1.0
 - `retries` defaults to `1` instead of `0`, so at-least-once delivery holds by default. Under a
   false positive of death detection this admits two **concurrent** invocations of the same
   execution, which `preventOverlap` does not stop.
-- The `V1`→`V4` chain is destructive to data from the single-table era.
-- **Published deltas were rewritten before 1.0, and nothing detects that any more.** A database that
-  already ran the previous `V5` (PostgreSQL) or `V3` (SQL Server, whose `VARCHAR` became `NVARCHAR`)
-  used to fail the boot on a checksum mismatch; with Flyway gone there is no checksum and no
-  complaint — it simply runs with the wrong schema. Pre-1.0 databases are disposable: recreate from
-  `schema-<dialect>.sql`. On SQL Server the old `V3` is worse than a mismatch — its
-  `IF OBJECT_ID(...) IS NULL` makes the new version a no-op there, so a fresh install gets `NVARCHAR`
-  and an upgraded one keeps `VARCHAR`, and only the first satisfies `V8`'s 900-byte clustered-key
-  limit. The structural guard test that compares both installation paths is what catches it.
-- `V5` is a maintenance window on a large database — it copies the whole history inside one
-  transaction. **Drain the cluster first**: with nodes still running, the pool is exhausted, the
-  heartbeat cannot get a connection, and the peers reap a live node.
-- **PostgreSQL primary keys are normalised, inside that same `V5`.** `mohs_execution` is keyed on
-  `(execution_id)` and `mohs_attempt` on `(execution_id, number)` — the shape the other three
-  dialects always had. The time-leading keys were a partitioning artefact that served no query once
-  the partitioning was gone. `idx_mohs_execution_id` and `idx_mohs_attempt_exec` disappear (they
-  became the keys). It **tightens a guarantee**: `execution_id` is now unique by the schema, where
-  before two rows could share an id with different `created_at` values. Nothing produced such a row,
-  but `V5` checks for one before copying, so a database that somehow has it fails naming the row
-  rather than reporting "duplicate key" halfway through the migration.

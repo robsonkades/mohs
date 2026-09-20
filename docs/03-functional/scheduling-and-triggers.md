@@ -108,7 +108,7 @@ sequenceDiagram
         Firer->>DB: UPDATE ... WHERE next_fire_at = :observed AND retired = false
         alt CAS won
             Firer->>DB: INSERT mohs_execution (one per occurrence)
-            Firer->>DB: INSERT mohs_ready (visible_at = scheduledAt)
+            Firer->>DB: INSERT mohs_work READY (visible_at = scheduledAt)
             Firer-->>Loop: true
         else CAS lost — another node fired it
             Firer-->>Loop: false (routine, not an error)
