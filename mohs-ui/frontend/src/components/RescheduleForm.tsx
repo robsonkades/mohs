@@ -37,6 +37,7 @@ export function RescheduleForm({
   const [afterFinish, setAfterFinish] = useState(current.type === "INTERVAL" ? current.afterFinish : false);
 
   function submit() {
+    if (pending) return;
     if (type === "CRON") {
       onSubmit({ type: "CRON", expression, zone });
     } else if (type === "INTERVAL") {
@@ -58,7 +59,7 @@ export function RescheduleForm({
         <Label className="text-[11px]" htmlFor="reschedule-type">
           Type
         </Label>
-        <Select value={type} onValueChange={(value) => setType(value as ScheduleType)}>
+        <Select value={type} disabled={pending} onValueChange={(value) => setType(value as ScheduleType)}>
           <SelectTrigger id="reschedule-type">
             <SelectValue />
           </SelectTrigger>
@@ -80,6 +81,7 @@ export function RescheduleForm({
               id="reschedule-expression"
               className="font-mono"
               placeholder="0 */5 * * * *"
+              disabled={pending}
               value={expression}
               onChange={(event) => setExpression(event.target.value)}
             />
@@ -90,6 +92,7 @@ export function RescheduleForm({
             </Label>
             <Input
               id="reschedule-zone"
+              disabled={pending}
               className="font-mono"
               value={zone}
               onChange={(event) => setZone(event.target.value)}
@@ -106,8 +109,11 @@ export function RescheduleForm({
             </Label>
             <Input
               id="reschedule-interval"
+              disabled={pending}
               type="number"
-              min={1}
+              min={0.000001}
+              step="any"
+              required
               value={seconds}
               onChange={(event) => setSeconds(event.target.value)}
             />
@@ -115,6 +121,7 @@ export function RescheduleForm({
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             <input
               type="checkbox"
+              disabled={pending}
               checked={afterFinish}
               onChange={(event) => setAfterFinish(event.target.checked)}
             />

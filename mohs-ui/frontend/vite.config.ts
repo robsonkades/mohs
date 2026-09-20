@@ -7,7 +7,8 @@ import tailwindcss from "@tailwindcss/vite";
 // The build output is copied onto mohs-ui's classpath by Maven (see mohs-ui/pom.xml), and Spring
 // Boot serves it as a static resource under /mohs-ui, on the same origin as the API.
 export default defineConfig({
-  base: "/mohs-ui/",
+  // The host supplies <base href="{context}/mohs-ui/"> for deep links and custom contexts.
+  base: "./",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: [

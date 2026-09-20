@@ -10,16 +10,16 @@ function elapsed(attempt: AttemptResponse): string | null {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toLocaleString("en", { maximumFractionDigits: 2 })} s`;
 }
 
-export function AttemptTimeline({ attempts }: { attempts: AttemptResponse[] }) {
+export function LastAttemptDetails({ attempt }: { attempt: AttemptResponse | null }) {
   return (
-    <section aria-label="Attempt history">
+    <section aria-label="Latest completed attempt">
       <div className="mb-4 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Attempt history</h3>
-        <span className="text-xs tabular-nums text-muted-foreground">{attempts.length} recorded</span>
+        <h3 className="text-sm font-semibold">Latest completed attempt</h3>
+        <span className="text-xs tabular-nums text-muted-foreground">{attempt ? `Attempt ${attempt.number}` : "No completed attempt"}</span>
       </div>
-      {attempts.length === 0 && <p className="text-sm text-muted-foreground">No attempts recorded yet.</p>}
+      {!attempt && <p className="text-sm text-muted-foreground">No attempt has completed yet.</p>}
       <ol className="ml-1 border-l pl-5">
-        {attempts.map((attempt) => (
+        {attempt && (
           <li key={attempt.number} className="relative pb-6 last:pb-0">
             <span aria-hidden className="absolute -left-[25px] top-1.5 size-2 rounded-full ring-4 ring-background"
               style={{ backgroundColor: TONE_COLOR_VAR[EXECUTION_STATE_TONE[attempt.outcome]] }} />
@@ -43,7 +43,7 @@ export function AttemptTimeline({ attempts }: { attempts: AttemptResponse[] }) {
               </details>
             )}
           </li>
-        ))}
+        )}
       </ol>
     </section>
   );

@@ -32,6 +32,9 @@ function RateLimitCard({ rateLimit }: { rateLimit: RateLimitResponse }) {
   const [max, setMax] = useState(String(rateLimit.max));
   const [window, setWindow] = useState(String(durationSeconds(rateLimit.window) ?? ""));
   const [notice, setNotice] = useState<string | null>(null);
+  const [editBase, setEditBase] = useState<RateLimitResponse | null>(null);
+  const changedRemotely = editing && editBase !== null
+    && (editBase.max !== rateLimit.max || editBase.window !== rateLimit.window);
 
   const patch = useMutation({
     mutationFn: () => patchRateLimit(rateLimit.name, { max: Number(max), window: `PT${Number(window)}S` }),
@@ -44,19 +47,29 @@ function RateLimitCard({ rateLimit }: { rateLimit: RateLimitResponse }) {
 
   const used = usedFraction(rateLimit);
 
+  function beginEditing() {
+    if (patch.isPending) return;
+    setMax(String(rateLimit.max));
+    setWindow(String(durationSeconds(rateLimit.window) ?? ""));
+    setEditBase(rateLimit);
+    setNotice(null);
+    patch.reset();
+    setEditing(true);
+  }
+
   return (
     // A bordered tile, not a Card: these already live inside a Panel, and a card inside a card
     // gives the eye two frames for one object. The tile sits on the page surface so the panel
     // stays the outer container.
-    <div className="flex flex-col gap-3 rounded-lg border bg-page p-4">
+    <div className="flex min-w-0 flex-col gap-3 rounded-lg border bg-page p-4">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5">
-          <span className="flex size-8 items-center justify-center rounded border border-primary/20 bg-primary/10 text-primary">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded border border-primary/20 bg-primary/10 text-primary">
             <IconClock className="size-4" />
           </span>
-          <span className="font-medium">{rateLimit.name}</span>
+          <span className="min-w-0 font-medium [overflow-wrap:anywhere]">{rateLimit.name}</span>
         </div>
-        <Button variant="ghost" size="sm" onClick={() => setEditing((open) => !open)}>
+        <Button variant="ghost" size="sm" disabled={patch.isPending} onClick={() => editing ? setEditing(false) : beginEditing()}>
           {editing ? "Cancel" : "Adjust"}
         </Button>
       </div>
@@ -78,10 +91,10 @@ function RateLimitCard({ rateLimit }: { rateLimit: RateLimitResponse }) {
 
       {editing && (
         <form
-          className="grid grid-cols-[1fr_1fr_auto] items-end gap-2 border-t pt-3"
+          className="grid grid-cols-1 items-end gap-2 border-t pt-3"
           onSubmit={(event) => {
             event.preventDefault();
-            patch.mutate();
+            if (!changedRemotely && !patch.isPending) patch.mutate();
           }}
         >
           <div className="space-y-1">
@@ -92,6 +105,9 @@ function RateLimitCard({ rateLimit }: { rateLimit: RateLimitResponse }) {
               id={`${rateLimit.name}-max`}
               type="number"
               min={1}
+              max={2147483647}
+              required
+              disabled={patch.isPending}
               value={max}
               onChange={(event) => setMax(event.target.value)}
             />
@@ -103,25 +119,33 @@ function RateLimitCard({ rateLimit }: { rateLimit: RateLimitResponse }) {
             <Input
               id={`${rateLimit.name}-window`}
               type="number"
-              min={1}
+              min={0.000001}
+              step="any"
+              required
+              disabled={patch.isPending}
               value={window}
               onChange={(event) => setWindow(event.target.value)}
             />
           </div>
-          <Button type="submit" size="sm" disabled={patch.isPending}>
+          <Button type="submit" size="sm" disabled={patch.isPending || changedRemotely}>
             Apply
           </Button>
         </form>
       )}
 
-      {patch.error && <p className="text-xs text-critical">{patch.error.message}</p>}
-      {notice && <p className="text-xs text-warning">{notice}</p>}
+      {changedRemotely && <div role="alert" className="space-y-2 text-xs text-warning">
+        <p>This limit changed while you were editing. Reload its current values before applying an adjustment.</p>
+        <Button size="sm" variant="outline" disabled={patch.isPending} onClick={beginEditing}>Reload current values</Button>
+      </div>}
+
+      {patch.error && <p role="alert" className="text-xs text-critical">{patch.error.message}</p>}
+      {notice && <p role="status" className="text-xs text-warning">{notice}</p>}
     </div>
   );
 }
 
 export function RateLimitsPage() {
-  const rateLimitsQuery = useQuery({ queryKey: queryKeys.rateLimits(), queryFn: fetchRateLimits });
+  const rateLimitsQuery = useQuery({ queryKey: queryKeys.rateLimits(), queryFn: ({ signal }) => fetchRateLimits(signal) });
   const rateLimits = rateLimitsQuery.data;
 
   return (

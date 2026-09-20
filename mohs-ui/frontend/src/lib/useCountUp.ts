@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useReducedMotion } from "./useReducedMotion";
 
 const DURATION_MS = 600;
 
@@ -18,6 +19,7 @@ function easeOutCubic(t: number): number {
  * backwards.
  */
 export function useCountUp(value: number | null): number | null {
+  const reducedMotion = useReducedMotion();
   const [display, setDisplay] = useState<number | null>(value);
   const displayedRef = useRef<number | null>(value);
   const frameRef = useRef<number>(undefined);
@@ -25,7 +27,7 @@ export function useCountUp(value: number | null): number | null {
   useEffect(() => {
     const displayed = displayedRef.current;
 
-    if (value === null || displayed === null || displayed === value) {
+    if (reducedMotion || value === null || displayed === null || displayed === value) {
       displayedRef.current = value;
       setDisplay(value);
       return;
@@ -48,7 +50,7 @@ export function useCountUp(value: number | null): number | null {
     frameRef.current = requestAnimationFrame(tick);
 
     return () => cancelAnimationFrame(frameRef.current!);
-  }, [value]);
+  }, [value, reducedMotion]);
 
   return display;
 }

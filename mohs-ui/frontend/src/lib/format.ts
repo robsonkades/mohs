@@ -92,7 +92,7 @@ export function durationSeconds(iso: string): number | null {
 /** "PT15M" → "15m". Falls back to the raw string when it cannot parse, rather than inventing a number. */
 export function formatDuration(iso: string): string {
   const total = durationSeconds(iso);
-  if (total === null) {
+  if (total === null || !Number.isFinite(total)) {
     return iso;
   }
   if (total === 0) {
@@ -103,7 +103,6 @@ export function formatDuration(iso: string): string {
     [86400, "d"],
     [3600, "h"],
     [60, "m"],
-    [1, "s"],
   ];
   let remaining = total;
   for (const [size, suffix] of units) {
@@ -113,6 +112,9 @@ export function formatDuration(iso: string): string {
       remaining -= value * size;
     }
   }
+  // Java durations preserve microseconds; rounding every unit down erased subsecond schedules.
+  const seconds = Number(remaining.toFixed(9));
+  if (seconds > 0) parts.push(`${seconds}s`);
   return parts.join(" ");
 }
 
