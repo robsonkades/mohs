@@ -96,9 +96,9 @@ a measurement record, not a production recommendation. Size the pool from observ
 database use by handlers, the engine and the host application, while respecting the database's
 connection budget.
 
-**Do not set a global `transaction-isolation`** without reading
-[migrations](../06-data/migrations.md#v5--the-one-migration-that-moves-rows) — the PostgreSQL `V5`
-migration refuses to run outside `READ COMMITTED` rather than silently losing rows.
+**Do not override transaction isolation globally** without reviewing the
+[transaction contracts](../04-engineering/transactions.md). Store operations declare their required
+isolation and compatible host-transaction behavior. The current schema uses canonical installers.
 
 ### 5. `event-concurrency`
 
@@ -209,8 +209,7 @@ Idle cost approaches one existence probe per 30 s per node, thanks to the idle g
 
 ### PostgreSQL
 
-`mohs_ready` and `mohs_lease` already carry `fillfactor = 70` and aggressive autovacuum settings in
-the schema, because they are pure insert/delete churn. Beyond that:
+Use the current installer for storage settings. READY/LEASED transitions update mohs_work; terminal completion deletes it. Measure vacuum and fillfactor choices for this mixed churn. Beyond that:
 
 | Setting | Note |
 | --- | --- |
@@ -269,4 +268,4 @@ Before changing anything:
 
 The codebase holds itself to this, and several plausible optimisations were reverted because the
 number did not support them. See
-[performance characteristics](performance-characteristics.md#a-note-on-measurement-discipline).
+[benchmark methodology](benchmarks.md).

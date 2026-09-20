@@ -21,6 +21,7 @@ export function RefreshControls({ streamStatus }: { streamStatus: StreamStatus }
   const connection = CONNECTION[streamStatus];
 
   function refresh() {
+    window.dispatchEvent(new Event("mohs:refresh"));
     setRefreshing(true);
     void queryClient.invalidateQueries().finally(() => setRefreshing(false));
   }
@@ -29,9 +30,9 @@ export function RefreshControls({ streamStatus }: { streamStatus: StreamStatus }
     <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
       <Popover>
         <PopoverTrigger asChild>
-          <Button variant="ghost" aria-label={`Connection status: ${connection.label}`} className="gap-2 px-2 sm:w-40">
+          <Button variant="ghost" aria-label={`Connection status: ${connection.label}`} className="gap-2 px-2 lg:w-40">
             <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: connection.color }} />
-            <span className="hidden text-xs text-muted-foreground sm:inline">{connection.label}</span>
+            <span className="hidden text-xs text-muted-foreground lg:inline">{connection.label}</span>
           </Button>
         </PopoverTrigger>
         <PopoverContent align="end" className="max-w-[calc(100vw-2rem)]">

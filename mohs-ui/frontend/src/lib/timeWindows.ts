@@ -22,7 +22,7 @@ export type TimeWindow = keyof typeof TIME_WINDOWS;
 export const TIME_WINDOW_KEYS = Object.keys(TIME_WINDOWS) as TimeWindow[];
 
 export function isTimeWindow(value: unknown): value is TimeWindow {
-  return typeof value === "string" && value in TIME_WINDOWS;
+  return typeof value === "string" && Object.hasOwn(TIME_WINDOWS, value);
 }
 
 /** The label the toggle shows — "all" reads better spelled out than as a unit that is not one. */

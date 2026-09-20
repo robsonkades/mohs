@@ -15,10 +15,10 @@
  */
 package io.mohs.core.execution;
 
+import org.jspecify.annotations.Nullable;
+
 import java.time.Instant;
 import java.util.Objects;
-
-import org.jspecify.annotations.Nullable;
 
 /**
  * A single attempt of an {@link Execution}.
@@ -28,33 +28,35 @@ import org.jspecify.annotations.Nullable;
  * {@code error} is the failure message, present only when {@code outcome} is
  * {@link ExecutionState#FAILED}.
  *
- * @param number the one-based attempt number
- * @param startedAt the instant this attempt began
+ * @param number     the one-based attempt number
+ * @param startedAt  the instant this attempt began
  * @param finishedAt the instant the attempt finished
- * @param outcome the recorded outcome of the attempt
- * @param error the recorded failure text, or {@code null} when unavailable
+ * @param outcome    the recorded outcome of the attempt
+ * @param error      the recorded failure text, or {@code null} when unavailable
  */
 public record Attempt(int number, Instant startedAt, @Nullable Instant finishedAt, ExecutionState outcome, @Nullable String error) {
 
     /**
      * Creates a {@code Attempt} with the supplied values.
      *
-     * @param number the one-based attempt number
-     * @param startedAt the instant this attempt began
+     * @param number     the one-based attempt number
+     * @param startedAt  the instant this attempt began
      * @param finishedAt the instant the attempt finished
-     * @param outcome the recorded outcome of the attempt
-     * @param error the recorded failure text, or {@code null} when unavailable
+     * @param outcome    the recorded outcome of the attempt
+     * @param error      the recorded failure text, or {@code null} when unavailable
      */
     public Attempt {
         if (number < 1) {
             throw new IllegalArgumentException("number is 1-based, must be >= 1");
         }
+
         Objects.requireNonNull(startedAt, "startedAt");
         Objects.requireNonNull(outcome, "outcome");
+
         if (outcome == ExecutionState.ENQUEUED || outcome == ExecutionState.RETRY_WAITING) {
-            throw new IllegalArgumentException(
-                    "outcome " + outcome + " does not describe a single attempt's result — it describes the owning Execution's state");
+            throw new IllegalArgumentException("outcome " + outcome + " does not describe a single attempt's result — it describes the owning Execution's state");
         }
+
         if ((outcome == ExecutionState.FAILED) != (error != null)) {
             throw new IllegalArgumentException("error must be present if and only if outcome is FAILED");
         }

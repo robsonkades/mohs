@@ -58,7 +58,7 @@ class JdbcRateLimitStoreTest {
     void setUp() {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         dataSource = freshH2DataSource();
-        store = new JdbcRateLimitStore(dataSource, clock, new H2JdbcDelegate());
+        store = new JdbcRateLimitStore(dataSource, io.mohs.store.jdbc.TestDatabaseClock.at(new H2JdbcDelegate(), clock));
     }
 
     private static DataSource freshH2DataSource() {
@@ -114,7 +114,7 @@ class JdbcRateLimitStoreTest {
     void chargeTakesThePermitsFromTheBucket() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
 
-        assertThat(store.charge("smtp", 30, clock.instant())).isTrue();
+        assertThat(store.charge("smtp", 30)).isTrue();
         assertThat(store.find("smtp")).get().extracting(RateLimitSnapshot::available).isEqualTo(70);
     }
 
@@ -126,24 +126,24 @@ class JdbcRateLimitStoreTest {
     @Test
     void chargeIsAllOrNothingAgainstTheRemainingBalance() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
-        store.charge("smtp", 90, clock.instant());
+        store.charge("smtp", 90);
 
-        assertThat(store.available("smtp", clock.instant())).isEqualTo(10);
-        assertThat(store.charge("smtp", 50, clock.instant())).isFalse();
-        assertThat(store.charge("smtp", 10, clock.instant())).isTrue();
+        assertThat(store.available("smtp")).isEqualTo(10);
+        assertThat(store.charge("smtp", 50)).isFalse();
+        assertThat(store.charge("smtp", 10)).isTrue();
     }
 
     /** One token every window/max (600ms for 100/min): half an interval yields no token at all. */
     @Test
     void theBucketRefillsOneTokenPerIntervalAndNotBefore() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
-        store.charge("smtp", 100, clock.instant());
+        store.charge("smtp", 100);
 
         clock.advance(Duration.ofMillis(300));
-        assertThat(store.charge("smtp", 1, clock.instant())).isFalse();
+        assertThat(store.charge("smtp", 1)).isFalse();
 
         clock.advance(Duration.ofMillis(300));
-        assertThat(store.charge("smtp", 1, clock.instant())).isTrue();
+        assertThat(store.charge("smtp", 1)).isTrue();
     }
 
     /**
@@ -153,15 +153,15 @@ class JdbcRateLimitStoreTest {
     @Test
     void refillKeepsTheLeftoverTimeBetweenCalls() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
-        store.charge("smtp", 100, clock.instant());
+        store.charge("smtp", 100);
 
         // Three advances of 400ms make 1200ms, which is 2 tokens of 600ms; the consumption at 800ms takes
         // the first, so 1 remains. Discarding the fraction on every call (refilledAt = "now" rather than
         // += refill x interval) would give 0 here: each step's remaining 200ms would evaporate.
         clock.advance(Duration.ofMillis(400));
-        store.charge("smtp", 1, clock.instant());
+        store.charge("smtp", 1);
         clock.advance(Duration.ofMillis(400));
-        store.charge("smtp", 1, clock.instant());
+        store.charge("smtp", 1);
         clock.advance(Duration.ofMillis(400));
 
         assertThat(store.find("smtp")).get().extracting(RateLimitSnapshot::available).isEqualTo(1);
@@ -170,7 +170,7 @@ class JdbcRateLimitStoreTest {
     @Test
     void theBucketNeverRefillsBeyondItsCapacity() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
-        store.charge("smtp", 100, clock.instant());
+        store.charge("smtp", 100);
 
         clock.advance(Duration.ofHours(3));
 
@@ -181,16 +181,17 @@ class JdbcRateLimitStoreTest {
     @Test
     void aClockGoingBackwardsRefillsNothing() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
-        store.charge("smtp", 100, clock.instant());
+        store.charge("smtp", 100);
 
-        assertThat(store.charge("smtp", 1, NOW.minus(Duration.ofHours(1)))).isFalse();
+        clock.setTo(NOW.minus(Duration.ofHours(1)));
+        assertThat(store.charge("smtp", 1)).isFalse();
     }
 
     /** The fail-safe: a nonexistent name grants zero rather than letting work through with no limit. */
     @Test
     void anUnknownRateLimitGrantsNothingAndChargesNothing() {
-        assertThat(store.available("ghost", clock.instant())).isZero();
-        assertThat(store.charge("ghost", 10, clock.instant())).isFalse();
+        assertThat(store.available("ghost")).isZero();
+        assertThat(store.charge("ghost", 10)).isFalse();
     }
 
     /**
@@ -200,7 +201,7 @@ class JdbcRateLimitStoreTest {
     @Test
     void upsertKeepsTheBucketBalance() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
-        store.charge("smtp", 60, clock.instant());
+        store.charge("smtp", 60);
 
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
 
@@ -230,21 +231,21 @@ class JdbcRateLimitStoreTest {
         // The tampered surplus is discarded (clamped to the capacity of 10), the charge of 5 is honoured and
         // 5 remain — and the limit stays chargeable, which is the point: with a clamp in mapBucket, the CAS
         // would never match again
-        assertThat(store.charge("smtp", 5, clock.instant())).isTrue();
+        assertThat(store.charge("smtp", 5)).isTrue();
         assertThat(store.find("smtp")).get().extracting(RateLimitSnapshot::available).isEqualTo(5);
     }
 
     /**
-     * A {@code window_duration} text written by hand in an equivalent but non-canonical form
+     * A {@code window_micros} text written by hand in an equivalent but non-canonical form
      * ({@code PT60S} instead of {@code PT1M}) must not stall the charge: the CAS compares TEXT, and
      * re-serialising the parsed {@code Duration} would make the predicate never match.
      */
     @Test
-    void chargeWorksWhenTheStoredWindowTextIsNotCanonical() {
+    void numericWindowRoundTripsExactly() {
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
-        new JdbcTemplate(dataSource).update("UPDATE mohs_rate_limits SET window_duration = 'PT60S' WHERE name = 'smtp'");
+        assertThat(new JdbcTemplate(dataSource).queryForObject("SELECT window_micros FROM mohs_rate_limits WHERE name = 'smtp'", Long.class)).isEqualTo(60_000_000L);
 
-        assertThat(store.charge("smtp", 1, clock.instant())).isTrue();
+        assertThat(store.charge("smtp", 1)).isTrue();
     }
 
     /** A read is pure: checking the balance must neither consume nor move the bucket. */
@@ -255,7 +256,7 @@ class JdbcRateLimitStoreTest {
         store.find("smtp");
         store.find("smtp");
 
-        assertThat(store.charge("smtp", 100, clock.instant())).isTrue();
+        assertThat(store.charge("smtp", 100)).isTrue();
     }
 
     /**
@@ -274,7 +275,7 @@ class JdbcRateLimitStoreTest {
         CyclicBarrier barrier = new CyclicBarrier(2);
         Callable<Integer> round = () -> transaction.execute(_ -> {
             awaitQuietly(barrier);
-            return store.charge("smtp", 10, clock.instant()) ? 10 : 0;
+            return store.charge("smtp", 10) ? 10 : 0;
         });
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 

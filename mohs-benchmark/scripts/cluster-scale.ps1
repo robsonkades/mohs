@@ -1,29 +1,8 @@
-# Phase 6 (S6.4) — os tres numeros que os gates da fase pedem e nenhum
-# script tinha: taxa de consulta OCIOSA por tamanho de cluster e latencia de
-# dispatch (gates ADR-G), escala RELATIVA de vazao com N processos-no contra
-# 1 (gate ADR-F).
-#
-#   -Mode Idle    — sobe N nos, PAUSA todas as definicoes (cluster de verdade
-#                   ocioso: nada dispara), espera o backoff estacionar no teto
-#                   e mede pg_stat_statements: consultas/s do cluster inteiro,
-#                   com o top por chamadas pra atribuicao (quem paga o idle).
-#   -Mode Drain   — sobe N nos, semeia SeedSize execucoes prontas com shard
-#                   uniforme (a forma que os escritores reais produzem) e mede
-#                   a vazao pela janela de mohs_attempt, como todo BASELINE.
-#   -Mode Latency — sobe N nos ociosos e enfileira UMA execucao por vez pelo
-#                   REST do no 0, espacadas o bastante pro backoff voltar ao
-#                   teto: mede scheduled_at -> started_at e atribui por no
-#                   quem despachou (hand-off local x poll do dono do shard).
-#
-# A comparacao honesta e' -Nodes 1/2/4 na MESMA sessao, com a MESMA config
-# POR NO: o que escala e' o cluster, nao o dimensionamento de cada no. A
-# primeira rodada de cada celula e' warmup e sai do registro (ritual da
-# decisao 7 do PLAN.md).
-#
-# Pre-requisitos: Docker com o container 'postgres', mohs-demo/target/classes
-# e mohs-demo/target/cp.txt (mvnw -pl mohs-demo -am install, depois
-# dependency:build-classpath -DincludeScope=runtime -Dmdep.outputFile=target/cp.txt).
-# Rodar com pwsh.
+# Compare idle query rate, SQL drain throughput or API dispatch latency across N nodes.
+# Dedicated disposable database required: Idle pauses definitions and resets
+# pg_stat_statements; Reset deletes work, execution, receipt and batch data.
+# Drain is a SQL microbenchmark; Latency uses the real API acceptance path.
+# Requires built demo classes/cp.txt, PostgreSQL 13+, Docker and PowerShell 7+.
 
 param(
     [Parameter(Mandatory)][ValidateSet('Idle', 'Drain', 'Latency')][string]$Mode,
@@ -50,6 +29,9 @@ param(
     [string]$OnDemandJobKey = 'every-job2',
     [string]$Container = 'postgres',
     [string]$DbUser = 'postgres',
+    [string]$Database = 'postgres',
+    [string]$DbPassword = 'postgres',
+    [string]$PayloadJson = '{}',
     [string]$RepoRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
 )
 
@@ -58,11 +40,12 @@ $demoDir = Join-Path $RepoRoot 'mohs-demo'
 $logDir = Join-Path $RepoRoot 'mohs-benchmark\target\cluster'
 New-Item -ItemType Directory -Force $logDir | Out-Null
 
-function Invoke-Psql([string]$Sql) {
-    $out = docker exec $Container psql -U $DbUser -tA -F '|' -v ON_ERROR_STOP=1 -c $Sql
-    if ($LASTEXITCODE -ne 0) { throw "psql failed (exit $LASTEXITCODE): $Sql" }
-    $out
-}
+. "$PSScriptRoot/benchmark-support.ps1"
+Assert-BenchmarkSchema
+if ($Nodes -lt 1 -or $Rounds -lt 1 -or $SeedSize -lt 1 -or $Samples -lt 1 -or $IdleSeconds -lt 1 -or $DrainTimeoutSeconds -lt 1) { throw 'Counts and durations must be positive.' }
+$jobLiteral = ConvertTo-SqlLiteral $JobKey
+$onDemandLiteral = ConvertTo-SqlLiteral $OnDemandJobKey
+$procs = [Collections.Generic.List[object]]::new()
 
 function Start-Node([int]$Index) {
     $port = $BasePort + $Index
@@ -75,9 +58,9 @@ function Start-Node([int]$Index) {
         '-cp', $cp
         'io.mohs.MohsApplication'
         "--server.port=$port"
-        '--spring.datasource.url=jdbc:postgresql://localhost:5432/postgres'
-        '--spring.datasource.username=postgres'
-        '--spring.datasource.password=postgres'
+        "--spring.datasource.url=jdbc:postgresql://localhost:5432/$Database"
+        "--spring.datasource.username=$DbUser"
+        "--spring.datasource.password=$DbPassword"
         "--spring.datasource.hikari.maximum-pool-size=$PoolSize"
         '--mohs.jdbc.dialect=postgresql'
         '--mohs.api.enabled=true'
@@ -90,6 +73,7 @@ function Start-Node([int]$Index) {
     $proc = Start-Process java -ArgumentList $javaArgs -WorkingDirectory $demoDir -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $logDir "node$Index.log") `
         -RedirectStandardError (Join-Path $logDir "node$Index.err.log")
+    $procs.Add($proc) # tracked before boot so finally also handles startup failures
     $deadline = (Get-Date).AddSeconds(120)
     while (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) {
         if ($proc.HasExited) { throw "node $Index exited during boot — see $logDir\node$Index.err.log" }
@@ -113,19 +97,18 @@ function Stop-Nodes([object[]]$Procs) {
         if ((Get-Date) -gt $deadline) { throw "backends from the killed nodes did not drain in 90s" }
         Start-Sleep -Seconds 1
     }
-    # o purge de linhas mortas e' por tick de quem esta' vivo; a proxima
-    # celula comeca sem heranca de nos parados
-    Invoke-Psql "DELETE FROM mohs_nodes" | Out-Null
+    # Dead sessions expire by the lease protocol; never delete peer sessions here.
+
 }
 
 if ($Reset) {
-    Invoke-Psql "TRUNCATE mohs_execution, mohs_attempt, mohs_ready, mohs_lease" | Out-Null
+    Invoke-Psql "TRUNCATE mohs_work, mohs_execution, mohs_idempotency, mohs_batches" | Out-Null
     Write-Host "== history/queue truncated =="
 }
 
 Write-Host "== booting $Nodes node(s) · pool $PoolSize each · poll $PollInterval..$MaxPollInterval =="
-$procs = @(0..($Nodes - 1) | ForEach-Object { Start-Node $_ })
 try {
+    foreach ($index in 0..($Nodes - 1)) { Start-Node $index | Out-Null }
     if ($Mode -eq 'Idle') {
         # cluster ocioso de verdade: o demo registra 'every-job' (PT1S) no boot,
         # e um trigger disparando a cada segundo mede outra coisa
@@ -163,24 +146,27 @@ try {
     }
     elseif ($Mode -eq 'Latency') {
         # latencia de dispatch de UM enqueue num cluster ocioso: com o tier
-        # NOTIFY retirado (ADR-0054), so' o hand-off LOCAL acorda alguem — e
+        # NOTIFY ausente, so' o hand-off LOCAL acorda alguem — e
         # ele so' resolve se quem recebeu o POST for o dono do shard sorteado
-        Invoke-Psql "UPDATE mohs_job_definitions SET paused = (job_key <> '$OnDemandJobKey')" | Out-Null
-        $probeStart = Invoke-Psql "SELECT now()::text"
+        Invoke-Psql "UPDATE mohs_job_definitions SET paused = (job_key <> $onDemandLiteral)" | Out-Null
+        $probeCohort = New-BenchmarkCohort 'latency'
+        $probeHeaders = @{ 'X-Mohs-Actor' = $probeCohort }
+        if ($env:MOHS_API_TOKEN) { $probeHeaders.Authorization = 'Bearer ' + $env:MOHS_API_TOKEN }
+        $probeBody = @{ payload = (ConvertFrom-Json $PayloadJson -AsHashtable) } | ConvertTo-Json -Depth 100 -Compress
         Write-Host "== $Samples probes into node 0 (port $BasePort), $SettleSeconds s apart so the backoff is back at the ceiling =="
         foreach ($i in 1..$Samples) {
             Start-Sleep -Seconds $SettleSeconds
-            Invoke-RestMethod -Method Post -Uri "http://localhost:$BasePort/api/mohs/v1/jobs/$OnDemandJobKey/schedule" `
-                -ContentType 'application/json' -Body '{"payload":{}}' | Out-Null
+            Invoke-RestMethod -Method Post -Uri "http://localhost:$BasePort/api/mohs/v1/jobs/$([uri]::EscapeDataString($OnDemandJobKey))/schedule" `
+                -ContentType 'application/json' -Body $probeBody -Headers $probeHeaders -TimeoutSec 30 | Out-Null
         }
-        Start-Sleep -Seconds 5
+        Wait-BenchmarkDrain $probeCohort $DrainTimeoutSeconds $Samples
         $row = Invoke-Psql ("SELECT count(*)||'|'||" +
             "round((percentile_cont(0.5) WITHIN GROUP (ORDER BY lat) * 1000)::numeric, 1)||'|'||" +
             "round((percentile_cont(0.95) WITHIN GROUP (ORDER BY lat) * 1000)::numeric, 1)||'|'||" +
             "round((max(lat) * 1000)::numeric, 1) FROM (" +
-            "  SELECT EXTRACT(EPOCH FROM a.started_at - e.scheduled_at) lat" +
-            "    FROM mohs_execution e JOIN mohs_attempt a USING (execution_id)" +
-            "   WHERE e.job_key = '$OnDemandJobKey' AND e.created_at > '$probeStart') t")
+            "  SELECT EXTRACT(EPOCH FROM e.last_attempt_started_at - e.scheduled_at) lat" +
+            "    FROM mohs_execution e" +
+            "   WHERE e.actor = '$probeCohort' AND e.last_attempt_number = 1) t")
         $n, $p50, $p95, $max = $row -split '\|', 4
         Write-Host ""
         Write-Host "--- dispatch latency, $Nodes idle node(s), enqueue on node 0 (n=$n) ---"
@@ -190,42 +176,31 @@ try {
         Write-Host ""
         Write-Host "--- who dispatched (local hand-off only helps the shard owner) ---"
         Invoke-Psql ("SELECT node_id || ' dispatched ' || n || ' · p50 ' || p50 || ' ms' FROM (" +
-            "  SELECT a.node_id, count(*) n," +
-            "         round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM a.started_at - e.scheduled_at)) * 1000)::numeric, 1) p50" +
-            "    FROM mohs_execution e JOIN mohs_attempt a USING (execution_id)" +
-            "   WHERE e.job_key = '$OnDemandJobKey' AND e.created_at > '$probeStart'" +
+            "  SELECT e.last_attempt_node_id AS node_id, count(*) n," +
+            "         round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM e.last_attempt_started_at - e.scheduled_at)) * 1000)::numeric, 1) p50" +
+            "    FROM mohs_execution e" +
+            "   WHERE e.actor = '$probeCohort' AND e.last_attempt_number = 1" +
             "   GROUP BY 1 ORDER BY 2 DESC) t")
     }
     else {
         # o job do seed precisa estar admissivel; uma rodada Idle anterior pode
         # ter deixado a definicao pausada na base
-        Invoke-Psql "UPDATE mohs_job_definitions SET paused = (job_key <> '$JobKey')" | Out-Null
+        Invoke-Psql "UPDATE mohs_job_definitions SET paused = (job_key <> $jobLiteral)" | Out-Null
         Write-Host ("== retained history at start: {0} rows in mohs_execution ==" -f (Invoke-Psql "SELECT count(*) FROM mohs_execution"))
         foreach ($round in 1..$Rounds) {
-            $prefix = 'cs{0}n{1}r{2}-' -f (Get-Date -Format 'HHmmss'), $Nodes, $round
+            $prefix = New-BenchmarkCohort "cluster-n$Nodes-r$round"
             Write-Host ""
-            Write-Host "== round $round : seeding $SeedSize as '$prefix*' =="
-            Invoke-Psql ("INSERT INTO mohs_execution (execution_id, job_key, shard, priority, state, scheduled_at, created_at, actor, payload, payload_type) " +
-                "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', (n % 64), 20, 'PENDING', now(), now(), 'anonymous', '{}', " +
-                "'java.util.Collections`$UnmodifiableMap' FROM generate_series(1,$SeedSize) n") | Out-Null
-            Invoke-Psql ("INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at) " +
-                "SELECT '$prefix'||lpad(n::text,7,'0'), '$JobKey', (n % 64), 20, 1, now() FROM generate_series(1,$SeedSize) n") | Out-Null
-
-            $pending = "SELECT count(*) FROM mohs_execution WHERE execution_id LIKE '$prefix%' AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')"
+            Write-Host "== round $round : seeding $SeedSize with actor '$prefix' =="
             $wall = [Diagnostics.Stopwatch]::StartNew()
-            $deadline = (Get-Date).AddSeconds($DrainTimeoutSeconds)
-            do {
-                Start-Sleep -Milliseconds 500
-                $remaining = [int](Invoke-Psql $pending)
-                if ((Get-Date) -gt $deadline) { throw "drain timed out with $remaining pending" }
-            } while ($remaining -gt 0)
+            Add-BenchmarkSeed -Cohort $prefix -Count $SeedSize -Key $JobKey -PayloadJson $PayloadJson
+            Wait-BenchmarkDrain $prefix $DrainTimeoutSeconds $SeedSize
             $wall.Stop()
 
-            $row = Invoke-Psql ("SELECT count(*)||'|'||EXTRACT(EPOCH FROM max(finished_at) - min(started_at))||'|'||count(DISTINCT node_id) " +
-                "FROM mohs_attempt WHERE execution_id LIKE '$prefix%'")
-            $attempts, $windowSec, $distinctNodes = $row -split '\|', 3
-            '{0} nodes · drained {1} in {2:N1} s wall · attempts window {3:N1} s · {4:N0} exec/s · {5} node(s) in attempts' -f `
-                $Nodes, $SeedSize, $wall.Elapsed.TotalSeconds, [double]$windowSec, ([double]$attempts / [double]$windowSec), $distinctNodes
+            $row = Invoke-Psql ("SELECT count(*)||'|'||EXTRACT(EPOCH FROM max(last_attempt_finished_at) - min(scheduled_at))||'|'||count(DISTINCT last_attempt_node_id) " +
+                "FROM mohs_execution WHERE actor = '$prefix'")
+            $completed, $windowSec, $distinctNodes = $row -split '\|', 3
+            '{0} nodes · drained {1} in {2:N1} s wall · execution window {3:N1} s · {4:N0} exec/s · {5} node(s) in latest attempts' -f `
+                $Nodes, $SeedSize, $wall.Elapsed.TotalSeconds, [double]$windowSec, ([double]$completed / [math]::Max(0.001, [double]$windowSec)), $distinctNodes
         }
     }
 }

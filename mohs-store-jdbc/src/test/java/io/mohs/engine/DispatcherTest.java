@@ -86,8 +86,8 @@ class DispatcherTest {
     }
 
     private static final Instant NOW = Instant.parse("2026-08-14T12:00:00Z");
-    private static final String NODE = "node-a";
-    private static final long EPOCH = 1;
+    private static final String NODE = "01991337-0000-7000-8000-000000000065";
+    private final java.util.Map<String, String> claimTokens = new java.util.HashMap<>();
     private static final String FIXED_RETRY_POLICY = "fixed-test-backoff";
 
     private DataSource dataSource;
@@ -107,10 +107,11 @@ class DispatcherTest {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
-        historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDelegate());
-        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), batchStore);
-        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate(), batchStore);
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, new H2JdbcDelegate());
+        historyStore = new JdbcHistoryStore(dataSource, new H2JdbcDelegate());
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate());
+        io.mohs.store.jdbc.TestSessions.seed(dataSource, new H2JdbcDelegate(), NODE, io.mohs.core.EngineState.RUNNING, Duration.ofMinutes(5));
+        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate());
         handlerRegistry = new HandlerRegistry();
         listener = new RecordingListener();
         eventExecutor = MohsExecutors.ioBoundExecutor("mohs-events-test", 16);
@@ -139,8 +140,8 @@ class DispatcherTest {
     }
 
     /** The ownership the seeds' claim handed over — the same (NODE, EPOCH) fence as the written lease. */
-    private static Dispatcher.Grant grant(int attemptNumber) {
-        return new Dispatcher.Grant(NODE, EPOCH, attemptNumber, NOW);
+    private Dispatcher.Grant grant(int attemptNumber) {
+        return new Dispatcher.Grant(NODE, claimTokens.get("01991337-0000-7000-8000-00000000001c"), attemptNumber, NOW);
     }
 
     /**
@@ -151,18 +152,18 @@ class DispatcherTest {
      */
     @Test
     void dispatchThroughTheBatcherCompletesAndPublishesAfterTheFlush() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
-        CompletionBatcher batcher = new CompletionBatcher(leaseStore, jobStore, 1, Duration.ofMillis(5));
+        }, Object.class);
+        CompletionBatcher batcher = new CompletionBatcher(leaseStore, 1, Duration.ofMillis(5));
         batcher.start();
         try {
             new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener), eventExecutor,
                     new EngineMetrics(new SimpleMeterRegistry()), batcher)
-                    .dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+                    .dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
             assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
-            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+            assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
         } finally {
             batcher.close();
         }
@@ -175,14 +176,14 @@ class DispatcherTest {
 
     private Execution seedRunningExecution(String id, String jobKey, int attempt, String actor) {
         if (jobStore.find(JobKey.of(jobKey)).isEmpty()) {
-            jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
+            jobStore.upsert(JobDefinition.of(jobKey, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         }
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
                 VALUES (?, ?, 'PENDING', ?, ?, ?, '{}', 'java.lang.Object')
                 """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW), actor);
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, 20, attempt, NOW.minusSeconds(1))));
-        workQueue.claim(0, NODE, EPOCH, 10, List.of(), NOW);
+        io.mohs.store.jdbc.TestWork.ready(dataSource, new H2JdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, 20, attempt, NOW.minusSeconds(1))));
+        workQueue.claim(0, NODE, 10, List.of(), NOW).forEach(work -> claimTokens.put(work.executionId().value(), work.claimToken()));
         return historyStore.find(ExecutionId.of(id), NOW).orElseThrow();
     }
 
@@ -198,28 +199,28 @@ class DispatcherTest {
      * budget from the product's default would make these tests change path with every policy revision.
      */
     private static JobDefinition onDemand(String jobKey) {
-        return JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand().retries(0));
+        return JobDefinition.of(jobKey, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(0), io.mohs.core.schedule.Misfire.IGNORE, false);
     }
 
     /** Full jitter includes zero: a retry is waiting only while its visibility is in the future. */
     @Test
     void failureWithRemainingBudgetSchedulesARetryWithBackoff() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
-        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(2));
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(2), io.mohs.core.schedule.Misfire.IGNORE, false);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             throw new IllegalStateException("boom");
-        });
+        }, Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
+        newDispatcher(List.of()).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
-        assertThat(found.attempts()).hasSize(1);
-        assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.FAILED);
+        Execution found = historyStore.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW).orElseThrow();
+        assertThat(found.lastAttempt()).isPresent();
+        assertThat(found.lastAttempt().orElseThrow().outcome()).isEqualTo(ExecutionState.FAILED);
         // The rebirth landed in the queue: attempt 2, visible after the backoff
         Instant retryVisibleAt = JdbcTimestamps.fromUtcLocalDateTime(rawJdbcTemplate.queryForObject(
-                "SELECT visible_at FROM mohs_ready WHERE execution_id = 'exec-1'", LocalDateTime.class));
+                "SELECT visible_at FROM mohs_work WHERE work_state = 'READY' AND  execution_id = '01991337-0000-7000-8000-00000000001c'", LocalDateTime.class));
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT attempt FROM mohs_ready WHERE execution_id = 'exec-1'", Integer.class)).isEqualTo(2);
+                "SELECT attempt FROM mohs_work WHERE work_state = 'READY' AND  execution_id = '01991337-0000-7000-8000-00000000001c'", Integer.class)).isEqualTo(2);
         assertThat(retryVisibleAt).isBetween(NOW, NOW.plusSeconds(1));
         assertThat(found.state()).isEqualTo(
                 retryVisibleAt.isAfter(NOW) ? ExecutionState.RETRY_WAITING : ExecutionState.ENQUEUED);
@@ -236,16 +237,15 @@ class DispatcherTest {
     @CsvSource({"0, ENQUEUED", "1, RETRY_WAITING"})
     void retryVisibilityAtNowAndOneMillisecondLaterHasTheExpectedState(long delayMillis, ExecutionState expected)
             throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
-        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class,
-                spec -> spec.onDemand().retries(1).retryPolicy(FIXED_RETRY_POLICY));
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1).withRetryPolicy(FIXED_RETRY_POLICY), io.mohs.core.schedule.Misfire.IGNORE, false);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             throw new IllegalStateException("boom");
-        });
+        }, Object.class);
 
-        newDispatcherWithRetryDelay(Duration.ofMillis(delayMillis)).dispatch(execution, definition, "hello", grant(1));
+        newDispatcherWithRetryDelay(Duration.ofMillis(delayMillis)).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(expected);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(expected);
         RetryScheduled scheduled = listener.awaitEvent(RetryScheduled.class);
         assertThat(scheduled.retryAt()).isEqualTo(NOW.plusMillis(delayMillis));
         assertThat(scheduled.nextAttempt()).isEqualTo(2);
@@ -254,15 +254,15 @@ class DispatcherTest {
     /** The budget's last attempt failing is a terminal FAILED with Failed(exhausted=true) — the attemptNumber came from the lease, not from counting. */
     @Test
     void failureOnTheLastBudgetedAttemptFailsTerminally() throws Exception {
-        Execution execution = seedRunningExecutionWithPriorFailedAttempt("exec-1", "welcome-email");
-        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1));
+        Execution execution = seedRunningExecutionWithPriorFailedAttempt("01991337-0000-7000-8000-00000000001c", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1), io.mohs.core.schedule.Misfire.IGNORE, false);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             throw new IllegalStateException("boom again");
-        });
+        }, Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(2));
+        newDispatcher(List.of()).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(2));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
         Failed event = listener.awaitEvent(Failed.class);
         assertThat(event.attempt()).isEqualTo(2);
         assertThat(event.attemptsExhausted()).isTrue();
@@ -271,11 +271,11 @@ class DispatcherTest {
     /** Terminal by nature, not by budget: a pre-dispatch failure publishes Failed(exhausted=false) — the field answers Failed's Javadoc question, it does not inherit the neighbouring path's value. */
     @Test
     void failBeforeDispatchPublishesFailedWithoutTheExhaustedFlag() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
 
         newDispatcher(List.of()).failBeforeDispatch(execution, null, new IllegalStateException("payload could not be read"), grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
         Failed event = listener.awaitEvent(Failed.class);
         assertThat(event.attemptsExhausted()).isFalse();
     }
@@ -283,48 +283,51 @@ class DispatcherTest {
     /** A terminal completion of a scheduler occurrence on a fixed-delay job rearms the chain — the execution's end plus the interval. */
     @Test
     void terminalCompletionOfASchedulerOccurrenceRearmsTheAfterFinishChain() {
-        JobDefinition definition = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
+        JobDefinition definition = JobDefinition.of("poll", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(5), true), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false);
         jobStore.upsert(definition);
-        Execution execution = seedRunningExecution("exec-1", "poll", 1, Execution.SCHEDULER_ACTOR);
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "poll", 1, Execution.SCHEDULER_ACTOR);
+        rawJdbcTemplate.update("UPDATE mohs_execution SET origin = 'SCHEDULED', schedule_revision = ? WHERE execution_id = ?",
+                jobStore.find(JobKey.of("poll")).orElseThrow().scheduleRevision(), execution.id().value());
         disarmTrigger("poll"); // NULL-until-finish: the firing disarmed the trigger
-        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { });
+        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { }, Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
+        newDispatcher(List.of()).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(nextFireAtOf("poll")).isEqualTo(NOW.plus(Duration.ofMinutes(5)));
     }
 
     /** A manual execution of a fixed-delay job is not the chain — completing does not rearm. */
     @Test
     void terminalCompletionOfAManualExecutionDoesNotRearmTheChain() {
-        JobDefinition definition = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
+        JobDefinition definition = JobDefinition.of("poll", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(5), true), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false);
         jobStore.upsert(definition);
-        Execution execution = seedRunningExecution("exec-1", "poll", 1, "api:user");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "poll", 1, "api:user");
         disarmTrigger("poll");
-        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { });
+        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { }, Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", grant(1));
+        newDispatcher(List.of()).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(nextFireAtOf("poll")).isNull();
     }
 
     /** A failure with budget does not rearm — the chain stays alive through the retry; the rearm comes from the retry's terminal completion. */
     @Test
     void aBudgetedFailureOfASchedulerOccurrenceDoesNotRearm() throws Exception {
-        JobDefinition definition = JobDefinition.of("poll", Handler.class,
-                spec -> spec.everyAfterFinish(Duration.ofMinutes(5)).retries(2).retryPolicy(FIXED_RETRY_POLICY));
+        JobDefinition definition = JobDefinition.of("poll", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(5), true), io.mohs.core.definition.JobOptions.defaults().withRetries(2).withRetryPolicy(FIXED_RETRY_POLICY), io.mohs.core.schedule.Misfire.IGNORE, false);
         jobStore.upsert(definition);
-        Execution execution = seedRunningExecution("exec-1", "poll", 1, Execution.SCHEDULER_ACTOR);
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "poll", 1, Execution.SCHEDULER_ACTOR);
+        rawJdbcTemplate.update("UPDATE mohs_execution SET origin = 'SCHEDULED', schedule_revision = ? WHERE execution_id = ?",
+                jobStore.find(JobKey.of("poll")).orElseThrow().scheduleRevision(), execution.id().value());
         disarmTrigger("poll");
         handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> {
             throw new IllegalStateException("boom");
-        });
+        }, Object.class);
 
-        newDispatcherWithRetryDelay(Duration.ofSeconds(1)).dispatch(execution, definition, "hello", grant(1));
+        newDispatcherWithRetryDelay(Duration.ofSeconds(1)).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RETRY_WAITING);
         assertThat(listener.awaitEvent(RetryScheduled.class).retryAt()).isEqualTo(NOW.plusSeconds(1));
         assertThat(nextFireAtOf("poll")).isNull();
     }
@@ -341,48 +344,50 @@ class DispatcherTest {
 
     /** A second attempt: one FAILED attempt already recorded plus the attempt-2 queue entry — the claim hands over the lease with attempt_number 2. */
     private Execution seedRunningExecutionWithPriorFailedAttempt(String id, String jobKey) {
-        jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.onDemand()));
+        jobStore.upsert(JobDefinition.of(jobKey, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
                 VALUES (?, ?, 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
                 """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW));
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome, error_type, error)
-                VALUES (?, 1, 'node-a', ?, ?, 'FAILED', 'java.lang.IllegalStateException', 'boom')
-                """, id, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(10)), JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(9)));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, 20, 2, NOW.minusSeconds(1))));
-        workQueue.claim(0, NODE, EPOCH, 10, List.of(), NOW);
+                UPDATE mohs_execution SET last_attempt_number = 1, last_attempt_node_id = '01991337-0000-7000-8000-000000000065',
+                    last_attempt_started_at = ?, last_attempt_finished_at = ?, last_attempt_outcome = 'FAILED',
+                    last_attempt_error_type = 'java.lang.IllegalStateException', last_attempt_error = 'boom'
+                WHERE execution_id = ?
+                """, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(10)), JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(9)), id);
+        io.mohs.store.jdbc.TestWork.ready(dataSource, new H2JdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, 20, 2, NOW.minusSeconds(1))));
+        workQueue.claim(0, NODE, 10, List.of(), NOW).forEach(work -> claimTokens.put(work.executionId().value(), work.claimToken()));
         return historyStore.find(ExecutionId.of(id), NOW).orElseThrow();
     }
 
     @Test
     void dispatchInvokesTheHandlerAndRecordsSuccess() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         List<Object> received = new CopyOnWriteArrayList<>();
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> received.add(payload));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> received.add(payload), Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
         assertThat(received).containsExactly("hello");
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
-        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
-        assertThat(found.attempts()).hasSize(1);
-        assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
+        Execution found = historyStore.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW).orElseThrow();
+        assertThat(found.lastAttempt()).isPresent();
+        assertThat(found.lastAttempt().orElseThrow().outcome()).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
     }
 
     /** Past the ceiling the message is data, not an error: the row keeps the head and says how much was cut. */
     @Test
     void anOversizedErrorMessageIsCutAtTheCeilingWithTheTailAccounted() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         String oversized = "x".repeat(Dispatcher.MAX_ERROR_LENGTH + 1_000);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             throw new IllegalStateException(oversized);
-        });
+        }, Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        String stored = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow().attempts().get(0).error();
+        String stored = historyStore.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW).orElseThrow().lastAttempt().orElseThrow().error();
         assertThat(stored).startsWith("x".repeat(Dispatcher.MAX_ERROR_LENGTH)).endsWith("… [truncated 1000 chars]");
         assertThat(stored.length()).isLessThan(oversized.length());
     }
@@ -390,32 +395,32 @@ class DispatcherTest {
     /** The cut never lands inside a surrogate pair: the head loses one char rather than end in half an emoji. */
     @Test
     void anOversizedErrorMessageNeverEndsInHalfASurrogatePair() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         String pairStraddlingTheCeiling = "x".repeat(Dispatcher.MAX_ERROR_LENGTH - 1) + "😀" + "y".repeat(10);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             throw new IllegalStateException(pairStraddlingTheCeiling);
-        });
+        }, Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        String stored = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow().attempts().get(0).error();
+        String stored = historyStore.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW).orElseThrow().lastAttempt().orElseThrow().error();
         assertThat(stored).isEqualTo("x".repeat(Dispatcher.MAX_ERROR_LENGTH - 1) + "… [truncated 12 chars]");
         assertThat(stored.chars().noneMatch(c -> Character.isSurrogate((char) c))).isTrue();
     }
 
     @Test
     void dispatchRecordsTerminalFailureWhenHandlerThrows() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             throw new IllegalStateException("boom");
-        });
+        }, Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
-        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
-        assertThat(found.attempts().get(0).outcome()).isEqualTo(ExecutionState.FAILED);
-        assertThat(found.attempts().get(0).error()).isEqualTo("boom");
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
+        Execution found = historyStore.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW).orElseThrow();
+        assertThat(found.lastAttempt().orElseThrow().outcome()).isEqualTo(ExecutionState.FAILED);
+        assertThat(found.lastAttempt().orElseThrow().error()).isEqualTo("boom");
         Failed event = listener.awaitEvent(Failed.class);
         assertThat(event.attemptsExhausted()).isTrue();
         assertThat(event.error()).hasMessage("boom");
@@ -423,13 +428,13 @@ class DispatcherTest {
 
     @Test
     void dispatchFailsTerminallyWhenNoHandlerIsRegistered() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
-        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
-        assertThat(found.attempts().get(0).error()).contains("no handler registered").contains("welcome-email");
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
+        Execution found = historyStore.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW).orElseThrow();
+        assertThat(found.lastAttempt().orElseThrow().error()).contains("no handler registered").contains("welcome-email");
         // Nothing ran, so nothing started: Started means "the handler is about to run"
         listener.awaitEvent(Failed.class);
         assertThat(listener.events()).noneMatch(Started.class::isInstance);
@@ -438,25 +443,25 @@ class DispatcherTest {
     /** ExecutionInterceptor's own Javadoc: its exception IS an attempt failure, treated exactly like a handler's. */
     @Test
     void interceptorExceptionCountsAsAttemptFailure() {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
         ExecutionInterceptor failingInterceptor = (ctx, chain) -> {
             throw new RuntimeException("interceptor blew up");
         };
 
-        newDispatcher(List.of(failingInterceptor)).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+        newDispatcher(List.of(failingInterceptor)).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
-        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
-        assertThat(found.attempts().get(0).error()).isEqualTo("interceptor blew up");
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
+        Execution found = historyStore.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW).orElseThrow();
+        assertThat(found.lastAttempt().orElseThrow().error()).isEqualTo("interceptor blew up");
     }
 
     @Test
     void interceptorsRunInOrderAroundTheHandler() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         List<String> order = new ArrayList<>();
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> order.add("handler"));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> order.add("handler"), Object.class);
         ExecutionInterceptor first = (ctx, chain) -> {
             order.add("first-before");
             chain.proceed();
@@ -468,43 +473,43 @@ class DispatcherTest {
             order.add("second-after");
         };
 
-        newDispatcher(List.of(first, second)).dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+        newDispatcher(List.of(first, second)).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
         assertThat(order).containsExactly("first-before", "second-before", "handler", "second-after", "first-after");
     }
 
     @Test
     void listenerExceptionNeverAffectsTheOutcome() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
         ExecutionListener throwingListener = event -> {
             throw new RuntimeException("listener blew up");
         };
         Dispatcher dispatcher = new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, List.of(),
                 List.of(throwingListener, listener), eventExecutor, new EngineMetrics(new SimpleMeterRegistry()));
 
-        dispatcher.dispatch(execution, onDemand("welcome-email"), "hello", grant(1));
+        dispatcher.dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
         assertThat(listener.awaitEvent(Succeeded.class)).isNotNull();
     }
 
     /** A MANUAL signal plus an abnormal exit is a terminal CANCELLED with a Cancelled event — a cancel beats the budget (rescheduling what the operator ordered stopped would contradict the order). */
     @Test
     void manualCancellationMapsAnAbnormalExitToCancelledWithoutRetry() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
-        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(5));
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(5), io.mohs.core.schedule.Misfire.IGNORE, false);
         CancellationSignal signal = new CancellationSignal();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             signal.requestCancellation(CancellationSignal.Reason.MANUAL, false);
             assertThat(ctx.cancellationRequested()).isTrue();
             throw new IllegalStateException("stopping at the operator's request");
-        });
+        }, Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, definition, "hello", signal, grant(1));
+        newDispatcher(List.of()).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), signal, grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.CANCELLED);
         Cancelled cancelled = listener.awaitEvent(Cancelled.class);
         assertThat(cancelled.attempt()).isEqualTo(1);
     }
@@ -512,18 +517,17 @@ class DispatcherTest {
     /** A TIMEOUT signal reclassifies the failure with a timeout cause and keeps the budget — and the thread exits clean (a pending interrupt never survives the dispatch). */
     @Test
     void timeoutSignalMapsTheFailureToTimeoutCauseAndKeepsTheRetryBudget() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
-        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class,
-                spec -> spec.onDemand().retries(1).timeout(Duration.ofMinutes(5)).retryPolicy(FIXED_RETRY_POLICY));
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1).withTimeout(Duration.ofMinutes(5)).withRetryPolicy(FIXED_RETRY_POLICY), io.mohs.core.schedule.Misfire.IGNORE, false);
         CancellationSignal signal = new CancellationSignal();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             signal.requestCancellation(CancellationSignal.Reason.TIMEOUT, true);
             throw new InterruptedException("interrupted mid-await");
-        });
+        }, Object.class);
 
-        newDispatcherWithRetryDelay(Duration.ofSeconds(1)).dispatch(execution, definition, "hello", signal, grant(1));
+        newDispatcherWithRetryDelay(Duration.ofSeconds(1)).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), signal, grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RETRY_WAITING);
         assertThat(listener.awaitEvent(RetryScheduled.class).retryAt()).isEqualTo(NOW.plusSeconds(1));
         AttemptFailed failed = listener.awaitEvent(AttemptFailed.class);
         assertThat(failed.error().getMessage()).contains("exceeded job timeout PT5M");
@@ -533,16 +537,16 @@ class DispatcherTest {
     /** A SHUTDOWN signal reclassifies with a NodeShutdown cause and follows the normal retry — honest at-least-once even during shutdown. */
     @Test
     void shutdownSignalMapsTheFailureToNodeShutdownCause() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         CancellationSignal signal = new CancellationSignal();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
             throw new InterruptedException("interrupted by drain escalation");
-        });
+        }, Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal, grant(1));
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), signal, grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
         Failed failed = listener.awaitEvent(Failed.class);
         assertThat(failed.error().getMessage()).contains("node shutdown");
     }
@@ -550,14 +554,14 @@ class DispatcherTest {
     /** A normal return with the signal raised is SUCCEEDED — the work finished; recording anything else would lie and would schedule a duplicate. */
     @Test
     void aHandlerThatFinishesDespiteTheSignalSucceeds() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         CancellationSignal signal = new CancellationSignal();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) ->
-                signal.requestCancellation(CancellationSignal.Reason.MANUAL, false));
+                signal.requestCancellation(CancellationSignal.Reason.MANUAL, false), Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal, grant(1));
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), signal, grant(1));
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
         listener.awaitEvent(Succeeded.class);
     }
 
@@ -569,34 +573,34 @@ class DispatcherTest {
      */
     @Test
     void aFailingSuccessWriteIsNeverReclassifiedBySignalOrBudget() {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         CancellationSignal signal = new CancellationSignal();
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) ->
-                signal.requestCancellation(CancellationSignal.Reason.MANUAL, false));
+                signal.requestCancellation(CancellationSignal.Reason.MANUAL, false), Object.class);
         LeaseStore blinkingStore = mock(LeaseStore.class, delegatesTo(leaseStore));
-        doThrow(new RuntimeException("simulated database error on the success write")).when(blinkingStore).complete(any(), any());
+        doThrow(new RuntimeException("simulated database error on the success write")).when(blinkingStore).complete(any());
         Dispatcher dispatcher = new Dispatcher(blinkingStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener),
                 eventExecutor, new EngineMetrics(new SimpleMeterRegistry()));
 
-        assertThatThrownBy(() -> dispatcher.dispatch(execution, onDemand("welcome-email"), "hello", signal, grant(1)))
+        assertThatThrownBy(() -> dispatcher.dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), signal, grant(1)))
                 .hasMessageContaining("simulated database error");
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RUNNING);
     }
 
     /** The pre-start check: MANUAL already raised when the task leaves the queue — the handler does not even run, and the operator's order is honoured without spending CPU. */
     @Test
     void aManualSignalRaisedBeforeTheHandlerStartsSkipsTheHandlerAndCancels() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
         CancellationSignal signal = new CancellationSignal();
         signal.requestCancellation(CancellationSignal.Reason.MANUAL, false);
         AtomicBoolean handlerRan = new AtomicBoolean();
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerRan.set(true));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerRan.set(true), Object.class);
 
-        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), "hello", signal, grant(1));
+        newDispatcher(List.of()).dispatch(execution, onDemand("welcome-email"), io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), signal, grant(1));
 
         assertThat(handlerRan).isFalse();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.CANCELLED);
         listener.awaitEvent(Cancelled.class);
         assertThat(listener.events()).as("a cancellation before the start publishes no Started").noneMatch(Started.class::isInstance);
     }
@@ -604,21 +608,56 @@ class DispatcherTest {
     /** The pre-start check: SHUTDOWN on a queued task — work not done fails NodeShutdown without running and becomes a clean retry on another node (not starting new work is the first step of a graceful shutdown). */
     @Test
     void aShutdownSignalRaisedBeforeTheHandlerStartsSkipsTheHandlerAndFollowsTheBudget() throws Exception {
-        Execution execution = seedRunningExecution("exec-1", "welcome-email");
-        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class,
-                spec -> spec.onDemand().retries(1).retryPolicy(FIXED_RETRY_POLICY));
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
+        JobDefinition definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1).withRetryPolicy(FIXED_RETRY_POLICY), io.mohs.core.schedule.Misfire.IGNORE, false);
         CancellationSignal signal = new CancellationSignal();
         signal.requestCancellation(CancellationSignal.Reason.SHUTDOWN, true);
         AtomicBoolean handlerRan = new AtomicBoolean();
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerRan.set(true));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerRan.set(true), Object.class);
 
-        newDispatcherWithRetryDelay(Duration.ofSeconds(1)).dispatch(execution, definition, "hello", signal, grant(1));
+        newDispatcherWithRetryDelay(Duration.ofSeconds(1)).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), signal, grant(1));
 
         assertThat(handlerRan).isFalse();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RETRY_WAITING);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RETRY_WAITING);
         assertThat(listener.awaitEvent(RetryScheduled.class).retryAt()).isEqualTo(NOW.plusSeconds(1));
         AttemptFailed failed = listener.awaitEvent(AttemptFailed.class);
         assertThat(failed.error().getMessage()).contains("before attempt 1 started");
+    }
+
+    @Test
+    void aCancellationAcceptedWhileTheFailureIsBufferedPublishesTheDurableOutcome() throws Exception {
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
+        var definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1), io.mohs.core.schedule.Misfire.IGNORE, false);
+        handlerRegistry.register(execution.jobKey(), (payload, ctx) -> { throw new IllegalStateException("buffered failure"); }, Object.class);
+        var registry = new SimpleMeterRegistry();
+        try (var batcher = new CompletionBatcher(leaseStore, 100, Duration.ofMinutes(5))) {
+            // Deliberately start no flusher: close is the controlled flush boundary.
+            new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener), eventExecutor,
+                    new EngineMetrics(registry), batcher).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
+            assertThat(workQueue.cancel(execution.id(), NOW)).isTrue();
+        }
+        listener.awaitEvent(Cancelled.class);
+        assertThat(listener.events()).noneMatch(RetryScheduled.class::isInstance).noneMatch(AttemptFailed.class::isInstance);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.CANCELLED);
+        assertThat(registry.get("mohs.execution.total").tag("outcome", "cancelled").counter().count()).isEqualTo(1);
+        assertThat(registry.find("mohs.attempt.total").tag("outcome", "failed").counter()).isNull();
+    }
+
+    @Test
+    void retirementDuringBufferedCompletionPublishesTerminalFailureWithoutRetry() throws Exception {
+        Execution execution = seedRunningExecution("01991337-0000-7000-8000-00000000001c", "welcome-email");
+        var definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1), io.mohs.core.schedule.Misfire.IGNORE, false);
+        handlerRegistry.register(execution.jobKey(), (payload, ctx) -> { throw new IllegalStateException("buffered failure"); }, Object.class);
+        var registry = new SimpleMeterRegistry();
+        try (var batcher = new CompletionBatcher(leaseStore, 100, Duration.ofMinutes(5))) {
+            new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, List.of(), List.of(listener), eventExecutor,
+                    new EngineMetrics(registry), batcher).dispatch(execution, definition, io.mohs.test.InputFixtures.encode(execution.jobKey(), "hello"), grant(1));
+            jobStore.remove(execution.jobKey());
+        }
+        assertThat(listener.awaitEvent(Failed.class).attemptsExhausted()).isFalse();
+        assertThat(listener.events()).noneMatch(RetryScheduled.class::isInstance).noneMatch(AttemptFailed.class::isInstance);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
+        assertThat(registry.get("mohs.execution.total").tag("outcome", "failed").counter().count()).isEqualTo(1);
     }
 
     private static final class RecordingListener implements ExecutionListener {

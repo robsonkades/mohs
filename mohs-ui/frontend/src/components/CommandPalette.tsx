@@ -34,7 +34,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     if (open) setQuery("");
   }, [open]);
 
-  const jobs = useQuery({ queryKey: queryKeys.jobs(), queryFn: fetchJobs, enabled: open });
+  const jobs = useQuery({ queryKey: queryKeys.jobs(), queryFn: ({ signal }) => fetchJobs(signal), enabled: open });
 
   const pages = useMemo(() => {
     const needle = query.trim().toLowerCase();

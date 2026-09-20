@@ -117,7 +117,42 @@ class MohsUiAutoConfigurationTest {
             mockMvc.perform(get("/mohs-ui/jobs/welcome.email"))
                     .andExpect(status().isOk())
                     .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_HTML))
-                    .andExpect(header().string("Cache-Control", "no-cache"));
+                    .andExpect(header().string("Cache-Control", "no-store"));
+        });
+    }
+
+    @Test
+    void bootstrapUsesTheHostContextAndConfiguredApiEvenOnDeepLinks() {
+        runner.withConfiguration(AutoConfigurations.of(WebMvcAutoConfiguration.class))
+                .withPropertyValues("mohs.api.enabled=true", "mohs.api.base-path=/operations/jobs",
+                        "mohs.engine.node-lease-ttl=45s")
+                .run(context -> {
+                    MockMvc mvc = MockMvcBuilders.webAppContextSetup(context).build();
+                    mvc.perform(get("/host/mohs-ui/jobs/welcome.email").contextPath("/host"))
+                            .andExpect(status().isOk())
+                            .andExpect(header().string("Cache-Control", "no-store"))
+                            .andExpect(content().string(containsString("<base href=\"/host/mohs-ui/\">")))
+                            .andExpect(content().string(containsString("\"apiBase\":\"/host/operations/jobs\"")))
+                            .andExpect(content().string(containsString("\"nodeLeaseTtlSeconds\":45.0")))
+                            .andExpect(content().string(containsString("type=\"application/json\" id=\"mohs-config\"")));
+                });
+    }
+
+    @Test
+    void bootstrapPublishesTheHostsCsrfTokenAsEscapedInertJsonWithoutConditionalCaching() {
+        runner.withConfiguration(AutoConfigurations.of(WebMvcAutoConfiguration.class)).run(context -> {
+            MockMvc mvc = MockMvcBuilders.webAppContextSetup(context).build();
+            var token = new org.springframework.security.web.csrf.DefaultCsrfToken(
+                    "X-HOST-CSRF", "_csrf", "</script><script>unexpected</script>");
+            mvc.perform(get("/mohs-ui/index.html")
+                            .requestAttr("org.springframework.security.web.csrf.CsrfToken", token)
+                            .header("If-Modified-Since", "Wed, 31 Dec 2099 23:59:59 GMT"))
+                    .andExpect(status().isOk())
+                    .andExpect(header().doesNotExist("Last-Modified"))
+                    .andExpect(header().string("Cache-Control", "no-store"))
+                    .andExpect(content().string(containsString("\"csrfHeaderName\":\"X-HOST-CSRF\"")))
+                    .andExpect(content().string(containsString("\\u003c/script\\u003e")))
+                    .andExpect(content().string(org.hamcrest.Matchers.not(containsString("<script>unexpected"))));
         });
     }
 

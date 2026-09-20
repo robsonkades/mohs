@@ -20,7 +20,7 @@ Start with the [getting started guide](01-overview/getting-started.md) to run a 
 | Integrating Mohs into an app | [Capabilities](01-overview/capabilities.md) → [Java API](05-api/java-api.md) → [Configuration reference](07-configuration/configuration-reference.md) |
 | Operating it in production | [Startup & shutdown](13-operations/startup-and-shutdown.md) → [Runbook](13-operations/runbook.md) → [Troubleshooting](13-operations/troubleshooting.md) → [Security](08-security/security-overview.md) |
 | Reviewing the design | [Module architecture](02-architecture/module-architecture.md) → [Boundaries and fitness functions](02-architecture/boundaries-and-fitness-functions.md) |
-| Tuning performance | [Performance characteristics](10-performance/performance-characteristics.md) → [Tuning](10-performance/tuning.md) → [Benchmarks](10-performance/benchmarks.md) |
+| Tuning performance | [Performance guide](10-performance/README.md) → [Tuning](10-performance/tuning.md) → [Benchmarks](10-performance/benchmarks.md) |
 
 ---
 
@@ -89,7 +89,7 @@ Start with the [getting started guide](01-overview/getting-started.md) to run a 
 - [Health and diagnostics](09-observability/health-and-diagnostics.md)
 
 ### 10. Performance
-- [Performance characteristics](10-performance/performance-characteristics.md)
+- [Performance guide](10-performance/README.md)
 - [Tuning](10-performance/tuning.md)
 - [Benchmarks and harnesses](10-performance/benchmarks.md)
 

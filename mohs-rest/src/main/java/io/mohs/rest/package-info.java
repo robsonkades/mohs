@@ -35,7 +35,7 @@
  *
  * <p>{@code *Response} is the default, used both for an endpoint's direct body and for a DTO nested
  * inside another (for example {@link io.mohs.rest.execution.AttemptResponse}, nested in
- * {@code ExecutionResponse.attempts()} — nesting is not the criterion that decides the suffix).
+ * {@code ExecutionResponse.lastAttempt()} — nesting is not the criterion that decides the suffix).
  *
  * <p>{@code *View} is reserved for two cases: the wire adaptation of a {@code sealed} domain type,
  * mirroring its variants 1:1 (for example {@link io.mohs.rest.job.ScheduleView}, mirroring

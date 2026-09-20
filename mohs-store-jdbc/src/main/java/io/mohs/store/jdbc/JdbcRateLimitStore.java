@@ -17,7 +17,6 @@ package io.mohs.store.jdbc;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -46,41 +45,14 @@ public final class JdbcRateLimitStore implements RateLimitStore {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcRateLimitStore.class);
 
-    /**
-     * The ceiling on waiting for the bucket row's lock (today only {@link #charge}'s {@code UPDATE}
-     * holds it, and only until the commit) — the ONLY unconditional wait on the claim path, which never
-     * used to block at all (the candidate selection's {@code SKIP LOCKED}/{@code READPAST} skips what is
-     * locked, never waits).
-     *
-     * <p>Without a ceiling, one stuck node holding the row delays OTHER nodes' ticks — and the tick is
-     * what beats the heartbeat and renews the lease, so contention would become a false positive of
-     * death and the reaper would reclaim executions that are still running: work duplicated by the very
-     * mechanism meant to protect the external resource.
-     *
-     * <p>Once the ceiling expires, a {@code QueryTimeoutException} comes out — MEASURED on H2 (SQLState
-     * 50200, 2013ms) and Postgres 18 (57014, 2022ms), not a {@code CannotAcquireLockException}: Spring's
-     * translator sends statement timeout and deadlock to SIBLING branches of the hierarchy. That is why
-     * the claim's caller catches both explicitly — the round is lost, never the heartbeat.
-     *
-     * <p>Two seconds assume a generous {@code lease-ttl} (30s by default): the wait has to fit
-     * comfortably inside the TTL, otherwise the ceiling that protects the heartbeat becomes what
-     * consumes it. A {@code lease-ttl} below about 10s calls for revisiting this value.
-     */
+    /** Two-second statement/transaction deadline for shared bucket contention. */
     static final Duration BUCKET_LOCK_TIMEOUT = Duration.ofSeconds(2);
 
-    /**
-     * Attempts at {@link #charge}'s CAS before returning failure to the caller. Three, because the
-     * asymmetric cost dictates it: each attempt costs two round trips, while giving up costs the whole
-     * claim round (the CAS of up to {@code batchSize} executions).
-     *
-     * <p>A collision requires two nodes charging the SAME limit within the same microsecond window
-     * between read and write — three attempts amply cover anything that is not pathological contention;
-     * and if it is, the lost round is the right signal.
-     */
+    /** Bounded retries of the full bucket CAS; exhausted contention rejects admission. */
     private static final int MAX_CHARGE_ATTEMPTS = 3;
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
-    private final Clock clock;
+    private final org.springframework.transaction.support.TransactionTemplate transaction;
     private final JdbcDelegate delegate;
     private final Set<String> unknownLimitsAlreadyWarned = ConcurrentHashMap.newKeySet();
 
@@ -88,10 +60,9 @@ public final class JdbcRateLimitStore implements RateLimitStore {
      * Creates a {@code JdbcRateLimitStore} with the supplied values.
      *
      * @param dataSource the configured database connection source
-     * @param clock the time source used by the component
      * @param delegate the database-specific SQL and timestamp adapter
      */
-    public JdbcRateLimitStore(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
+    public JdbcRateLimitStore(DataSource dataSource, JdbcDelegate delegate) {
         // Its own template, not JdbcSupport.namedTemplateWithStreamFetchSize: this store's ceiling is its
         // own (BUCKET_LOCK_TIMEOUT, the one unconditional lock wait on the claim path), tighter than the
         // tick's. The convention's fetch size stays — findAll returns a Stream.
@@ -99,7 +70,11 @@ public final class JdbcRateLimitStore implements RateLimitStore {
         template.setFetchSize(JdbcSupport.STREAM_FETCH_SIZE);
         template.setQueryTimeout((int) BUCKET_LOCK_TIMEOUT.toSeconds());
         this.jdbcTemplate = new NamedParameterJdbcTemplate(template);
-        this.clock = Objects.requireNonNull(clock, "clock");
+        transaction = new org.springframework.transaction.support.TransactionTemplate(
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
+        transaction.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        transaction.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_READ_COMMITTED);
+        transaction.setTimeout((int) BUCKET_LOCK_TIMEOUT.toSeconds());
         this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
 
@@ -111,28 +86,42 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     @Override
     public RateLimit upsert(RateLimit rateLimit) {
         Objects.requireNonNull(rateLimit, "rateLimit");
-        MapSqlParameterSource params = new MapSqlParameterSource()
-                .addValue("name", rateLimit.name())
-                .addValue("maxCount", rateLimit.max())
-                .addValue("windowDuration", rateLimit.window().toString())
-                .addValue("refilledAt", JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
-
-        // See the equivalent race in JdbcJobStore.upsert — same race, same fix.
-        int updated = jdbcTemplate.update(delegate.updateRateLimitSpec(), params);
-        if (updated == 0) {
+        for (int attempt = 0; attempt < MAX_CHARGE_ATTEMPTS; attempt++) {
             try {
-                jdbcTemplate.update(delegate.insertFullRateLimitBucket(), params);
+                boolean applied = Boolean.TRUE.equals(transaction.execute(_ -> {
+                    var stored = readBucket(rateLimit.name());
+                    long window = io.mohs.core.TimePrecision.micros(rateLimit.window());
+                    if (stored.isPresent() && stored.orElseThrow().max() == rateLimit.max()
+                            && stored.orElseThrow().windowMicros() == window) return true;
+                    Instant now = JdbcDatabaseTime.now(jdbcTemplate, delegate);
+                    var params = new MapSqlParameterSource("name", rateLimit.name())
+                            .addValue("maxCount", rateLimit.max()).addValue("windowMicros", window)
+                            .addValue("refilledAt", JdbcTimestamps.toUtcLocalDateTime(now));
+                    if (stored.isEmpty()) {
+                        return jdbcTemplate.update(delegate.insertFullRateLimitBucket(), params) == 1;
+                    }
+                    Bucket expected = stored.orElseThrow();
+                    // A backward database clock cannot reopen an interval already accounted for.
+                    if (now.isBefore(expected.refilledAt())) params.addValue("refilledAt", JdbcTimestamps.toUtcLocalDateTime(expected.refilledAt()));
+                    params.addValue("tokens", Math.min(expected.tokens(), rateLimit.max()))
+                            .addValue("expectedTokens", expected.tokens())
+                            .addValue("expectedRefilledAt", JdbcTimestamps.toUtcLocalDateTime(expected.refilledAt()))
+                            .addValue("expectedMax", expected.max()).addValue("expectedWindow", expected.windowMicros())
+                            .addValue("expectedRemainder", expected.remainder());
+                    return jdbcTemplate.update(delegate.updateRateLimitSpec(), params) == 1;
+                }));
+                if (applied) return rateLimit;
             } catch (DuplicateKeyException _) {
-                jdbcTemplate.update(delegate.updateRateLimitSpec(), params);
+                // The competing birth won. Its failed transaction is rolled back before the next read.
             }
         }
-        return rateLimit;
+        throw new org.springframework.dao.CannotAcquireLockException("rate-limit configuration changed concurrently: " + rateLimit.name());
     }
 
     @Override
     public Optional<RateLimitSnapshot> find(String name) {
         Objects.requireNonNull(name, "name");
-        Instant now = clock.instant();
+        Instant now = JdbcDatabaseTime.now(jdbcTemplate, delegate);
         return JdbcSupport.findOne(jdbcTemplate,
                 delegate.findRateLimitByName(),
                 new MapSqlParameterSource("name", name),
@@ -141,7 +130,7 @@ public final class JdbcRateLimitStore implements RateLimitStore {
 
     @Override
     public Stream<RateLimitSnapshot> findAll() {
-        Instant now = clock.instant();
+        Instant now = JdbcDatabaseTime.now(jdbcTemplate, delegate);
         return jdbcTemplate.queryForStream(delegate.findAllRateLimits(), new MapSqlParameterSource(),
                 (rs, _) -> toSnapshot(rs, now));
     }
@@ -161,61 +150,39 @@ public final class JdbcRateLimitStore implements RateLimitStore {
 
     /** A read with no lock at all: phase 1 must not cost serialisation, which is precisely what the revised design bought. */
     @Override
-    public int available(String name, Instant now) {
+    public int available(String name) {
         Objects.requireNonNull(name, "name");
-        Objects.requireNonNull(now, "now");
         Optional<Bucket> stored = readBucket(name);
         if (stored.isEmpty()) {
             warnOnceAboutUnknownLimit(name);
             return 0;
         }
-        return stored.get().refill(now).tokens();
+        return stored.get().refill(JdbcDatabaseTime.now(jdbcTemplate, delegate)).tokens();
     }
 
-    /**
-     * A CAS over the {@code (tokens, refilled_at)} pair — atomic by construction, like every guarded
-     * {@code UPDATE} in the engine, rather than through a specialised lock. The refill and the charge
-     * travel in the SAME statement: applying the refill separately would open a window for another node
-     * to charge on top of an already refilled balance, which is over-delivery.
-     *
-     * <p>An internal retry rather than dropping the round on the first collision: a lost CAS costs two
-     * round trips, while undoing the round throws away the CAS of up to {@code batchSize} executions.
-     * Only after {@link #MAX_CHARGE_ATTEMPTS} is the caller forced to undo.
-     */
+    /** Own READ_COMMITTED transaction: read, database-time refill, full configuration/balance CAS.
+     * A lost response is an unknown outcome; it cannot authorize dispatch or imply a refund. */
     @Override
-    public boolean charge(String name, int permits, Instant now) {
+    public boolean charge(String name, int permits) {
         Objects.requireNonNull(name, "name");
-        Objects.requireNonNull(now, "now");
-        if (permits < 1) {
-            throw new IllegalArgumentException("permits must be at least 1, got " + permits);
-        }
-
-        for (int attempt = 0; attempt < MAX_CHARGE_ATTEMPTS; attempt++) {
-            Optional<Bucket> stored = readBucket(name);
-            if (stored.isEmpty()) {
-                warnOnceAboutUnknownLimit(name);
-                return false;
+        if (permits < 1) throw new IllegalArgumentException("permits must be at least 1, got " + permits);
+        return Boolean.TRUE.equals(transaction.execute(_ -> {
+            for (int attempt = 0; attempt < MAX_CHARGE_ATTEMPTS; attempt++) {
+                Optional<Bucket> stored = readBucket(name);
+                if (stored.isEmpty()) {
+                    warnOnceAboutUnknownLimit(name);
+                    return false;
+                }
+                Bucket expected = stored.orElseThrow();
+                Bucket refilled = expected.refill(JdbcDatabaseTime.now(jdbcTemplate, delegate));
+                if (refilled.tokens() < permits) return false;
+                if (chargeIfUnchanged(name, expected, refilled, permits)) return true;
             }
-            Bucket expected = stored.get();
-            Bucket refilled = expected.refill(now);
-            if (refilled.tokens() < permits) {
-                return false;
-            }
-            if (chargeIfUnchanged(name, expected, refilled, permits)) {
-                return true;
-            }
-        }
-        return false;
+            return false;
+        }));
     }
 
-    /**
-     * {@code false} when the row is no longer {@code expected}: another node charged — or a {@code PATCH}
-     * changed the spec — between the read and this {@code UPDATE}.
-     *
-     * <p>The guard covers the FOUR columns that entered the calculation, not only the two it writes:
-     * {@code max_count} and {@code window_duration} define the refill interval, and a PATCH widening the
-     * window mid-round would refill the balance at the old rate — a silent burst above the new limit.
-     */
+    /** Guard every input to refill: capacity, window, tokens, refilled time and fractional remainder. */
     private boolean chargeIfUnchanged(String name, Bucket expected, Bucket refilled, int permits) {
         return jdbcTemplate.update(delegate.chargeRateLimitByCas(), new MapSqlParameterSource("name", name)
                 .addValue("tokens", refilled.tokens() - permits)
@@ -223,7 +190,9 @@ public final class JdbcRateLimitStore implements RateLimitStore {
                 .addValue("expectedTokens", expected.tokens())
                 .addValue("expectedRefilledAt", JdbcTimestamps.toUtcLocalDateTime(expected.refilledAt()))
                 .addValue("expectedMax", expected.max())
-                .addValue("expectedWindow", expected.windowText())) == 1;
+                .addValue("expectedWindow", expected.windowMicros())
+                .addValue("remainder", refilled.remainder())
+                .addValue("expectedRemainder", expected.remainder())) == 1;
     }
 
     private Optional<Bucket> readBucket(String name) {
@@ -247,73 +216,42 @@ public final class JdbcRateLimitStore implements RateLimitStore {
     }
 
     private static RateLimit mapRow(ResultSet rs) throws SQLException {
-        return new RateLimit(rs.getString("name"), rs.getInt("max_count"), Duration.parse(rs.getString("window_duration")));
+        return new RateLimit(rs.getString("name"), rs.getInt("max_count"), io.mohs.core.TimePrecision.duration(rs.getLong("window_micros")));
     }
 
-    /**
-     * The deserialisation boundary is also a trust boundary: {@link RateLimit}'s invariant protects
-     * WRITERS (boot, a {@code @Bean}, a PATCH), and the {@code ResultSet} does not go through it.
-     *
-     * <p>A hand-edited row — a real scenario, since the operator is told to run manual DDL on this table
-     * during an upgrade — with {@code max_count} larger than the window in nanoseconds would resurrect
-     * the refill's division by zero, taking down the whole claim round. Here that becomes an error that
-     * says what to do, and the balance is clamped so one bad row does not blind
-     * {@code GET /rate-limits} to the rest.
-     */
     private static Bucket mapBucket(ResultSet rs) throws SQLException {
         int max = rs.getInt("max_count");
-        Duration window = Duration.parse(rs.getString("window_duration"));
-        try {
-            RateLimit.requireRefillable(max, window);
-        } catch (IllegalArgumentException notRefillable) {
-            throw new IllegalStateException("rate limit row (max_count=" + max + ", window_duration=" + window
-                    + ") cannot issue tokens — it was not written by Mohs; fix the row", notRefillable);
+        long window = rs.getLong("window_micros");
+        long remainder = rs.getLong("refill_remainder");
+        if (max < 1 || window < 1 || remainder < 0 || remainder >= window) {
+            throw new IllegalStateException("invalid persisted rate bucket: positive capacity/window and fraction within window required");
         }
-        // The RAW balance, unclamped: the value read here becomes the CAS's `expectedTokens`, and clamping
-        // it in memory would blind the guard — on a row with tokens > max_count the predicate would never
-        // match and `charge` would fail forever, taking down every round that touched the limit. What
-        // clamps is the dashboard read (`toSnapshot`), which guards nothing.
-        //
-        // windowText is the row's RAW text, not window.toString(): the CAS compares text, and
-        // Duration.parse is lenient while toString is canonical ('PT60S' written by hand comes back as
-        // 'PT1M'). Re-serialising here would make the predicate never match on a row edited outside Mohs
-        // — the limit would become uncharge­able forever, in silence.
-        return new Bucket(max, window, rs.getString("window_duration"), rs.getInt("tokens"),
-                JdbcTimestamps.fromUtcLocalDateTime(rs.getObject("refilled_at", LocalDateTime.class)));
+        return new Bucket(max, window, rs.getInt("tokens"),
+                JdbcTimestamps.fromUtcLocalDateTime(rs.getObject("refilled_at", LocalDateTime.class)), remainder);
     }
 
-    /**
-     * The token bucket: one token every {@code window / max}, with a capacity of {@code max}.
-     */
-    private record Bucket(int max, Duration window, String windowText, int tokens, Instant refilledAt) {
-
-        /**
-         * Elapsed time converted into WHOLE tokens, with {@code refilledAt} advancing by what was
-         * converted — never to "now". Keeping the pending fraction is what stops the bucket from
-         * delivering less than {@code max} per window forever (each call would lose the division's
-         * remainder).
-         *
-         * <p>A clock running backwards gives {@code earned <= 0} and moves nothing: an NTP step into the
-         * past delays the release, it never releases twice as much.
-         */
-        Bucket refill(Instant now) {
-            if (tokens > max) {
-                // A tampered row: the raw balance remains the CAS's `expected` (what guards is `expected`,
-                // not this return value), but what can be SPENT never exceeds the capacity — under-delivering
-                // is the safe error, over-delivering is the violation.
-                return new Bucket(max, window, windowText, max, now);
+    /** Fractional token credit has numerator microseconds * capacity and denominator windowMicros. */
+    private record Bucket(int max, long windowMicros, int tokens, Instant refilledAt, long remainder) {
+        Bucket refill(Instant observed) {
+            Instant now = io.mohs.core.TimePrecision.observed(observed);
+            if (tokens > max) return new Bucket(max, windowMicros, max, now.isAfter(refilledAt) ? now : refilledAt, 0);
+            if (!now.isAfter(refilledAt)) return this;
+            long elapsed = io.mohs.core.TimePrecision.micros(Duration.between(refilledAt, now));
+            if (tokens >= max || elapsed >= windowMicros) return new Bucket(max, windowMicros, max, now, 0);
+            long earned;
+            long fraction;
+            try {
+                long credit = Math.addExact(Math.multiplyExact(elapsed, max), remainder);
+                earned = credit / windowMicros;
+                fraction = credit % windowMicros;
+            } catch (ArithmeticException largeWindow) {
+                var quotient = java.math.BigInteger.valueOf(elapsed).multiply(java.math.BigInteger.valueOf(max))
+                        .add(java.math.BigInteger.valueOf(remainder)).divideAndRemainder(java.math.BigInteger.valueOf(windowMicros));
+                earned = quotient[0].longValueExact();
+                fraction = quotient[1].longValueExact();
             }
-            Duration perToken = window.dividedBy(max);
-            long earned = Duration.between(refilledAt, now).dividedBy(perToken);
-            if (earned <= 0) {
-                return this;
-            }
-            if (earned >= max - tokens) {
-                // A full bucket has no pending fraction to preserve — and the shortcut avoids multiplying a
-                // duration by an arbitrarily large token count (a row untouched since the previous boot).
-                return new Bucket(max, window, windowText, max, now);
-            }
-            return new Bucket(max, window, windowText, tokens + (int) earned, refilledAt.plus(perToken.multipliedBy(earned)));
+            if (earned >= max - tokens) return new Bucket(max, windowMicros, max, now, 0);
+            return new Bucket(max, windowMicros, tokens + (int) earned, now, fraction);
         }
     }
 }

@@ -58,7 +58,7 @@ class ShardsTest {
 
     @Test
     void everyShardHasExactlyOneOwnerAcrossTheCluster() {
-        List<String> nodes = List.of("node-c", "node-a", "node-b");
+        List<String> nodes = List.of("01991337-0000-7000-8000-000000000068", "01991337-0000-7000-8000-000000000065", "01991337-0000-7000-8000-000000000067");
         Set<Integer> covered = new HashSet<>();
         int total = 0;
         for (String node : nodes) {
@@ -74,19 +74,19 @@ class ShardsTest {
     /** The assignment derives from the ORDER of the ids, not from the list's order — every node must reach the same partition without negotiating. */
     @Test
     void assignmentIsIndependentOfListOrder() {
-        assertThat(Shards.ownedBy("node-b", List.of("node-c", "node-a", "node-b")))
-                .isEqualTo(Shards.ownedBy("node-b", List.of("node-a", "node-b", "node-c")));
+        assertThat(Shards.ownedBy("01991337-0000-7000-8000-000000000067", List.of("01991337-0000-7000-8000-000000000068", "01991337-0000-7000-8000-000000000065", "01991337-0000-7000-8000-000000000067")))
+                .isEqualTo(Shards.ownedBy("01991337-0000-7000-8000-000000000067", List.of("01991337-0000-7000-8000-000000000065", "01991337-0000-7000-8000-000000000067", "01991337-0000-7000-8000-000000000068")));
     }
 
     @Test
     void singleNodeOwnsEveryShard() {
-        assertThat(Shards.ownedBy("node-a", List.of("node-a"))).hasSize(Shards.SHARD_COUNT);
+        assertThat(Shards.ownedBy("01991337-0000-7000-8000-000000000065", List.of("01991337-0000-7000-8000-000000000065"))).hasSize(Shards.SHARD_COUNT);
     }
 
     /** Safe degeneration: outside the list (a stale snapshot of mohs_nodes) or an empty list means owning ALL — an overlap is the pre-shard behaviour (SKIP LOCKED resolves it), a stalled queue is not an option. */
     @Test
     void nodeMissingFromTheListOwnsEveryShard() {
-        assertThat(Shards.ownedBy("node-x", List.of("node-a", "node-b"))).hasSize(Shards.SHARD_COUNT);
-        assertThat(Shards.ownedBy("node-x", List.of())).hasSize(Shards.SHARD_COUNT);
+        assertThat(Shards.ownedBy("01991337-0000-7000-8000-000000000073", List.of("01991337-0000-7000-8000-000000000065", "01991337-0000-7000-8000-000000000067"))).hasSize(Shards.SHARD_COUNT);
+        assertThat(Shards.ownedBy("01991337-0000-7000-8000-000000000073", List.of())).hasSize(Shards.SHARD_COUNT);
     }
 }

@@ -71,14 +71,16 @@ public class MohsApplication {
     public static void main(String[] args) {
         SpringApplication app = new SpringApplication(MohsApplication.class);
         // Mohs does not create its schema — the application does, and this demo is an application.
-        // spring.sql.init is the ordinary Boot mechanism for it, and schema-h2.sql ships in
-        // mohs-store-jdbc's jar, so a host reaches it on the classpath exactly like this. A real
-        // deployment applies the file with its own tooling instead and leaves this off.
+        // spring.sql.init selects the installer for the effective Mohs dialect, including an
+        // external override from the IDE, command line or environment. A real deployment applies
+        // the file with its own tooling instead and leaves this off.
         app.setDefaultProperties(Map.of(
                 "spring.application.name", "mohs",
                 "mohs.jdbc.dialect", "h2",
+                // Keep pool acquisition below the default 15-second node lease.
+                "spring.datasource.hikari.connection-timeout", "3000",
                 "spring.sql.init.mode", "always",
-                "spring.sql.init.schema-locations", "classpath:schema-h2.sql"));
+                "spring.sql.init.schema-locations", "classpath:schema-${mohs.jdbc.dialect}.sql"));
         app.run(args);
     }
 

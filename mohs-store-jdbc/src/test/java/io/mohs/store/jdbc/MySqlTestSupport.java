@@ -83,15 +83,23 @@ final class MySqlTestSupport {
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-        jdbcTemplate.execute("DELETE FROM mohs_job_definitions");
-        jdbcTemplate.execute("DELETE FROM mohs_batches");
-        jdbcTemplate.execute("DELETE FROM mohs_rate_limits");
-        jdbcTemplate.execute("DELETE FROM mohs_nodes");
-        jdbcTemplate.execute("DELETE FROM mohs_ready");
-        jdbcTemplate.execute("DELETE FROM mohs_lease");
-        jdbcTemplate.execute("DELETE FROM mohs_attempt");
-        jdbcTemplate.execute("DELETE FROM mohs_execution");
-        jdbcTemplate.execute("DELETE FROM mohs_idempotency");
+        // This is the disposable test database. InnoDB RESTRICT also prevents deleting a self-reference.
+        // Disable checks only on this cleanup connection and restore them before returning it.
+        jdbcTemplate.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            try (var statement = connection.createStatement()) {
+                statement.execute("SET FOREIGN_KEY_CHECKS = 0");
+                try {
+                    for (String table : java.util.List.of("mohs_work", "mohs_execution", "mohs_idempotency",
+                            "mohs_batches", "mohs_rate_limits", "mohs_nodes", "mohs_job_definitions")) {
+                        statement.executeUpdate("DELETE FROM " + table);
+                    }
+                } finally {
+                    statement.execute("SET FOREIGN_KEY_CHECKS = 1");
+                }
+            }
+            return null;
+        });
+        new JdbcTemplate(dataSource).update("UPDATE mohs_catalog SET fingerprint = NULL WHERE singleton = 1");
         return dataSource;
     }
 }

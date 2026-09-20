@@ -17,7 +17,8 @@ package io.mohs.core;
 
 /**
  * The engine's lifecycle state on this node — {@code CREATED -> [STARTING ->] RUNNING <-> PAUSED -> DRAINING ->
- * STOPPED}.
+ * STOPPED}. An unexpected coordinator termination moves the node to {@code FAILED};
+ * {@code stop} still drains local work before moving it to {@code STOPPED}.
  *
  * <p>Node-local by nature; not to be confused with pausing a job, which is cluster-wide and
  * per-job.
@@ -27,7 +28,9 @@ public enum EngineState {
      * Constructed but not yet started.
      */
     CREATED,
-    /** Waiting for the startup delay; no heartbeat or processing has begun. */
+    /**
+     * Waiting for the startup delay; no heartbeat or processing has begun.
+     */
     STARTING,
     /**
      * Heartbeating and accepting new claims.
@@ -41,6 +44,10 @@ public enum EngineState {
      * Waiting for in-flight work without accepting new claims.
      */
     DRAINING,
+    /**
+     * The coordinator terminated unexpectedly. No new work is claimed; stop still drains local work.
+     */
+    FAILED,
     /**
      * Stopped after releasing local execution resources.
      */

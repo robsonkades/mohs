@@ -7,7 +7,8 @@ Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 | [api-overview.md](api-overview.md) | The two APIs and their audiences, how to enable REST, design principles, cross-cutting conventions, versioning |
 | [endpoints.md](endpoints.md) | Every endpoint: parameters, bodies, status codes, semantics, and the reasoning behind the response shapes |
 | [error-model.md](error-model.md) | RFC 7807, the full exception-to-status mapping, and client guidance |
-| [java-api.md](java-api.md) | The `Mohs` facade, `ScheduleCommand`, `JobContext`, extension beans, and the compatibility contract |
+| [java-api.md](java-api.md) | The typed `Mohs` facade, `JobContext`, extension beans, and transaction contracts |
+| [programmatic-jobs.md](programmatic-jobs.md) | Register once, submit typed inputs, create independent recurrences, track work and migrate existing consumers |
 | [streaming.md](streaming.md) | `GET /overview/stream` — frames, cadence, conflation, the structured snapshot read, shutdown |
 
 ## At a glance
@@ -25,7 +26,7 @@ PATCH  /jobs/{jobKey}/schedule          emergency; reverts on next boot
 GET    /jobs/{jobKey}/executions        cursor paginated
 
 GET    /executions                      cursor paginated  [status, jobKey, from, to]
-GET    /executions/{id}                 with attempts
+GET    /executions/{id}                 with latest completed attempt
 POST   /executions/{id}/cancel          202, cooperative
 POST   /executions/{id}/retry           202, bypasses the retry budget
 

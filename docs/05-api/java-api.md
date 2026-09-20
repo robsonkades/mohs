@@ -1,223 +1,85 @@
 # Java API
 
-Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`mohs-api`)
+The first release uses typed executable registrations and direct scheduling methods. Register code through `JobRegistration<T>` or the supported annotations before the worker joins its [executable catalog](../04-engineering/executable-catalog.md).
 
-The `Mohs` facade is the entire programmatic surface. One verb per operation, always over an
-**existing** definition.
-
-## Getting the facade
+## Registration and submission
 
 ```java
-@Service
-class Invoices {
-    private final Mohs mohs;
-    Invoices(Mohs mohs) { this.mohs = mohs; }   // a bean registered by MohsAutoConfiguration
+record SendInvoice(long invoiceId) {}
+
+static final JobRef<SendInvoice> SEND_INVOICE =
+        JobRef.of("send-invoice", SendInvoice.class, "invoice-input-v1");
+
+@Bean
+JobRegistration<SendInvoice> sendInvoice(InvoiceService service) {
+    return JobRegistration.of(SEND_INVOICE,
+            (input, context) -> service.send(input.invoiceId()));
 }
 ```
 
-## Scheduling
-
-### The typed path (preferred)
+After Spring finishes registration, inject `Mohs` into application services:
 
 ```java
-static final JobRef<SendInvoice> SEND_INVOICE = JobRef.of("send-invoice", SendInvoice.class);
+var options = SubmissionOptions.defaults()
+        .withPriority(Priority.HIGH)
+        .withActor("ops@acme.com")
+        .withIdempotencyKey("invoice-4711");
 
-Enqueued receipt = mohs.schedule(SEND_INVOICE, new SendInvoice(4711))
-        .priority(Priority.HIGH)
-        .as("ops@acme.com")
-        .idempotencyKey("invoice-4711")
-        .now();
+Enqueued receipt = mohs.enqueue(SEND_INVOICE, new SendInvoice(4711), options);
+mohs.scheduleAt(SEND_INVOICE, new SendInvoice(4712), when);
+mohs.scheduleAfter(SEND_INVOICE, new SendInvoice(4713), Duration.ofMinutes(10));
+
+var recurring = mohs.scheduleRecurring("invoice-4711-weekly", SEND_INVOICE,
+        new SendInvoice(4711), new CronSpec("0 0 9 * * MON", ZoneId.of("America/Sao_Paulo")));
 ```
 
-A `JobRef<T>` binds the key to the payload type at compile time, so an incompatible payload is a
-compilation error rather than a runtime surprise.
+`JobRef<T>` carries the stable key, local Java input class and durable input-contract ID. Its two-argument factory uses the job ID as the contract. Persisted snapshots contain JSON and that contract ID; Java class names and executable lambdas are never persisted. Use `NoInput` for a job that takes no input. Generic root types use `Class<T>`; wrap a parameterized collection in an application record.
 
-### The string path
+The first three operations return `Enqueued`; recurring registration returns `RecurringSchedule`. Options are immutable values: constructing or copying them has no storage side effect. `JobDefinition.of` also constructs a value and does not register executable code.
 
-```java
-mohs.schedule("send-invoice", payload).now();
-```
+Submission encodes and validates the input before opening its acceptance transaction. The store rechecks active definition and input contract under locks. See [programmatic jobs](programmatic-jobs.md) for complete application examples.
 
-The payload type is checked **at runtime** against the definition, producing a clear error rather
-than a `ClassCastException`.
+## Receipts and transactions
 
-### The chain
+`Enqueued` identifies accepted work; it is not a future for the handler's result. Within a host transaction using the same DataSource, its durability depends on the host commit. A rollback removes the accepted rows. A connection failure around commit can leave the outcome unknown even if the method throws.
 
-`ScheduleCommand` has three pre-terminal steps and three terminals:
-
-| Step | Effect |
-| --- | --- |
-| `.priority(Priority)` | Claim ordering. Default `NORMAL` |
-| `.as(String actor)` | The audit trail. Rejects blank and rejects `"scheduler"` in any casing |
-| `.idempotencyKey(String)` | Deduplication scoped to `(job, key)`. Not blank, and at most `ScheduleCommand.MAX_IDEMPOTENCY_KEY_LENGTH` (255) characters, the column's width — an `IllegalArgumentException` otherwise |
-| `.now()` | Terminal — due immediately |
-| `.at(Instant)` | Terminal — due at an absolute time |
-| `.after(Duration)` | Terminal — due after a delay |
-
-**A chain abandoned before its terminal never touches the database.** The pre-terminal steps carry
-`@CheckReturnValue`, so an abandoned chain is a compilation warning rather than runtime silence —
-the classic builder-without-`.build()` bug.
-
-The **terminals are deliberately not annotated**. The annotation exists against an abandoned chain,
-and what catches that are the non-terminal steps plus `schedule`/`batch`. On a terminal it would add
-nothing and would tax the single most common line in the library:
-`mohs.schedule(ref, payload).now();` is a correct statement, and a framework whose hello-world
-produces a warning teaches the user to suppress the inspection — at which point they also lose the
-warnings that matter.
-
-### The receipt
-
-Every terminal returns an `Enqueued`, with the `executionId` assigned and the enqueue written in the current transaction — and the same
-record reaches the `ExecutionListener`s (and `@OnExecution(ENQUEUED)`) once it is: immediately, or
-after the host's commit when the call ran inside a host transaction. It is a receipt,
-never a `Future` of the result.
+An optional idempotency key is scoped to the job and returns the original retained receipt on a duplicate; input differences do not replace that receipt. Receipt expiration is fixed at acceptance and independent of execution-history pruning. An unkeyed operation must not be blindly repeated after an unknown result. Events are published after a confirmed commit and can be lost on a crash. See [transactions](../04-engineering/transactions.md) and [idempotency](../03-functional/idempotency.md).
 
 ## Batches
 
 ```java
-Batch batch = mohs.batch("nightly-invoices", b -> {
-    for (Customer c : customers) b.add(SEND_INVOICE, new SendInvoice(c.id()));
+Batch batch = mohs.batch("nightly-invoices", members -> {
+    for (Customer customer : customers) {
+        members.add(SEND_INVOICE, new SendInvoice(customer.id()));
+    }
 });
-batch.onCompletion(done -> log.info("{}: {} ok, {} failed", done.name(), done.succeeded(), done.failed()));
+Optional<BatchSnapshot> progress = mohs.findBatch(batch.batchId());
 ```
 
-All-or-nothing. Inside a host transaction, durability depends on that transaction committing;
-a rollback removes the batch and its members. See [batches](../03-functional/batches.md).
+A batch and all of its members are accepted atomically. The returned `Batch` contains only its identity. Progress is durable; global listeners remain process-local best effort. A batch has no per-object completion callback and provides no durable workflow continuation. See [batches](../03-functional/batches.md).
 
-## Definitions
+## Controls and reads
 
-```java
-mohs.define(JobDefinition.of("tenant-42-sync", TenantSync.class,
-        spec -> spec.every(Duration.ofMinutes(5)).runner("io").retries(5)));
-
-mohs.remove(JobKey.of("tenant-42-sync"));   // PROGRAMMATIC definitions only
-```
-
-`define` is an **upsert by `JobKey`**: redefining replaces the definitional part and never touches
-the operational one (`paused`, `orphaned`, `next_fire_at`).
-
-`remove` retires: it cancels future firings and preserves history. Calling it on a `@MohsJob` job
-throws — remove the annotation instead, and the scanner marks it `ORPHANED` on the next boot. An
-unknown job is a no-op.
-
-## Control operations
-
-| Method | Semantics |
+| Operation | Contract |
 | --- | --- |
-| `pause(JobKey)` / `resume(JobKey)` | Cluster-wide, per job. A pause suspends automatic firing only; manual scheduling still works. Unknown job → no-op |
-| `reschedule(JobKey, Schedule)` | Rewrites the schedule and rearms the trigger in one write. Returns the new snapshot, or empty for an unknown/retired job. Throws `IllegalArgumentException` for an unrealisable schedule |
-| `cancel(ExecutionId)` | Cooperative. Returns the state right after the request — **not necessarily terminal**; empty for an unknown id |
-| `retry(ExecutionId)` | Rearms a `FAILED` execution, bypassing the budget. Empty for an unknown id; throws `IllegalStateException` for a wrong state, a retired job, or a batch member |
-| `adjustRateLimit(String, int, Duration)` | Adjusts an **already declared** limit. Empty when the name does not exist |
-| `lifecycle()` | The node's `MohsLifecycle` |
+| `pause(JobKey)` / `resume(JobKey)` | Suspend or resume automatic firing. Accepted work and explicit submissions remain eligible. |
+| `reschedule(JobKey, Schedule)` | Atomically advance the schedule revision and calculate a new trigger. Unknown or retired key returns empty. |
+| `remove(JobKey)` | Retire either an annotated or programmatic definition, cancel queued work and prevent new acceptance. Acquired work can finish. A joined host transaction must use READ_COMMITTED. Retire active named recurrences before their executable. |
+| `reactivate(JobKey)` | Explicitly restore a retained definition against the installed/local catalog, preserving operator pause and starting a new schedule revision. Returns false if absent or already active. |
+| `cancel(ExecutionId)` | Request cooperative cancellation; the returned state can still be RUNNING. An already produced success can remain successful. |
+| `retry(ExecutionId)` | Reopen a standalone MANUAL FAILED execution with an active job. Scheduled occurrences and batch members cannot be retried individually. |
+| `adjustRateLimit(String, int, Duration)` | Change an already declared shared bucket. Unknown name returns empty. |
+| `lifecycle()` | Control this node's RUNNING, PAUSED and DRAINING lifecycle. |
+| `findJob`, `jobs`, `jobRef` | Read active definitions or locally declared typed references. `jobs()` materializes the active catalog. |
+| `findExecution` | Read the current projection and only the latest completed attempt. |
+| `executions(ExecutionQuery)` | Read summaries without attempt error details, ordered by descending execution identity. |
+| `findBatch`, `nodes`, `rateLimits`, `runners` | Read durable progress, session observations, buckets, and local runner state respectively. |
+| `overview(Duration)` | Operational estimates from separate reads, not a single atomic ledger. |
 
-## Reads
+Execution and batch IDs are canonical lowercase UUIDv7 strings. A nonempty page cursor must be an execution ID; an absent or blank cursor starts the first page. Technical job/resource/idempotency keys use exact ASCII comparison; human labels and actors allow Unicode. See the [type contract](../06-data/type-contract.md).
 
-| Method | Returns | Pagination |
-| --- | --- | --- |
-| `findJob(JobKey)` | `Optional<JobSnapshot>` | — |
-| `jobs()` | `List<JobSnapshot>` | None — bounded cardinality |
-| `findExecution(ExecutionId)` | `Optional<Execution>` **with attempts** | — |
-| `executions(ExecutionQuery)` | `List<Execution>` — a **summary**: `attempts()` comes back empty | Cursor, inside `ExecutionQuery` |
-| `findBatch(String)` | `Optional<BatchSnapshot>` | — |
-| `nodes()` | `List<NodeSnapshot>` | None |
-| `runners()` | `List<RunnerSnapshot>` — **this node only**; the one read that touches no database | None |
-| `rateLimits()` | `List<RateLimitSnapshot>`, ordered by name | None |
-| `overview(Duration)` | `OverviewSnapshot` | — |
-| `payloadType(JobKey)` | `Optional<Class<?>>` | — |
+## Execution and extension contracts
 
-`ExecutionQuery` is a parameter object over the six filters and controls:
+`JobContext` exposes identity, attempt information and cooperative cancellation to the handler. User code runs outside acquisition/completion transactions. A worker that loses its lease can still finish an external effect; rejecting its old completion does not undo that effect. Handlers must supply idempotency or destination-enforced fencing when needed.
 
-```java
-new ExecutionQuery(jobKey, status, from, to, cursor, limit)   // all nullable except limit >= 1
-```
-
-Results are ordered by **descending id** (UUIDv7, so most recent first); with a cursor present, only
-executions with `id < cursor` are returned.
-
-> **Read-consistency note.** `overview` performs independent reads rather than one transactional
-> cut, so executions transitioning during the query may disagree between the numbers (read skew).
-> That is acceptable for polling, and a serialisable cut here would be cost without benefit.
-
-## Lifecycle
-
-```java
-MohsLifecycle lifecycle = mohs.lifecycle();
-lifecycle.state();               // CREATED → [STARTING →] RUNNING ⇄ PAUSED → DRAINING → STOPPED
-lifecycle.pause();               // this NODE stops claiming; not the same as pausing a job
-lifecycle.resume();
-lifecycle.drain(Duration.ofSeconds(30));   // stop claiming, wait for in-flight work
-lifecycle.stop(Duration.ofSeconds(30));    // drain, then shut the loop down
-```
-
-This is **node-local**, and not to be confused with pausing a job, which is cluster-wide and per job.
-Under Spring, `MohsEngineLifecycle` starts the engine automatically in `auto` mode.
-`mohs.lifecycle.start-mode=manual` disables automatic startup; Spring still stops a running
-engine during context shutdown.
-
-Every transition is a guarded CAS: calling `pause()` from anything but `RUNNING` throws
-`IllegalStateException` naming both states.
-
-## The handler contract
-
-```java
-@OnDemandJob("import-file")
-void importFile(ImportRequest payload, JobContext ctx) throws Exception { … }
-```
-
-`JobContext` exposes:
-
-| Method | Notes |
-| --- | --- |
-| `jobKey()`, `executionId()` | The execution id is **stable across retries** |
-| `attempt()` | 1-based; this is what changes on a retry |
-| `scheduledAt()` | When it was due |
-| `firedAt()` | When **this attempt** began dispatching — not the execution's claim instant, which is tens of milliseconds earlier under load |
-| `cancellationRequested()` | Cooperative cancellation from a timeout, shutdown escalation, or a manual cancel |
-
-`JobContext` is deliberately a plain interface rather than a fluent one: it lives on the hot path,
-and a DSL here would only pollute stack traces.
-
-## Extension beans
-
-```java
-@Bean ExecutionListener    listener();      // observe — best-effort, async, never affects the job
-@Bean ExecutionInterceptor interceptor();   // participate — on the attempt's thread; throwing IS a failure
-@Bean MohsRunner           runner();        // a named execution capability
-@Bean RateLimit            limit();         // a cluster-wide throughput cap
-@Bean ExecutionWindow      window();        // a firing exclusion window (code-only)
-@Bean ActorResolver        actors();        // replaces the default header-based resolver
-```
-
-See [extensibility](../04-engineering/extensibility.md).
-
-## The compatibility contract
-
-This is the part to read before writing any integration code.
-
-| Type | May you implement it? |
-| --- | --- |
-| `Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`, `BatchBuilder`, `JobContext` | **No.** They are non-sealed only because the implementation lives in another module and the project does not use a JPMS `permits` clause across them. **They may gain methods in minor releases**, and implementing them breaks with `AbstractMethodError` on the first new method. To test handlers, use `io.mohs.test` |
-| `ExecutionListener`, `ExecutionInterceptor`, `RetryPolicy` | **Yes.** Functional interfaces intended for application implementations |
-| `io.mohs.rest.ActorResolver` | **Yes.** The REST module's SPI |
-| `JobSpec`, `PolicySpec`, `Schedule`, `ExecutionEvent`, `ScheduleView` | Sealed — not implementable by consumers. Adding a permitted subtype can require changes to exhaustive switches in consuming code |
-
-## Constructing definitions
-
-Use `JobDefinition.of(id, handlerType, spec -> ...)` to avoid coupling application code
-to constructor arity. The record currently has 15 components; the former 13-argument
-compatibility constructor is no longer present. There are no deprecated API elements
-in this checkout.
-
-## The test kit
-
-```java
-MutableClock clock = MutableClock.startingAt(Instant.parse("2026-01-01T00:00:00Z"));
-clock.advance(Duration.ofMinutes(5));         // no Thread.sleep anywhere
-
-InMemoryJobStore store = new InMemoryJobStore(clock);
-```
-
-Two documented divergences of `InMemoryJobStore` from the JDBC adapter: it does not heal a disarmed
-trigger (an unreachable state without a `TriggerFirer`), and `remove` is a hard delete rather than a
-soft retire — so a post-remove resurrection is a *birth* there, and `startPaused` applies again.
+Annotations, `JobRegistration`, runners, windows, retry policies and global listeners are the extension points. Internal persistence ports expose complete operations and read models; consumers should use the test kit instead of implementing a mock facade tied to every method. There is no compatibility path for the removed scheduling builder, metadata-only definition API, typeless registration or pre-release schemas.

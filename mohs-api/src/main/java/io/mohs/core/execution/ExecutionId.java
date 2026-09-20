@@ -15,13 +15,13 @@
  */
 package io.mohs.core.execution;
 
-import java.util.Objects;
+import io.mohs.core.GeneratedId;
 
 /**
  * The identity of a single {@link Execution}.
  *
- * <p>Opaque by design — the engine decides the concrete format when it starts generating them in
- * {@code io.mohs.store.jdbc}; this contract only requires a non-empty value.
+ * <p>Canonical lowercase UUIDv7 text. Its millisecond prefix supports stable keyset ordering;
+ * external effects still require their own idempotency protocol.
  *
  * @param value the serialized identity value
  */
@@ -33,10 +33,7 @@ public record ExecutionId(String value) {
      * @param value the serialized identity value
      */
     public ExecutionId {
-        Objects.requireNonNull(value, "value");
-        if (value.isBlank()) {
-            throw new IllegalArgumentException("ExecutionId value must not be blank");
-        }
+        GeneratedId.require(value, "executionId");
     }
 
     /**

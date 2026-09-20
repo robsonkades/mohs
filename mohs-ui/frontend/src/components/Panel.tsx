@@ -27,13 +27,13 @@ export function Panel({
   children: ReactNode;
 }) {
   return (
-    <Card className="gap-0 py-0">
-      <CardHeader className="border-b py-3">
-        <CardTitle className="text-headline">{title}</CardTitle>
+    <Card className="min-w-0 gap-0 py-0">
+      <CardHeader className="flex flex-col gap-2 border-b py-3 sm:grid">
+        <CardTitle className="min-w-0 text-headline [overflow-wrap:anywhere]">{title}</CardTitle>
         {description && <CardDescription className="text-xs">{description}</CardDescription>}
-        {action && <CardAction>{action}</CardAction>}
+        {action && <CardAction className="max-w-full">{action}</CardAction>}
       </CardHeader>
-      <CardContent className={cn(flush ? "p-0" : "py-3")}>{children}</CardContent>
+      <CardContent className={cn("min-w-0", flush ? "p-0" : "py-3")}>{children}</CardContent>
     </Card>
   );
 }

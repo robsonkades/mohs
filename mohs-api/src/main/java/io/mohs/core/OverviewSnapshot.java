@@ -15,13 +15,13 @@
  */
 package io.mohs.core;
 
+import io.mohs.core.execution.ExecutionState;
+
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-
-import io.mohs.core.execution.ExecutionState;
 
 /**
  * The aggregate view behind {@link Mohs#overview} — the dashboard's polling anchor
@@ -60,33 +60,34 @@ import io.mohs.core.execution.ExecutionState;
  * answers its own question, on its own.
  *
  * @param executionCountsByState counts of live executions by state, including zero-valued states
- * @param throughput the terminal counts over the requested window
- * @param recent an independent short-window reading for the recent completion rate
+ * @param throughput             the terminal counts over the requested window
+ * @param recent                 an independent short-window reading for the recent completion rate
  */
-public record OverviewSnapshot(Map<ExecutionState, Long> executionCountsByState, ThroughputReading throughput,
-        ThroughputReading recent) {
+public record OverviewSnapshot(Map<ExecutionState, Long> executionCountsByState, ThroughputReading throughput, ThroughputReading recent) {
 
-    /** The states the map always carries — the live work. */
-    private static final Set<ExecutionState> ACTIVE_STATES =
-            Set.of(ExecutionState.ENQUEUED, ExecutionState.RUNNING, ExecutionState.RETRY_WAITING);
+    /**
+     * The states the map always carries — the live work.
+     */
+    private static final Set<ExecutionState> ACTIVE_STATES = Set.of(ExecutionState.ENQUEUED, ExecutionState.RUNNING, ExecutionState.RETRY_WAITING);
 
     /**
      * Creates a {@code OverviewSnapshot} with the supplied values.
      *
      * @param executionCountsByState counts of live executions by state, including zero-valued states
-     * @param throughput the terminal counts over the requested window
-     * @param recent an independent short-window reading for the recent completion rate
+     * @param throughput             the terminal counts over the requested window
+     * @param recent                 an independent short-window reading for the recent completion rate
      */
     public OverviewSnapshot {
         Objects.requireNonNull(executionCountsByState, "executionCountsByState");
         Objects.requireNonNull(throughput, "throughput");
         Objects.requireNonNull(recent, "recent");
+
         for (ExecutionState state : executionCountsByState.keySet()) {
             if (!ACTIVE_STATES.contains(state)) {
-                throw new IllegalArgumentException("executionCountsByState only carries live work, got " + state
-                        + " — all-time terminal counts are excluded by contract (unbounded history on a polling anchor)");
+                throw new IllegalArgumentException("executionCountsByState only carries live work, got " + state + " — all-time terminal counts are excluded by contract (unbounded history on a polling anchor)");
             }
         }
+
         // EnumMap plus unmodifiableMap rather than Map.copyOf: the enum's declaration order
         // (ENQUEUED before RUNNING before RETRY_WAITING) is the lifecycle order, and an order
         // exposed through an API is contract.

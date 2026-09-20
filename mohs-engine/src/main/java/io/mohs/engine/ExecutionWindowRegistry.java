@@ -41,6 +41,11 @@ public final class ExecutionWindowRegistry {
 
     private final Map<String, ExecutionWindow> windows;
 
+    /** Whether this node declares the named execution window. */
+    public boolean contains(String name) {
+        return windows.containsKey(name);
+    }
+
     /**
      * Creates a {@code ExecutionWindowRegistry} with the supplied values.
      *

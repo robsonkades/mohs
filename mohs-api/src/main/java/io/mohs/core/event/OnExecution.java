@@ -15,13 +15,13 @@
  */
 package io.mohs.core.event;
 
+import io.mohs.core.job.JobKey;
+
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
-
-import io.mohs.core.job.JobKey;
 
 /**
  * Per-method sugar for {@link ExecutionListener}, filtered by job and event type — in the style of

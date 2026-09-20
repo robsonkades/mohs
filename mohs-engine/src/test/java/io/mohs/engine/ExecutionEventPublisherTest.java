@@ -40,7 +40,7 @@ class ExecutionEventPublisherTest {
         }), saturated);
 
         assertThatCode(() -> publisher.publish(
-                new Started(ExecutionId.of("exec-1"), JobKey.of("welcome-email"), 1, Instant.parse("2026-08-15T12:00:00Z"))))
+                new Started(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("welcome-email"), 1, Instant.parse("2026-08-15T12:00:00Z"))))
                 .doesNotThrowAnyException();
     }
 }

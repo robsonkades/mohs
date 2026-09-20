@@ -50,37 +50,22 @@ and the REST `PATCH` body**, deliberately not two copies that would diverge by t
 | --- | --- |
 | `max >= 1` | |
 | `window` positive | |
-| `window >= max` nanoseconds | The refill interval `window / max` must be representable. A truncation to zero would make `dividedBy` produce `Duration.ZERO`, and a division by it inside the claim would bring down the **entire claim round** — including jobs with no rate limit at all |
+| Exact microseconds representable as BIGINT | Sub-microsecond or overflowing durations are rejected. Fractional credit is retained; refill does not divide Duration into an unrepresentable period. |
 
 ### Two-phase consumption
 
-Before each claim lap, the engine reads available balances to exclude jobs with no tokens.
-After a claim commits, `Engine#admitFor` applies the window and concurrency guards, then
-charges tokens for the granted share of each job. The charge uses up to three compare-and-set attempts. On the engine loop these
-statements run in autocommit after the claim transaction has ended.
+Before claim, WorkAdmission checks each named resource once per phase. After claim it groups work sharing a rate name, reads availability and charges the group's permitted share. Excess members return to READY with the same attempt. Positive concurrency caps have already been arbitrated inside the claim's job locks.
 
-A failed charge returns that job's claimed share to the queue without invoking its handlers
-or consuming retry attempts. Other jobs in the batch can still be admitted when a charge
-returns `false`; a thrown infrastructure exception aborts the remaining processing and
-stray-lease reconciliation recovers owned work that did not reach dispatch.
+Charging and configuration each own a short READ_COMMITTED transaction with a two-second deadline. A charge retries up to three complete full-state CAS attempts. Refill uses fresh database time, checked arithmetic and retained fractional credit. API callers cannot supply a refill clock. A failed creation rolls back before resolving the winning bucket.
 
-Tokens are charged before handler execution. A crash or dispatch failure after charging can
-consume tokens without running a handler; they are replenished by normal refill. The claim
-transaction and the rate-limit transaction are not one atomic unit.
-
-### Isolation requirement
-
-`JdbcRateLimitStore` does not open a transaction. On the engine loop, each autocommit
-statement sees committed balances. An internal caller using an explicit transaction must
-provide `READ COMMITTED` so repeated reads can resolve CAS contention. The statement timeout is two seconds; on timeout, the operation fails and
-the engine can recover the claimed work through its normal ownership mechanisms.
+The availability read is advisory. Failed or unknown charge never authorizes dispatch. A thrown infrastructure failure leaves grants for fenced reconciliation. Tokens charged before a crash/dispatch failure are consumed and refill normally; there is no speculative refund. Claim and rate charging remain separate transactions.
 
 ### Runtime adjustment
 
 `Mohs.adjustRateLimit(name, max, window)` and `PATCH /rate-limits/{name}` adjust an existing
 declaration. An unknown name returns empty (HTTP 404). The bucket survives and its balance
 is clamped to the new capacity. At the next application boot, declared rate-limit settings
-are upserted again; `registration.on-conflict` governs job definitions, not rate limits.
+are upserted again; `registration.on-conflict` also governs conflicts between declared and stored rate-limit specifications.
 
 ### Reading a limit
 
@@ -132,7 +117,7 @@ Both are evaluated **at claim time**, not at enqueue time and not at handler ent
 | --- | --- | --- |
 | Window closed | Job excluded from the round entirely | Second line of defence — the whole job's share is rejected |
 | Rate limit exhausted | Job excluded from the round | `min(allowed, available)` then an all-or-nothing charge |
-| Concurrency cap full | Job excluded from the round | Trimmed to the remaining headroom |
+| Concurrency cap full | Authoritative job lock prevents excess grants | No post-claim over-admission allowance |
 
 The post-claim pass is the **authority**; the pre-claim filter is a churn optimisation that may be
 truncated. A newborn job, or a round whose filter was truncated at the parameter ceiling, arrives at

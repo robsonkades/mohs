@@ -33,7 +33,7 @@ import io.mohs.core.schedule.Misfire;
  *
  * @param jobKey the stable identity of the job
  * @param name the human-readable name
- * @param handlerType the fully qualified handler class name
+ * @param executableKey the fully qualified handler class name
  * @param schedule the firing schedule representation
  * @param runner the selected runner name, or {@code null} for the default
  * @param window the exclusion-window name, or {@code null} for no exclusion
@@ -49,7 +49,7 @@ import io.mohs.core.schedule.Misfire;
 public record JobResponse(
         String jobKey,
         String name,
-        String handlerType,
+        String executableKey,
         ScheduleView schedule,
         @Nullable String runner,
         @Nullable String window,
@@ -67,7 +67,7 @@ public record JobResponse(
      *
      * @param jobKey the stable identity of the job
      * @param name the human-readable name
-     * @param handlerType the fully qualified handler class name
+     * @param executableKey the fully qualified handler class name
      * @param schedule the firing schedule representation
      * @param runner the selected runner name, or {@code null} for the default
      * @param window the exclusion-window name, or {@code null} for no exclusion
@@ -83,7 +83,7 @@ public record JobResponse(
     public JobResponse {
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(name, "name");
-        Objects.requireNonNull(handlerType, "handlerType");
+        Objects.requireNonNull(executableKey, "executableKey");
         Objects.requireNonNull(schedule, "schedule");
         Objects.requireNonNull(misfire, "misfire");
         Objects.requireNonNull(source, "source");
@@ -101,7 +101,7 @@ public record JobResponse(
         return new JobResponse(
                 definition.key().value(),
                 name,
-                definition.handlerType().getName(),
+                definition.executableKey().value(),
                 ScheduleView.from(definition.schedule()),
                 definition.runner(),
                 definition.window(),

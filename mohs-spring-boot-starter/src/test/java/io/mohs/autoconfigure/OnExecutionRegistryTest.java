@@ -48,7 +48,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class OnExecutionRegistryTest {
 
-    private static final ExecutionId ID = ExecutionId.of("exec-1");
+    private static final ExecutionId ID = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
     private static final JobKey WELCOME = JobKey.of("welcome-email");
     private static final Instant NOW = Instant.parse("2026-08-15T12:00:00Z");
 
@@ -184,10 +184,10 @@ class OnExecutionRegistryTest {
         registry.on(new Succeeded(ID, WELCOME, 2));
         registry.on(new Failed(ID, WELCOME, 3, new IllegalStateException("gone"), true));
         registry.on(new Cancelled(ID, WELCOME, 1));
-        registry.on(new BatchCompleted("b1", "nightly", 1, 1, 0));
+        registry.on(new BatchCompleted("01991337-0000-7000-8000-00000000000b", "nightly", 1, 1, 0));
 
-        assertThat(observer.seen).containsExactly("enqueued:exec-1", "started:1", "attemptFailed:boom",
-                "retryScheduled:2", "succeeded:2", "failed:true", "cancelled:1", "batch:b1");
+        assertThat(observer.seen).containsExactly("enqueued:" + ID.value(), "started:1", "attemptFailed:boom",
+                "retryScheduled:2", "succeeded:2", "failed:true", "cancelled:1", "batch:01991337-0000-7000-8000-00000000000b");
     }
 
     /** The job filter, the no-argument shape, and isolation of a throwing method — in one fan-out. */
@@ -200,7 +200,7 @@ class OnExecutionRegistryTest {
 
         // Registration order is by name (broken, onOther, onWelcome, withoutArguments), so the
         // delivery order is deterministic too
-        assertThat(observer.seen).containsExactly("welcome:exec-1", "no-args");
+        assertThat(observer.seen).containsExactly("welcome:" + ID.value(), "no-args");
     }
 
     /** A batch belongs to no job: a subscription filtered by job never matches it, the unfiltered one does. */
@@ -209,9 +209,9 @@ class OnExecutionRegistryTest {
         BatchObserver observer = new BatchObserver();
         registerAll(observer);
 
-        registry.on(new BatchCompleted("b1", "nightly", 1, 1, 0));
+        registry.on(new BatchCompleted("01991337-0000-7000-8000-00000000000b", "nightly", 1, 1, 0));
 
-        assertThat(observer.seen).containsExactly("any:b1");
+        assertThat(observer.seen).containsExactly("any:01991337-0000-7000-8000-00000000000b");
     }
 
     @Test

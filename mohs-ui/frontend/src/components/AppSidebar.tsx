@@ -47,7 +47,7 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
-      <SidebarContent>
+      <SidebarContent role="navigation" aria-label="Main navigation">
         <SidebarGroup className="pt-4">
           <SidebarGroupLabel className="mb-2 text-[10px] uppercase tracking-widest">Workspace</SidebarGroupLabel>
           <SidebarGroupContent>

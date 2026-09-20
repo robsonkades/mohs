@@ -16,19 +16,18 @@ metadata is generated from the `@param` documentation.
 | `mohs.engine.max-poll-interval` | No | `2s` | The **ceiling** of the idle backoff. Must be `>= poll-interval` |
 | `mohs.engine.batch-size` | No | `50` | Maximum executions claimed per claim statement |
 | `mohs.engine.claim-rounds` | No | `1` | How many claims one tick may chain while batches come back full |
-| `mohs.engine.lease-ttl` | No | `30s` | Feeds `lease_expires_at` at claim time; also the staleness cutoff for a legacy node row with no `expires_at` |
 | `mohs.engine.node-lease-ttl` | No | `15s` | **The node's lease.** Each heartbeat promises `now + this` |
 | `mohs.engine.watchdog-timeout` | No | *(none — off)* | The Watchdog Bound. When present it **must be greater than `node-lease-ttl`** |
 | `mohs.engine.misfire-threshold` | No | `60s` | Separates a late firing from a missed one |
-| `mohs.engine.idempotency-retention` | No | `7d` | **The deduplication window**: a key deduplicates for exactly as long as its row lives in `mohs_idempotency`, and the tick prunes older rows hourly, under a 5s query timeout so a prune can never hold the claim hostage. `0s` keeps every key forever, and the unbounded table that comes with it |
-| `mohs.engine.history-retention` | No | `0s` *(off)* | **The history window, opt-in**: with a positive value, terminal executions finished longer ago than this — plus their attempts and member-less batches — are swept hourly, in bounded batches (1,000 rows/statement, 2s of budget per slot). `0s` keeps all history forever: deleting history is the operator's decision, never the scheduler's surprise. Does not touch `mohs_idempotency` (see the row above). [Data lifecycle](../06-data/data-lifecycle.md) carries the semantics |
+| `mohs.engine.idempotency-retention` | No | `7d` | Fixed expiry for each newly accepted receipt, independent of physical cleanup and history. `0s` creates nonexpiring receipts; existing expiries do not change. |
+| `mohs.engine.history-retention` | No | `0s` *(off)* | **The history window, opt-in**: with a positive value, terminal executions finished longer ago than this — including their latest attempt and member-less batches — are swept hourly, in bounded batches (1,000 rows/statement, 2s of budget per slot). `0s` keeps all history forever: deleting history is the operator's decision, never the scheduler's surprise. Does not touch `mohs_idempotency` (see the row above). [Data lifecycle](../06-data/data-lifecycle.md) carries the semantics |
 | `mohs.engine.dispatch-concurrency` | No | `64` | The node's ceiling on in-flight executions. **Also bounds the claim**, and sizes the built-in `io` runner |
 | `mohs.engine.event-concurrency` | No | `16` | The event publisher's concurrency ceiling |
 | `mohs.engine.completion-flush-on-every-result` | No | `false` | `true` turns off group commit, returning to a synchronous commit per result |
 | `mohs.lifecycle.start-mode` | No | `auto` | `auto` starts the engine at boot; `manual` waits for `mohs.lifecycle().start()` |
 | `mohs.lifecycle.startup-delay` | No | `0s` | Nonnegative, one-time delay from the local engine's `start()` call before any processing or heartbeat. Applies to automatic and manual start |
 | `mohs.lifecycle.shutdown.grace-period` | No | `30s` | How long shutdown waits for in-flight executions before interrupting them |
-| `mohs.time.mode` | No | `application` | `application` uses the system clock; `database` uses `DatabaseClock` |
+| `mohs.time.mode` | No | `application` | Application schedule/local timestamps use the system clock or the sampled `DatabaseClock`. Durable session, bucket, receipt and eligibility decisions always read database time. |
 | `mohs.time.skew-warn-threshold` | No | `1s` | **`database` mode only.** WARN threshold for measured clock skew |
 | `mohs.time.sync-interval` | No | `30s` | **`database` mode only.** How often to resample the offset |
 | `mohs.registration.on-conflict` | No | `override` | `override` / `preserve` / `fail` — how definitional drift between code and store is resolved |
@@ -149,8 +148,7 @@ These are checked at boot and **fail the boot** when violated:
 | `claim-rounds > 0` | `EngineSettings` | That `1` is the classic one-claim-per-tick shape, not zero |
 | `poll-interval > 0` | `EngineSettings` | The property and the value |
 | `max-poll-interval >= poll-interval` | `EngineSettings` | That it is the ceiling the backoff climbs to, not a second floor |
-| `lease-ttl > 0` | `EngineSettings` | That a non-positive lease is born expired and turns the first tick into a reclaim storm |
-| `node-lease-ttl >= 12s` | `MohsAutoConfiguration` | A sanity floor: one tick sleeps up to a third of the TTL and then spends up to 7 s on the always-on maintenance steps, so a shorter promise expires while the node is alive and working — and every peer's reaper would reclaim its work |
+| `node-lease-ttl >= 12s` | `MohsAutoConfiguration` | Operational floor for statement deadlines and cadence; each complete round has a shared TTL/4 monotonic budget. A blocked pool/driver call may exceed a checkpoint. |
 | `watchdog-timeout > node-lease-ttl` | `EngineSettings` | That the bound sits **on top of** node liveness, not as a shorter lease |
 | Hikari `connection-timeout < node-lease-ttl` | `MohsAutoConfiguration` | Checked on the actual Hikari pool, including Spring delegating proxies, before engine startup. Set a shorter acquisition timeout; the pool is never modified. Other pools and opaque wrappers require operator validation |
 | `misfire-threshold > 0` | `EngineSettings` | That a non-positive threshold turns every normally-late fire into a misfire |
@@ -206,19 +204,13 @@ So `poll-interval` bounds how *often* the loop can tick, `max-poll-interval` bou
 | Derived value | Formula |
 | --- | --- |
 | Maximum tick cadence | `node-lease-ttl / 3` |
-| The claim lap's time budget | `node-lease-ttl / 4` |
+| The whole coordinator round budget | `node-lease-ttl / 4` |
 | The stop's loop-join budget | `node-lease-ttl / 4` |
 | Heartbeat-row retention | `node-lease-ttl × 10` |
 | Minimum `watchdog-timeout` | Strictly greater than `node-lease-ttl` |
 | Crash detection | Remaining node lease, plus peer polling and processing time |
 
 Lowering it speeds recovery and raises the tick's minimum frequency. Raising it does the reverse.
-
-### `lease-ttl` and the rate-limit lock
-
-The rate-limit bucket's 2-second statement timeout assumes a generous `lease-ttl`. **A `lease-ttl`
-below about 10 s calls for revisiting that internal value**, because the wait must fit comfortably
-inside the TTL — otherwise the ceiling that protects the heartbeat becomes what consumes it.
 
 ### `api.base-path` and the dashboard
 

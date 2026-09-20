@@ -15,17 +15,17 @@
  */
 package io.mohs.core.event;
 
-import java.util.Objects;
-
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
+
+import java.util.Objects;
 
 /**
  * The execution finished successfully on this attempt.
  *
  * @param executionId the identity of the execution
- * @param jobKey the stable identity of the job
- * @param attempt the one-based attempt number
+ * @param jobKey      the stable identity of the job
+ * @param attempt     the one-based attempt number
  */
 public record Succeeded(ExecutionId executionId, JobKey jobKey, int attempt) implements ExecutionEvent {
 
@@ -33,8 +33,8 @@ public record Succeeded(ExecutionId executionId, JobKey jobKey, int attempt) imp
      * Creates a {@code Succeeded} with the supplied values.
      *
      * @param executionId the identity of the execution
-     * @param jobKey the stable identity of the job
-     * @param attempt the one-based attempt number
+     * @param jobKey      the stable identity of the job
+     * @param attempt     the one-based attempt number
      */
     public Succeeded {
         Objects.requireNonNull(executionId, "executionId");

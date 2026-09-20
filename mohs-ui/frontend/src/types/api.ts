@@ -52,7 +52,7 @@ export interface CursorPage<T> {
 export interface JobResponse {
   jobKey: string;
   name: string;
-  handlerType: string;
+  executableKey: string;
   schedule: ScheduleView;
   runner: string | null;
   window: string | null;
@@ -66,7 +66,7 @@ export interface JobResponse {
   nextFireAt: string | null;
 }
 
-/** io.mohs.rest.execution.ExecutionSummaryResponse — what the paged search returns (no attempts). */
+/** io.mohs.rest.execution.ExecutionSummaryResponse — what the paged search returns (no latest-attempt diagnostics). */
 export interface ExecutionSummaryResponse {
   executionId: string;
   jobKey: string;
@@ -85,9 +85,9 @@ export interface AttemptResponse {
   error: string | null;
 }
 
-/** io.mohs.rest.execution.ExecutionResponse — the detail view, with attempts. */
+/** io.mohs.rest.execution.ExecutionResponse — the detail view, with the latest completed attempt. */
 export interface ExecutionResponse extends ExecutionSummaryResponse {
-  attempts: AttemptResponse[];
+  lastAttempt: AttemptResponse | null;
 }
 
 /** io.mohs.rest.overview.ThroughputView */
@@ -129,7 +129,7 @@ export interface RateLimitResponse {
 }
 
 /** io.mohs.core.EngineState */
-export type EngineState = "CREATED" | "STARTING" | "RUNNING" | "PAUSED" | "DRAINING" | "STOPPED";
+export type EngineState = "CREATED" | "STARTING" | "RUNNING" | "PAUSED" | "DRAINING" | "STOPPED" | "FAILED";
 
 /** io.mohs.rest.runner.RunnerResponse — node-local: describes the process that answered, not the cluster. */
 export interface RunnerResponse {

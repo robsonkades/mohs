@@ -42,34 +42,15 @@ anything but success for a handler that completed would lie, and would schedule 
 A **pre-start** check also exists: a signal raised while the task was still queued in the runner is
 honoured *before* invoking the handler. `MANUAL` becomes `CANCELLED` without running; `SHUTDOWN`
 becomes a node-shutdown failure without running — work not done, so a clean retry on another node.
-Not starting new work is the first step of a graceful shutdown.
+Registration and cancellation share one lock: a cancellation observed during payload decoding also
+refuses handler entry and the Started event. Not starting new work is the first step of shutdown.
 
-## Cancelling: the two halves
+## Persisting a cancellation
 
-An execution can be cancelled in two places, and `Mohs.cancel` orchestrates both:
-
-```mermaid
-flowchart TB
-    A["cancel(executionId)"] --> B["workQueue.cancelQueued(id, now)"]
-    B -->|"deleted the queue row"| C["advisory terminal CANCELLED<br/>+ batch counter, one transaction"]
-    B -->|"lost — the row is gone"| D["leaseStore.requestCancellation(id)"]
-    D -->|"lease exists"| E["cancel_requested = true<br/>the owner observes it within one tick"]
-    D -->|"no lease either"| F["second pass: cancelQueued, then requestCancellation"]
-    C --> G["read the current state and return it"]
-    E --> G
-    F --> G
-```
-
-**Why a second pass.** The two predicates partition the state space, but the state can migrate
-*between* the checks — an attempt completing takes `RUNNING` to `RETRY_WAITING` in the middle of the
-pair, and the operator's order would fall into the gap. The second pass closes that window; another
-migration would require a whole attempt cycle within microseconds.
-
-On a terminal state both calls are no-ops: cancelling what has already decided changes nothing, and
-the return shows the state that stood.
-
-`cancelQueued` also counts the cancellation into its batch, in the same transaction as the delete —
-cancelling is terminal, and an end that does not count leaves the batch open forever.
+`Mohs.cancel` delegates to one `WorkQueue.cancel` transaction and then reads the current execution.
+The store locks the job under the same protocol as claim and completion. READY work becomes
+terminal CANCELLED, including its batch/trigger effects; LEASED work receives `cancel_requested`.
+Terminal executions remain unchanged. No client-side two-pass race is part of this contract.
 
 ## Observing a `MANUAL` cancel
 
@@ -81,13 +62,12 @@ cancelling is terminal, and an end that does not count leaves the batch open for
 4. Raise `MANUAL` on each match, **without** an interrupt.
 
 Staleness is at most one loop interval — between `mohs.engine.poll-interval` and
-`min(max-poll-interval, node-lease-ttl/3)` depending on the backoff — plus the tick's own duration.
+`min(max-poll-interval, node-lease-ttl/3)` depending on the backoff — plus coordinator processing and continuation-page delay.
 The poll runs in `PAUSED` and `DRAINING` too.
 
-**A declared window**: the cooperative flag lives on the lease and dies with it. A cancel landing
-between the end of the handler and the flush's commit (at most the flush interval) is lost, and an
-eventual retry will run. Acceptable for cooperative cancellation — the operator re-cancels the
-retry.
+A request arriving before completion is arbitrated by the store: it can suppress a retry even
+if the owner has not yet polled the flag. A successful completion may still win, as required by
+cooperative cancellation. The retained outcome reports the transaction's decision.
 
 ## Timeouts
 
@@ -102,6 +82,10 @@ sweep — zero new threads.
 | Outcome | Passive — recorded when the handler actually stops, never by the tick |
 | Active in | `RUNNING`, `PAUSED` and `DRAINING` |
 
+Timeout delivery is recorded once per attempt, independently of the first cancellation reason.
+An earlier MANUAL flag therefore does not disable the later timeout interrupt; the first reason
+still determines how an abnormal handler exit is classified.
+
 A handler that ignores the interrupt remains owned while the node is alive. A timeout alone
 does not invalidate its fence, and a later normal return still records success. If a watchdog
 releases ownership, or a peer reclaims it after node failure, the old handler becomes a zombie
@@ -114,7 +98,10 @@ The most delicate piece of concurrency in the codebase, and the reason it is a c
 deregistration — the `FutureTask.cancel` problem:
 
 ```java
-signal.registerHandlerThread();          // opens the window, starts the timeout clock
+if (!signal.registerHandlerThread()) {
+    failBeforeStart();                   // signal won before handler admission
+    return;
+}                                       // window open, timeout clock started
 try {
     runInterceptorChain(handler, payload, ctx);
 } finally {
@@ -151,7 +138,7 @@ that ignores everything.
 | Measures | Submit-to-now in **monotonic** time. Waiting in a CPU runner's queue counts as runtime — deliberate semantics |
 | Validation | Must be **greater than** `node-lease-ttl`. A smaller bound would release ownership before the node could even be considered dead |
 | Effect | The node **releases ownership**: a synthetic `FAILED` attempt through the retry budget, fenced by this incarnation |
-| The local handler | Keeps running as a zombie until it finishes on its own; its completion carries the same ownership, but the lease is already gone (and a re-claim writes a new owner and epoch), so its fence loses by construction |
+| The local handler | Keeps running as a zombie until it finishes on its own; its completion carries the same ownership, but the lease is already gone (and a re-claim writes a new session/token grant), so its fence loses by construction |
 | Marking | The in-flight entry is **marked**, not removed — the zombie stays reachable by the drain escalation and by the cancel poll |
 | A failed release | Does not mark; the next tick tries again |
 

@@ -129,8 +129,8 @@ public class MohsRestAutoConfiguration {
     @Bean
     public JobsController mohsJobsController(Mohs mohs, ActorResolver mohsActorResolver, MohsProperties properties) {
         // The request body is converted with Mohs' own mapper, the one the store reads with — never
-        // the context's ObjectMapper — in its strict variant (PayloadMapper says why for both)
-        return new JobsController(mohs, mohsActorResolver, PayloadMapper.STRICT, properties.api().basePath());
+        // the context's ObjectMapper. HTTP conversion and durable snapshots share the same format.
+        return new JobsController(mohs, mohsActorResolver, io.mohs.engine.InputCodec.JSON.requestMapper(), properties.api().basePath());
     }
 
     /**

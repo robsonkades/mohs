@@ -15,11 +15,11 @@
  */
 package io.mohs.core.event;
 
-import java.time.Instant;
-import java.util.Objects;
-
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
+
+import java.time.Instant;
+import java.util.Objects;
 
 /**
  * An attempt began executing: its interceptor chain — and, unless an interceptor short-circuits it,
@@ -28,9 +28,9 @@ import io.mohs.core.job.JobKey;
  * terminal event without a {@code Started}.
  *
  * @param executionId the identity of the execution
- * @param jobKey the stable identity of the job
- * @param attempt the one-based attempt number
- * @param firedAt the instant this attempt began
+ * @param jobKey      the stable identity of the job
+ * @param attempt     the one-based attempt number
+ * @param firedAt     the instant this attempt began
  */
 public record Started(ExecutionId executionId, JobKey jobKey, int attempt, Instant firedAt)
         implements ExecutionEvent {
@@ -39,9 +39,9 @@ public record Started(ExecutionId executionId, JobKey jobKey, int attempt, Insta
      * Creates a {@code Started} with the supplied values.
      *
      * @param executionId the identity of the execution
-     * @param jobKey the stable identity of the job
-     * @param attempt the one-based attempt number
-     * @param firedAt the instant this attempt began
+     * @param jobKey      the stable identity of the job
+     * @param attempt     the one-based attempt number
+     * @param firedAt     the instant this attempt began
      */
     public Started {
         Objects.requireNonNull(executionId, "executionId");

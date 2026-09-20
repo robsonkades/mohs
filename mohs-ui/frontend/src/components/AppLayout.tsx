@@ -18,9 +18,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
         <a href="#workspace" className="sr-only fixed left-4 top-4 z-50 rounded-md bg-primary px-4 py-2 text-primary-foreground focus:not-sr-only">Skip to workspace</a>
         <GlobalProgressBar />
         <AppSidebar />
-        <SidebarInset>
+        <SidebarInset className="min-w-0">
           <SiteHeader streamStatus={status} />
-          <div id="workspace" tabIndex={-1} className="workspace-content mx-auto w-full max-w-[1600px] px-4 py-6 outline-none md:px-6">
+          <div id="workspace" tabIndex={-1} className="workspace-content mx-auto min-w-0 w-full max-w-[1600px] px-4 py-6 outline-none md:px-6">
             <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
           </div>
         </SidebarInset>

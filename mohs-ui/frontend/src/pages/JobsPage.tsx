@@ -2,9 +2,9 @@ import { useMemo, useState } from "react";
 import { getRouteApi, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { fetchJob, fetchJobs, pauseJob, rescheduleJob, resumeJob, scheduleJob } from "../lib/api";
+import { fetchJob, fetchJobs, pauseJob, rescheduleJob, resumeJob } from "../lib/api";
 import { queryKeys } from "../lib/queryKeys";
-import type { AcceptedExecutionResponse, JobResponse } from "../types/api";
+import type { JobResponse } from "../types/api";
 import { DataTable } from "../components/DataTable";
 import { PageStack, Section } from "../components/Layout";
 import { Panel } from "../components/Panel";
@@ -19,21 +19,16 @@ import { Drawer, Field } from "../components/Drawer";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CopyButton } from "../components/CopyButton";
 import { RescheduleForm } from "../components/RescheduleForm";
+import { RunJobDialog } from "../components/RunJobDialog";
 import { IconArrowRight, IconPause, IconPlay, IconSearch, IconTicks } from "../components/Icons";
 import { absoluteTime, formatDuration, relativeTime } from "../lib/format";
 import { scheduleLabel, scheduleTypeLabel } from "../lib/schedule";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import type { AppFeatures } from "../lib/table";
 
-type JobAction = "pause" | "resume" | "schedule";
+type JobAction = "pause" | "resume";
 
 const ACTION_COPY: Record<JobAction, { title: string; description: string; confirmLabel: string }> = {
-  schedule: {
-    title: "Run this job now?",
-    description:
-      "Creates an immediately due Execution with an empty payload, independent of the job's schedule. You'll be taken to it once it's accepted.",
-    confirmLabel: "Run now",
-  },
   pause: {
     title: "Pause this job?",
     description:
@@ -139,7 +134,7 @@ function visibleJobs(jobs: JobResponse[], term: string, paused: string): JobResp
     return (
       job.jobKey.toLowerCase().includes(needle) ||
       job.name.toLowerCase().includes(needle) ||
-      job.handlerType.toLowerCase().includes(needle)
+      job.executableKey.toLowerCase().includes(needle)
     );
   });
 }
@@ -150,11 +145,11 @@ export function JobsPage() {
   const queryClient = useQueryClient();
 
   const debouncedSearch = useDebouncedValue(search.search ?? "");
-  const jobsQuery = useQuery({ queryKey: queryKeys.jobs(), queryFn: fetchJobs });
+  const jobsQuery = useQuery({ queryKey: queryKeys.jobs(), queryFn: ({ signal }) => fetchJobs(signal) });
 
   const jobDetail = useQuery({
     queryKey: queryKeys.job(search.jobKey ?? ""),
-    queryFn: () => fetchJob(search.jobKey!),
+    queryFn: ({ signal }) => fetchJob(search.jobKey!, signal),
     enabled: !!search.jobKey,
   });
 
@@ -164,33 +159,29 @@ export function JobsPage() {
   );
 
   const [pendingAction, setPendingAction] = useState<JobAction | null>(null);
+  const [runJobKey, setRunJobKey] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ jobKey: string; message: string } | null>(null);
   const jobActionMutation = useMutation({
-    mutationFn: (action: JobAction): Promise<JobResponse | AcceptedExecutionResponse> => {
-      const jobKey = search.jobKey!;
+    mutationFn: ({ action, jobKey }: { action: JobAction; jobKey: string }) => {
       if (action === "pause") return pauseJob(jobKey);
-      if (action === "resume") return resumeJob(jobKey);
-      return scheduleJob(jobKey, { payload: {} });
+      return resumeJob(jobKey);
     },
-    onSuccess: (result, action) => {
-      setFeedback({ jobKey: search.jobKey!, message: action === "pause" ? "Job paused. Manual runs remain available." : action === "resume" ? "Job resumed." : "Execution accepted." });
+    onSuccess: (_result, { action, jobKey }) => {
+      setFeedback({ jobKey, message: action === "pause" ? "Job paused. Manual runs remain available." : "Job resumed." });
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs() });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.job(search.jobKey!) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.job(jobKey) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.executions({}) });
       setPendingAction(null);
-      if (result && "executionId" in result) {
-        void navigate({ to: "/executions", search: { executionId: result.executionId } });
-      }
     },
   });
 
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ jobKey: string; message: string } | null>(null);
   const rescheduleMutation = useMutation({
-    mutationFn: (schedule: Parameters<typeof rescheduleJob>[1]) => rescheduleJob(search.jobKey!, schedule),
-    onSuccess: (response) => {
-      setNotice(response.notice);
+    mutationFn: ({ jobKey, schedule }: { jobKey: string; schedule: Parameters<typeof rescheduleJob>[1] }) => rescheduleJob(jobKey, schedule),
+    onSuccess: (response, { jobKey }) => {
+      setNotice({ jobKey, message: response.notice });
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobs() });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.job(search.jobKey!) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.job(jobKey) });
     },
   });
 
@@ -207,7 +198,7 @@ export function JobsPage() {
   function closeDrawer() {
     setFeedback(null);
     setNotice(null);
-    rescheduleMutation.reset();
+    if (!rescheduleMutation.isPending) rescheduleMutation.reset();
     patchSearch({ jobKey: undefined });
   }
 
@@ -301,7 +292,7 @@ export function JobsPage() {
             </Button>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" onClick={() => startAction("schedule")}>
+              <Button variant="outline" onClick={() => setRunJobKey(jobDetail.data.jobKey)}>
                 <IconTicks className="size-4" />
                 Run now
               </Button>
@@ -325,8 +316,8 @@ export function JobsPage() {
                   <CopyButton value={jobDetail.data.jobKey} label="Copy job key" />
                 </span>
               </Field>
-              <Field label="Handler">
-                <span className="font-mono text-xs">{jobDetail.data.handlerType}</span>
+              <Field label="Executable">
+                <span className="font-mono text-xs">{jobDetail.data.executableKey}</span>
               </Field>
               <Field label="Schedule">
                 <span className="font-mono text-xs">{scheduleLabel(jobDetail.data.schedule)}</span>
@@ -349,17 +340,26 @@ export function JobsPage() {
             <div>
               <h3 className="mono-label mb-3 text-muted-foreground">Reschedule · runtime</h3>
               <RescheduleForm
+                key={jobDetail.data.jobKey}
                 current={jobDetail.data.schedule}
                 pending={rescheduleMutation.isPending}
-                error={rescheduleMutation.error?.message}
-                onSubmit={(schedule) => rescheduleMutation.mutate(schedule)}
+                error={rescheduleMutation.variables?.jobKey === jobDetail.data.jobKey ? rescheduleMutation.error?.message : undefined}
+                onSubmit={(schedule) => {
+                  if (!rescheduleMutation.isPending) rescheduleMutation.mutate({ jobKey: jobDetail.data.jobKey, schedule });
+                }}
               />
-              {notice && <p role="status" className="pt-2 text-xs text-warning">{notice}</p>}
+              {notice?.jobKey === jobDetail.data.jobKey && <p role="status" className="pt-2 text-xs text-warning">{notice.message}</p>}
             </div>
           </div>
         )}
       </Drawer>
 
+      {runJobKey && <RunJobDialog key={runJobKey} jobKey={runJobKey} onClose={() => setRunJobKey(null)} onAccepted={(receipt) => {
+        setRunJobKey(null);
+        void queryClient.invalidateQueries({ queryKey: ["executions"] });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.attention() });
+        void navigate({ to: "/executions", search: { executionId: receipt.executionId } });
+      }} />}
       <ConfirmDialog
         open={!!pendingAction}
         title={pendingAction ? ACTION_COPY[pendingAction].title : ""}
@@ -373,7 +373,7 @@ export function JobsPage() {
         tone="default"
         pending={jobActionMutation.isPending}
         error={jobActionMutation.error?.message}
-        onConfirm={() => jobActionMutation.mutate(pendingAction!)}
+        onConfirm={() => { if (pendingAction && search.jobKey) jobActionMutation.mutate({ action: pendingAction, jobKey: search.jobKey }); }}
         onCancel={() => setPendingAction(null)}
       />
     </PageStack>

@@ -286,25 +286,18 @@ class FiringPlannerTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("misfireThreshold");
     }
-    /**
-     * The "not due yet" guard's 1ms slack is the COLUMN's resolution, not clock tolerance: DATETIME2
-     * (100ns) and DATETIME(6) (microseconds) round the next_fire_at the calculation produced with
-     * nanoseconds, and the value read back may land marginally ahead of the raw now.
-     *
-     * <p>Without the slack, a non-event becomes a log.error per tick — and the guard throws from inside
-     * fireTrigger, so the job would stop firing with the node healthy.
-     */
+    /** Timestamp normalization belongs at the boundary; planning never fires early. */
     @Test
-    void aTriggerRoundedForwardByTheColumnIsStillDue() {
+    void theExactDueBoundaryIsAccepted() {
         assertThatNoException().isThrownBy(() -> planner.plan(new IntervalSpec(Duration.ofMinutes(5), false),
-                Misfire.FIRE_NOW, NOW.plusMillis(1), NOW));
+                Misfire.FIRE_NOW, NOW, NOW));
     }
 
     /** The other side of the boundary: a genuinely future trigger is a violation of the caller's contract. */
     @Test
     void aTriggerThatIsGenuinelyInTheFutureIsRejected() {
         assertThatThrownBy(() -> planner.plan(new IntervalSpec(Duration.ofMinutes(5), false),
-                Misfire.FIRE_NOW, NOW.plusMillis(2), NOW))   // 1ms passes, 2ms does not — THIS is the boundary
+                Misfire.FIRE_NOW, NOW.plusNanos(1000), NOW))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("not due yet");
     }

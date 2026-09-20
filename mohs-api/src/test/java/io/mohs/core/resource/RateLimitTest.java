@@ -51,22 +51,16 @@ class RateLimitTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
-    /**
-     * The bucket yields one token every {@code window / max}. If that division truncates to zero,
-     * the refill would divide by {@code Duration.ZERO} and bring down the ENTIRE claim round —
-     * including jobs with no limit at all. The spec refuses to be created in that state, so neither
-     * a property, nor a {@code @Bean}, nor a PATCH can produce it.
-     */
     @Test
-    void rejectsAWindowTooShortToIssueOneTokenPerInterval() {
-        assertThatThrownBy(() -> new RateLimit("smtp", 2_000_000, Duration.ofMillis(1)))
+    void rejectsSubMicrosecondWindow() {
+        assertThatThrownBy(() -> new RateLimit("smtp", 100, Duration.ofNanos(999)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("too short for max");
+                .hasMessageContaining("sub-microsecond");
     }
 
     /** The exact limit — one token per nanosecond — remains valid: the rejection is of what is not representable, not of what is aggressive. */
     @Test
-    void acceptsAWindowThatIssuesExactlyOneTokenPerNanosecond() {
+    void acceptsMoreThanOneTokenPerMicrosecond() {
         assertThat(new RateLimit("smtp", 1_000_000, Duration.ofMillis(1)).max()).isEqualTo(1_000_000);
     }
 }

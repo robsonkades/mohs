@@ -18,7 +18,7 @@ package io.mohs.core.schedule;
 import io.mohs.core.Mohs;
 
 /**
- * No automatic trigger — the job fires only through {@link Mohs#schedule}, {@link Mohs#batch} or
+ * No automatic trigger — the job fires only through {@link Mohs#enqueue}, {@link Mohs#batch} or
  * the dashboard.
  *
  * <p>Explicit rather than "no schedule defined", so that a job without a cron or interval is a

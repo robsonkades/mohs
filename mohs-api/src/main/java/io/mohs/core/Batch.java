@@ -15,38 +15,14 @@
  */
 package io.mohs.core;
 
-import java.util.function.Consumer;
-
-import io.mohs.core.event.BatchCompleted;
-import io.mohs.core.event.ExecutionListener;
-
 /**
- * A batch's receipt — {@link #batchId()} is already available synchronously, with the same
- * durability the async contract promises for an enqueue.
+ * Identity of an accepted batch. Inside a host transaction it becomes durable only at commit.
+ * Read {@link Mohs#findBatch} for durable progress; global execution listeners are best-effort.
  *
- * <p>{@link #onCompletion} registers a best-effort continuation, in the same spirit as
- * {@link ExecutionListener}: a guaranteed reaction enqueues a job inside its own transaction rather
- * than depending on this callback.
+ * @param batchId the batch identity
  */
-public interface Batch {
-
-    /**
-     * Returns the identity used to look up this batch.
-     *
-     * @return the stable batch identity
-     */
-    String batchId();
-
-    /**
-     * Registers a best-effort callback fired at the end of the batch, on success or failure — this
-     * is not the batch's completion guarantee, only a convenience notification.
-     *
-     * <p>Each call registers an independent listener without replacing those already registered:
-     * {@code batch.onCompletion(a).onCompletion(b)} registers both, not just the last. The
-     * {@link Batch} returned references the same batch, never a copy.
-     *
-     * @param callback the callback to invoke when the batch completes
-     * @return this batch receipt
-     */
-    Batch onCompletion(Consumer<BatchCompleted> callback);
+public record Batch(String batchId) {
+    public Batch {
+        GeneratedId.require(batchId, "batchId");
+    }
 }

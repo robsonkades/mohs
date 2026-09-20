@@ -7,13 +7,12 @@ mohs/
 ├── pom.xml                      the reactor root: io.github.robsonkades:mohs-parent:0.0.1-SNAPSHOT
 ├── mvnw · mvnw.cmd · .mvn/      the Maven Wrapper
 ├── LICENSE · NOTICE             Apache 2.0; NOTICE records the vendored cron adaptation
-├── CLAUDE.md                    working instructions for AI assistants on this repository
 ├── README.md                    the entry point
 │
 ├── mohs-cron/                   seconds-first cron parsing, vendored, self-contained
 ├── mohs-api/                    THE PUBLIC API — 100% contract, module-info.java
-├── mohs-engine/                 the engine and its ten ports (nine for persistence, one for the clock)
-├── mohs-store-jdbc/             JDBC adapters, dialects, migrations, schema files
+├── mohs-engine/                 the coordinator, dispatch and persistence/clock ports
+├── mohs-store-jdbc/             JDBC adapters, dialects, canonical schema installers
 ├── mohs-rest/                   the operational REST API v1
 ├── mohs-ui/                     the dashboard — no Java, only the built bundle
 ├── mohs-test/                   the test kit: MutableClock, InMemoryJobStore
@@ -22,8 +21,7 @@ mohs/
 ├── mohs-benchmark/              load and chaos harnesses — NEVER published
 ├── mohs-bom/                    the bill of materials (deliberately parentless)
 │
-└── docs/                        this documentation
-    └── old/                     the previous documentation set, retained for provenance
+└── docs/                        current documentation and review reports
 ```
 
 ## Where the important things live
@@ -38,7 +36,6 @@ mohs/
 | The persistence ports | `mohs-engine/.../io/mohs/engine/{JobStore,WorkQueue,LeaseStore,HistoryStore,…}.java` |
 | **The claim SQL** | `mohs-store-jdbc/.../io/mohs/store/jdbc/delegate/` |
 | **The schema** | `mohs-store-jdbc/src/main/resources/schema-*.sql` |
-| **The migrations** | `mohs-store-jdbc/src/main/resources/io/mohs/store/jdbc/migration/<dialect>/` |
 | **The properties** | `mohs-spring-boot-starter/.../io/mohs/autoconfigure/MohsProperties.java` |
 | **The bean wiring** | `mohs-spring-boot-starter/.../io/mohs/autoconfigure/MohsAutoConfiguration.java` |
 | The `@MohsJob` scanner | `mohs-spring-boot-starter/.../io/mohs/autoconfigure/MohsJobScanner.java` |
@@ -55,14 +52,14 @@ mohs/
 mohs-api/src/main/java/
 ├── module-info.java                    exports all seven packages
 └── io/mohs/core/
-    ├── Mohs · MohsLifecycle · EngineState · ScheduleCommand
+    ├── Mohs · MohsLifecycle · EngineState
     ├── Batch · BatchBuilder · ExecutionQuery
     ├── JobSnapshot · NodeSnapshot · RunnerSnapshot
     ├── RateLimitSnapshot · BatchSnapshot · OverviewSnapshot · ThroughputReading
     ├── job/          JobKey · JobRef
     ├── schedule/     Schedule (sealed) · CronSpec · IntervalSpec · OnDemandSpec · Misfire
     ├── definition/   JobDefinition · @MohsJob · @RecurringJob · @OnDemandJob
-    │                 JobSpec · PolicySpec · DefinitionSource
+    │                 JobOptions · JobRegistration · DefinitionSource
     ├── execution/    Execution · Attempt · ExecutionId · ExecutionState
     │                 JobContext · Priority
     ├── event/        ExecutionEvent (sealed, 8 variants) · ExecutionListener
@@ -81,14 +78,14 @@ io/mohs/engine/
 ├── MohsImpl.java                implements Mohs
 ├── Dispatcher.java              invokes handlers; maps outcomes
 ├── CompletionBatcher.java       group commit
-├── ScheduleCommandImpl.java     the fluent chain and the enqueue unit
+├── InputCodec.java               typed JSON snapshot validation and decoding
 ├── RunnerRegistry · MohsExecutors · HandlerRegistry · ExecutionWindowRegistry
 ├── FiringPlanner · NextFireCalculator · RetrySchedule · Shards   (pure logic)
 ├── CancellationSignal · EngineMetrics · EngineSettings
-├── BatchCompletionCallbacks · BatchCounters · ExecutionEventPublisher
+├── ExecutionEventPublisher
 ├── StoredJob · StoredNode                                        (read forms)
 └── PORTS: JobStore · WorkQueue · LeaseStore · HistoryStore · NodeStore
-          BatchStore · RateLimitStore · TriggerFirer · StoreTransactions
+          BatchStore · RateLimitStore · TriggerFirer · SubmissionStore
           SyncableClock · JobHandler
 ```
 
@@ -97,17 +94,16 @@ io/mohs/engine/
 ```text
 main/java/io/mohs/store/jdbc/
 ├── Jdbc{Job,WorkQueue,Lease,History,Node,Batch,RateLimit}Store · JdbcTriggerFirer
-├── JdbcStoreTransactions · JdbcSupport · JdbcTimestamps
+├── JdbcSubmissionStore · JdbcSupport · JdbcTimestamps
 ├── DatabaseClock
 └── delegate/ JdbcDelegate · {H2,Postgres,MySql,SqlServer}JdbcDelegate · ClaimedReady
 
 main/resources/
-├── schema-{h2,postgresql,mysql,sqlserver}.sql        the hand-install path
-└── io/mohs/store/jdbc/migration/<dialect>/V1..Vn     the upgrade path, applied by you
+└── schema-{h2,postgresql,mysql,sqlserver}.sql        canonical first-release installers
 ```
 
 Note: `src/test/java` also contains **`io.mohs.engine`** tests (`EngineTest`, `DispatcherTest`,
-`CompletionBatcherTest`, `ScheduleCommandImplTest`) — engine tests that need a real store, living
+`CompletionBatcherTest`, `JdbcSubmissionFacadeTest`) — engine tests that need a real store, living
 where the store is. This split package is also why the module carries only an
 `Automatic-Module-Name` rather than a `module-info`.
 
@@ -160,7 +156,10 @@ mohs-benchmark/
 └── scripts/
     ├── chaos-recovery.ps1                S6 (kill -9) · S8 (db pause) · SUSPEND (freeze)
     ├── cluster-scale.ps1                 Idle · Drain · Latency, N node-processes
-    └── write-amplification.ps1           commits, tuple versions, WAL per execution
+    ├── write-amplification.ps1           commits, tuple versions, WAL per execution
+    ├── soak.ps1                          sustained SQL workload and scoped accounting
+    ├── api-load.ps1                      API acceptance workload
+    └── benchmark-support.ps1             schema checks and canonical SQL seed
 ```
 
 ## Directories that are build output

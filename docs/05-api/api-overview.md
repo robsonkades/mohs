@@ -116,7 +116,8 @@ running.
 ### Summary versus detail
 
 `GET /executions` and `GET /jobs/{k}/executions` return `ExecutionSummaryResponse` — **without
-`attempts`**. The detail view (`GET /executions/{id}`) returns `ExecutionResponse` with them.
+`lastAttempt`**. The detail view (`GET /executions/{id}`) returns `ExecutionResponse` with the latest
+completed attempt (or null). Earlier attempt details are overwritten.
 
 What the list stops carrying is not only volume: an attempt's `error` is arbitrarily long text that
 used to travel on every page and on every tick of the dashboard's stream.

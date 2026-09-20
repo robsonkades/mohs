@@ -68,6 +68,7 @@ import io.mohs.core.job.JobKey;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.engine.HandlerRegistry;
+import io.mohs.engine.JobStore;
 import io.mohs.store.jdbc.DatabaseClock;
 import io.mohs.store.jdbc.JdbcJobStore;
 import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
@@ -165,12 +166,15 @@ class MohsAutoConfigurationTest {
 
         runnerWith(freshH2DataSource())
                 .withBean(ExecutionListener.class, () -> listener)
+                .withBean(io.mohs.core.definition.JobRegistration.class, () -> io.mohs.core.definition.JobRegistration.of(
+                        new io.mohs.core.job.JobRef<>(JobKey.of("greet"), Greeting.class, JobKey.of("greet").value()),
+                        (payload, ctx) -> { }).withOptions(io.mohs.core.definition.JobOptions.defaults().withRunner("io")))
                 .run(context -> {
-                    context.getBean(HandlerRegistry.class).register(JobKey.of("greet"), (payload, ctx) -> { });
+
 
                     Mohs mohs = context.getBean(Mohs.class);
-                    mohs.define(JobDefinition.of("greet", Handler.class, spec -> spec.onDemand().runner("io")));
-                    mohs.schedule("greet", new Greeting("ana")).now();
+
+                    mohs.enqueue(io.mohs.core.job.JobRef.of("greet", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     // Wait INSIDE run(): the context runner closes the context (and the Engine,
                     // through SmartLifecycle.stop) as soon as the lambda returns — claim and
@@ -417,7 +421,7 @@ class MohsAutoConfigurationTest {
                 .withUserConfiguration(GreetingJob.class)
                 .run(context -> {
                     Mohs mohs = context.getBean(Mohs.class);
-                    mohs.schedule("greet-annotated", new Greeting("ana")).now();
+                    mohs.enqueue(io.mohs.core.job.JobRef.of("greet-annotated", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
                     assertThat(context.getBean(GreetingJob.class).received).containsExactly(new Greeting("ana"));
@@ -443,7 +447,7 @@ class MohsAutoConfigurationTest {
                 .withBean("greetingJob", GreetingJob.class, () -> proxy)
                 .run(context -> {
                     Mohs mohs = context.getBean(Mohs.class);
-                    mohs.schedule("greet-annotated", new Greeting("ana")).now();
+                    mohs.enqueue(io.mohs.core.job.JobRef.of("greet-annotated", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
                     assertThat(target.received).containsExactly(new Greeting("ana"));
@@ -462,13 +466,15 @@ class MohsAutoConfigurationTest {
 
         runnerWith(freshH2DataSource(), "mohs.runners.s3.mode=io", "mohs.runners.s3.max=4")
                 .withBean(ExecutionListener.class, () -> listener)
+                .withBean(io.mohs.core.definition.JobRegistration.class, () -> io.mohs.core.definition.JobRegistration.of(
+                        new io.mohs.core.job.JobRef<>(JobKey.of("upload"), Greeting.class, JobKey.of("upload").value()),
+                        (payload, ctx) -> dispatchThreadName.set(Thread.currentThread().getName())).withOptions(io.mohs.core.definition.JobOptions.defaults().withRunner("s3")))
                 .run(context -> {
-                    context.getBean(HandlerRegistry.class).register(JobKey.of("upload"),
-                            (payload, ctx) -> dispatchThreadName.set(Thread.currentThread().getName()));
+
 
                     Mohs mohs = context.getBean(Mohs.class);
-                    mohs.define(JobDefinition.of("upload", Handler.class, spec -> spec.onDemand().runner("s3")));
-                    mohs.schedule("upload", new Greeting("ana")).now();
+
+                    mohs.enqueue(io.mohs.core.job.JobRef.of("upload", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
                 });
@@ -488,13 +494,15 @@ class MohsAutoConfigurationTest {
         runnerWith(freshH2DataSource())
                 .withBean(ExecutionListener.class, () -> listener)
                 .withBean("batchRunner", MohsRunner.class, () -> MohsRunner.cpu("batch").coreSize(1).maxSize(1).build())
+                .withBean(io.mohs.core.definition.JobRegistration.class, () -> io.mohs.core.definition.JobRegistration.of(
+                        new io.mohs.core.job.JobRef<>(JobKey.of("report"), Greeting.class, JobKey.of("report").value()),
+                        (payload, ctx) -> dispatchThreadName.set(Thread.currentThread().getName())).withOptions(io.mohs.core.definition.JobOptions.defaults().withRunner("batch")))
                 .run(context -> {
-                    context.getBean(HandlerRegistry.class).register(JobKey.of("report"),
-                            (payload, ctx) -> dispatchThreadName.set(Thread.currentThread().getName()));
+
 
                     Mohs mohs = context.getBean(Mohs.class);
-                    mohs.define(JobDefinition.of("report", Handler.class, spec -> spec.onDemand().runner("batch")));
-                    mohs.schedule("report", new Greeting("ana")).now();
+
+                    mohs.enqueue(io.mohs.core.job.JobRef.of("report", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
                 });
@@ -514,12 +522,15 @@ class MohsAutoConfigurationTest {
         runnerWith(freshH2DataSource())
                 .withBean(ExecutionListener.class, () -> listener)
                 .withBean("maintenanceWindow", ExecutionWindow.class, () -> maintenance)
+                .withBean(io.mohs.core.definition.JobRegistration.class, () -> io.mohs.core.definition.JobRegistration.of(
+                        new io.mohs.core.job.JobRef<>(JobKey.of("blocked"), Greeting.class, JobKey.of("blocked").value()),
+                        (payload, ctx) -> { }).withOptions(io.mohs.core.definition.JobOptions.defaults().withWindow("maintenance")))
                 .run(context -> {
-                    context.getBean(HandlerRegistry.class).register(JobKey.of("blocked"), (payload, ctx) -> { });
+
 
                     Mohs mohs = context.getBean(Mohs.class);
-                    mohs.define(JobDefinition.of("blocked", Handler.class, spec -> spec.onDemand().window("maintenance")));
-                    mohs.schedule("blocked", new Greeting("ana")).now();
+
+                    mohs.enqueue(io.mohs.core.job.JobRef.of("blocked", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(started.await(300, TimeUnit.MILLISECONDS)).as("never claimed/dispatched while the window excludes now").isFalse();
                 });
@@ -538,12 +549,15 @@ class MohsAutoConfigurationTest {
         runnerWith(freshH2DataSource())
                 .withBean(ExecutionListener.class, () -> listener)
                 .withBean("maintenanceWindow", ExecutionWindow.class, () -> openWindow)
+                .withBean(io.mohs.core.definition.JobRegistration.class, () -> io.mohs.core.definition.JobRegistration.of(
+                        new io.mohs.core.job.JobRef<>(JobKey.of("allowed"), Greeting.class, JobKey.of("allowed").value()),
+                        (payload, ctx) -> { }).withOptions(io.mohs.core.definition.JobOptions.defaults().withWindow("maintenance")))
                 .run(context -> {
-                    context.getBean(HandlerRegistry.class).register(JobKey.of("allowed"), (payload, ctx) -> { });
+
 
                     Mohs mohs = context.getBean(Mohs.class);
-                    mohs.define(JobDefinition.of("allowed", Handler.class, spec -> spec.onDemand().window("maintenance")));
-                    mohs.schedule("allowed", new Greeting("ana")).now();
+
+                    mohs.enqueue(io.mohs.core.job.JobRef.of("allowed", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(succeeded.await(5, TimeUnit.SECONDS)).as("execution claimed, dispatched and succeeded within timeout").isTrue();
                 });
@@ -586,7 +600,7 @@ class MohsAutoConfigurationTest {
                 .withUserConfiguration(ObservingGreetingJob.class)
                 .run(context -> {
                     ObservingGreetingJob bean = context.getBean(ObservingGreetingJob.class);
-                    context.getBean(Mohs.class).schedule("greet-annotated", new Greeting("ana")).now();
+                    context.getBean(Mohs.class).enqueue(io.mohs.core.job.JobRef.of("greet-annotated", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(bean.observedOnce.await(5, TimeUnit.SECONDS))
                             .as("the @OnExecution method received the Succeeded event within the timeout").isTrue();
@@ -637,7 +651,7 @@ class MohsAutoConfigurationTest {
                 .withUserConfiguration(MixedObservers.class)
                 .run(context -> {
                     MixedObservers bean = context.getBean(MixedObservers.class);
-                    context.getBean(Mohs.class).schedule("greet-annotated", new Greeting("ana")).now();
+                    context.getBean(Mohs.class).enqueue(io.mohs.core.job.JobRef.of("greet-annotated", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(bean.bothObserversRan.await(5, TimeUnit.SECONDS))
                             .as("both observers ran, even though the first one to run threw")
@@ -705,14 +719,20 @@ class MohsAutoConfigurationTest {
         DataSource dataSource = freshH2DataSource();
         // A job persisted by an earlier deploy — the WARN runs at engine start, with the store already populated
         new JdbcJobStore(dataSource, new MutableClock(Instant.parse("2026-08-15T12:00:00Z"), ZoneId.of("UTC")), new H2JdbcDelegate())
-                .upsert(JobDefinition.of("slow-report", Handler.class, spec -> spec.onDemand().timeout(Duration.ofMinutes(5))));
+                .upsert(JobDefinition.of("slow-report", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withTimeout(Duration.ofMinutes(5)), io.mohs.core.schedule.Misfire.IGNORE, false));
         ch.qos.logback.classic.Logger lifecycleLogger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(MohsEngineLifecycle.class);
         ListAppender<ILoggingEvent> warnWatcher = new ListAppender<>();
         warnWatcher.start();
         lifecycleLogger.addAppender(warnWatcher);
         try {
-            runnerWith(dataSource, "mohs.engine.watchdog-timeout=2m").run(context -> {
+            runnerWith(dataSource, "mohs.engine.watchdog-timeout=2m")
+                    .withBean("slowReport", io.mohs.core.definition.JobRegistration.class, () ->
+                            io.mohs.core.definition.JobRegistration.of(
+                                    io.mohs.core.job.JobRef.of("slow-report", Greeting.class),
+                                    (_, _) -> {}).withOptions(
+                                    io.mohs.core.definition.JobOptions.defaults().withTimeout(Duration.ofMinutes(5))))
+                    .run(context -> {
                 assertThat(context).hasNotFailed();
                 // The SmartLifecycle's start() runs inside the refresh — the WARN has already happened by here
                 assertThat(warnWatcher.list).anyMatch(event -> event.getFormattedMessage().contains("slow-report")
@@ -805,16 +825,19 @@ class MohsAutoConfigurationTest {
 
         runnerWith(freshH2DataSource())
                 .withBean(ExecutionListener.class, () -> listener)
-                .run(context -> {
-                    context.getBean(HandlerRegistry.class).register(JobKey.of("flaky"), (payload, ctx) -> {
+                .withBean(io.mohs.core.definition.JobRegistration.class, () -> io.mohs.core.definition.JobRegistration.of(
+                        new io.mohs.core.job.JobRef<>(JobKey.of("flaky"), Greeting.class, JobKey.of("flaky").value()),
+                        (payload, ctx) -> {
                         if (attempts.incrementAndGet() == 1) {
                             throw new IllegalStateException("first attempt fails");
                         }
-                    });
+                    }).withOptions(io.mohs.core.definition.JobOptions.defaults().withRetries(2).withRunner("io")))
+                .run(context -> {
+
 
                     Mohs mohs = context.getBean(Mohs.class);
-                    mohs.define(JobDefinition.of("flaky", Handler.class, spec -> spec.onDemand().retries(2).runner("io")));
-                    mohs.schedule("flaky", new Greeting("ana")).now();
+
+                    mohs.enqueue(io.mohs.core.job.JobRef.of("flaky", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(succeeded.await(10, TimeUnit.SECONDS)).as("retried and succeeded within timeout").isTrue();
                     assertThat(attempts.get()).isEqualTo(2);
@@ -831,9 +854,13 @@ class MohsAutoConfigurationTest {
     void bootFailsWhenAJobNamesARetryPolicyBeanThatDoesNotExist() {
         DataSource dataSource = freshH2DataSource();
         new JdbcJobStore(dataSource, new MutableClock(Instant.parse("2026-08-15T12:00:00Z"), ZoneId.of("UTC")), new H2JdbcDelegate())
-                .upsert(JobDefinition.of("flaky-report", Handler.class, spec -> spec.onDemand().retryPolicy("myRetryPolicyBean")));
+                .upsert(JobDefinition.of("flaky-report", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetryPolicy("myRetryPolicyBean"), io.mohs.core.schedule.Misfire.IGNORE, false));
 
-        runnerWith(dataSource).run(context -> {
+        runnerWith(dataSource)
+                .withBean(io.mohs.core.definition.JobRegistration.class, () -> io.mohs.core.definition.JobRegistration.of(
+                        io.mohs.core.job.JobRef.of("flaky-report", Greeting.class), (input, ctx) -> {})
+                        .withOptions(io.mohs.core.definition.JobOptions.defaults().withRetryPolicy("myRetryPolicyBean")))
+                .run(context -> {
             assertThat(context).hasFailed();
             assertThat(context.getStartupFailure())
                     .hasStackTraceContaining("flaky-report")
@@ -863,17 +890,18 @@ class MohsAutoConfigurationTest {
                     consulted.add(failure);
                     return Optional.of(Duration.ofMillis(50));
                 })
-                .run(context -> {
-                    Mohs mohs = context.getBean(Mohs.class);
-                    context.getBean(HandlerRegistry.class).register(JobKey.of("stubborn"), (payload, ctx) -> {
+                .withBean(io.mohs.core.definition.JobRegistration.class, () -> io.mohs.core.definition.JobRegistration.of(
+                        new io.mohs.core.job.JobRef<>(JobKey.of("stubborn"), Greeting.class, JobKey.of("stubborn").value()),
+                        (payload, ctx) -> {
                         // retries(0) would be terminal on the built-in schedule — the policy is what keeps it alive
                         if (attempts.incrementAndGet() == 1) {
                             throw new IllegalStateException("first attempt always fails");
                         }
-                    });
-                    mohs.define(JobDefinition.of("stubborn", Handler.class,
-                            spec -> spec.onDemand().retries(0).retryPolicy("stubbornRetries").runner("io")));
-                    mohs.schedule("stubborn", new Greeting("ana")).now();
+                    }).withOptions(io.mohs.core.definition.JobOptions.defaults().withRetries(0).withRetryPolicy("stubbornRetries").withRunner("io")))
+                .run(context -> {
+                    Mohs mohs = context.getBean(Mohs.class);
+
+                    mohs.enqueue(io.mohs.core.job.JobRef.of("stubborn", Greeting.class), new Greeting("ana"), io.mohs.core.SubmissionOptions.defaults());
 
                     assertThat(succeeded.await(10, TimeUnit.SECONDS))
                             .as("the policy granted a retry that the declared budget of 0 would have refused").isTrue();

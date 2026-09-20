@@ -24,9 +24,9 @@ class BatchCompletedTest {
 
     @Test
     void carriesCounters() {
-        BatchCompleted event = new BatchCompleted("import-2026-08", "nightly invoices", 10, 8, 2);
+        BatchCompleted event = new BatchCompleted("01991337-0000-7000-8000-000000000053", "nightly invoices", 10, 8, 2);
 
-        assertThat(event.batchId()).isEqualTo("import-2026-08");
+        assertThat(event.batchId()).isEqualTo("01991337-0000-7000-8000-000000000053");
         assertThat(event.total()).isEqualTo(10);
         assertThat(event.succeeded()).isEqualTo(8);
         assertThat(event.failed()).isEqualTo(2);
@@ -40,7 +40,7 @@ class BatchCompletedTest {
 
     @Test
     void rejectsNegativeCounters() {
-        assertThatThrownBy(() -> new BatchCompleted("b1", "n", -1, 0, 0))
+        assertThatThrownBy(() -> new BatchCompleted("01991337-0000-7000-8000-00000000000b", "n", -1, 0, 0))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

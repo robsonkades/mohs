@@ -50,8 +50,8 @@ class BatchesControllerContractTest {
         @Bean
         Mohs mohs() {
             Mohs mohs = mock(Mohs.class);
-            when(mohs.findBatch("batch-1")).thenReturn(Optional.of(new BatchSnapshot("batch-1", "nightly invoices", 10, 7, 1)));
-            when(mohs.findBatch("ghost")).thenReturn(Optional.empty());
+            when(mohs.findBatch("01991337-0000-7000-8000-00000000000e")).thenReturn(Optional.of(new BatchSnapshot("01991337-0000-7000-8000-00000000000e", "nightly invoices", 10, 7, 1)));
+            when(mohs.findBatch("01991337-0000-7000-8000-000000000050")).thenReturn(Optional.empty());
             return mohs;
         }
 
@@ -76,9 +76,9 @@ class BatchesControllerContractTest {
      */
     @Test
     void getReturnsTheCountersWithPendingAndStateDerived() throws Exception {
-        mockMvc.perform(get(ApiPaths.V1 + "/batches/batch-1"))
+        mockMvc.perform(get(ApiPaths.V1 + "/batches/01991337-0000-7000-8000-00000000000e"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.batchId").value("batch-1"))
+                .andExpect(jsonPath("$.batchId").value("01991337-0000-7000-8000-00000000000e"))
                 .andExpect(jsonPath("$.total").value(10))
                 .andExpect(jsonPath("$.succeeded").value(7))
                 .andExpect(jsonPath("$.failed").value(1))
@@ -88,8 +88,15 @@ class BatchesControllerContractTest {
 
     @Test
     void getAnswers404ForAnUnknownBatch() throws Exception {
-        mockMvc.perform(get(ApiPaths.V1 + "/batches/ghost"))
+        mockMvc.perform(get(ApiPaths.V1 + "/batches/01991337-0000-7000-8000-000000000050"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.title").value("Batch not found"));
+    }
+
+    @Test
+    void malformedBatchIdentityIsRejectedAtTheHttpBoundary() throws Exception {
+        mockMvc.perform(get(ApiPaths.V1 + "/batches/old-id"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.field").value("id"));
     }
 }

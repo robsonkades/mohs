@@ -81,15 +81,16 @@ final class SqlServerTestSupport {
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+        jdbcTemplate.execute("UPDATE mohs_job_definitions SET executable_key = job_key, recurring_payload = NULL");
         jdbcTemplate.execute("DELETE FROM mohs_job_definitions");
         jdbcTemplate.execute("DELETE FROM mohs_batches");
         jdbcTemplate.execute("DELETE FROM mohs_rate_limits");
         jdbcTemplate.execute("DELETE FROM mohs_nodes");
-        jdbcTemplate.execute("DELETE FROM mohs_ready");
-        jdbcTemplate.execute("DELETE FROM mohs_lease");
-        jdbcTemplate.execute("DELETE FROM mohs_attempt");
+        jdbcTemplate.execute("DELETE FROM mohs_work WHERE work_state = 'READY'");
+        jdbcTemplate.execute("DELETE FROM mohs_work WHERE work_state = 'LEASED'");
         jdbcTemplate.execute("DELETE FROM mohs_execution");
         jdbcTemplate.execute("DELETE FROM mohs_idempotency");
+        new JdbcTemplate(dataSource).update("UPDATE mohs_catalog SET fingerprint = NULL WHERE singleton = 1");
         return dataSource;
     }
 }

@@ -26,9 +26,8 @@ import io.mohs.core.execution.ExecutionId;
 /**
  * An execution's shard, and the assignment of shards to nodes.
  *
- * <p>{@code shard = hash(execution_id) % 64} — a FUNCTION of the id, never transported state:
- * enqueue, retry, requeue and the reaper all re-derive the same value from wherever they are, with
- * no column in {@code mohs_lease} and no migration.
+ * <p>{@code shard = hash(execution_id) % 64}. Production acceptance computes this value once;
+ * work/history retain it and retry/requeue preserve it. It is routing metadata, not ownership.
  *
  * <p>{@code SHARD_COUNT = 64} is fixed, not configurable: 64 divides cleanly into any plausible node
  * count, and 64 shards on a single node cost nothing. The hash is FNV-1a over the id's UTF-8 bytes —

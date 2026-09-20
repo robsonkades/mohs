@@ -15,25 +15,24 @@
  */
 package io.mohs.core;
 
-import java.time.Instant;
-import java.util.Objects;
-
+import io.mohs.core.definition.JobDefinition;
 import org.jspecify.annotations.Nullable;
 
-import io.mohs.core.definition.JobDefinition;
+import java.time.Instant;
+import java.util.Objects;
 
 /**
  * A {@link JobDefinition} plus the operational state it deliberately does not carry
  * ({@code paused}) and the computed next firing ({@code nextFireAt}) — the read form returned by
  * {@link Mohs#findJob}/{@link Mohs#jobs}.
  *
- * <p>It is the public mirror of {@code io.mohs.engine.StoredJob}, without {@code orphaned} and
+ * <p>It is the public mirror of {@code io.mohs.engine.StoredJob}, without
  * {@code runningExecutionCount} (too operational to expose through the API yet, with no consumer
  * outside the engine needing them).
  *
  * @param nextFireAt the next firing instant, or {@code null} when paused, on demand or disarmed
  * @param definition the registered job definition
- * @param paused whether automatic firing is suspended
+ * @param paused     whether automatic firing is suspended
  */
 public record JobSnapshot(JobDefinition definition, boolean paused, @Nullable Instant nextFireAt) {
 
@@ -41,7 +40,7 @@ public record JobSnapshot(JobDefinition definition, boolean paused, @Nullable In
      * Creates a {@code JobSnapshot} with the supplied values.
      *
      * @param definition the registered job definition
-     * @param paused whether automatic firing is suspended
+     * @param paused     whether automatic firing is suspended
      * @param nextFireAt the next firing instant, or {@code null} when paused, on demand or disarmed
      */
     public JobSnapshot {

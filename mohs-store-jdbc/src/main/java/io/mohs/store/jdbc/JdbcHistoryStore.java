@@ -28,12 +28,10 @@ import java.util.Optional;
 import javax.sql.DataSource;
 
 import org.jspecify.annotations.Nullable;
-import org.springframework.util.ClassUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
-import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.execution.Attempt;
 import io.mohs.core.execution.Execution;
@@ -42,48 +40,31 @@ import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
 import io.mohs.engine.HistoryStore;
+import io.mohs.engine.JobPayload;
 import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
-/**
- * {@link HistoryStore} over {@code mohs_execution}/{@code mohs_attempt}/{@code mohs_idempotency}.
- *
- * <p>Deliberately WITHOUT a {@code TransactionTemplate}: {@link #record} takes part in the caller's
- * active transaction (the enqueue joins the host's; execution, queue and idempotency are the same unit
- * of work, composed by the caller and never here); the reads are autocommit like any store's. The
- * terminal write does NOT live here — it belongs to the completion transaction
- * ({@code JdbcLeaseStore.complete}).
- */
+/** Execution and receipt queries, plus bounded retention. All execution writes belong to complete operations. */
 public final class JdbcHistoryStore implements HistoryStore {
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final NamedParameterJdbcTemplate pruneTemplate;
     private final NamedParameterJdbcTemplate sweepTemplate;
-    private final JsonMapper objectMapper;
     private final JdbcDelegate delegate;
+    private final org.springframework.transaction.support.TransactionTemplate pruning;
 
-    /**
-     * Shorter than any sensible {@code node-lease-ttl}, so a prune waiting on another node's locks
-     * can never cost this node the lease it is supposed to be renewing. It is a ceiling on waiting,
-     * not a budget for working — see {@link #pruneIdempotencyBefore}.
-     */
+    /** Statement ceiling; the pruning transaction's remaining timeout may impose a shorter limit. */
     private static final int PRUNE_TIMEOUT_SECONDS = 5;
 
-    /**
-     * Tighter than the prune's, because the history sweep issues THREE statements per pass and may
-     * loop passes within the caller's budget: at five seconds each, one lock-bound pass alone could
-     * outspend the node lease. One second is still two orders of magnitude above what a bounded,
-     * primary-key-ranged delete of cold rows costs — a statement that hits it is waiting, not working.
-     */
+    /** A history page issues two deletes; keep each statement within the maintenance loop's budget. */
     private static final int SWEEP_TIMEOUT_SECONDS = 1;
 
     /**
      * Creates a {@code JdbcHistoryStore} with the supplied values.
      *
      * @param dataSource the configured database connection source
-     * @param objectMapper the JSON mapper used for payload conversion
      * @param delegate the database-specific SQL and timestamp adapter
      */
-    public JdbcHistoryStore(DataSource dataSource, JsonMapper objectMapper, JdbcDelegate delegate) {
+    public JdbcHistoryStore(DataSource dataSource, JdbcDelegate delegate) {
         Objects.requireNonNull(dataSource, "dataSource");
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
         // Templates of their own: the timeouts must not reach the read model or the payload read,
@@ -94,59 +75,27 @@ public final class JdbcHistoryStore implements HistoryStore {
         JdbcTemplate sweepOperations = new JdbcTemplate(dataSource);
         sweepOperations.setQueryTimeout(SWEEP_TIMEOUT_SECONDS);
         this.sweepTemplate = new NamedParameterJdbcTemplate(sweepOperations);
-        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.delegate = Objects.requireNonNull(delegate, "delegate");
+        this.pruning = new org.springframework.transaction.support.TransactionTemplate(
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
+        this.pruning.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.pruning.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_READ_COMMITTED);
+        this.pruning.setTimeout(3);
     }
 
     @Override
-    public void record(List<NewExecution> executions) {
-        if (executions.isEmpty()) {
-            return;
-        }
-        // Idempotency goes in BEFORE history: the primary-key conflict IS the deduplication check
-        // (Idempotent Receiver, EIP) and has to abort the whole unit before any history row is born
-        MapSqlParameterSource[] keys = executions.stream()
-                .filter(e -> e.idempotencyKey() != null)
-                .map(this::idempotencyParams)
-                .toArray(MapSqlParameterSource[]::new);
-        if (keys.length > 0) {
-            jdbcTemplate.batchUpdate(delegate.insertIdempotency(), keys);
-        }
-        jdbcTemplate.batchUpdate(delegate.recordExecution(), executions.stream()
-                .map(this::recordParams)
-                .toArray(MapSqlParameterSource[]::new));
-    }
-
-    private MapSqlParameterSource idempotencyParams(NewExecution execution) {
-        return new MapSqlParameterSource()
-                .addValue("jobKey", execution.jobKey().value())
-                .addValue("idempotencyKey", execution.idempotencyKey())
-                .addValue("executionId", execution.executionId().value())
-                .addValue("createdAt", delegate.splitTimestamp(execution.createdAt()));
-    }
-
-    private MapSqlParameterSource recordParams(NewExecution execution) {
-        return new MapSqlParameterSource()
-                .addValue("executionId", execution.executionId().value())
-                .addValue("jobKey", execution.jobKey().value())
-                .addValue("shard", execution.shard())
-                .addValue("priority", execution.priority())
-                .addValue("scheduledAt", delegate.splitTimestamp(execution.scheduledAt()))
-                .addValue("createdAt", delegate.splitTimestamp(execution.createdAt()))
-                .addValue("actor", execution.actor())
-                .addValue("correlationId", execution.correlationId())
-                .addValue("idempotencyKey", execution.idempotencyKey())
-                .addValue("payload", objectMapper.writeValueAsString(execution.payload()))
-                .addValue("payloadType", execution.payload().getClass().getName());
-    }
-
-    @Override
-    public Optional<ExecutionId> findByIdempotencyKey(JobKey jobKey, String idempotencyKey) {
+    public Optional<io.mohs.core.event.Enqueued> findReceiptByIdempotencyKey(
+            JobKey jobKey, String idempotencyKey) {
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(idempotencyKey, "idempotencyKey");
-        return JdbcSupport.findOne(jdbcTemplate, delegate.findExecutionIdByIdempotencyKey(),
-                new MapSqlParameterSource().addValue("jobKey", jobKey.value()).addValue("idempotencyKey", idempotencyKey),
-                rs -> ExecutionId.of(rs.getString("execution_id")));
+        return JdbcSupport.findOne(jdbcTemplate, delegate.findIdempotencyReceipt(),
+                new MapSqlParameterSource("jobKey", jobKey.value()).addValue("idempotencyKey", idempotencyKey)
+                        .addValue("now", delegate.splitTimestamp(JdbcDatabaseTime.now(jdbcTemplate, delegate))), rs -> {
+                    ExecutionId id = ExecutionId.of(rs.getString("execution_id"));
+                    Instant scheduledAt = Objects.requireNonNull(delegate.readSplitTimestamp(rs, "scheduled_at"), "scheduled_at");
+                    String actor = rs.getString("actor");
+                    return new io.mohs.core.event.Enqueued(id, jobKey, scheduledAt, actor);
+                });
     }
 
     /** The same discipline as {@code findPayloads}: a PER-ROW verdict — an unreadable row does not contaminate its neighbours; only infrastructure propagates. */
@@ -194,51 +143,19 @@ public final class JdbcHistoryStore implements HistoryStore {
                 Objects.requireNonNull(delegate.readSplitTimestamp(rs, "created_at"), "created_at"),
                 rs.getString("actor"),
                 rs.getInt("priority"),
-                rs.getString("correlation_id"));
+                rs.getString("batch_id"));
     }
 
-    private Object readPayload(ResultSet rs) throws SQLException {
-        String payloadJson = rs.getString("payload");
-        String payloadType = rs.getString("payload_type");
-        Class<?> type;
-        try {
-            type = ClassUtils.forName(payloadType, ClassUtils.getDefaultClassLoader());
-        } catch (ClassNotFoundException e) {
-            throw new IllegalStateException("payload type '" + payloadType + "' not found on classpath", e);
-        }
-        return objectMapper.readValue(payloadJson, type);
+    private JobPayload readPayload(ResultSet rs) throws SQLException {
+        return new JobPayload(rs.getString("payload"), rs.getString("input_contract"));
     }
 
+    /** One row-bounded transaction. The engine budgets repeated pages and resumes a full backlog later. */
     @Override
-    public List<Attempt> findAttempts(ExecutionId executionId) {
-        Objects.requireNonNull(executionId, "executionId");
-        return jdbcTemplate.query(delegate.findAttempts(),
-                new MapSqlParameterSource("executionId", executionId.value()), (rs, _) -> mapAttempt(rs));
-    }
-
-    /**
-     * Bounded in TIME, not in rows, and the bound is the point: this runs on the engine's loop
-     * thread, ahead of the firing and the claim. Every node issues the same DELETE, so the node that
-     * gets there second waits on the first one's row locks — and a node blocked here is a node that
-     * is heartbeating, owning its share of the shards, and claiming nothing. That is the exact
-     * failure mode the tick's own comment describes, and {@code runMaintenance} does not shield
-     * against it: it catches exceptions, and waiting throws nothing.
-     *
-     * <p>A five-second ceiling ({@code PRUNE_TIMEOUT_SECONDS}) therefore caps the wait rather than
-     * the work. A prune cut short rolls
-     * back whole and makes no progress, which is the right trade at this cadence — the loser of the
-     * race would have deleted nothing anyway, since the winner is removing the same rows. What it
-     * costs is the pathological case: a first prune over a window that was never enforced can be
-     * large enough to time out on every node, forever. That surfaces as
-     * {@code mohs.tick.failed{step=idempotency-prune}} climbing hourly, and the answer is a one-off
-     * manual DELETE in batches — not a longer timeout, which would only move the stall into the
-     * claim.
-     */
-    @Override
-    public int pruneIdempotencyBefore(Instant cutoff) {
-        Objects.requireNonNull(cutoff, "cutoff");
-        return pruneTemplate.update(delegate.pruneIdempotencyBefore(),
-                new MapSqlParameterSource("cutoff", delegate.splitTimestamp(cutoff)));
+    public int pruneExpiredIdempotency() {
+        return Objects.requireNonNull(pruning.execute(_ -> pruneTemplate.update(delegate.pruneExpiredIdempotency(),
+                new MapSqlParameterSource("now", delegate.splitTimestamp(JdbcDatabaseTime.now(pruneTemplate, delegate)))
+                        .addValue("limit", (long) HistoryStore.IDEMPOTENCY_PRUNE_BATCH, java.sql.Types.BIGINT))));
     }
 
     /**
@@ -253,11 +170,10 @@ public final class JdbcHistoryStore implements HistoryStore {
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("cutoff", delegate.splitTimestamp(cutoff))
                 .addValue("cutoffId", uuidV7LowerBound(cutoff))
-                .addValue("limit", limit);
+                .addValue("limit", (long) limit, java.sql.Types.BIGINT);
         int executions = sweepTemplate.update(delegate.pruneTerminalExecutionsBefore(), params);
-        int attempts = sweepTemplate.update(delegate.pruneOrphanedAttemptsBefore(), params);
         int batches = sweepTemplate.update(delegate.pruneEmptyBatchesBefore(), params);
-        return new PrunedHistory(executions, attempts, batches);
+        return new PrunedHistory(executions, batches);
     }
 
     /**
@@ -277,18 +193,10 @@ public final class JdbcHistoryStore implements HistoryStore {
     public Optional<Execution> find(ExecutionId id, Instant now) {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(now, "now");
-        Optional<Execution> summary = JdbcSupport.findOne(jdbcTemplate, delegate.findExecutionById(),
+        return JdbcSupport.findOne(jdbcTemplate, delegate.findExecutionById(),
                 new MapSqlParameterSource("executionId", id.value()),
-                rs -> mapDerived(rs, now, List.of()));
-        // The detail view carries attempts (the earlier era's contract preserved); two reads, not an NxM
-        // join — attempts would multiply the row
-        return summary.map(execution -> withAttempts(execution, findAttempts(id)));
-    }
-
-    private static Execution withAttempts(Execution execution, List<Attempt> attempts) {
-        return new Execution(execution.id(), execution.jobKey(), execution.state(), execution.scheduledAt(),
-                execution.firedAt(), attempts, execution.actor(), execution.priority(), execution.idempotencyKey(),
-                execution.batchId(), execution.owner());
+                rs -> mapDerived(rs, now, rs.getInt("last_attempt_number") == 0
+                        ? Optional.empty() : Optional.of(mapAttempt(rs))));
     }
 
     @Override
@@ -296,7 +204,7 @@ public final class JdbcHistoryStore implements HistoryStore {
             @Nullable Instant to, @Nullable ExecutionId cursor, int limit, Instant now) {
         Objects.requireNonNull(now, "now");
         MapSqlParameterSource params = new MapSqlParameterSource()
-                .addValue("limit", limit)
+                .addValue("limit", (long) limit, java.sql.Types.BIGINT)
                 .addValue("now", delegate.splitTimestamp(now));
         List<String> conditions = new ArrayList<>();
         if (jobKey != null) {
@@ -323,24 +231,24 @@ public final class JdbcHistoryStore implements HistoryStore {
                     conditions.add("e.state = :status");
                     params.addValue("status", status.name());
                 }
-                case RUNNING -> conditions.add("l.node_id IS NOT NULL");
-                case RETRY_WAITING -> conditions.add("r.attempt > 1 AND r.visible_at > :now");
-                case ENQUEUED -> conditions.add("r.execution_id IS NOT NULL AND (r.attempt = 1 OR r.visible_at <= :now)");
+                case RUNNING -> conditions.add("w.work_state = 'LEASED'");
+                case RETRY_WAITING -> conditions.add("w.attempt > 1 AND w.visible_at > :now");
+                case ENQUEUED -> conditions.add("w.work_state = 'READY' AND (w.attempt = 1 OR w.visible_at <= :now)");
             }
         }
         String where = conditions.isEmpty() ? "" : "WHERE " + String.join(" AND ", conditions) + "\n";
-        // A SUMMARY by contract (the earlier era preserved): empty attempts in the listing
-        return jdbcTemplate.query(delegate.findExecutionPage(where), params, (rs, _) -> mapDerived(rs, now, List.of()));
+        // Summaries omit attempt details and their potentially large failure text.
+        return jdbcTemplate.query(delegate.findExecutionPage(where), params, (rs, _) -> mapDerived(rs, now, Optional.empty()));
     }
 
     /** Row to {@link Execution}; the state, owner and firing instant come from {@link #deriveState}. */
-    private Execution mapDerived(ResultSet rs, Instant now, List<Attempt> attempts) throws SQLException {
+    private Execution mapDerived(ResultSet rs, Instant now, Optional<Attempt> lastAttempt) throws SQLException {
         ExecutionId id = ExecutionId.of(rs.getString("execution_id"));
         DerivedState derived = deriveState(rs, now);
         return new Execution(id, JobKey.of(rs.getString("job_key")), derived.state(),
                 Objects.requireNonNull(delegate.readSplitTimestamp(rs, "scheduled_at"), "scheduled_at"),
-                derived.firedAt(), attempts, rs.getString("actor"), Priority.fromValue(rs.getInt("priority")),
-                rs.getString("idempotency_key"), rs.getString("correlation_id"), derived.owner());
+                derived.firedAt(), lastAttempt, rs.getString("actor"), Priority.fromValue(rs.getInt("priority")),
+                rs.getString("idempotency_key"), rs.getString("batch_id"), derived.owner());
     }
 
     /**
@@ -355,6 +263,10 @@ public final class JdbcHistoryStore implements HistoryStore {
         if (!"PENDING".equals(column)) {
             return DerivedState.unowned(ExecutionState.valueOf(column));
         }
+        if ((leaseNode != null) == queued) {
+            throw new IllegalStateException("pending execution " + rs.getString("execution_id")
+                    + " must have exactly one active work record");
+        }
         if (leaseNode != null) {
             return new DerivedState(ExecutionState.RUNNING, leaseNode, delegate.readSplitTimestamp(rs, "lease_claimed_at"));
         }
@@ -362,8 +274,8 @@ public final class JdbcHistoryStore implements HistoryStore {
                 && Objects.requireNonNull(delegate.readSplitTimestamp(rs, "ready_visible_at"), "ready_visible_at").isAfter(now)) {
             return DerivedState.unowned(ExecutionState.RETRY_WAITING);
         }
-        // queued and visible — or inside the window of a completion flush in
-        // progress (an orphan PENDING): ENQUEUED, the read model's accepted staleness
+        // A single statement sees either side of the committed transition. An uncommitted
+        // completion never justifies fabricating queue membership for a broken pending row.
         return DerivedState.unowned(ExecutionState.ENQUEUED);
     }
 
@@ -403,10 +315,10 @@ public final class JdbcHistoryStore implements HistoryStore {
 
     private Attempt mapAttempt(ResultSet rs) throws SQLException {
         return new Attempt(
-                rs.getInt("number"),
-                Objects.requireNonNull(delegate.readSplitTimestamp(rs, "started_at"), "started_at"),
-                delegate.readSplitTimestamp(rs, "finished_at"),
-                ExecutionState.valueOf(rs.getString("outcome")),
-                rs.getString("error"));
+                rs.getInt("last_attempt_number"),
+                Objects.requireNonNull(delegate.readSplitTimestamp(rs, "last_attempt_started_at"), "last_attempt_started_at"),
+                delegate.readSplitTimestamp(rs, "last_attempt_finished_at"),
+                ExecutionState.valueOf(rs.getString("last_attempt_outcome")),
+                rs.getString("last_attempt_error"));
     }
 }

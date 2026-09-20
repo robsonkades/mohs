@@ -19,12 +19,23 @@ dependency are both required.
 Select a row to open its detail drawer. Filters are reflected in the URL, so a filtered jobs or
 executions view can be bookmarked and shared with another operator who has access.
 
+## Deployment paths and bootstrap
+
+The starter injects `apiBase` (servlet context plus `mohs.api.base-path`), `uiBase`, the configured
+node lease TTL and optional CSRF token into `#mohs-config`. Assets are relative to the injected
+`<base>`; nested routes work under a servlet context without rebuilding the bundle.
+The HTML response is `Cache-Control: no-store` because configuration and tokens belong to its
+request. Do not override this with a shared proxy cache. The bootstrap is JSON, not executable
+inline JavaScript, and does not require allowing inline script execution in CSP.
+
 ## Live data and refresh
 
 The header shows the SSE connection state. A healthy live connection updates the one-minute
 overview and invalidates affected queries as events arrive. Other overview windows use polling.
-Reconnection is automatic after an interruption, and the refresh button invalidates all dashboard
-queries immediately.
+The dashboard requests `?executionMode=invalidation`; execution frames carry a refresh signal
+and the client reloads its own filtered page. Default API subscribers still receive execution
+arrays. Reconnection is automatic after an interruption; stalled streams fall back to polling,
+and the refresh button invalidates dashboard queries immediately.
 
 The **Live list** switch on Executions controls only whether rows move while you inspect them. It
 does not disconnect the dashboard, pause jobs or stop event delivery. A custom date range also
@@ -58,8 +69,11 @@ The dashboard has no login or permission model. Protect `/mohs-ui`, `/mohs-ui/**
 an `X-Mohs-Actor` header, so the default resolver records mutations as `anonymous`; replace
 `ActorResolver` with authenticated identity for an accountable audit trail.
 
-The bundled client does not send a CSRF token. A host using cookie or other browser-managed
-credentials must integrate the token into the SPA before allowing mutations. See the
+The HTML bootstrap reads the host-provided Spring Security CSRF request attribute and includes
+its token/header name in inert JSON (`<script type="application/json" id="mohs-config">`).
+The bundled client sends that header on mutations when present. The host still owns authentication,
+authorization and CSRF configuration. Reload the dashboard after login/logout or session changes
+so it obtains the current token. See the
 [security guide](../08-security/security-overview.md) for a complete example.
 
 ## Troubleshooting

@@ -121,7 +121,7 @@ final class MohsEngineLifecycle implements SmartLifecycle {
      */
     private void collectMissingRetryPolicy(StoredJob stored, List<String> missing) {
         String policy = stored.definition().retryPolicy();
-        if (policy != null && !stored.orphaned() && !retryPolicies.contains(policy)) {
+        if (policy != null && !retryPolicies.contains(policy)) {
             missing.add("'" + stored.definition().key().value() + "' -> retryPolicy '" + policy + "'");
         }
     }

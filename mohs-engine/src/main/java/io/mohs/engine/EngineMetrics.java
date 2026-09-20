@@ -35,9 +35,10 @@ import io.mohs.core.job.JobKey;
  * The engine's {@code mohs.*} metrics — operability is a requirement, not finishing polish (design
  * for 3 a.m.).
  *
- * <p>The cardinality rule is enforced here rather than by convention: the labels are {@code job}
- * (bounded by the number of definitions) and {@code outcome}/{@code reason} (enums) — an execution
- * id NEVER becomes a label.
+ * <p>The {@code job} tag identifies registered executable code, shared by its named recurring
+ * schedules. It retains its tag name for existing dashboards; dynamically generated schedule IDs
+ * are available in execution events/history rather than metric series. Missing retained definitions
+ * use the single {@code _unresolved} label. Outcome and reason labels have fixed vocabularies.
  *
  * <p>Execution duration derives from the {@link Attempt}'s timestamps — the same persisted window
  * the benchmarks and the dashboard read, so there is a single source. Claim latency arrives in nanoseconds
@@ -143,6 +144,12 @@ public final class EngineMetrics {
      */
     void tickStepFailed(String step) {
         registry.counter("mohs.tick.failed", "step", step).increment();
+    }
+
+    void idempotencyPruned(long removed, long elapsedNanos, boolean backlog) {
+        registry.counter("mohs.idempotency.pruned").increment(removed);
+        registry.timer("mohs.idempotency.prune.duration").record(elapsedNanos, TimeUnit.NANOSECONDS);
+        if (backlog) registry.counter("mohs.idempotency.prune.deferred").increment();
     }
 
     private static String labelValue(ExecutionState state) {

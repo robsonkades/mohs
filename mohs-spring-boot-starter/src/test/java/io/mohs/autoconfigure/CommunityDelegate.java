@@ -44,6 +44,24 @@ final class CommunityDelegate implements JdbcDelegate {
     private final JdbcDelegate delegate = new H2JdbcDelegate();
 
     @Override
+    public String lockBindingOwner() { return delegate.lockBindingOwner(); }
+
+    @Override
+    public String findJobBinding() { return delegate.findJobBinding(); }
+
+    @Override
+    public String findExecutableKey() { return delegate.findExecutableKey(); }
+
+    @Override
+    public String hasActiveJobDependents() { return delegate.hasActiveJobDependents(); }
+
+    @Override
+    public String findActiveJobBindings() { return delegate.findActiveJobBindings(); }
+
+    @Override
+    public String upsertBoundJobUpdate(boolean writeNextFire) { return delegate.upsertBoundJobUpdate(writeNextFire); }
+
+    @Override
     public String nowQuery() {
         return delegate.nowQuery();
     }
@@ -69,6 +87,11 @@ final class CommunityDelegate implements JdbcDelegate {
     }
 
     @Override
+    public String completeExecution() {
+        return delegate.completeExecution();
+    }
+
+    @Override
     public String upsertJobUpdate(boolean writeNextFire) {
         return delegate.upsertJobUpdate(writeNextFire);
     }
@@ -79,18 +102,13 @@ final class CommunityDelegate implements JdbcDelegate {
     }
 
     @Override
-    public String readyCandidatesFiltered() {
-        return delegate.readyCandidatesFiltered();
-    }
-
-    @Override
     public String readyDelete() {
         return delegate.readyDelete();
     }
 
     @Override
-    public String leaseInsert() {
-        return delegate.leaseInsert();
+    public String fencedReleaseWork() {
+        return delegate.fencedReleaseWork();
     }
 
     @Override
@@ -149,8 +167,8 @@ final class CommunityDelegate implements JdbcDelegate {
     }
 
     @Override
-    public String findExecutionIdByIdempotencyKey() {
-        return delegate.findExecutionIdByIdempotencyKey();
+    public String findIdempotencyReceipt() {
+        return delegate.findIdempotencyReceipt();
     }
 
     @Override
@@ -164,23 +182,13 @@ final class CommunityDelegate implements JdbcDelegate {
     }
 
     @Override
-    public String findAttempts() {
-        return delegate.findAttempts();
-    }
-
-    @Override
-    public String pruneIdempotencyBefore() {
-        return delegate.pruneIdempotencyBefore();
+    public String pruneExpiredIdempotency() {
+        return delegate.pruneExpiredIdempotency();
     }
 
     @Override
     public String pruneTerminalExecutionsBefore() {
         return delegate.pruneTerminalExecutionsBefore();
-    }
-
-    @Override
-    public String pruneOrphanedAttemptsBefore() {
-        return delegate.pruneOrphanedAttemptsBefore();
     }
 
     @Override
@@ -219,11 +227,6 @@ final class CommunityDelegate implements JdbcDelegate {
     }
 
     @Override
-    public String findOrphanedLeasesExceptAlive() {
-        return delegate.findOrphanedLeasesExceptAlive();
-    }
-
-    @Override
     public String countLeasesByJob() {
         return delegate.countLeasesByJob();
     }
@@ -239,16 +242,6 @@ final class CommunityDelegate implements JdbcDelegate {
     }
 
     @Override
-    public String insertAttempt() {
-        return delegate.insertAttempt();
-    }
-
-    @Override
-    public String terminalStateUpdate() {
-        return delegate.terminalStateUpdate();
-    }
-
-    @Override
     public String insertJob() {
         return delegate.insertJob();
     }
@@ -259,19 +252,10 @@ final class CommunityDelegate implements JdbcDelegate {
     }
 
     @Override
-    public String countLiveSchedulerOccurrences() {
-        return delegate.countLiveSchedulerOccurrences();
-    }
-
-    @Override
     public String cancelDrainedExecutions() {
         return delegate.cancelDrainedExecutions();
     }
 
-    @Override
-    public String markJobOrphaned() {
-        return delegate.markJobOrphaned();
-    }
 
     @Override
     public String setJobPaused() {
@@ -308,10 +292,6 @@ final class CommunityDelegate implements JdbcDelegate {
         return delegate.findAllJobs();
     }
 
-    @Override
-    public String findAllAnnotationSourcedJobs() {
-        return delegate.findAllAnnotationSourcedJobs();
-    }
 
     @Override
     public String findDueRecurringJobs() {

@@ -72,7 +72,7 @@ class ShutdownLatencyScenario {
             // retries(0): the measured number is the COST of the stop, and a redelivery from a
             // reclaim would inflate `invocations` without the shutdown window — the experiment's
             // variable — having changed
-            cluster.defineJob("slow", spec -> spec.retries(0));
+            cluster.defineJob("slow", spec -> spec.withRetries(0));
             for (int i = 0; i < 2; i++) {
                 cluster.addNode(settings(), List.of());
             }
@@ -112,7 +112,6 @@ class ShutdownLatencyScenario {
     }
 
     private static EngineSettings settings() {
-        return new EngineSettings(Duration.ofMillis(25), Duration.ofMillis(200), 256, DISPATCH_CONCURRENCY, 3,
-                Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60));
+        return new EngineSettings(Duration.ofMillis(25),Duration.ofMillis(200),256,DISPATCH_CONCURRENCY,3,Duration.ofSeconds(15),null,Duration.ofSeconds(60),Duration.ZERO,Duration.ZERO);
     }
 }

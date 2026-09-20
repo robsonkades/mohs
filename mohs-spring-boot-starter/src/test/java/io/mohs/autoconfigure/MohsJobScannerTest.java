@@ -54,6 +54,107 @@ class MohsJobScannerTest {
         }
     }
 
+    @org.springframework.scheduling.annotation.Async
+    static class AsyncJob {
+        @OnDemandJob("async-job")
+        void run() {}
+    }
+
+    static class AsyncMethodJob {
+        @org.springframework.scheduling.annotation.Async
+        @OnDemandJob("async-job")
+        void run() {}
+    }
+
+    static class LazyJobFactory implements org.springframework.beans.factory.FactoryBean<WelcomeEmailJob> {
+        @Override public WelcomeEmailJob getObject() { return new WelcomeEmailJob(); }
+        @Override public Class<?> getObjectType() { return WelcomeEmailJob.class; }
+    }
+
+    static class LazyObserver {
+        int calls;
+        @io.mohs.core.event.OnExecution(event = io.mohs.core.event.ExecutionEventType.ENQUEUED)
+        void accepted() { calls++; }
+    }
+
+    @Test
+    void initializesLazyRegistrationsAndObserversBeforePublication() {
+        MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.FAIL);
+        beanFactory.addBeanPostProcessor(scanner);
+        GenericBeanDefinition registration = new GenericBeanDefinition();
+        registration.setBeanClass(io.mohs.core.definition.JobRegistration.class);
+        registration.setLazyInit(true);
+        registration.setInstanceSupplier(() -> io.mohs.core.definition.JobRegistration.of(
+                io.mohs.core.job.JobRef.of("lazy-registration", io.mohs.core.NoInput.class), (_, _) -> {}));
+        beanFactory.registerBeanDefinition("registration", registration);
+        GenericBeanDefinition observer = new GenericBeanDefinition();
+        observer.setBeanClass(LazyObserver.class);
+        observer.setLazyInit(true);
+        beanFactory.registerBeanDefinition("observer", observer);
+
+        scanner.afterSingletonsInstantiated();
+        onExecutionRegistry.on(new io.mohs.core.event.Enqueued(
+                io.mohs.core.execution.ExecutionId.of("01991337-0000-7000-8000-00000000001c"),
+                JobKey.of("lazy-registration"), java.time.Instant.EPOCH, "tester"));
+
+        assertThat(handlerRegistry.find(JobKey.of("lazy-registration"))).isPresent();
+        assertThat(beanFactory.getBean("observer", LazyObserver.class).calls).isEqualTo(1);
+    }
+
+    @Test
+    void initializesATypedFactoryProductEvenWhenItsFactoryWasAlreadyProcessed() {
+        MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.FAIL);
+        beanFactory.addBeanPostProcessor(scanner);
+        GenericBeanDefinition factory = new GenericBeanDefinition();
+        factory.setBeanClass(LazyJobFactory.class);
+        beanFactory.registerBeanDefinition("jobFactory", factory);
+        beanFactory.getBean("&jobFactory");
+        assertThat(handlerRegistry.find(JobKey.of("welcome-email"))).isEmpty();
+
+        scanner.afterSingletonsInstantiated();
+
+        assertThat(handlerRegistry.find(JobKey.of("welcome-email"))).isPresent();
+        assertThat(jobStore.find(JobKey.of("welcome-email"))).isPresent();
+    }
+
+    @Test
+    void rejectsAsyncAdviceOnTheClassAndMethod() {
+        MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.FAIL);
+        for (Object bean : new Object[] { new AsyncJob(), new AsyncMethodJob() }) {
+            assertThatThrownBy(() -> scanner.postProcessAfterInitialization(bean, "async"))
+                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("@Async");
+        }
+    }
+
+    @Test
+    void initializesLazyJobDeclarationsBeforeFreezingButLeavesOtherBeansLazy() {
+        MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.FAIL);
+        beanFactory.addBeanPostProcessor(scanner);
+        GenericBeanDefinition job = new GenericBeanDefinition();
+        job.setBeanClass(WelcomeEmailJob.class);
+        job.setLazyInit(true);
+        beanFactory.registerBeanDefinition("lazyJob", job);
+        GenericBeanDefinition unrelated = new GenericBeanDefinition();
+        unrelated.setBeanClass(Object.class);
+        unrelated.setLazyInit(true);
+        beanFactory.registerBeanDefinition("unrelated", unrelated);
+
+        scanner.afterSingletonsInstantiated();
+
+        assertThat(handlerRegistry.find(JobKey.of("welcome-email"))).isPresent();
+        assertThat(jobStore.find(JobKey.of("welcome-email"))).isPresent();
+        assertThat(beanFactory.containsSingleton("unrelated")).isFalse();
+    }
+
+    @Test
+    void reportsADeclarationWhoseTypeWasHiddenUntilAfterStartup() {
+        MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.FAIL);
+        scanner.afterSingletonsInstantiated();
+
+        assertThatThrownBy(() -> scanner.postProcessAfterInitialization(new WelcomeEmailJob(), "lateJob"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("catalog was frozen");
+    }
+
     static class DuplicateIdJobA {
         @MohsJob(id = "duplicate")
         void a() {
@@ -153,14 +254,14 @@ class MohsJobScannerTest {
         MohsProperties properties = new MohsProperties(
                 true,
                 new MohsProperties.Jdbc(null),
-                new MohsProperties.Engine(Duration.ofSeconds(5), Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60), Duration.ofDays(7), Duration.ZERO, 64, 16, false),
+                new MohsProperties.Engine(Duration.ofSeconds(5), Duration.ofSeconds(5), 50, 1, Duration.ofSeconds(15), null, Duration.ofSeconds(60), Duration.ofDays(7), Duration.ZERO, 64, 16, false),
                 new MohsProperties.Lifecycle(MohsProperties.Lifecycle.StartMode.AUTO,
-                        new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30))),
+                        new MohsProperties.Lifecycle.Shutdown(Duration.ofSeconds(30)), Duration.ZERO),
                 new MohsProperties.Time(MohsProperties.Time.Mode.APPLICATION, Duration.ofSeconds(1), Duration.ofSeconds(30)),
                 new MohsProperties.Registration(onConflict),
                 new MohsProperties.Api(false, "/api/mohs/v1"),
                 Map.of(), Map.of());
-        MohsJobScanner scanner = new MohsJobScanner(providerOf(handlerRegistry), providerOf(jobStore),
+        MohsJobScanner scanner = new MohsJobScanner(providerOf(handlerRegistry), providerOf(jobStore), providerOf(jobStore),
                 providerOf(properties), providerOf(onExecutionRegistry));
         scanner.setBeanFactory(beanFactory);
         return scanner;
@@ -191,9 +292,9 @@ class MohsJobScannerTest {
 
     /** ANNOTATION-sourced, the same key as WelcomeEmailJob with a different trigger — it simulates definitional drift for the on-conflict and orphan tests. */
     private void seedDivergedStoredDefinition() {
-        JobDefinition existing = new JobDefinition(JobKey.of("welcome-email"), null, WelcomeEmailJob.class,
+        JobDefinition existing = new JobDefinition(JobKey.of("welcome-email"), null,JobKey.of("welcome-email"),
                 new IntervalSpec(Duration.ofMinutes(5), false),
-                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
+                null, null, null, Misfire.IGNORE, false, 0, 0, null, null, DefinitionSource.ANNOTATION, JobKey.of("welcome-email").value());
         jobStore.upsert(existing);
     }
 
@@ -371,16 +472,16 @@ class MohsJobScannerTest {
     }
 
     @Test
-    void annotationCollidingWithProgrammaticDefinitionFailsBoot() {
-        jobStore.upsert(JobDefinition.of("welcome-email", Object.class, spec -> spec.onDemand()));
+    void annotationCanReplaceProgrammaticMetadataUnderOverride() {
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.OVERRIDE);
         WelcomeEmailJob bean = new WelcomeEmailJob();
         registerSingleton("welcomeEmailJob", bean);
         scanner.postProcessAfterInitialization(bean, "welcomeEmailJob");
 
-        assertThatThrownBy(scanner::afterSingletonsInstantiated)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("PROGRAMMATIC");
+        scanner.afterSingletonsInstantiated();
+        assertThat(jobStore.find(JobKey.of("welcome-email")).orElseThrow().definition().source())
+                .isEqualTo(DefinitionSource.ANNOTATION);
     }
 
     @Test
@@ -424,27 +525,15 @@ class MohsJobScannerTest {
     }
 
     @Test
-    void definitionMissingFromScanIsMarkedOrphaned() {
+    void missingLocalExecutableFailsStartupWithoutMutatingSharedCatalog() {
         seedDivergedStoredDefinition(); // ANNOTATION, but nothing scanned in this round
 
-        newScanner(MohsProperties.Registration.OnConflict.OVERRIDE).afterSingletonsInstantiated();
+        assertThatThrownBy(() -> newScanner(MohsProperties.Registration.OnConflict.OVERRIDE).afterSingletonsInstantiated())
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("requires executable");
 
-        assertThat(jobStore.find(JobKey.of("welcome-email"))).map(StoredJob::orphaned).contains(true);
+        assertThat(jobStore.find(JobKey.of("welcome-email"))).isPresent();
     }
 
-    @Test
-    void reappearingAnnotationClearsOrphaned() {
-        seedDivergedStoredDefinition();
-        jobStore.markOrphaned(JobKey.of("welcome-email"));
-        MohsJobScanner scanner = newScanner(MohsProperties.Registration.OnConflict.OVERRIDE);
-        WelcomeEmailJob bean = new WelcomeEmailJob();
-        registerSingleton("welcomeEmailJob", bean);
-        scanner.postProcessAfterInitialization(bean, "welcomeEmailJob");
-
-        scanner.afterSingletonsInstantiated();
-
-        assertThat(jobStore.find(JobKey.of("welcome-email"))).map(StoredJob::orphaned).contains(false);
-    }
 
     /**
      * Spring initialises objects that are NOT declared beans, under the name that identifies them

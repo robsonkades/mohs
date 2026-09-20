@@ -33,8 +33,8 @@ import io.mohs.core.BatchSnapshot;
  * @param failed the number of failed terminal executions
  * @param pending the number of batch members not yet terminal
  */
-public record BatchResponse(String batchId, String name, BatchState state, int total, int succeeded, int failed,
-        int pending) {
+public record BatchResponse(String batchId, String name, BatchState state, long total, long succeeded, long failed,
+        long pending) {
 
     /**
      * Creates a {@code BatchResponse} with the supplied values.
@@ -71,8 +71,8 @@ public record BatchResponse(String batchId, String name, BatchState state, int t
      * @param failed the number of failed terminal executions
      * @return the REST representation of the batch counters
      */
-    public static BatchResponse of(String batchId, String name, int total, int succeeded, int failed) {
-        int pending = total - succeeded - failed;
+    public static BatchResponse of(String batchId, String name, long total, long succeeded, long failed) {
+        long pending = total - succeeded - failed;
         BatchState state = pending == 0 ? BatchState.COMPLETED : BatchState.RUNNING;
         return new BatchResponse(batchId, name, state, total, succeeded, failed, pending);
     }

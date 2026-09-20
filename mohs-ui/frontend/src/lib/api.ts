@@ -12,13 +12,13 @@ import type {
   RuntimePatchResponse,
   ScheduleView,
 } from "../types/api";
+import { runtimeConfig } from "./runtimeConfig.ts";
+import { recordServerTime } from "./serverClock.ts";
 
-// Assumes the default mohs.api.base-path (io.mohs.rest.ApiPaths.V1). A host that overrides that
-// property must serve this dashboard from a build with a matching prefix.
-export const API_BASE = "/api/mohs/v1";
+export const API_BASE = runtimeConfig.apiBase;
 
 /** Where the dashboard is mounted — MohsUiAutoConfiguration's resource handler serves it here. */
-export const UI_BASE = "/mohs-ui";
+export const UI_BASE = runtimeConfig.uiBase;
 
 export class ApiError extends Error {
   /**
@@ -49,7 +49,7 @@ async function problemDetail(response: Response): Promise<string | undefined> {
     .catch(() => undefined);
 }
 
-async function request<T>(path: string, params?: Record<string, string | number | undefined>): Promise<T> {
+async function request<T>(path: string, params?: Record<string, string | number | undefined>, signal?: AbortSignal): Promise<T> {
   const url = new URL(API_BASE + path, window.location.origin);
   for (const [key, value] of Object.entries(params ?? {})) {
     if (value !== undefined && value !== "") {
@@ -57,7 +57,9 @@ async function request<T>(path: string, params?: Record<string, string | number 
     }
   }
 
-  const response = await fetch(url);
+  const response = await fetch(url, { signal });
+  const serverDate = response.headers.get("Date");
+  if (serverDate) recordServerTime(serverDate);
   if (!response.ok) {
     throw new ApiError(response.status, (await problemDetail(response)) ?? response.statusText);
   }
@@ -66,11 +68,16 @@ async function request<T>(path: string, params?: Record<string, string | number 
 
 async function command<T = void>(
   path: string,
-  options?: { method?: "POST" | "PATCH" | "DELETE"; body?: unknown },
+  options?: { method?: "POST" | "PATCH" | "DELETE"; body?: unknown; idempotencyKey?: string },
 ): Promise<T> {
-  const init: RequestInit = { method: options?.method ?? "POST" };
+  const headers = new Headers();
+  if (runtimeConfig.csrfHeaderName && runtimeConfig.csrfToken) {
+    headers.set(runtimeConfig.csrfHeaderName, runtimeConfig.csrfToken);
+  }
+  if (options?.idempotencyKey) headers.set("Idempotency-Key", options.idempotencyKey);
+  const init: RequestInit = { method: options?.method ?? "POST", headers };
   if (options?.body !== undefined) {
-    init.headers = { "Content-Type": "application/json" };
+    headers.set("Content-Type", "application/json");
     init.body = JSON.stringify(options.body);
   }
 
@@ -137,8 +144,8 @@ export function isOverview(data: unknown): data is OverviewResponse {
  * whose promise changed (`recent` was added). A cast would let a body without `recent` reach
  * the panel and throw inside the render.
  */
-export async function fetchOverview(window?: string): Promise<OverviewResponse> {
-  const body = await request<unknown>("/overview", { window });
+export async function fetchOverview(window?: string, signal?: AbortSignal): Promise<OverviewResponse> {
+  const body = await request<unknown>("/overview", { window }, signal);
   if (!isOverview(body)) {
     throw new UnsupportedServerError("This dashboard needs a newer Mohs server: /overview did not carry `recent`.");
   }
@@ -147,12 +154,12 @@ export async function fetchOverview(window?: string): Promise<OverviewResponse> 
 
 // ---- Jobs --------------------------------------------------------------------------------
 
-export function fetchJobs() {
-  return request<JobResponse[]>("/jobs");
+export function fetchJobs(signal?: AbortSignal) {
+  return request<JobResponse[]>("/jobs", undefined, signal);
 }
 
-export function fetchJob(jobKey: string) {
-  return request<JobResponse>(`/jobs/${encodeURIComponent(jobKey)}`);
+export function fetchJob(jobKey: string, signal?: AbortSignal) {
+  return request<JobResponse>(`/jobs/${encodeURIComponent(jobKey)}`, undefined, signal);
 }
 
 export function pauseJob(jobKey: string) {
@@ -170,8 +177,9 @@ export function resumeJob(jobKey: string) {
 export function scheduleJob(
   jobKey: string,
   body: { payload: Record<string, unknown>; at?: string; delay?: string; priority?: string },
+  idempotencyKey: string,
 ) {
-  return command<AcceptedExecutionResponse>(`/jobs/${encodeURIComponent(jobKey)}/schedule`, { body });
+  return command<AcceptedExecutionResponse>(`/jobs/${encodeURIComponent(jobKey)}/schedule`, { body, idempotencyKey });
 }
 
 /** Changes the schedule at runtime — holds until the next boot, as the response `notice` says. */
@@ -182,21 +190,21 @@ export function rescheduleJob(jobKey: string, schedule: ScheduleView) {
   });
 }
 
-export function fetchJobExecutions(jobKey: string, cursor: string | undefined, size: number) {
+export function fetchJobExecutions(jobKey: string, cursor: string | undefined, size: number, signal?: AbortSignal) {
   return request<CursorPage<ExecutionSummaryResponse>>(`/jobs/${encodeURIComponent(jobKey)}/executions`, {
     cursor,
     size,
-  });
+  }, signal);
 }
 
 // ---- Executions --------------------------------------------------------------------------
 
-export function fetchExecutions(filters: ExecutionFilters, cursor: string | undefined, size: number) {
-  return request<CursorPage<ExecutionSummaryResponse>>("/executions", { ...filters, cursor, size });
+export function fetchExecutions(filters: ExecutionFilters, cursor: string | undefined, size: number, signal?: AbortSignal) {
+  return request<CursorPage<ExecutionSummaryResponse>>("/executions", { ...filters, cursor, size }, signal);
 }
 
-export function fetchExecution(executionId: string) {
-  return request<ExecutionResponse>(`/executions/${encodeURIComponent(executionId)}`);
+export function fetchExecution(executionId: string, signal?: AbortSignal) {
+  return request<ExecutionResponse>(`/executions/${encodeURIComponent(executionId)}`, undefined, signal);
 }
 
 export function cancelExecution(executionId: string) {
@@ -210,8 +218,8 @@ export function retryExecution(executionId: string) {
 
 // ---- Rate limits -------------------------------------------------------------------------
 
-export function fetchRateLimits() {
-  return request<RateLimitResponse[]>("/rate-limits");
+export function fetchRateLimits(signal?: AbortSignal) {
+  return request<RateLimitResponse[]>("/rate-limits", undefined, signal);
 }
 
 /** Cluster-wide throughput adjustment. Undeclared limit → 404: declaring one is a boot-time act. */
@@ -225,12 +233,12 @@ export function patchRateLimit(name: string, body: { max: number; window: string
 // ---- Runners -----------------------------------------------------------------------------
 
 /** Node-local: describes the process that answered, not the cluster. */
-export function fetchRunners() {
-  return request<RunnerResponse[]>("/runners");
+export function fetchRunners(signal?: AbortSignal) {
+  return request<RunnerResponse[]>("/runners", undefined, signal);
 }
 
 // ---- Nodes -------------------------------------------------------------------------------
 
-export function fetchNodes() {
-  return request<NodeResponse[]>("/nodes");
+export function fetchNodes(signal?: AbortSignal) {
+  return request<NodeResponse[]>("/nodes", undefined, signal);
 }

@@ -15,14 +15,12 @@
  */
 package io.mohs.core;
 
-import java.time.Instant;
-import java.util.Objects;
-
-import org.jspecify.annotations.Nullable;
-
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 import io.mohs.core.job.JobKey;
+import org.jspecify.annotations.Nullable;
+
+import java.time.Instant;
 
 /**
  * The filter and pagination of {@link Mohs#executions} — a parameter object (Fowler, "Introduce
@@ -33,11 +31,11 @@ import io.mohs.core.job.JobKey;
  * page's last item. Results are ordered by descending {@code id} (most recent first), and only
  * {@link Execution}s with {@code id < cursor} are returned when it is present.
  *
- * @param limit the ceiling on items returned, at least 1
+ * @param limit  the ceiling on items returned, at least 1
  * @param jobKey the job filter, or {@code null} for all jobs
  * @param status the state filter, or {@code null} for all states
- * @param from the inclusive lower bound on the scheduled instant, or {@code null}
- * @param to the exclusive upper bound on the scheduled instant, or {@code null}
+ * @param from   the inclusive lower bound on the scheduled instant, or {@code null}
+ * @param to     the exclusive upper bound on the scheduled instant, or {@code null}
  * @param cursor the last execution ID of the previous page, or {@code null} for the first page
  */
 public record ExecutionQuery(
@@ -53,12 +51,15 @@ public record ExecutionQuery(
      *
      * @param jobKey the job filter, or {@code null} for all jobs
      * @param status the state filter, or {@code null} for all states
-     * @param from the inclusive lower bound on the scheduled instant, or {@code null}
-     * @param to the exclusive upper bound on the scheduled instant, or {@code null}
+     * @param from   the inclusive lower bound on the scheduled instant, or {@code null}
+     * @param to     the exclusive upper bound on the scheduled instant, or {@code null}
      * @param cursor the last execution ID of the previous page, or {@code null} for the first page
-     * @param limit the ceiling on items returned, at least 1
+     * @param limit  the ceiling on items returned, at least 1
      */
     public ExecutionQuery {
+        if (cursor != null) {
+            cursor = cursor.isBlank() ? null : GeneratedId.require(cursor, "cursor");
+        }
         if (limit < 1) {
             throw new IllegalArgumentException("limit must be at least 1");
         }

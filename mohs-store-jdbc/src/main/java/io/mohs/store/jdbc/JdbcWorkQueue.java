@@ -15,10 +15,13 @@
  */
 package io.mohs.store.jdbc;
 
+import org.jspecify.annotations.Nullable;
+
 import java.time.Instant;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import javax.sql.DataSource;
@@ -32,20 +35,14 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
-import io.mohs.engine.BatchStore;
 import io.mohs.engine.WorkQueue;
 import io.mohs.store.jdbc.delegate.ClaimedReady;
 import io.mohs.store.jdbc.delegate.JdbcDelegate;
 
 /**
- * {@link WorkQueue} over {@code mohs_ready}/{@code mohs_lease}. The claim is the transaction in which
- * queue and ownership change together or not at all; the SQL's shape belongs to {@link JdbcDelegate}
- * (a single statement on Postgres, a {@code DELETE … OUTPUT} plus the lease insert on SQL Server, three
- * portable statements elsewhere).
- *
- * <p>{@link #offer} deliberately does NOT open a transaction: the enqueue takes part in the caller's —
- * it is the async contract's "joins your transaction", now with execution, queue and idempotency in the
- * same unit.
+ * Complete work transitions over mohs_work. Claim validates a locked session and ordered job
+ * admission before a guarded READY-to-LEASED update. Cancellation/manual retry also coordinate
+ * history, batch and schedule effects inside their transaction.
  */
 public final class JdbcWorkQueue implements WorkQueue {
 
@@ -62,16 +59,14 @@ public final class JdbcWorkQueue implements WorkQueue {
     private final NamedParameterJdbcTemplate countTemplate;
     private final TransactionTemplate claimTransaction;
     private final JdbcDelegate delegate;
-    private final BatchStore batchStore;
 
     /**
      * Creates a {@code JdbcWorkQueue} with the supplied values.
      *
      * @param dataSource the configured database connection source
      * @param delegate the database-specific SQL and timestamp adapter
-     * @param batchStore the persistence port for batch counters
      */
-    public JdbcWorkQueue(DataSource dataSource, JdbcDelegate delegate, BatchStore batchStore) {
+    public JdbcWorkQueue(DataSource dataSource, JdbcDelegate delegate) {
         Objects.requireNonNull(dataSource, "dataSource");
         // The offer joins the caller's enqueue transaction, and cancel/rearm serve the API: none of
         // them runs on the loop thread, so none of them gets the tick's ceiling
@@ -87,8 +82,8 @@ public final class JdbcWorkQueue implements WorkQueue {
         // The same reasoning: SKIP LOCKED plus the inserts assume an explicit READ COMMITTED, never the
         // database's default (MySQL defaults to REPEATABLE READ).
         this.claimTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        this.claimTransaction.setTimeout(JdbcSupport.TICK_STATEMENT_TIMEOUT_SECONDS);
         this.delegate = Objects.requireNonNull(delegate, "delegate");
-        this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
         // A template of its own: the timeout must not reach the claim or the requeue, which are the
         // work rather than the measurement of it
         JdbcTemplate countOperations = new JdbcTemplate(dataSource);
@@ -97,19 +92,47 @@ public final class JdbcWorkQueue implements WorkQueue {
     }
 
     @Override
-    public List<ClaimedWork> claim(int shard, String nodeId, long epoch, int limit, Collection<JobKey> inadmissible,
+    public List<JobKey> findCandidateJobs(int shard, @Nullable JobKey after, int limit, Instant horizon) {
+        Objects.requireNonNull(horizon, "horizon");
+        if (shard < 0 || shard >= io.mohs.engine.Shards.SHARD_COUNT || limit < 1 || limit > 1000) {
+            throw new IllegalArgumentException("candidate shard or page limit out of range");
+        }
+        return tickTemplate.query(delegate.candidateJobKeys(), new MapSqlParameterSource("shard", shard)
+                .addValue("afterKey", after == null ? "" : after.value())
+                .addValue("now", delegate.splitTimestamp(horizon))
+                .addValue("limit", (long) limit, java.sql.Types.BIGINT), (rs, _) -> JobKey.of(rs.getString("job_key")));
+    }
+
+    @Override
+    public List<ClaimedWork> claim(int shard, String nodeId, int limit, Collection<JobKey> candidateJobs,
             Instant now) {
         Objects.requireNonNull(nodeId, "nodeId");
         Objects.requireNonNull(now, "now");
         if (limit <= 0) {
             return List.of();
         }
-        List<String> inadmissibleKeys = inadmissible.stream().map(JobKey::value).toList();
+        if (candidateJobs.size() > JdbcSupport.MAX_IDS_PER_QUERY) throw new IllegalArgumentException("too many candidate jobs");
+        int boundedLimit = Math.min(limit, JdbcSupport.MAX_IDS_PER_QUERY);
+        String claimToken = io.github.robsonkades.uuidv7.UUIDv7.randomUUIDString();
+        List<String> candidateKeys = candidateJobs.stream().map(JobKey::value).toList();
         // requireNonNull documents the invariant for @NullMarked — the callback never returns null
-        List<ClaimedReady> claimed = Objects.requireNonNull(claimTransaction.execute(
-                _ -> delegate.claimReady(tickTemplate, shard, nodeId, epoch, limit, inadmissibleKeys, now)));
+        List<ClaimedReady> claimed = Objects.requireNonNull(claimTransaction.execute(_ -> {
+            var sessions = new JdbcSessions(tickTemplate, delegate);
+            var session = sessions.lock(nodeId);
+            Instant observed = sessions.now();
+            if (session.isEmpty() || !session.orElseThrow().validAt(observed)) {
+                return List.of();
+            }
+            // A caller may request an earlier horizon; a forward local clock cannot advance eligibility.
+            Instant eligibleThrough = now.isBefore(observed) ? now : observed;
+            var selected = new JdbcAdmission(tickTemplate, delegate).select(shard, boundedLimit, candidateKeys, eligibleThrough);
+            if (selected.isEmpty()) return List.of();
+            Instant grantedAt = sessions.now();
+            if (!session.orElseThrow().validAt(grantedAt)) return List.of();
+            return delegate.claimReady(tickTemplate, shard, nodeId, claimToken, boundedLimit, selected, eligibleThrough, grantedAt);
+        }));
         return claimed.stream()
-                .map(row -> new ClaimedWork(ExecutionId.of(row.executionId()), JobKey.of(row.jobKey()), row.attempt(), row.priority()))
+                .map(row -> new ClaimedWork(ExecutionId.of(row.executionId()), JobKey.of(row.jobKey()), row.attempt(), row.priority(), claimToken))
                 .toList();
     }
 
@@ -147,16 +170,6 @@ public final class JdbcWorkQueue implements WorkQueue {
     }
 
     @Override
-    public void offer(List<ReadyEntry> entries) {
-        if (entries.isEmpty()) {
-            return;
-        }
-        jdbcTemplate.batchUpdate(delegate.readyInsert(), entries.stream()
-                .map(entry -> JdbcSupport.readyEntryParams(entry, delegate))
-                .toArray(MapSqlParameterSource[]::new));
-    }
-
-    @Override
     public int requeue(List<Requeue> orders) {
         if (orders.isEmpty()) {
             return 0;
@@ -169,47 +182,66 @@ public final class JdbcWorkQueue implements WorkQueue {
                 .toList();
         // requireNonNull: the same invariant as claim()
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
+            var sessions = new JdbcSessions(tickTemplate, delegate);
+            var activeNodes = new java.util.HashSet<String>();
+            for (String nodeId : ordered.stream().map(Requeue::nodeId).distinct().sorted().toList()) {
+                sessions.lock(nodeId).filter(sessions::active).ifPresent(node -> activeNodes.add(node.nodeId()));
+            }
+            var transitions = new JdbcExecutionTransitions(tickTemplate, delegate);
+            var metadata = transitions.metadata(ordered.stream().map(Requeue::executionId).toList());
+            transitions.lockJobs(metadata.values().stream().map(JdbcExecutionTransitions.Metadata::jobKey).toList());
+            var retired = transitions.retiredJobs(metadata.values().stream().map(JdbcExecutionTransitions.Metadata::jobKey).toList());
+            var cancelled = transitions.cancellationRequests(ordered.stream().map(Requeue::executionId).toList());
+            Map<ExecutionId, Instant> finishedCancellations = new java.util.LinkedHashMap<>();
             int requeued = 0;
             for (Requeue order : ordered) {
-                int fenceWon = tickTemplate.update(delegate.fencedLeaseDelete(),
-                        JdbcSupport.fencedLeaseDeleteParams(order.executionId().value(), order.nodeId(), order.epoch(),
-                                order.attemptNumber()));
+                if (!activeNodes.contains(order.nodeId())) {
+                    continue;
+                }
+                var stored = metadata.get(order.executionId());
+                if (stored == null) continue;
+                boolean terminal = cancelled.contains(order.executionId()) || retired.contains(stored.jobKey());
+                var params = JdbcSupport.fencedLeaseDeleteParams(order.executionId().value(), order.nodeId(),
+                        order.claimToken(), order.attemptNumber());
+                if (!terminal) params.addValue("visibleAt", delegate.splitTimestamp(order.visibleAt()))
+                        .addValue("nextAttempt", order.attemptNumber()).addValue("cancelRequested", false);
+                int fenceWon = tickTemplate.update(terminal ? delegate.fencedLeaseDelete() : delegate.fencedReleaseWork(), params);
                 if (fenceWon == 1) {
-                    tickTemplate.update(delegate.readyInsert(), JdbcSupport.readyEntryParams(order.entry(), delegate));
-                    requeued++;
+                    if (terminal) finishedCancellations.put(order.executionId(), sessions.now());
+                    else requeued++;
                 }
             }
+            transitions.finishCancellations(finishedCancellations);
             return requeued;
         }));
     }
 
     @Override
-    public boolean cancelQueued(ExecutionId id, Instant now) {
+    public boolean cancel(ExecutionId id, Instant now) {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(now, "now");
         // requireNonNull: the same invariant as claim()
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
-            MapSqlParameterSource idParam = new MapSqlParameterSource("executionId", id.value());
-            if (jdbcTemplate.update(delegate.deleteReadyById(), idParam) == 0) {
+            var transitions = new JdbcExecutionTransitions(jdbcTemplate, delegate);
+            var job = transitions.jobOf(id);
+            if (job.isEmpty()) {
                 return false;
             }
-            jdbcTemplate.update(delegate.cancelExecution(), idParam.addValue("finishedAt", delegate.splitTimestamp(now)));
-            // Cancelling is terminal, and an end that does not count leaves the batch open forever — it
-            // counts as a failure in the SAME transaction as the delete (without the delete having taken
-            // the entry, this point is not reached, so it counts exactly once)
-            String batchId = jdbcTemplate.queryForObject(delegate.findBatchIdByExecution(), idParam, String.class);
-            if (batchId != null) {
-                batchStore.incrementFailed(batchId);
+            transitions.lockJobs(List.of(job.orElseThrow()));
+            MapSqlParameterSource idParam = new MapSqlParameterSource("executionId", id.value());
+            if (jdbcTemplate.update(delegate.deleteReadyById(), idParam) == 1) {
+                transitions.finishCancellations(Map.of(id, now));
+                return true;
             }
-            return true;
+            return jdbcTemplate.update(delegate.requestLeaseCancellation(), idParam.addValue("flag", true)) == 1;
         }));
     }
 
     /**
      * The CAS and the queue rebirth in a single guarded pair: the UPDATE only wins with the advisory
      * {@code FAILED} and the job alive (the EXISTS narrows the window against a concurrent
-     * {@code remove}); the INSERT derives the attempt and the priority from history itself (recorded
-     * attempts plus 1; the original priority), with the caller carrying nothing.
+     * {@code remove}); the INSERT derives the attempt and the priority from history itself
+     * ({@code last_attempt_number + 1}; the original priority), with the caller carrying nothing.
      */
     @Override
     public boolean rearmForManualRetry(ExecutionId id, Instant now) {
@@ -218,6 +250,10 @@ public final class JdbcWorkQueue implements WorkQueue {
         // requireNonNull: the same invariant as claim()
         return Objects.requireNonNull(claimTransaction.execute(_ -> {
             MapSqlParameterSource params = new MapSqlParameterSource("executionId", id.value());
+            var transitions = new JdbcExecutionTransitions(jdbcTemplate, delegate);
+            var job = transitions.jobOf(id);
+            if (job.isEmpty()) return false;
+            transitions.lockJobs(List.of(job.orElseThrow()));
             int rearmed = jdbcTemplate.update(delegate.rearmExecutionByCas(), params.addValue("retired", false));
             if (rearmed == 0) {
                 return false;

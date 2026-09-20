@@ -109,10 +109,15 @@ public class OverviewController {
     /**
      * Subscribes to periodic server-sent overview updates.
      *
+     * @param executionMode snapshot for legacy execution pages, or invalidation for lightweight refresh signals
      * @return the subscribed server-sent-event emitter
      */
     @GetMapping("/stream")
-    public SseEmitter stream() {
-        return broadcaster.subscribe();
+    public SseEmitter stream(@RequestParam(defaultValue = "snapshot") String executionMode) {
+        return switch (executionMode) {
+            case "snapshot" -> broadcaster.subscribe();
+            case "invalidation" -> broadcaster.subscribe(false);
+            default -> throw new PayloadValidationException("executionMode", "executionMode must be snapshot or invalidation");
+        };
     }
 }

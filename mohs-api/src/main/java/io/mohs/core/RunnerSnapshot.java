@@ -47,9 +47,9 @@ import io.mohs.core.resource.RunnerMode;
  * backlog computes {@code running - max} in {@code CPU} mode, where it is the difference's only
  * possible meaning.
  *
- * @param name the human-readable name
- * @param mode the runner workload mode
- * @param max the declared concurrency ceiling for this runner mode
+ * @param name    the human-readable name
+ * @param mode    the runner workload mode
+ * @param max     the declared concurrency ceiling for this runner mode
  * @param running accepted executions that have not finished, including queued CPU work
  */
 public record RunnerSnapshot(String name, RunnerMode mode, int max, int running) {
@@ -57,9 +57,9 @@ public record RunnerSnapshot(String name, RunnerMode mode, int max, int running)
     /**
      * Creates a {@code RunnerSnapshot} with the supplied values.
      *
-     * @param name the human-readable name
-     * @param mode the runner workload mode
-     * @param max the declared concurrency ceiling for this runner mode
+     * @param name    the human-readable name
+     * @param mode    the runner workload mode
+     * @param max     the declared concurrency ceiling for this runner mode
      * @param running accepted executions that have not finished, including queued CPU work
      */
     public RunnerSnapshot {
