@@ -20,34 +20,39 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 
-import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.schedule.Schedule;
 
-/**
- * Persistence of {@link JobDefinition} — a Repository (PoEAA), the port {@code io.mohs.store.jdbc}
- * implements (a Data Mapper).
- *
- * <p>{@link #upsert} writes definitional state. The operational fields ({@code orphaned},
- * {@code paused}) have two deliberate exceptions: the upsert clears {@code orphaned} (the source
- * reappearing is proof of life) and, ONLY on the first registration, initialises
- * {@code paused = startPaused}; after birth, {@code paused} belongs exclusively to
- * {@link #pause}/{@link #resume}.
- */
+/** Complete definition operations. Catalog registration, firing and execution completion have separate atomic ports. */
 public interface JobStore {
 
+    /** Atomically persists a definition and direct executable binding, refusing ownership collisions. */
+    StoredJob upsertBound(JobDefinition definition, JobBinding binding);
+
+    /** Reads a binding, including retained bindings of retired definitions. */
+    Optional<JobBinding> findBinding(JobKey key);
+
+    /** Resolves executable identity without loading the recurring input; includes retained bindings. */
+    default Optional<JobKey> findExecutableKey(JobKey key) {
+        return findBinding(key).map(JobBinding::executableKey);
+    }
+
+    /** Whether retiring this executable would leave an active recurrence without its owner. */
+    default boolean hasActiveDependents(JobKey key) {
+        return bindings().stream().anyMatch(binding -> binding.executableKey().equals(key)
+                && !binding.key().equals(key));
+    }
+
+    /** Active bindings for startup contract validation; a detached snapshot. */
+    List<JobBinding> bindings();
+
     /**
-     * The upsert owns the trigger's initial state: a new or altered schedule arms {@code nextFireAt}
-     * recomputed from the clock; an unchanged schedule preserves the stored value — and preserving
-     * means <b>not writing</b> the column, never rewriting the value that was read (a lost update
-     * against the firing CAS and the completion's rearm); an on-demand job stays disarmed
-     * ({@code null}).
-     *
-     * <p>An unchanged recurring schedule with a disarmed trigger is healed (rearmed) — for
-     * fixed-delay, only when there is no live scheduler occurrence.
-     *
-     * @param definition the registered job definition
+     * Writes an active retained definition. Before any catalog is installed this also seeds standalone compositions.
+     * New executable identities after catalog publication require {@link CatalogStore#reconcile}.
+     * Unchanged schedules preserve nextFireAt and the revision; changed schedules start a new series.
+     * A retired identity requires explicit {@link #reactivate}; input contracts and executable bindings remain immutable.
+     * @param definition the desired active definition
      * @return the persisted definition
      */
     JobDefinition upsert(JobDefinition definition);
@@ -73,38 +78,28 @@ public interface JobStore {
      */
     Stream<StoredJob> findAll();
 
-    /**
-     * The same cursor contract as {@link #findAll()}, filtered to {@link DefinitionSource#ANNOTATION}
-     * at the source (not in memory afterwards) — {@code io.mohs.autoconfigure.MohsJobScanner}
-     * reconciles orphans only against this subset; {@code PROGRAMMATIC} definitions never become
-     * {@code ORPHANED} (see {@link #markOrphaned}), so fetching them along would be read bandwidth
-     * with no use.
-     *
-     * @return an open cursor stream of annotation-sourced jobs that the caller must close
-     */
-    Stream<StoredJob> findAllAnnotationSourced();
+    /** Detached policies for the supplied identities, excluding retired definitions and input payloads. */
+    List<StoredJob> findByKeys(java.util.Collection<JobKey> keys);
+
+    /** Nearest active, unpaused trigger strictly after this observation; an advisory sleep horizon. */
+    Optional<Instant> nextFireAfter(Instant now);
+
+
+    /** A bounded due page and the exact cutoff used by its query and misfire planning. */
+    record DueJobs(Instant observedAt, List<StoredJob> jobs) {
+        public DueJobs {
+            java.util.Objects.requireNonNull(observedAt, "observedAt");
+            jobs = List.copyOf(jobs);
+        }
+    }
 
     /**
-     * Due recurring jobs: {@code next_fire_at <= now}, excluding {@code paused}, {@code orphaned} and
-     * {@code retired} — a pause blocks exactly the trigger, and on-demand still works while paused.
-     * Oldest first, at most {@code limit} (the surplus stays due and drains over the following ticks).
-     *
-     * @param now the current instant from the configured time source
-     * @param limit the maximum number of results in one batch
-     * @return up to the limit of active recurring jobs with due triggers
+     * Returns active, unpaused triggers in time order, at most limit. The observation is the earlier
+     * of the requested horizon and a fresh store-clock sample: a caller can narrow eligibility but
+     * cannot make a future trigger due. Planning must use the returned observation, not the caller clock.
      */
-    List<StoredJob> findDueRecurring(Instant now, int limit);
+    DueJobs findDueRecurring(Instant horizon, int limit);
 
-    /**
-     * Arms {@code next_fire_at} only if it is disarmed ({@code NULL}) — the fixed-delay chain's cures:
-     * a cancelled occurrence still {@code ENQUEUED} never goes through the completion path that
-     * rearms, and this guard guarantees the cure never clobbers a series a schedule-change upsert has
-     * already rearmed.
-     *
-     * @param key the stable identity of the job
-     * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
-     */
-    void armNextFire(JobKey key, Instant nextFireAt);
 
     /**
      * Rewrites the schedule and rearms the trigger, recomputed from the clock, in the SAME write — the
@@ -120,12 +115,6 @@ public interface JobStore {
      */
     boolean reschedule(JobKey key, Schedule schedule);
 
-    /**
-     * An {@code ANNOTATION} job present in the store and absent from the code — it does not fire, and it does not erase history.
-     *
-     * @param key the stable identity of the job
-     */
-    void markOrphaned(JobKey key);
 
     /**
      * Suspends automatic firing for the identified job.
@@ -142,18 +131,14 @@ public interface JobStore {
     void resume(JobKey key);
 
     /**
-     * Explicit retirement ({@code Mohs#remove}) — only for {@code PROGRAMMATIC} definitions (the
-     * caller, {@code MohsImpl}, is what validates the {@code source}).
-     *
-     * <p>A soft retire, never a delete: it drains the queue ({@code mohs_ready}), cancelling whatever
-     * was enqueued, and marks the definition {@code retired} — it disappears from
-     * {@link #find}/{@link #findAll}, but the row (and the whole execution history) remains. An
-     * {@link #upsert} of the same {@code job_key} resurrects the definition.
-     *
-     * <p>The concurrency slot is not this port's business: the cap derives from {@code mohs_lease} —
-     * deleting the lease IS releasing the slot.
-     *
-     * @param key the stable identity of the job
+     * Retires an annotated or programmatic definition and cancels its queued executions in one transaction.
+     * Active named recurrences must be retired before their executable. Acquired work may complete;
+     * automatic retry is suppressed while the definition is retired. History and identity remain retained.
+     * A joined host transaction must use READ_COMMITTED so the locked scan includes committed work.
+     * @param key the definition to retire; unknown or already retired is a no-op
      */
     void remove(JobKey key);
+
+    /** Explicitly reactivates a retained definition under its catalog and a new schedule revision. */
+    boolean reactivate(JobKey key, ExecutableCatalog catalog);
 }

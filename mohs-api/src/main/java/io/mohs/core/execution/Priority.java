@@ -26,33 +26,36 @@ package io.mohs.core.execution;
  * higher levels — a documented risk.
  */
 public enum Priority {
-    /** Claims before everything else. */
+    /**
+     * Claims before everything else.
+     */
     CRITICAL(0),
-    /** Claims before {@link #NORMAL}. */
+    /**
+     * Claims before {@link #NORMAL}.
+     */
     HIGH(10),
-    /** The default. */
+    /**
+     * The default.
+     */
     NORMAL(20),
-    /** Claims after {@link #NORMAL}. */
+    /**
+     * Claims after {@link #NORMAL}.
+     */
     LOW(30),
-    /** Claims last. */
+    /**
+     * Claims last.
+     */
     BACKGROUND(40);
 
-    /** {@code values()} clones the array on every call — cached because {@link #fromValue} runs per row mapped at the claim's JDBC boundary. */
+    /**
+     * {@code values()} clones the array on every call — cached because {@link #fromValue} runs per row mapped at the claim's JDBC boundary.
+     */
     private static final Priority[] VALUES = values();
 
     private final int value;
 
     Priority(int value) {
         this.value = value;
-    }
-
-    /**
-     * Returns the integer stored in the queue priority column.
-     *
-     * @return the database representation of this priority
-     */
-    public int value() {
-        return value;
     }
 
     /**
@@ -68,5 +71,14 @@ public enum Priority {
             }
         }
         throw new IllegalArgumentException("no Priority with value " + value);
+    }
+
+    /**
+     * Returns the integer stored in the queue priority column.
+     *
+     * @return the database representation of this priority
+     */
+    public int value() {
+        return value;
     }
 }

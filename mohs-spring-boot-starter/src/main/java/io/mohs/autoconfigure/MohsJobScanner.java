@@ -21,11 +21,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
@@ -37,8 +36,8 @@ import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.core.annotation.MergedAnnotations;
 import org.springframework.util.ReflectionUtils;
+import org.springframework.scheduling.annotation.Async;
 
-import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.definition.MohsJob;
 import io.mohs.core.definition.RecurringJob;
@@ -46,8 +45,12 @@ import io.mohs.core.event.OnExecution;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.schedule.OnDemandSpec;
 import io.mohs.engine.HandlerRegistry;
+import io.mohs.engine.JobHandler;
 import io.mohs.engine.JobStore;
-import io.mohs.engine.StoredJob;
+import io.mohs.engine.JobBinding;
+import io.mohs.engine.JobDefinitions;
+import io.mohs.core.definition.JobRegistration;
+import io.mohs.core.schedule.Misfire;
 
 /**
  * Scans singleton beans for {@link MohsJob} methods, translating them into
@@ -73,10 +76,9 @@ import io.mohs.engine.StoredJob;
  */
 final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, SmartInitializingSingleton {
 
-    private static final Logger log = LoggerFactory.getLogger(MohsJobScanner.class);
-
     private final ObjectProvider<HandlerRegistry> handlerRegistry;
     private final ObjectProvider<JobStore> jobStore;
+    private final ObjectProvider<io.mohs.engine.CatalogStore> catalogStore;
     private final ObjectProvider<MohsProperties> properties;
     private final ObjectProvider<OnExecutionRegistry> onExecutionRegistry;
 
@@ -88,16 +90,21 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
      * application, and an embedded library does not control that.
      */
     private final Map<JobKey, ScannedJob> scanned = new LinkedHashMap<>();
+    private final Map<JobKey, NamedRegistration> registrations = new LinkedHashMap<>();
 
     /** {@code @OnExecution} methods, accumulated by the same two-phase rule and under the same lock. */
     private final List<ScannedObserver> observers = new ArrayList<>();
+    private final Set<String> processedBeans = new HashSet<>();
+    private boolean published;
 
     private @Nullable ConfigurableListableBeanFactory beanFactory;
 
     MohsJobScanner(ObjectProvider<HandlerRegistry> handlerRegistry, ObjectProvider<JobStore> jobStore,
+            ObjectProvider<io.mohs.engine.CatalogStore> catalogStore,
             ObjectProvider<MohsProperties> properties, ObjectProvider<OnExecutionRegistry> onExecutionRegistry) {
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
+        this.catalogStore = Objects.requireNonNull(catalogStore, "catalogStore");
         this.properties = Objects.requireNonNull(properties, "properties");
         this.onExecutionRegistry = Objects.requireNonNull(onExecutionRegistry, "onExecutionRegistry");
     }
@@ -129,6 +136,26 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         if (beanFactory != null && beanFactory.containsBean(beanName) && !beanFactory.isSingleton(beanName)) {
             return bean;
         }
+        synchronized (scanned) {
+            if (!published) {
+                processedBeans.add(bean instanceof org.springframework.beans.factory.FactoryBean<?>
+                        ? BeanFactory.FACTORY_BEAN_PREFIX + beanName : beanName);
+            }
+        }
+        if (bean instanceof JobRegistration<?> registration) {
+            synchronized (scanned) {
+                requireUnpublished(beanName);
+                JobKey key = registration.job().key();
+                NamedRegistration previous = registrations.get(key);
+                if (previous != null || scanned.containsKey(key)) {
+                    String other = previous != null ? previous.beanName() : scanned.get(key).declaringMethod();
+                    throw new IllegalStateException("duplicate job id '" + key.value() + "' — "
+                            + beanName + " and " + other + " both declare it");
+                }
+                registrations.put(key, new NamedRegistration(registration, beanName));
+            }
+            return bean;
+        }
         Class<?> targetClass = AopUtils.getTargetClass(bean);
         ReflectionUtils.doWithMethods(targetClass, method -> {
             scanObserver(bean, method);
@@ -148,6 +175,7 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         // never happened
         OnExecutionRegistry.validate(observer, targetMethod, declaring);
         synchronized (scanned) {
+            requireUnpublished(declaring);
             observers.add(new ScannedObserver(observer, bean,
                     AopUtils.selectInvocableMethod(targetMethod, bean.getClass()), declaring));
         }
@@ -162,6 +190,11 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
             return;
         }
         String declaringMethod = describe(targetMethod);
+        if (AnnotatedElementUtils.hasAnnotation(targetMethod, Async.class)
+                || AnnotatedElementUtils.hasAnnotation(targetClass, Async.class)) {
+            throw new IllegalStateException("@MohsJob method " + declaringMethod
+                    + " must complete synchronously; @Async on the method or class is not supported");
+        }
         requireSingleJobForm(targetMethod, declaringMethod);
         if (annotation.id().isBlank()) {
             // Only reachable through the stereotypes (the general form's id is mandatory at compile time)
@@ -174,13 +207,18 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         JobKey key = JobKey.of(annotation.id());
 
         synchronized (scanned) {
+            requireUnpublished(declaringMethod);
+            if (registrations.containsKey(key)) {
+                throw new IllegalStateException("duplicate job id '" + key.value() + "' — "
+                        + declaringMethod + " and " + registrations.get(key).beanName() + " both declare it");
+            }
             ScannedJob already = scanned.get(key);
             if (already != null) {
                 throw new IllegalStateException("duplicate job id '" + annotation.id() + "' — "
                         + already.declaringMethod() + " and " + declaringMethod + " both declare it");
             }
 
-            JobDefinition definition = MohsJobs.toDefinition(key, annotation, targetClass);
+            JobDefinition definition = MohsJobs.toDefinition(key, annotation);
             if (definition.schedule() instanceof OnDemandSpec
                     && AnnotatedElementUtils.hasAnnotation(targetMethod, RecurringJob.class)) {
                 throw new IllegalStateException("@RecurringJob(id=\"" + annotation.id() + "\") on " + declaringMethod
@@ -217,6 +255,7 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
 
     @Override
     public void afterSingletonsInstantiated() {
+        initializeLazyDeclarations();
         JobStore store = jobStore.getObject();
         HandlerRegistry registry = handlerRegistry.getObject();
         MohsProperties.Registration.OnConflict onConflict = properties.getObject().registration().onConflict();
@@ -224,77 +263,117 @@ final class MohsJobScanner implements BeanPostProcessor, BeanFactoryAware, Smart
         OnExecutionRegistry observerRegistry = onExecutionRegistry.getObject();
 
         synchronized (scanned) {
+            List<JobDefinition> definitions = new ArrayList<>();
             for (ScannedJob job : scanned.values()) {
-                reconcile(store, onConflict, job);
-                registry.register(job.definition().key(), job.handler().handler(), job.handler().payloadType());
+                registry.validatePolicy(job.definition());
+                definitions.add(job.definition());
+                registry.register(job.definition().key(), job.handler().handler(),
+                        job.handler().payloadType() == null ? io.mohs.core.NoInput.class : job.handler().payloadType());
             }
+            for (NamedRegistration named : registrations.values()) {
+                var registration = named.registration();
+                var definition = JobDefinitions.definition(registration.job().key(), registration.options(),
+                        new OnDemandSpec(), Misfire.IGNORE, false).withInputContract(registration.job().inputContract());
+                registry.validatePolicy(definition);
+                definitions.add(definition);
+                registerAction(registry, registration);
+            }
+            catalogStore.getObject().reconcile(registry.freeze(), definitions,
+                    io.mohs.engine.CatalogStore.Conflict.valueOf(onConflict.name()));
             for (ScannedObserver observer : observers) {
                 observerRegistry.register(observer.annotation(), observer.bean(), observer.method(), observer.declaringMethod());
             }
-            reconcileOrphans(store);
+            validateBindings(store, registry);
+            published = true;
+            processedBeans.clear();
         }
     }
 
-    /**
-     * {@code annotation x programmatic} always fails, unconditionally — that is not what
-     * {@code on-conflict} governs, being an identity collision rather than definitional drift.
-     * {@code annotation x annotation} already failed earlier, in {@link #scanJob}. Real drift
-     * within the same {@code ANNOTATION} lineage follows
-     * {@link MohsProperties.Registration.OnConflict}.
-     */
-    private void reconcile(JobStore jobStore, MohsProperties.Registration.OnConflict onConflict, ScannedJob job) {
-        JobDefinition incoming = job.definition();
-        Optional<StoredJob> existing = jobStore.find(incoming.key());
-        if (existing.isEmpty()) {
-            jobStore.upsert(incoming);
+    /** Materialize only singleton job/observer declarations, leaving unrelated lazy beans lazy. */
+    private void initializeLazyDeclarations() {
+        if (beanFactory == null) {
             return;
         }
-
-        JobDefinition stored = existing.get().definition();
-        if (stored.source() == DefinitionSource.PROGRAMMATIC) {
-            throw new IllegalStateException("@MohsJob id '" + incoming.key().value() + "' (" + job.declaringMethod()
-                    + ") collides with a PROGRAMMATIC definition already registered for the same id");
-        }
-        if (stored.equals(incoming)) {
-            jobStore.upsert(incoming);
-            return;
-        }
-
-        switch (onConflict) {
-            case OVERRIDE -> {
-                log.info("job '{}' definition changed, code wins (mohs.registration.on-conflict=override): {}",
-                        incoming.key().value(), MohsJobs.diff(stored, incoming));
-                jobStore.upsert(incoming);
+        for (String name : beanFactory.getBeanDefinitionNames()) {
+            synchronized (scanned) {
+                if (processedBeans.contains(name)) {
+                    continue;
+                }
             }
-            case PRESERVE -> log.warn(
-                    "job '{}' definition changed but store wins (mohs.registration.on-conflict=preserve), code version ignored: {}",
-                    incoming.key().value(), MohsJobs.diff(stored, incoming));
-            case FAIL -> throw new IllegalStateException("job '" + incoming.key().value()
-                    + "' definition diverged from the stored one (mohs.registration.on-conflict=fail): "
-                    + MohsJobs.diff(stored, incoming));
+            if (!beanFactory.getBeanDefinition(name).isSingleton()) {
+                continue;
+            }
+            // Do not instantiate unrelated FactoryBeans just to discover their product type.
+            Class<?> type = beanFactory.getType(name, false);
+            if (type == null) {
+                continue;
+            }
+            boolean declaration = JobRegistration.class.isAssignableFrom(type);
+            if (!declaration) {
+                for (Method method : ReflectionUtils.getAllDeclaredMethods(type)) {
+                    if (AnnotatedElementUtils.hasAnnotation(method, MohsJob.class)
+                            || method.isAnnotationPresent(OnExecution.class)) {
+                        declaration = true;
+                        break;
+                    }
+                }
+            }
+            if (declaration && beanFactory.isSingleton(name)) {
+                beanFactory.getBean(name);
+            }
         }
     }
 
-    /**
-     * An ANNOTATION job present in the store but absent from this scan becomes ORPHANED.
-     *
-     * <p>{@code markOrphaned} runs after the try-with-resources closes the
-     * {@link JobStore#findAllAnnotationSourced()} cursor — never inside the {@code forEach}, for
-     * the same reason as {@code JdbcJobStore#markOrphanedForUnresolvedHandlers}: never write with a
-     * read cursor still open on the same connection.
-     */
-    private void reconcileOrphans(JobStore jobStore) {
-        List<JobKey> toOrphan = new ArrayList<>();
-        try (var annotationSourced = jobStore.findAllAnnotationSourced()) {
-            annotationSourced.filter(stored -> !stored.orphaned())
-                    .filter(stored -> !scanned.containsKey(stored.definition().key()))
-                    .forEach(stored -> toOrphan.add(stored.definition().key()));
-        }
-        for (JobKey key : toOrphan) {
-            log.warn("job '{}' annotation no longer found in code — marking ORPHANED", key.value());
-            jobStore.markOrphaned(key);
+    private void requireUnpublished(String declaration) {
+        if (published) {
+            throw new IllegalStateException("Mohs declaration " + declaration
+                    + " was initialized after the executable catalog was frozen; expose its concrete bean type"
+                    + " and declare it before application startup");
         }
     }
+
+    @SuppressWarnings("unchecked") // The boxed class represents the same generic input contract.
+    private static <T> void registerAction(HandlerRegistry registry, JobRegistration<T> registration) {
+        Class<?> type = org.springframework.util.ClassUtils.resolvePrimitiveIfNecessary(registration.job().payloadType());
+        registry.register(registration.job().key(),
+                (input, context) -> registration.action().execute((T) type.cast(input), context), type, registration.job().inputContract());
+    }
+
+    private void validateBindings(JobStore store, HandlerRegistry registry) {
+        // Validate all durable policies with one read instead of one query per recurrence.
+        try (var jobs = store.findAll()) {
+            jobs.forEach(job -> {
+                registry.validatePolicy(job.definition());
+                JobKey executable = job.definition().executableKey();
+                if (registry.find(executable).isEmpty()) {
+                    throw new IllegalStateException("job '" + job.definition().key().value()
+                            + "' requires executable '" + executable.value() + "' on every worker");
+                }
+                try {
+                    registry.requireContract(executable, job.definition().inputContract());
+                } catch (IllegalArgumentException mismatch) {
+                    throw new IllegalStateException("local catalog disagrees with the persisted input contract", mismatch);
+                }
+            });
+        }
+        for (JobBinding binding : store.bindings()) {
+            if (registry.find(binding.executableKey()).isEmpty()) {
+                throw new IllegalStateException("job '" + binding.key().value() + "' requires executable '"
+                        + binding.executableKey().value() + "'; declare its JobRegistration bean or @MohsJob handler on every worker");
+            }
+            if (binding.input() != null) {
+                Class<?> expected = registry.payloadType(binding.executableKey()).orElseThrow(() ->
+                        new IllegalStateException("executable '" + binding.executableKey().value() + "' has no input contract"));
+                Object input = registry.decode(binding.executableKey(), binding.input());
+                if (!org.springframework.util.ClassUtils.resolvePrimitiveIfNecessary(expected).isInstance(input)) {
+                    throw new IllegalStateException("recurrence '" + binding.key().value() + "' expects "
+                            + expected.getName() + "; stored input has type " + input.getClass().getName());
+                }
+            }
+        }
+    }
+
+    private record NamedRegistration(JobRegistration<?> registration, String beanName) {}
 
     private record ScannedJob(JobDefinition definition, MohsJobs.AdaptedHandler handler, String declaringMethod) {
     }

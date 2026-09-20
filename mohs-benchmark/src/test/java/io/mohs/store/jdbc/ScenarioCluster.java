@@ -15,6 +15,8 @@
  */
 package io.mohs.store.jdbc;
 
+import io.mohs.engine.SubmissionStore;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -38,7 +40,6 @@ import io.mohs.store.jdbc.delegate.JdbcDelegate;
 import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.mohs.core.definition.JobDefinition;
-import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
@@ -51,7 +52,6 @@ import io.mohs.engine.ExecutionWindowRegistry;
 import io.mohs.engine.HandlerRegistry;
 import io.mohs.engine.HistoryStore;
 import io.mohs.engine.JobHandler;
-import io.mohs.engine.BatchCompletionCallbacks;
 import io.mohs.engine.CompletionBatcher;
 import io.mohs.engine.MohsExecutors;
 import io.mohs.engine.MohsImpl;
@@ -137,12 +137,12 @@ final class ScenarioCluster implements AutoCloseable {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.jdbcTemplate = new JdbcTemplate(dataSource);
         this.delegate = Objects.requireNonNull(delegate, "delegate");
-        this.batchStore = new JdbcBatchStore(dataSource, clock, delegate);
+        this.batchStore = new JdbcBatchStore(dataSource, delegate);
         this.jobStore = new JdbcJobStore(dataSource, clock, delegate);
-        this.historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), delegate);
-        this.workQueue = new JdbcWorkQueue(dataSource, delegate, batchStore);
-        this.leaseStore = new JdbcLeaseStore(dataSource, delegate, batchStore);
-        this.rateLimitStore = new JdbcRateLimitStore(dataSource, clock, delegate);
+        this.historyStore = new JdbcHistoryStore(dataSource, delegate);
+        this.workQueue = new JdbcWorkQueue(dataSource, delegate);
+        this.leaseStore = new JdbcLeaseStore(dataSource, delegate);
+        this.rateLimitStore = new JdbcRateLimitStore(dataSource, delegate);
         this.nodeStore = new JdbcNodeStore(dataSource, delegate);
     }
 
@@ -167,8 +167,8 @@ final class ScenarioCluster implements AutoCloseable {
     }
 
     /** Registers an on-demand job definition; {@code policy} receives the spec to point at a runner, a limit or a cap. */
-    void defineJob(String jobKey, Consumer<PolicySpec> policy) {
-        jobStore.upsert(JobDefinition.of(jobKey, ScenarioCluster.class, spec -> policy.accept(spec.onDemand())));
+    void defineJob(String jobKey, java.util.function.UnaryOperator<io.mohs.core.definition.JobOptions> policy) {
+        jobStore.upsert(JobDefinition.of(jobKey, new io.mohs.core.schedule.OnDemandSpec(), policy.apply(io.mohs.core.definition.JobOptions.defaults()), io.mohs.core.schedule.Misfire.IGNORE, false));
     }
 
     /**
@@ -181,7 +181,7 @@ final class ScenarioCluster implements AutoCloseable {
      * from moving what the bench measures without anyone deciding to.
      */
     void defineRecurring(String jobKey, Duration every) {
-        jobStore.upsert(JobDefinition.of(jobKey, ScenarioCluster.class, spec -> spec.every(every).retries(0)));
+        jobStore.upsert(JobDefinition.of(jobKey, new io.mohs.core.schedule.IntervalSpec(every, false), io.mohs.core.definition.JobOptions.defaults().withRetries(0), io.mohs.core.schedule.Misfire.IGNORE, false));
     }
 
     /**
@@ -189,6 +189,11 @@ final class ScenarioCluster implements AutoCloseable {
      * node knows how to do — two nodes with different registries is literally the rolling update.
      */
     Node addNode(EngineSettings settings, List<ExecutionListener> listeners) {
+        return addNode(settings, listeners, List.of());
+    }
+
+    Node addNode(EngineSettings settings, List<ExecutionListener> listeners,
+            List<io.mohs.core.resource.ExecutionWindow> windows) {
         HandlerRegistry handlers = new HandlerRegistry();
         EngineMetrics metrics = new EngineMetrics(new SimpleMeterRegistry());
         RunnerRegistry runners = new RunnerRegistry(
@@ -198,7 +203,7 @@ final class ScenarioCluster implements AutoCloseable {
         // guards in `Engine#reconcileOwnStrayLeases`) and the "completion committed x lease
         // released" window — the one from the incident — ceases to exist. A shutdown-loss verdict
         // drawn without this would be about a wiring no client runs.
-        CompletionBatcher batcher = new CompletionBatcher(leaseStore, jobStore, 256, Duration.ofMillis(5));
+        CompletionBatcher batcher = new CompletionBatcher(leaseStore, 256, Duration.ofMillis(5));
         batcher.start();
         // Events scale WITH dispatch (PERFORMANCE.md: "under high throughput, 16 becomes a queue;
         // raise it along with dispatch") — the production default is the 4:1 ratio of 64/16, not
@@ -208,7 +213,7 @@ final class ScenarioCluster implements AutoCloseable {
         Dispatcher dispatcher = new Dispatcher(leaseStore, jobStore, handlers, clock, List.of(), listeners,
                 events, metrics, batcher);
         Engine engine = new Engine(workQueue, dispatcher, historyStore, leaseStore, jobStore, nodeStore,
-                new JdbcTriggerFirer(dataSource, historyStore, workQueue, delegate), new ExecutionWindowRegistry(List.of()),
+                new JdbcSubmissionStore(dataSource, delegate, java.time.Duration.ofDays(7)), new ExecutionWindowRegistry(windows),
                 rateLimitStore, clock, settings, runners, metrics);
         Node node = new Node(engine, handlers, runners, batcher, events, List.copyOf(listeners));
         nodes.add(node);
@@ -222,23 +227,14 @@ final class ScenarioCluster implements AutoCloseable {
      * <p>A scenario seeding through {@link #seedReady} measures the engine; this one measures the
      * engine PLUS the entry path, which is where a batch is born.
      */
-    MohsImpl facadeFor(Node node, BatchCompletionCallbacks callbacks) {
-        // BatchCompletionCallbacks IS an ExecutionListener: left out of the node's listener list it
-        // is never notified, and an onCompletion that silently never fires would make the bench
-        // report a defect that does not exist. Failing here is cheaper than the investigation.
-        if (!node.listeners().contains(callbacks)) {
-            throw new IllegalArgumentException("callbacks must have been passed to addNode(...) as a listener — "
-                    + "BatchCompletionCallbacks is an ExecutionListener, and outside the node's listener list "
-                    + "onCompletion never fires");
-        }
-        return new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcStoreTransactions(dataSource),
-                nodeStore, rateLimitStore, node.handlers(), clock, node.engine(), batchStore,
-                callbacks, node.runners(), node.engine()::signalWorkScheduled, List.of(), Runnable::run);
+    MohsImpl facadeFor(Node node) {
+        return new MohsImpl(jobStore, workQueue, historyStore, leaseStore, new JdbcSubmissionStore(dataSource, delegate, java.time.Duration.ofDays(7)),
+                nodeStore, rateLimitStore, node.handlers(), clock, node.engine(), batchStore, node.runners(), node.engine()::signalWorkScheduled, List.of(), Runnable::run);
     }
 
     /** Registers the same handler on every node created so far. */
     void registerEverywhere(String jobKey, JobHandler handler) {
-        nodes.forEach(node -> node.handlers().register(JobKey.of(jobKey), handler));
+        nodes.forEach(node -> node.handlers().register(JobKey.of(jobKey), handler, Object.class));
     }
 
     void startAll() {
@@ -254,19 +250,17 @@ final class ScenarioCluster implements AutoCloseable {
         JobKey key = JobKey.of(jobKey);
         Instant now = clock.instant();
         List<ExecutionId> ids = new ArrayList<>(count);
-        List<HistoryStore.NewExecution> rows = new ArrayList<>(count);
-        List<WorkQueue.ReadyEntry> entries = new ArrayList<>(count);
+        List<SubmissionStore.NewExecution> rows = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             ExecutionId id = ExecutionId.of(UUIDv7.randomUUID().toString());
             int shard = Shards.of(id);
             ids.add(id);
-            rows.add(new HistoryStore.NewExecution(id, key, shard, priority, now, now, "scenario", null, null, ""));
-            entries.add(new WorkQueue.ReadyEntry(id, key, shard, priority, 1, now));
+            rows.add(new SubmissionStore.NewExecution(id, key, shard, priority, now, now, "scenario", null, null, io.mohs.test.InputFixtures.encode(key, ""), io.mohs.engine.SubmissionStore.Origin.MANUAL, null));
         }
         for (int from = 0; from < count; from += OFFER_BATCH_SIZE) {
             int to = Math.min(from + OFFER_BATCH_SIZE, count);
-            historyStore.record(rows.subList(from, to));
-            workQueue.offer(entries.subList(from, to));
+            new JdbcSubmissionStore(dataSource, delegate, java.time.Duration.ofDays(7))
+                    .accept(rows.subList(from, to), null, () -> {});
         }
         return ids;
     }
@@ -304,7 +298,7 @@ final class ScenarioCluster implements AutoCloseable {
      * a time zone is worse than no bench.
      */
     Duration oldestQueuedAge() {
-        Instant oldest = jdbcTemplate.query("SELECT MIN(visible_at) AS oldest FROM mohs_ready",
+        Instant oldest = jdbcTemplate.query("SELECT MIN(visible_at) AS oldest FROM mohs_work WHERE work_state = 'READY'",
                 rs -> rs.next() ? delegate.readSplitTimestamp(rs, "oldest") : null);
         return oldest == null ? Duration.ZERO : Duration.between(oldest, clock.instant());
     }
@@ -323,15 +317,16 @@ final class ScenarioCluster implements AutoCloseable {
     }
 
     int countReady() {
-        return count("SELECT count(*) FROM mohs_ready");
+        return count("SELECT count(*) FROM mohs_work WHERE work_state = 'READY'");
     }
 
     int countLease() {
-        return count("SELECT count(*) FROM mohs_lease");
+        return count("SELECT count(*) FROM mohs_work WHERE work_state = 'LEASED'");
     }
 
     int countAttempts() {
-        return count("SELECT count(*) FROM mohs_attempt");
+        // Latest sequence numbers retain the number completed, without retaining each record.
+        return count("SELECT COALESCE(SUM(last_attempt_number), 0) FROM mohs_execution");
     }
 
     int countTerminal(String state) {
@@ -343,7 +338,7 @@ final class ScenarioCluster implements AutoCloseable {
     }
 
     /**
-     * How the engine classified each failed attempt — where {@code NO_HANDLER} and an ownership
+     * How the engine classified each latest failed attempt — where {@code NO_HANDLER} and an ownership
      * reclaim appear by name, instead of collapsing into an unexplained FAILED count.
      */
     Map<String, Integer> failureKinds() {
@@ -356,10 +351,10 @@ final class ScenarioCluster implements AutoCloseable {
         // select: `||` is logical OR in MySQL, and MySQL's only_full_group_by rejects a selected
         // expression that is not itself grouped.
         return jdbcTemplate.query("""
-                SELECT CONCAT(error_type, ': ', LEFT(error, 60)) AS kind, count(*) AS total
-                  FROM mohs_attempt
-                 WHERE error_type IS NOT NULL
-                 GROUP BY CONCAT(error_type, ': ', LEFT(error, 60))
+                SELECT CONCAT(last_attempt_error_type, ': ', LEFT(last_attempt_error, 60)) AS kind, count(*) AS total
+                  FROM mohs_execution
+                 WHERE last_attempt_error_type IS NOT NULL
+                 GROUP BY CONCAT(last_attempt_error_type, ': ', LEFT(last_attempt_error, 60))
                  ORDER BY count(*) DESC
                 """, rs -> {
             Map<String, Integer> kinds = new LinkedHashMap<>();

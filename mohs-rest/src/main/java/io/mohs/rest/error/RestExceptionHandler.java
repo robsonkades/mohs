@@ -202,23 +202,18 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     /**
-     * A row contended by the engine's hot path — today only the {@code mohs_rate_limits} bucket,
-     * whose lock has a time ceiling ({@code JdbcRateLimitStore#BUCKET_LOCK_TIMEOUT}).
-     *
-     * <p>A 503 meaning "nothing changed", not a generic 500: under contention the {@code PATCH} is
-     * precisely the emergency lever the operator is pulling, and "unexpected error" would leave them
-     * unsure whether it applied — retrying on top of an already saturated row. Transient by
-     * definition ({@code TransientDataAccessException}): the same request repeated later tends to
-     * succeed.
+     * A transient database failure may occur during a write or the read that builds its response.
+     * The latter can fail after commit, so this boundary cannot promise rollback or safe replay.
      *
      * @param ex the exception being translated
      * @return the HTTP problem describing this failure
      */
     @ExceptionHandler({QueryTimeoutException.class, PessimisticLockingFailureException.class})
     public ProblemDetail handleContention(TransientDataAccessException ex) {
-        log.warn("a database row is under contention — the requested change did not apply", ex);
+        log.warn("database request timed out or encountered contention; operation outcome may be unknown", ex);
         return problem(HttpStatus.SERVICE_UNAVAILABLE, "Resource busy",
-                "A database row is under contention and nothing changed — retry in a few seconds");
+                "The database is temporarily busy. A requested change may already have applied; check the resource"
+                        + " before retrying, and reuse the same Idempotency-Key for a submission");
     }
 
     /**

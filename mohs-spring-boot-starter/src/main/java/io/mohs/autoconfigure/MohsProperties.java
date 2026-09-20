@@ -21,7 +21,6 @@ import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
-import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 import io.mohs.core.resource.RunnerMode;
 import io.mohs.rest.ApiPaths;
@@ -59,8 +58,7 @@ public record MohsProperties(
 
     /**
      * Mohs does NOT create or migrate its schema: the operator applies {@code schema-<dialect>.sql}
-     * before the application starts, and the versioned {@code V*.sql} files in the jar are the deltas
-     * for an upgrade. There is no {@code migrate} switch because there is nothing to switch off.
+     * before the application starts. This unreleased baseline has no historical upgrade chain.
      *
      * @param dialect an explicit choice, never auto-detected from the {@code DataSource}. No default — mandatory.
      */
@@ -86,26 +84,24 @@ public record MohsProperties(
     /**
      * Configures polling, execution ownership, dispatch and retention.
      *
-     * @param pollInterval the FLOOR of the interval between engine loop ticks: the loop polls at this rate while it keeps finding work and doubles the interval on every empty tick up to {@code max-poll-interval}; default 25ms — dispatch latency is about poll/2 in the worst case without a wake-up, and idle cost is controlled by the backoff, not by the floor
+     * @param pollInterval the FLOOR of the interval between engine loop ticks: the loop polls at this rate while it keeps finding work and doubles the interval on every empty tick up to {@code max-poll-interval}; default 25ms — the floor alone does not bound dispatch latency, and idle cost is controlled by the backoff, not by the floor
      * @param maxPollInterval the CEILING of the adaptive backoff: the longest interval between ticks of an idle engine; must be >= {@code poll-interval}; the actual sleep never exceeds {@code node-lease-ttl/3} — the heartbeat has its own cadence, and a high ceiling must not let an idle node be declared dead
      * @param batchSize the maximum number of executions claimed per claim
      * @param claimRounds how many claims one tick chains while the batch keeps coming back full and dispatch has headroom — it loosens the coupling between throughput and {@code poll-interval} under backlog; 1 (the default) is the classic one-claim-per-tick shape
-     * @param leaseTtl feeds {@code lease_expires_at} at claim time; it is also the staleness cutoff for a legacy node row with no {@code expires_at}
-     * @param nodeLeaseTtl the NODE's lease — each tick's heartbeat promises "alive until now+TTL" in {@code mohs_nodes.expires_at}; the reaper only reclaims executions from a node whose promise has expired; a sanity floor of 12s is validated at boot — one tick sleeps up to a third of the TTL and then spends up to 7s on the idempotency prune and the queue-depth count (plus up to ~5s on the hourly history sweep, when one is enabled — a 2s budget checked between passes, and a pass is up to three 1s-capped statements), and 12s is the smallest promise that still outlasts the always-on steps with a second of margin for clock skew
+     * @param nodeLeaseTtl database-time session expiry; boot requires at least 12s. One whole coordinator round uses a shared TTL/4 monotonic budget, checked between operations; a blocked driver/pool call may exceed a checkpoint.
      * @param watchdogTimeout the Watchdog Bound: a runtime ceiling — on reaching it the node RELEASES ownership (a fenced failure, with normal retry); {@code null} (the default) means no ceiling; when present it must be greater than {@code node-lease-ttl} (validated while assembling the engine)
      * @param misfireThreshold separates a late firing from a lost one — an occurrence due within the threshold fires late under any policy; anything older answers to the job's {@code Misfire}
-     * @param idempotencyRetention how long an {@code Idempotency-Key} keeps deduplicating — it IS the window, because the key deduplicates for exactly as long as its row lives in {@code mohs_idempotency}; the engine prunes older rows hourly, and {@code 0s} turns pruning off and keeps every key forever (an unbounded table)
-     * @param historyRetention how long a TERMINAL execution's history (its row, its attempts, and a batch none of whose members remain) survives after finishing; {@code 0s} — the default — keeps everything forever, because deleting history is the operator's decision and never the scheduler's surprise; a positive window is enforced hourly, in bounded batches, and does not touch {@code mohs_idempotency} (that table answers to {@code idempotency-retention} alone)
+     * @param idempotencyRetention fixed expiry duration of newly accepted receipts, independent of cleanup/history. Zero creates nonexpiring receipts; existing expiries remain unchanged.
+     * @param historyRetention how long a TERMINAL execution's history (its row and latest attempt, and a batch none of whose members remain) survives after finishing; {@code 0s} — the default — keeps everything forever, because deleting history is the operator's decision and never the scheduler's surprise; a positive window is enforced hourly, in bounded batches, and does not touch {@code mohs_idempotency} (that table answers to {@code idempotency-retention} alone)
      * @param dispatchConcurrency the real concurrency ceiling of the dispatch executor (never through pool size); it also bounds the claim
      * @param eventConcurrency the real concurrency ceiling of the event-publication executor
-     * @param completionFlushOnEveryResult turns off group commit for completions and returns to a synchronous commit per result — it trades the durability window (~5ms) for the earlier per-execution latency; the only knob the decision adds
+     * @param completionFlushOnEveryResult turns off group commit for completions and returns to a synchronous commit per result — it removes batching delay but not database waits or unknown commit outcomes
      */
     public record Engine(
             @DefaultValue("25ms") Duration pollInterval,
             @DefaultValue("2s") Duration maxPollInterval,
             @DefaultValue("50") int batchSize,
             @DefaultValue("1") int claimRounds,
-            @DefaultValue("30s") Duration leaseTtl,
             @DefaultValue("15s") Duration nodeLeaseTtl,
             @Nullable Duration watchdogTimeout,
             @DefaultValue("60s") Duration misfireThreshold,
@@ -129,25 +125,6 @@ public record MohsProperties(
             @DefaultValue("0s") Duration startupDelay) {
 
         /**
-         * Binds the canonical constructor even when the compatibility constructor is present.
-         * @param startMode whether startup is automatic or manual
-         * @param shutdown the graceful shutdown settings
-         * @param startupDelay the one-time delay before processing
-         */
-        @ConstructorBinding
-        public Lifecycle {
-        }
-
-        /**
-         * Preserves immediate startup for existing programmatic configurations.
-         * @param startMode whether startup is automatic or manual
-         * @param shutdown the graceful shutdown settings
-         */
-        public Lifecycle(StartMode startMode, Shutdown shutdown) {
-            this(startMode, shutdown, Duration.ZERO);
-        }
-
-        /**
          * Whether Spring starts the engine automatically.
          */
         public enum StartMode {
@@ -169,7 +146,7 @@ public record MohsProperties(
     }
 
     /**
-     * Selects the cluster time source and its synchronization cadence.
+     * Selects application scheduling/local timestamps and clock-sampling cadence. Durable session, bucket, receipt and eligibility decisions always read database time.
      *
      * @param mode {@code application} uses the system clock; {@code database} uses {@link io.mohs.store.jdbc.DatabaseClock} (the database is the cluster's time authority)
      * @param skewWarnThreshold only read when {@code mode} is {@code database} — the WARN threshold of {@link io.mohs.store.jdbc.DatabaseClock#sync()}

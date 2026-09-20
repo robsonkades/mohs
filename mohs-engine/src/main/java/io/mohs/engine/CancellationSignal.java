@@ -70,8 +70,8 @@ final class CancellationSignal {
      *
      * <p>{@code interrupt} delivers {@code Thread.interrupt()} if — and only if — the handler's
      * thread is registered; before registration or after deregistration it is a pure flag. There is
-     * no risk of an interrupt loop: {@code signalJobTimeouts} guards with
-     * {@code !cancellationRequested()}, and the drain escalation runs at most twice per {@code stop}.
+     * no risk of an interrupt loop: the coordinator records timeout delivery once per attempt,
+     * and the drain escalation runs at most twice per {@code stop}.
      */
     void requestCancellation(Reason newReason, boolean interrupt) {
         lock.lock();
@@ -87,13 +87,15 @@ final class CancellationSignal {
         }
     }
 
-    /** Called by the handler's own thread immediately before invoking the chain — it opens the interrupt window and starts the timeout clock. */
-    void registerHandlerThread() {
+    /** Called by the handler thread: atomically refuses a start after cancellation, or opens the interrupt window and starts the timeout clock. */
+    boolean registerHandlerThread() {
         lock.lock();
         try {
+            if (reason != null) return false;
             handlerThread = Thread.currentThread();
             handlerStartedNanos = System.nanoTime();
             handlerStarted = true;
+            return true;
         } finally {
             lock.unlock();
         }
@@ -123,6 +125,6 @@ final class CancellationSignal {
      */
     boolean handlerRunningLongerThan(Duration duration) {
         return handlerStarted && !handlerFinished
-                && System.nanoTime() - handlerStartedNanos >= duration.toNanos();
+                && Duration.ofNanos(System.nanoTime() - handlerStartedNanos).compareTo(duration) >= 0;
     }
 }

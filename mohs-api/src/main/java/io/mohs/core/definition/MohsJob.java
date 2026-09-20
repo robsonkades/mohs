@@ -15,19 +15,19 @@
  */
 package io.mohs.core.definition;
 
+import io.mohs.core.Mohs;
+import io.mohs.core.execution.JobContext;
+import io.mohs.core.job.JobKey;
+import io.mohs.core.resource.ExecutionWindow;
+import io.mohs.core.resource.MohsRunner;
+import io.mohs.core.resource.RateLimit;
+import io.mohs.core.schedule.Misfire;
+
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
-
-import io.mohs.core.job.JobKey;
-import io.mohs.core.Mohs;
-import io.mohs.core.execution.JobContext;
-import io.mohs.core.resource.ExecutionWindow;
-import io.mohs.core.resource.MohsRunner;
-import io.mohs.core.resource.RateLimit;
-import io.mohs.core.schedule.Misfire;
 
 /**
  * Declares a job on a method of a Spring-managed bean — no {@code Job} interface, no
@@ -35,10 +35,13 @@ import io.mohs.core.schedule.Misfire;
  * {@link JobDefinition} at boot, with source {@link DefinitionSource#ANNOTATION}.
  *
  * <p>{@link #cron()}, {@link #every()} and {@link #everyAfterFinish()} are mutually exclusive; all
- * three absent means the job fires only on demand (through {@link Mohs#schedule},
+ * three absent means the job fires only on demand (through {@link Mohs#enqueue},
  * {@link Mohs#batch} or the dashboard). The method's parameters follow the same convention
  * regardless of the trigger: at most one payload and one {@link JobContext}, both optional, in any
  * order.
+ * The method must return {@code void} and finish synchronously. Async return types and Spring
+ * {@code @Async} advice are rejected at startup because completion must include the handler's work.
+ * Lazy singleton declarations are initialized before the executable catalog is frozen.
  *
  * <p>Composable as a meta-annotation ({@code ANNOTATION_TYPE} in its target, the same design as
  * Spring's {@code @Scheduled}): {@link RecurringJob} and {@link OnDemandJob} are stereotypes over
@@ -132,36 +135,18 @@ public @interface MohsJob {
      */
     boolean startPaused() default false;
 
-    /**
-     * Prevents more than one execution of this job from being {@code RUNNING} at the same time.
-     *
-     * <p>The default is to allow concurrency (see {@link PolicySpec#preventOverlap()} for the full
-     * reasoning) — set {@code true} for the narrow case of a cron or interval job whose next firing
-     * may occur before the previous one finishes.
-     *
-     * @return whether concurrent execution is unrestricted
-     */
-    boolean allowConcurrentExecutions() default true;
 
     /**
-     * The ceiling on concurrent executions of this job — read only when
-     * {@link #allowConcurrentExecutions()} is {@code false} (see
-     * {@link PolicySpec#maxConcurrentExecutions(int)}); in that case it must be at least 1 (the
-     * default of {@code 0} fails the boot with a clear message rather than assuming a value).
-     *
-     * @return the concurrency ceiling when overlap is restricted
+     * Global admitted grants per job; zero is unlimited, positive values impose the cap.
      */
     int maxConcurrentExecutions() default 0;
 
     /**
      * Retry attempts BEYOND the first execution. The default is 1, not 0.
      *
-     * <p>The delivery contract is only at-least-once when there is budget: without it, reclaiming
-     * an execution whose ownership was lost (a dead node, an expired lease, the shutdown window)
-     * has nowhere to reschedule and becomes a terminal {@code FAILED} — silently lost work, in
-     * exactly the event the product promises to survive. Anyone preferring at most one invocation
-     * per execution declares {@code retries = 0} deliberately, and accepts the loss under node
-     * failure.
+     * <p>Finite retries authorize further attempts but do not guarantee successful delivery.
+     * Repeated process failures may exhaust the budget before the handler succeeds. Zero disables
+     * automatic retry; external effects may still need application idempotency.
      *
      * @return the number of retry attempts beyond the first
      */

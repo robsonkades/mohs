@@ -35,7 +35,6 @@ import io.mohs.core.event.ExecutionListener;
 import io.mohs.core.event.Failed;
 import io.mohs.core.event.Succeeded;
 import io.mohs.core.job.JobRef;
-import io.mohs.engine.BatchCompletionCallbacks;
 import io.mohs.engine.EngineSettings;
 
 /**
@@ -92,12 +91,11 @@ class BatchCompletionScenario {
                 }
             }
         };
-        BatchCompletionCallbacks callbacks = new BatchCompletionCallbacks();
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.delegate())) {
-            cluster.defineJob("member", spec -> spec.retries(RETRIES));
+            cluster.defineJob("member", spec -> spec.withRetries(RETRIES));
             for (int i = 0; i < NODES; i++) {
-                cluster.addNode(settings(), List.of(collector, callbacks));
+                cluster.addNode(settings(), List.of(collector));
             }
             cluster.registerEverywhere("member", (payload, _) -> {
                 invocations.incrementAndGet();
@@ -110,7 +108,7 @@ class BatchCompletionScenario {
 
             JobRef<String> member = JobRef.of("member", String.class);
             long createdAt = System.nanoTime();
-            Batch batch = cluster.facadeFor(cluster.nodes().getFirst(), callbacks)
+            Batch batch = cluster.facadeFor(cluster.nodes().getFirst())
                     .batch("release-validation", builder -> {
                         for (int i = 0; i < MEMBERS; i++) {
                             builder.add(member, String.valueOf(i));
@@ -130,11 +128,11 @@ class BatchCompletionScenario {
             // it is verified (below) but is never the only witness.
             Map<String, Object> counters = cluster.jdbc().queryForMap(
                     "SELECT total, succeeded, failed FROM mohs_batches WHERE id = ?", batch.batchId());
-            assertThat(counters.get("total")).isEqualTo(MEMBERS);
+            assertThat(counters.get("total")).isEqualTo((long) MEMBERS);
             assertThat(counters.get("failed"))
                     .as("the batch counter must count the TERMINAL failure once, not each attempt — with retries=%d "
                             + "each deliberate failure is invoked twice", RETRIES)
-                    .isEqualTo(MEMBERS / 2);
+                    .isEqualTo((long) MEMBERS / 2);
             assertThat(counters.get("succeeded")).isEqualTo(MEMBERS / 2);
 
             // With one retry, every even member runs twice: STRICT equality is what separates
@@ -164,8 +162,7 @@ class BatchCompletionScenario {
     }
 
     private static EngineSettings settings() {
-        return new EngineSettings(Duration.ofMillis(25), Duration.ofMillis(200), 256, 128, 3,
-                Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60));
+        return new EngineSettings(Duration.ofMillis(25),Duration.ofMillis(200),256,128,3,Duration.ofSeconds(15),null,Duration.ofSeconds(60),Duration.ZERO,Duration.ZERO);
     }
 
     private static void report(long createNanos, long drainNanos, boolean closed, List<BatchCompleted> completions,

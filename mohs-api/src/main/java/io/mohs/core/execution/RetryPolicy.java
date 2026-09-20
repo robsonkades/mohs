@@ -15,13 +15,12 @@
  */
 package io.mohs.core.execution;
 
+import io.mohs.core.job.JobKey;
+import org.jspecify.annotations.Nullable;
+
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
-
-import org.jspecify.annotations.Nullable;
-
-import io.mohs.core.job.JobKey;
 
 /**
  * A per-job retry decision, for the cases {@code retries} cannot express — a Strategy (GoF) over the
@@ -47,17 +46,17 @@ import io.mohs.core.job.JobKey;
  * not a lookup: everything it needs to decide with is in {@link Failure}.
  *
  * <p>Example — give up quickly on a bad request, keep trying on a timeout:
- *
+ * <p>
  * {@snippet :
- * @Bean("invoiceRetries")
- * RetryPolicy invoiceRetries() {
- *     return failure -> switch (failure.error()) {
- *         case IllegalArgumentException _ -> Optional.empty();
- *         case null -> Optional.of(Duration.ofSeconds(30));
- *         default -> failure.failedAttempt() <= 10 ? Optional.of(Duration.ofMinutes(1)) : Optional.empty();
- *     };
+ *
+ * @Bean("invoiceRetries") RetryPolicy invoiceRetries() {
+ * return failure -> switch (failure.error()) {
+ * case IllegalArgumentException _ -> Optional.empty();
+ * case null -> Optional.of(Duration.ofSeconds(30));
+ * default -> failure.failedAttempt() <= 10 ? Optional.of(Duration.ofMinutes(1)) : Optional.empty();
+ * };
  * }
- * }
+ *}
  */
 @FunctionalInterface
 public interface RetryPolicy {
@@ -76,20 +75,20 @@ public interface RetryPolicy {
     /**
      * The failure being decided on.
      *
-     * @param jobKey the job whose execution failed
+     * @param jobKey        the job whose execution failed
      * @param failedAttempt which attempt just failed, 1-based
-     * @param retries the budget the definition declares — informative here, since the policy is what decides
-     * @param error what the handler threw, or {@code null} when the failure is a dead node's reclaimed lease
+     * @param retries       the budget the definition declares — informative here, since the policy is what decides
+     * @param error         what the handler threw, or {@code null} when the failure is a dead node's reclaimed lease
      */
     record Failure(JobKey jobKey, int failedAttempt, int retries, @Nullable Throwable error) {
 
         /**
          * Creates a {@code Failure} with the supplied values.
          *
-         * @param jobKey the job whose execution failed
+         * @param jobKey        the job whose execution failed
          * @param failedAttempt which attempt just failed, 1-based
-         * @param retries the budget the definition declares — informative here, since the policy is what decides
-         * @param error what the handler threw, or {@code null} when the failure is a dead node's reclaimed lease
+         * @param retries       the budget the definition declares — informative here, since the policy is what decides
+         * @param error         what the handler threw, or {@code null} when the failure is a dead node's reclaimed lease
          */
         public Failure {
             Objects.requireNonNull(jobKey, "jobKey");

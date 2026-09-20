@@ -16,7 +16,6 @@
 package io.mohs.rest.execution;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.Objects;
 
 import org.jspecify.annotations.Nullable;
@@ -25,7 +24,7 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 
 /**
- * The wire form of {@link Execution} — the detail view, attempts included.
+ * The wire form of {@link Execution} — the detail view, including the latest completed attempt.
  *
  * @param executionId the identity of the execution
  * @param jobKey the stable identity of the job
@@ -33,7 +32,7 @@ import io.mohs.core.execution.ExecutionState;
  * @param scheduledAt the intended firing instant
  * @param firedAt the instant this attempt began
  * @param actor the identity attributed to the operation
- * @param attempts the recorded attempts of this execution
+ * @param lastAttempt the latest completed attempt, or null before completion of this execution
  */
 public record ExecutionResponse(
         String executionId,
@@ -42,7 +41,7 @@ public record ExecutionResponse(
         Instant scheduledAt,
         @Nullable Instant firedAt,
         String actor,
-        List<AttemptResponse> attempts) {
+        @Nullable AttemptResponse lastAttempt) {
 
     /**
      * Creates a {@code ExecutionResponse} with the supplied values.
@@ -53,7 +52,7 @@ public record ExecutionResponse(
      * @param scheduledAt the intended firing instant
      * @param firedAt the instant this attempt began
      * @param actor the identity attributed to the operation
-     * @param attempts the recorded attempts of this execution
+     * @param lastAttempt the latest completed attempt, or null before completion of this execution
      */
     public ExecutionResponse {
         Objects.requireNonNull(executionId, "executionId");
@@ -61,7 +60,6 @@ public record ExecutionResponse(
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(scheduledAt, "scheduledAt");
         Objects.requireNonNull(actor, "actor");
-        attempts = List.copyOf(attempts);
     }
 
     /**
@@ -78,6 +76,6 @@ public record ExecutionResponse(
                 execution.scheduledAt(),
                 execution.firedAt(),
                 execution.actor(),
-                execution.attempts().stream().map(AttemptResponse::from).toList());
+                execution.lastAttempt().map(AttemptResponse::from).orElse(null));
     }
 }

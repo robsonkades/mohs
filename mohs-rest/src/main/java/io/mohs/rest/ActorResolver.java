@@ -34,11 +34,7 @@ public interface ActorResolver {
     String ANONYMOUS = "anonymous";
 
     /**
-     * Never return {@link io.mohs.core.execution.Execution#SCHEDULER_ACTOR}, in any casing: it is
-     * the engine's reserved name — {@code ScheduleCommand.as} rejects it, and rejecting a value
-     * coming from this SPI surfaces as a generic 500 rather than the 400 the boundary gives. An
-     * authenticated principal carrying that name (a "scheduler" service account, say) must be
-     * mapped to another identifier here.
+     * Resolves the audit identity. No actor name grants scheduling authority.
      *
      * @param request the incoming HTTP request
      * @return the actor identity attributed to the request

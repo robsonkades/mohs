@@ -30,13 +30,15 @@ public interface ExecutionInterceptor {
     /**
      * Intercepts an attempt; calling the chain proceeds to the next interceptor or handler.
      *
-     * @param ctx the context of the current execution attempt
+     * @param ctx   the context of the current execution attempt
      * @param chain the remainder of the interceptor and handler chain
      * @throws java.lang.Exception if an interceptor or the job handler fails
      */
     void intercept(JobContext ctx, Chain chain) throws Exception;
 
-    /** The continuation of the interceptor chain down to the handler. */
+    /**
+     * The continuation of the interceptor chain down to the handler.
+     */
     @FunctionalInterface
     interface Chain {
         /**

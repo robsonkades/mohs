@@ -16,6 +16,7 @@
 package io.mohs.core.job;
 
 import io.mohs.core.Mohs;
+import io.mohs.core.TechnicalKey;
 
 import java.util.Objects;
 
@@ -23,36 +24,52 @@ import java.util.Objects;
  * A typed reference to a job definition, binding its {@link JobKey} to the payload type at compile
  * time.
  *
- * <p>Passing a {@code JobRef<WelcomeEmail>} to {@link Mohs#schedule(JobRef, Object)} makes an
+ * <p>Passing a {@code JobRef<WelcomeEmail>} to {@link Mohs#enqueue(JobRef, Object)} makes an
  * incompatible payload a compilation error rather than a runtime surprise — the point of preferring
  * typed references over stringly-typed ones.
  *
- * @param <T> the payload type accepted by the referenced job
- * @param key the stable identity of the job
- * @param payloadType the runtime class of the job payload
+ * @param <T>           the payload type accepted by the referenced job
+ * @param key           the stable identity of the job
+ * @param payloadType   the runtime class of the job payload
+ * @param inputContract the stable persisted format identifier
  */
-public record JobRef<T>(JobKey key, Class<T> payloadType) {
+public record JobRef<T>(JobKey key, Class<T> payloadType, String inputContract) {
 
     /**
      * Creates a {@code JobRef} with the supplied values.
      *
-     * @param key the stable identity of the job
-     * @param payloadType the runtime class of the job payload
+     * @param key           the stable identity of the job
+     * @param payloadType   the runtime class of the job payload
+     * @param inputContract the stable persisted format identifier
      */
     public JobRef {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(payloadType, "payloadType");
+        inputContract = TechnicalKey.require(inputContract, "inputContract");
     }
 
     /**
      * Creates a typed job reference for scheduling without string-based payload checks.
      *
-     * @param <T> the payload type accepted by the referenced job
-     * @param id the stable identity of the job
+     * @param <T>         the payload type accepted by the referenced job
+     * @param id          the stable identity of the job
      * @param payloadType the runtime class of the job payload
      * @return the typed reference to the job
      */
     public static <T> JobRef<T> of(String id, Class<T> payloadType) {
-        return new JobRef<>(JobKey.of(id), payloadType);
+        return new JobRef<>(JobKey.of(id), payloadType, id);
+    }
+
+    /**
+     * The contract identity stays stable across compatible Java class renames.
+     *
+     * @param <T>           the locally declared input type
+     * @param id            the job identity
+     * @param payloadType   the local Java class
+     * @param inputContract the stable persisted format identifier
+     * @return the typed reference
+     */
+    public static <T> JobRef<T> of(String id, Class<T> payloadType, String inputContract) {
+        return new JobRef<>(JobKey.of(id), payloadType, inputContract);
     }
 }

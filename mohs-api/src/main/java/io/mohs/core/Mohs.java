@@ -16,6 +16,7 @@
 package io.mohs.core;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -28,82 +29,173 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.schedule.Schedule;
+import io.mohs.core.schedule.RecurringOptions;
+import io.mohs.core.schedule.RecurringSchedule;
+import io.mohs.core.event.Enqueued;
 
 /**
- * Mohs's public facade — one verb per operation, always over an existing definition.
+ * Mohs's public facade for typed submissions, named recurring schedules and execution controls.
+ * Declare reusable code with {@link io.mohs.core.definition.JobRegistration} before submitting.
  *
  * <p>The read methods ({@link #findJob}/{@link #jobs}/{@link #findExecution}/{@link #executions}/
- * {@link #payloadType}) exist for {@code io.mohs.rest}: the architectural boundary
+ * {@link #jobRef}) exist for {@code io.mohs.rest}: the architectural boundary
  * ({@code ArchitectureTest#rest_only_sees_public_api}) forbids the REST layer from seeing
  * {@code io.mohs.engine} directly, so this facade is the only read path available to it.
  */
 public interface Mohs {
 
     /**
-     * Prepares an invocation of a job with its compile-time payload type.
+     * Enqueues one typed invocation for immediate background eligibility after commit.
      *
-     * @param <T> the payload type
-     * @param ref the typed reference identifying the job and its payload contract
-     * @param payload the input passed to the job handler
-     * @return the command whose terminal method enqueues the invocation
+     * @param <T>   the input contract
+     * @param job   the registered executable and its input contract
+     * @param input the invocation data, persisted as a JSON snapshot
+     * @return the acceptance receipt, subject to any enclosing transaction's commit
+     * @throws IllegalArgumentException if the reference, input or options violate the job contract
      */
-    @CheckReturnValue
-    <T> ScheduleCommand schedule(JobRef<T> ref, T payload);
+    default <T> Enqueued enqueue(JobRef<T> job, T input) {
+        return enqueue(job, input, SubmissionOptions.defaults());
+    }
 
     /**
-     * The string overload; the payload type is checked at runtime against the definition (a clear error, not a ClassCastException).
+     * Enqueues one invocation with explicit priority, actor or deduplication. Never executes inline.
      *
-     * @param jobId the stable identity of the job
-     * @param payload the input passed to the job handler
-     * @return the command whose terminal method enqueues the invocation
+     * @param <T>     the input contract
+     * @param job     the registered executable and its input contract
+     * @param input   the invocation data, persisted as a JSON snapshot
+     * @param options the immutable options for this operation
+     * @return the acceptance receipt, subject to any enclosing transaction's commit
+     * @throws IllegalArgumentException if the reference, input or options violate the job contract
      */
-    @CheckReturnValue
-    ScheduleCommand schedule(String jobId, Object payload);
+    <T> Enqueued enqueue(JobRef<T> job, T input, SubmissionOptions options);
 
     /**
-     * Schedules several jobs as one batch: the {@code configurer} collects the members, the total is
-     * fixed at creation, and each execution is born already carrying the {@code batchId} — which is
-     * what makes each member's completion count towards the batch. An empty batch is refused: with
-     * no members it would never complete, and a forever-open batch is worse than an error.
+     * Persists one invocation now, eligible at the supplied instant after commit. Past instants are due.
      *
-     * <p>{@code name} is the batch's label and is PERSISTED: it appears in
-     * {@link BatchSnapshot#name()}, in the {@link io.mohs.core.event.BatchCompleted} handed to
-     * {@link Batch#onCompletion}, and in {@code GET /batches/{id}}. It is what ties the batch back
-     * to the intent of whoever created it, so the operator is not left with only a UUID at 3 a.m.
+     * @param <T>   the input contract
+     * @param job   the registered executable and its input contract
+     * @param input the invocation data, persisted as a JSON snapshot
+     * @param when  the earliest eligibility instant; past instants are due
+     * @return the acceptance receipt, subject to any enclosing transaction's commit
+     * @throws IllegalArgumentException if the reference, input or options violate the job contract
+     */
+    default <T> Enqueued scheduleAt(JobRef<T> job, T input, Instant when) {
+        return scheduleAt(job, input, when, SubmissionOptions.defaults());
+    }
+
+    /**
+     * Persists one invocation with an absolute due instant and explicit submission options.
      *
-     * <p><b>All-or-nothing:</b> ALL members are validated before any write, and the batch row plus
-     * its members enter in a single transaction. An exception from here guarantees nothing was
-     * persisted — the call can be repeated with no risk of a partial batch.
+     * @param <T>     the input contract
+     * @param job     the registered executable and its input contract
+     * @param input   the invocation data, persisted as a JSON snapshot
+     * @param when    the earliest eligibility instant; past instants are due
+     * @param options the immutable options for this operation
+     * @return the acceptance receipt, subject to any enclosing transaction's commit
+     * @throws IllegalArgumentException if the reference, input or options violate the job contract
+     */
+    <T> Enqueued scheduleAt(JobRef<T> job, T input, Instant when, SubmissionOptions options);
+
+    /**
+     * Persists one invocation after a nonnegative delay measured with Mohs's clock.
      *
-     * @param name the human-readable name
-     * @param configurer the callback that adds the members to the batch
-     * @return the batch's receipt, with {@code batchId} already durable
-     * @throws IllegalArgumentException if the batch is empty (it would never complete) or if any
-     *         member references an undefined job — no write occurred in either case
+     * @param <T>   the input contract
+     * @param job   the registered executable and its input contract
+     * @param input the invocation data, persisted as a JSON snapshot
+     * @param delay the nonnegative delay measured from Mohs's clock
+     * @return the acceptance receipt, subject to any enclosing transaction's commit
+     * @throws IllegalArgumentException if the reference, input or options violate the job contract
+     */
+    default <T> Enqueued scheduleAfter(JobRef<T> job, T input, Duration delay) {
+        return scheduleAfter(job, input, delay, SubmissionOptions.defaults());
+    }
+
+    /**
+     * Persists one invocation after a nonnegative delay with explicit submission options.
+     *
+     * @param <T>     the input contract
+     * @param job     the registered executable and its input contract
+     * @param input   the invocation data, persisted as a JSON snapshot
+     * @param delay   the nonnegative delay measured from Mohs's clock
+     * @param options the immutable options for this operation
+     * @return the acceptance receipt, subject to any enclosing transaction's commit
+     * @throws IllegalArgumentException if the reference, input or options violate the job contract
+     */
+    <T> Enqueued scheduleAfter(JobRef<T> job, T input, Duration delay, SubmissionOptions options);
+
+    /**
+     * Creates or updates a named recurrence with a durable input snapshot, reusing a registered executable.
+     * The ID must be distinct from the executable's ID. Repeating it updates the same schedule;
+     * existing executions retain their inputs and operator pause state is preserved.
+     * CronSpec and both IntervalSpec forms are accepted; OnDemandSpec is not a recurrence.
+     *
+     * @param <T>        the input contract
+     * @param scheduleId the stable recurring ID, distinct from the executable ID
+     * @param job        the registered executable and its input contract
+     * @param input      the invocation data, persisted as a JSON snapshot
+     * @param recurrence the cron or interval recurrence
+     * @return the updated recurring schedule snapshot, subject to commit
+     * @throws IllegalArgumentException if the reference, input or options violate the job contract
+     */
+    default <T> RecurringSchedule scheduleRecurring(String scheduleId, JobRef<T> job, T input, Schedule recurrence) {
+        return scheduleRecurring(scheduleId, job, input, recurrence, RecurringOptions.defaults());
+    }
+
+    /**
+     * Upserts a named recurrence with explicit execution/misfire/initial-pause options.
+     * A recurrence cannot change its executable identity. Returns trigger state, not an execution ID.
+     *
+     * @param <T>        the input contract
+     * @param scheduleId the stable recurring ID, distinct from the executable ID
+     * @param job        the registered executable and its input contract
+     * @param input      the invocation data, persisted as a JSON snapshot
+     * @param recurrence the cron or interval recurrence
+     * @param options    the immutable options for this operation
+     * @return the updated recurring schedule snapshot, subject to commit
+     * @throws IllegalArgumentException if the reference, input or options violate the job contract
+     */
+    <T> RecurringSchedule scheduleRecurring(String scheduleId, JobRef<T> job, T input,
+                                            Schedule recurrence, RecurringOptions options);
+
+    /**
+     * Accepts a nonempty batch and all of its input snapshots atomically. The name and counters
+     * remain queryable through {@link #findBatch}; listeners are best-effort notifications.
+     * A receipt inside a host transaction becomes durable only with that transaction's commit.
+     * Connection loss after commit can leave the result unknown; batches have no submission
+     * idempotency key and must not be retried automatically in that case.
+     *
+     * @param name       the persisted human-readable name
+     * @param configurer the callback collecting typed members before acceptance
+     * @return a batch identity, subject to commit of any enclosing transaction
+     * @throws IllegalArgumentException for an empty batch or invalid member
      */
     @CheckReturnValue
     Batch batch(String name, Consumer<BatchBuilder> configurer);
 
-    /**
-     * Registers (or updates) a job definition. An upsert by {@link JobDefinition#key()}: redefining
-     * the same job replaces the definitional part and NEVER touches the operational one
-     * ({@code paused}/{@code orphaned}/{@code next_fire_at}).
-     *
-     * @param definition the registered job definition
-     */
-    void define(JobDefinition definition);
 
     /**
      * Retirement: cancels future firings ({@code ENQUEUED} executions become {@code CANCELLED}) and
      * preserves history.
      *
-     * <p>Only for programmatic definitions — for a {@code @MohsJob} job, remove the annotation and
-     * the scanner marks it {@code ORPHANED} on the next boot; calling this on one throws
-     * {@link IllegalArgumentException}. An unknown job is a no-op.
+     * <p>Applies to annotated and programmatic definitions. An unknown job is a no-op.
+     * Startup registration preserves retirement; only {@link #reactivate} reverses it.
+     * Remove active named recurrences before retiring their shared executable.
+     * A joined JDBC transaction must use READ_COMMITTED; retirement rejects a retained snapshot
+     * that could omit work accepted before its job lock. Standalone retirement selects this isolation.
      *
      * @param jobKey the stable identity of the job
      */
     void remove(JobKey jobKey);
+
+    /**
+     * Reactivates a retained definition with its existing input contract and policy. Starts a new
+     * schedule revision and preserves the operator's pause state. Cancelled executions stay cancelled.
+     * The local catalog must match the installed cluster catalog and contain its executable.
+     *
+     * @param jobKey the retained definition identity
+     * @return true when a retired definition was reactivated; false when absent or already active
+     */
+    boolean reactivate(JobKey jobKey);
 
     /**
      * Cancels an execution. A pending one ({@code ENQUEUED}/{@code RETRY_WAITING}) becomes
@@ -119,12 +211,12 @@ public interface Mohs {
      *
      * @param executionId the identity of the execution
      * @return the execution in its current state right after the request — not necessarily
-     *         terminal; empty if the id does not exist
+     * terminal; empty if the id does not exist
      */
     Optional<Execution> cancel(ExecutionId executionId);
 
     /**
-     * A manual retry of a {@code FAILED} execution: it rearms the SAME row as {@code RETRY_WAITING}
+     * A manual retry of a standalone, manually submitted {@code FAILED} execution: it rearms the SAME row as {@code RETRY_WAITING}
      * due now, and the new attempt travels the normal claim path, competing like any other
      * candidate.
      *
@@ -137,10 +229,10 @@ public interface Mohs {
      * @param executionId the identity of the execution
      * @return the execution already rearmed ({@code RETRY_WAITING}); empty if the id does not exist
      * @throws IllegalStateException if the execution exists but is not {@code FAILED} (a cancelled
-     *         one was an explicit decision; the other states have an owner — the engine), belongs to
-     *         a retired job (the rearmed row would never be claimed), or is a BATCH MEMBER — the
-     *         batch already counted this failure, and counting it again would close the batch early;
-     *         schedule the job standalone to redo the work
+     *                               one was an explicit decision; the other states have an owner — the engine), belongs to
+     *                               a retired job (the rearmed row would never be claimed), was created by an automatic trigger, or is a BATCH MEMBER — the
+     *                               batch already counted this failure, and counting it again would close the batch early;
+     *                               submit the same input as a new standalone execution to redo the work
      */
     Optional<Execution> retry(ExecutionId executionId);
 
@@ -200,11 +292,11 @@ public interface Mohs {
      * <p>The bucket survives the adjustment (its balance clamped to the new ceiling): lowering the
      * limit cuts future throughput, it does not give back what was already consumed.
      *
-     * @param name the human-readable name
-     * @param max the maximum permitted count
+     * @param name   the human-readable name
+     * @param max    the maximum permitted count
      * @param window the positive window over which the rate is limited
      * @return the adjusted limit, or empty if {@code name} does not exist — declaring a new limit is
-     *         an act of boot, not of emergency
+     * an act of boot, not of emergency
      */
     Optional<RateLimitSnapshot> adjustRateLimit(String name, int max, Duration window);
 
@@ -232,36 +324,30 @@ public interface Mohs {
      * <p>The trigger is recomputed from the clock in the same write — {@code ON_DEMAND} disarms the
      * recurrence.
      *
-     * @param jobKey the stable identity of the job
+     * @param jobKey   the stable identity of the job
      * @param schedule the replacement firing schedule
      * @return the snapshot already carrying the new schedule; empty if the job does not exist (or is
-     *         retired)
+     * retired)
      * @throws IllegalArgumentException if the schedule is unrealisable (a syntactically valid cron
-     *         that never fires, for instance)
+     *                                  that never fires, for instance)
      */
     Optional<JobSnapshot> reschedule(JobKey jobKey, Schedule schedule);
 
     /**
-     * The real type of the payload parameter of {@code jobKey}'s handler, or empty if the job does
-     * not exist or the annotated method declares no payload (only a {@code JobContext}, or no
-     * parameters).
+     * Resolves a registered local input type and stable contract for a live job identity.
+     * Named recurrences resolve to their executable's type and contract while retaining their
+     * own job key, so an explicit submission keeps its chosen scheduling identity.
      *
-     * <p>Used by the REST layer to convert the JSON body of {@code POST .../schedule} before
-     * scheduling, rather than persisting a raw {@code Map} the handler cannot consume. Only the
-     * {@code @MohsJob} scanner knows the type: a handler registered manually (the
-     * {@code HandlerRegistry}'s internal or test path) without declaring a {@code payloadType} is
-     * treated by REST as a job that accepts no payload.
-     *
-     * @param jobKey the stable identity of the job
-     * @return the handler payload class, or empty when it declares no payload parameter
+     * @param jobKey the job or recurrence identity
+     * @return its typed reference, or empty if the definition or local executable is unavailable
      */
-    Optional<Class<?>> payloadType(JobKey jobKey);
+    Optional<JobRef<?>> jobRef(JobKey jobKey);
 
     /**
-     * Looks up an execution and its recorded attempts.
+     * Looks up an execution and its latest completed attempt.
      *
      * @param executionId the identity of the execution
-     * @return the execution with its attempts, or empty when it does not exist
+     * @return the execution with its latest completed attempt, or empty when it does not exist
      */
     Optional<Execution> findExecution(ExecutionId executionId);
 
@@ -293,8 +379,8 @@ public interface Mohs {
      * Up to {@code query.limit()} executions, ordered by descending id (UUIDv7) — see
      * {@link ExecutionQuery}.
      *
-     * <p>A SUMMARY: {@code attempts()} comes back empty in a listing (a dashboard read — one query,
-     * without the arbitrarily large {@code error} column); the detail with attempts is
+     * <p>A SUMMARY: {@code lastAttempt()} comes back empty in a listing (a dashboard read — one query,
+     * without the arbitrarily large {@code error} column); the detail with the latest completed attempt is
      * {@link #findExecution}.
      *
      * @param query the execution filters and page limit

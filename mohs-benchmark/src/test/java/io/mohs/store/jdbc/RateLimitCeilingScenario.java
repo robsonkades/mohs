@@ -75,8 +75,8 @@ class RateLimitCeilingScenario {
             // retries(0) on both: the bucket ceiling is billed per DELIVERY, and a retry from a
             // reclaim would be one more delivery that did not come from the seed — noise in an
             // assertion that counts deliveries exactly
-            cluster.defineJob("limited", spec -> spec.rateLimit(LIMIT_NAME).retries(0));
-            cluster.defineJob("unlimited", spec -> spec.retries(0));
+            cluster.defineJob("limited", spec -> spec.withRateLimit(LIMIT_NAME).withRetries(0));
+            cluster.defineJob("unlimited", spec -> spec.withRetries(0));
 
             for (int i = 0; i < NODES; i++) {
                 cluster.addNode(settings(), List.of());
@@ -152,8 +152,7 @@ class RateLimitCeilingScenario {
     }
 
     private static EngineSettings settings() {
-        return new EngineSettings(Duration.ofMillis(25), Duration.ofMillis(200), 64, 64, 3,
-                Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60));
+        return new EngineSettings(Duration.ofMillis(25),Duration.ofMillis(200),64,64,3,Duration.ofSeconds(15),null,Duration.ofSeconds(60),Duration.ZERO,Duration.ZERO);
     }
 
     private static void report(long observedNanos, int limited, int unlimited, long unlimitedDrainNanos,

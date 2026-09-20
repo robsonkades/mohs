@@ -15,6 +15,8 @@
  */
 package io.mohs.core.schedule;
 
+import io.mohs.core.TimePrecision;
+
 import java.time.Duration;
 import java.util.Objects;
 
@@ -36,6 +38,7 @@ public record IntervalSpec(Duration interval, boolean afterFinish) implements Sc
      */
     public IntervalSpec {
         Objects.requireNonNull(interval, "interval");
+        TimePrecision.micros(interval);
         if (interval.isZero() || interval.isNegative()) {
             throw new IllegalArgumentException("interval must be positive");
         }

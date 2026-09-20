@@ -44,7 +44,7 @@ import io.mohs.core.schedule.Schedule;
  *
  * <p>Fixed-delay ({@code afterFinish}) is a chain of single occurrences: once materialised, the next
  * firing is unknown until the execution finishes (the plan's {@code nextFireAt} comes out
- * {@code null} — the completion rearms it, see {@code LeaseStore.CompletionResult#rearmNextFireAt}).
+ * {@code null} — the completion rearms it, using its persisted origin and schedule revision).
  */
 public final class FiringPlanner {
 
@@ -90,15 +90,7 @@ public final class FiringPlanner {
         Objects.requireNonNull(misfire, "misfire");
         Objects.requireNonNull(nextFireAt, "nextFireAt");
         Objects.requireNonNull(now, "now");
-        // The 1ms slack is the COLUMN's resolution, not clock tolerance: DATETIME2 (100ns) and
-        // DATETIME(6) (microseconds) round the next_fire_at the calculation produced with nanoseconds,
-        // and the SELECT may return a row whose read value comes back marginally after the raw now.
-        // Without the slack, a non-event becomes a log.error — and a benign ERROR is what erodes trust
-        // in the log at 3 a.m.
-        // (The database-synced clock does NOT reach this guard: fireDueTriggers reads the clock once
-        // and passes the SAME now to findDueRecurring and to plan. The real violation would be a
-        // custom JobStore ignoring the now it was given.)
-        if (nextFireAt.isAfter(now.plusMillis(1))) {
+        if (nextFireAt.isAfter(now)) {
             throw new IllegalArgumentException("trigger is not due yet: next_fire_at=" + nextFireAt + " is after now="
                     + now + " — the caller must only plan triggers already due (" + schedule + ")");
         }

@@ -35,89 +35,90 @@ import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class JdbcNodeStoreTest {
-
-    /** The scenarios' node lease — the value itself does not matter, only the {@code at + TTL} arithmetic. */
-    private static final Duration NODE_LEASE_TTL = Duration.ofSeconds(15);
-
-    private JdbcNodeStore store;
-
-    @BeforeEach
-    void setUp() {
-        store = new JdbcNodeStore(freshH2DataSource(), new H2JdbcDelegate());
-    }
-
-    private static DataSource freshH2DataSource() {
-        JdbcDataSource h2 = new JdbcDataSource();
-        h2.setURL("jdbc:h2:mem:node-store-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
-        h2.setUser("sa");
-        h2.setPassword("");
-        new ResourceDatabasePopulator(new ClassPathResource("schema-h2.sql")).execute(h2);
-        return h2;
-    }
-
-    private void heartbeat(String nodeId, EngineState state, long epoch, Instant at) {
-        store.heartbeat(nodeId, state, epoch, at, at.plus(NODE_LEASE_TTL));
-    }
-
     @Test
-    void heartbeatInsertsANewNode() {
-        Instant at = Instant.parse("2026-08-14T12:00:00Z");
-
-        heartbeat("node-1", EngineState.RUNNING, 1, at);
-
-        assertThat(store.findAll()).containsExactly(
-                new StoredNode("node-1", EngineState.RUNNING, at, 1, at.plus(NODE_LEASE_TTL)));
-    }
-
-    @Test
-    void heartbeatOnExistingNodeUpdatesStateEpochAndLease() {
-        heartbeat("node-1", EngineState.RUNNING, 1, Instant.parse("2026-08-14T12:00:00Z"));
-
-        Instant later = Instant.parse("2026-08-14T12:00:30Z");
-        heartbeat("node-1", EngineState.DRAINING, 2, later);
-
-        assertThat(store.findAll()).containsExactly(
-                new StoredNode("node-1", EngineState.DRAINING, later, 2, later.plus(NODE_LEASE_TTL)));
-    }
-
-    @Test
-    void findAllReturnsEveryNode() {
-        Instant at = Instant.parse("2026-08-14T12:00:00Z");
-        heartbeat("node-1", EngineState.RUNNING, 1, at);
-        heartbeat("node-2", EngineState.RUNNING, 1, at);
-
-        assertThat(store.findAll()).extracting(StoredNode::nodeId).containsExactlyInAnyOrder("node-1", "node-2");
-    }
-
-    @Test
-    void findAllReturnsEmptyWhenNoNodeHasEverBeaten() {
+    void sessionTtlCannotSilentlyLoseSubMicrosecondPrecision() {
+        var catalog = new io.mohs.engine.ExecutableCatalog(java.util.Map.of());
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> store.register("01991337-0000-7000-8000-000000000087", EngineState.RUNNING,
+                Duration.ofNanos(1), catalog)).isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> store.renew("01991337-0000-7000-8000-000000000087", EngineState.RUNNING,
+                Duration.ofSeconds(1).plusNanos(1))).isInstanceOf(IllegalArgumentException.class);
         assertThat(store.findAll()).isEmpty();
     }
 
-    /** Mixed-version tolerance: a row written by an older jar, with no {@code expires_at}, comes back with the field null — the reaper decides by the heartbeat's staleness. */
-    @Test
-    void findAllReadsALegacyRowWithoutANodeLease() {
-        Instant at = Instant.parse("2026-08-14T12:00:00Z");
-        DataSource dataSource = freshH2DataSource();
-        new JdbcTemplate(dataSource).update(
-                "INSERT INTO mohs_nodes (node_id, state, last_heartbeat_at, epoch) VALUES (?, 'RUNNING', ?, 0)",
-                "legacy-node", JdbcTimestamps.toUtcLocalDateTime(at));
+    private static final Duration TTL = Duration.ofSeconds(15);
+    private JdbcNodeStore store;
+    private JdbcTemplate jdbc;
 
-        assertThat(new JdbcNodeStore(dataSource, new H2JdbcDelegate()).findAll()).containsExactly(
-                new StoredNode("legacy-node", EngineState.RUNNING, at, 0, null));
+    @BeforeEach
+    void setUp() {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:session-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
+        new ResourceDatabasePopulator(new ClassPathResource("schema-h2.sql")).execute(source);
+        store = new JdbcNodeStore(source, new H2JdbcDelegate());
+        jdbc = new JdbcTemplate(source);
     }
 
-    /** A cutoff strictly BEFORE: a row exactly at the cutoff stays (a heartbeat at the threshold is still a signal, not rubbish). */
     @Test
-    void deleteHeartbeatsBeforeRemovesOnlyStrictlyStaleNodes() {
-        Instant cutoff = Instant.parse("2026-08-14T11:30:00Z");
-        heartbeat("stale", EngineState.RUNNING, 1, cutoff.minusSeconds(1));
-        heartbeat("at-cutoff", EngineState.RUNNING, 1, cutoff);
-        heartbeat("fresh", EngineState.RUNNING, 1, Instant.parse("2026-08-14T12:00:00Z"));
+    void registerUsesDatabaseTimeAndRepeatingItReturnsTheSameSession() {
+        var registered = store.register("01991337-0000-7000-8000-000000000064", EngineState.RUNNING, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource()));
+        assertThat(registered.expiresAt()).isEqualTo(registered.lastHeartbeatAt().plus(TTL));
+        assertThat(registered.revoked()).isFalse();
+        assertThat(store.register("01991337-0000-7000-8000-000000000064", EngineState.PAUSED, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource()))).isEqualTo(registered);
+        assertThat(store.findAll()).containsExactly(registered);
+    }
 
-        int purged = store.deleteHeartbeatsBefore(cutoff);
+    @Test
+    void renewChangesStateWithoutChangingIdentity() {
+        var original = store.register("01991337-0000-7000-8000-000000000064", EngineState.RUNNING, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource()));
+        var renewed = store.renew("01991337-0000-7000-8000-000000000064", EngineState.DRAINING, TTL).orElseThrow();
+        assertThat(renewed.nodeId()).isEqualTo(original.nodeId());
+        assertThat(renewed.state()).isEqualTo(EngineState.DRAINING);
+        assertThat(renewed.lastHeartbeatAt()).isAfterOrEqualTo(original.lastHeartbeatAt());
+        assertThat(renewed.expiresAt()).isEqualTo(renewed.lastHeartbeatAt().plus(TTL));
+    }
 
-        assertThat(purged).isEqualTo(1);
-        assertThat(store.findAll()).extracting(StoredNode::nodeId).containsExactlyInAnyOrder("at-cutoff", "fresh");
+    @Test
+    void expiredOrStoppedIdentitiesCannotBeResurrected() {
+        var original = store.register("01991337-0000-7000-8000-00000000004c", EngineState.RUNNING, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource()));
+        jdbc.update("UPDATE mohs_nodes SET expires_at = ? WHERE node_id = '01991337-0000-7000-8000-00000000004c'",
+                JdbcTimestamps.toUtcLocalDateTime(original.lastHeartbeatAt().minusSeconds(1)));
+        assertThat(store.renew("01991337-0000-7000-8000-00000000004c", EngineState.RUNNING, TTL)).isEmpty();
+        assertThat(store.revokeExpired("01991337-0000-7000-8000-00000000004c")).isTrue();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> store.register("01991337-0000-7000-8000-00000000004c", EngineState.RUNNING, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource())))
+                .isInstanceOf(io.mohs.engine.NodeStore.SessionExpired.class);
+        store.register("01991337-0000-7000-8000-000000000086", EngineState.RUNNING, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource()));
+        store.stop("01991337-0000-7000-8000-000000000086");
+        assertThat(store.renew("01991337-0000-7000-8000-000000000086", EngineState.RUNNING, TTL)).isEmpty();
+    }
+
+    @Test
+    void healthySessionCannotBeRevokedByAnObsoleteFailureObservation() {
+        store.register("01991337-0000-7000-8000-000000000051", EngineState.RUNNING, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource()));
+        assertThat(store.revokeExpired("01991337-0000-7000-8000-000000000051")).isFalse();
+        assertThat(store.renew("01991337-0000-7000-8000-000000000051", EngineState.RUNNING, TTL)).isPresent();
+        assertThat(store.renew("01991337-0000-7000-8000-00000000008e", EngineState.RUNNING, TTL)).isEmpty();
+    }
+
+    @Test
+    void findAllReturnsEverySessionAndNoSyntheticNodes() {
+        assertThat(store.findAll()).isEmpty();
+        store.register("01991337-0000-7000-8000-000000000008", EngineState.RUNNING, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource()));
+        store.register("01991337-0000-7000-8000-00000000000a", EngineState.PAUSED, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource()));
+        assertThat(store.findAll()).extracting(StoredNode::nodeId).containsExactlyInAnyOrder("01991337-0000-7000-8000-000000000008", "01991337-0000-7000-8000-00000000000a");
+    }
+
+    @Test
+    void purgeRequiresRevocationStrictAgeAndNoOutstandingOwnership() {
+        var cutoff = store.register("01991337-0000-7000-8000-000000000084", EngineState.RUNNING, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource())).lastHeartbeatAt();
+        for (String id : java.util.List.of("01991337-0001-7000-8000-000000000090", "01991337-0002-7000-8000-000000000099", "01991337-0002-7000-8000-00000000009a")) store.register(id, EngineState.RUNNING, TTL, io.mohs.store.jdbc.TestSessions.catalog(jdbc.getDataSource()));
+        for (String id : java.util.List.of("01991337-0000-7000-8000-000000000084", "01991337-0001-7000-8000-000000000090", "01991337-0002-7000-8000-00000000009a")) store.stop(id);
+        jdbc.update("UPDATE mohs_nodes SET last_heartbeat_at = ?", JdbcTimestamps.toUtcLocalDateTime(cutoff.minusSeconds(1)));
+        jdbc.update("UPDATE mohs_nodes SET last_heartbeat_at = ? WHERE node_id = '01991337-0001-7000-8000-000000000090'", JdbcTimestamps.toUtcLocalDateTime(cutoff));
+        jdbc.update("""
+                INSERT INTO mohs_work (work_state, execution_id, job_key, node_id, claim_token, attempt, priority, claimed_at)
+                VALUES ('LEASED', 'execution', 'job', '01991337-0002-7000-8000-00000000009a', 'token', 1, 20, ?)
+                """, JdbcTimestamps.toUtcLocalDateTime(cutoff));
+        assertThat(store.deleteHeartbeatsBefore(cutoff)).isEqualTo(1);
+        assertThat(store.findAll()).extracting(StoredNode::nodeId).containsExactlyInAnyOrder("01991337-0001-7000-8000-000000000090", "01991337-0002-7000-8000-000000000099", "01991337-0002-7000-8000-00000000009a");
     }
 }

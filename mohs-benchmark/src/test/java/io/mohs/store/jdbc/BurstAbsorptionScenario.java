@@ -98,7 +98,7 @@ class BurstAbsorptionScenario {
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.delegate())) {
             // retries(0): a retry would re-enter the same queue and inflate the very backlog being
             // measured, turning a dispatch hiccup into an arrival rate the scenario never applied
-            cluster.defineJob("burst", spec -> spec.retries(0));
+            cluster.defineJob("burst", spec -> spec.withRetries(0));
             for (int i = 0; i < NODES; i++) {
                 cluster.addNode(settings(), List.of());
             }
@@ -194,8 +194,7 @@ class BurstAbsorptionScenario {
      * measure the sleep rather than the claim.
      */
     private static EngineSettings settings() {
-        return new EngineSettings(Duration.ofMillis(25), Duration.ofMillis(200), 64, 32, 3,
-                Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60));
+        return new EngineSettings(Duration.ofMillis(25),Duration.ofMillis(200),64,32,3,Duration.ofSeconds(15),null,Duration.ofSeconds(60),Duration.ZERO,Duration.ZERO);
     }
 
     private static void report(int burst, List<Sample> duringBurst, Recovery recovery, int invocations, int succeeded,

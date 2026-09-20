@@ -19,7 +19,6 @@ import jakarta.servlet.http.HttpServletRequest;
 
 import java.util.regex.Pattern;
 
-import io.mohs.core.execution.Execution;
 import io.mohs.rest.error.InvalidActorException;
 
 /**
@@ -84,14 +83,6 @@ public final class HeaderActorResolver implements ActorResolver {
         if (UNSAFE_ACTOR.matcher(actor).find()) {
             throw new InvalidActorException(ACTOR_HEADER + " must not contain control or bidirectional-override"
                     + " characters — the actor is persisted and written to the audit log");
-        }
-        // Validated here for the same reason as the length ceiling: a 400 that teaches, not
-        // ScheduleCommand.as's IllegalArgumentException becoming a 500 in the generic handler.
-        // Case- and whitespace-insensitive for the same reason as the guard in as(): the upsert's
-        // cure compares the actor in the database, whose default collation may be case-insensitive
-        if (Execution.SCHEDULER_ACTOR.equalsIgnoreCase(actor.strip())) {
-            throw new InvalidActorException(ACTOR_HEADER + " must not be '" + Execution.SCHEDULER_ACTOR
-                    + "' — reserved for engine-fired occurrences; identify the real caller or omit the header");
         }
         return actor;
     }

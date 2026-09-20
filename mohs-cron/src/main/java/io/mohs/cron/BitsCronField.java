@@ -244,8 +244,8 @@ final class BitsCronField extends CronField {
             setBits(range);
         }
         else {
-            for (int i = (int) range.getMinimum(); i <= range.getMaximum(); i += delta) {
-                setBit(i);
+            for (long i = range.getMinimum(); i <= range.getMaximum(); i += delta) {
+                setBit((int) i);
             }
         }
     }

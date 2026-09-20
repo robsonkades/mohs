@@ -36,7 +36,6 @@ import javax.sql.DataSource;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.util.ClassUtils;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -44,7 +43,6 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import io.github.robsonkades.uuidv7.UUIDv7;
 
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
@@ -56,6 +54,7 @@ import io.mohs.core.schedule.OnDemandSpec;
 import io.mohs.core.schedule.Schedule;
 import io.mohs.core.execution.Execution;
 import io.mohs.engine.JobStore;
+import io.mohs.engine.JobBinding;
 import io.mohs.engine.NextFireCalculator;
 import io.mohs.engine.StoredJob;
 import io.mohs.store.jdbc.delegate.JdbcDelegate;
@@ -82,7 +81,9 @@ public final class JdbcJobStore implements JobStore {
      * dies every cycle. The facade's listing and the boot reconcile share the same cursor helper.
      */
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final NamedParameterJdbcTemplate tickTemplate;
     private final TransactionTemplate transactionTemplate;
+    private final TransactionTemplate bindingTransaction;
     private final Clock clock;
     private final JdbcDelegate delegate;
     private final NextFireCalculator nextFireCalculator = new NextFireCalculator();
@@ -96,111 +97,205 @@ public final class JdbcJobStore implements JobStore {
      */
     public JdbcJobStore(DataSource dataSource, Clock clock, JdbcDelegate delegate) {
         this.jdbcTemplate = JdbcSupport.namedTemplateWithStreamFetchSize(Objects.requireNonNull(dataSource, "dataSource"));
+        this.tickTemplate = JdbcSupport.tickTemplate(dataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-        // Default propagation, on purpose and unlike the claim: this template wraps one act, remove()
-        // — draining the queue and marking retired as an indivisible pair — and a remove called from
-        // the host's code JOINS the host's transaction when there is one, so a remove inside a
-        // @Transactional rolls back with it. The isolation below therefore holds only when the
-        // template opens the transaction itself (a remove with no outer transaction), where the
-        // guarded DELETE assumes "last write wins" and must not inherit the database's default
-        // (MySQL's is REPEATABLE READ); inside the host's transaction it is the host's level, which
-        // Spring ignores here rather than validating. The other writes of this store fall in two
-        // shapes, neither wrapped here: pause, resume, reschedule, markOrphaned and arming the next
-        // fire are one guarded UPDATE each, in autocommit or in whatever transaction the host has
-        // bound; define (upsert) is a trigger snapshot followed by one guarded UPDATE or INSERT,
-        // whose lost-update protection is NOT rewriting next_fire_at on an unchanged schedule —
-        // never an isolation level. Under the host's REPEATABLE READ the re-decide after a lost
-        // INSERT race sees the pre-INSERT snapshot and overwrites with a value computed from the
-        // same instant; benign, and documented at upsert().
+        this.bindingTransaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        this.bindingTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_NESTED);
+        // Missing-key UPDATEs must not take MySQL REPEATABLE READ gap locks: two first
+        // registrations would otherwise deadlock before the unique key can choose a winner.
+        // An enclosing application transaction retains its own isolation and retry policy.
+        this.bindingTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        this.bindingTransaction.setTimeout(3);
+        // Retirement joins a host transaction; standalone writes use READ_COMMITTED.
+        // Registration is serialized by catalog and job locks; firing compares the schedule revision.
         this.transactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        this.transactionTemplate.setTimeout(30);
         this.clock = Objects.requireNonNull(clock, "clock");
         this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
 
     @Override
-    public JobDefinition upsert(JobDefinition definition) {
+    public StoredJob upsertBound(JobDefinition definition, JobBinding binding) {
         Objects.requireNonNull(definition, "definition");
+        Objects.requireNonNull(binding, "binding");
+        if (!definition.key().equals(binding.key())) throw new IllegalArgumentException("binding key differs from definition");
+        // A concurrent first insert is retried outside the savepoint: PostgreSQL must have a
+        // healthy transaction before we read the winner and validate its ownership.
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return Objects.requireNonNull(bindingTransaction.execute(_ -> {
+                    writeBound(definition, binding);
+                    return find(binding.key()).orElseThrow();
+                }));
+            } catch (DuplicateKeyException conflict) {
+                if (attempt >= 2) throw conflict;
+            }
+        }
+    }
+
+    private void writeBound(JobDefinition definition, JobBinding binding) {
+        new JdbcCatalog(jdbcTemplate, delegate).requireExistingExecutable(binding.executableKey());
+        definition = definition.withExecutableKey(binding.executableKey());
+        if (binding.input() != null) definition = definition.withInputContract(binding.input().inputContract());
+        new JdbcExecutionTransitions(jdbcTemplate, delegate).lockJobs(List.of(binding.key(), binding.executableKey()));
+        if (!binding.key().equals(binding.executableKey())) {
+            BindingOwner executable = lockBindingOwner(binding.executableKey()).orElse(null);
+            if (executable == null || executable.retired()) {
+                throw new IllegalArgumentException("no active executable '" + binding.executableKey().value() + "'");
+            }
+            requireInputContract(executable, definition);
+            String target = executable.executableKey();
+            if (target != null && !target.equals(binding.executableKey().value())) {
+                throw new IllegalArgumentException("a recurrence cannot reference another recurrence");
+            }
+        }
+        BindingOwner owner = lockBindingOwner(binding.key()).orElse(null);
+        if (owner != null) {
+            if (owner.retired()) throw new IllegalStateException("job is retired; use reactivate before updating it");
+            requireInputContract(owner, definition);
+            String previous = owner.executableKey();
+            if (previous == null && !binding.key().equals(binding.executableKey())
+                    || previous != null && !previous.equals(binding.executableKey().value())) {
+                throw new IllegalArgumentException("job '" + binding.key().value()
+                        + "' belongs to another definition or executable; choose a different schedule ID");
+            }
+        }
         Instant now = clock.instant();
-        ScheduleColumns scheduleColumns = ScheduleColumns.of(definition.schedule());
-        NextFireDecision nextFire = upsertNextFire(definition, scheduleColumns, now);
-        MapSqlParameterSource params = upsertParams(definition, scheduleColumns, nextFire,
-                JdbcTimestamps.toUtcLocalDateTime(now));
-
-        // Try the UPDATE first; 0 rows affected means a new key, so INSERT. That avoids the extra round
-        // trip (and the time-of-check/time-of-use race) of a prior SELECT COUNT to decide which of the
-        // two paths to take.
-        //
-        // orphaned/retired = FALSE even on an UPDATE: unlike paused (an operator decision the upsert
-        // never touches), both are consequences of "the source is gone" (an annotation removed, or
-        // Mohs.remove) — the upsert happening at all is proof that a real source (a scan, or
-        // Mohs.define) wants this job again, so define() after remove() resurrects the definition with
-        // its history intact.
-        int updated = jdbcTemplate.update(
-                delegate.upsertJobUpdate(nextFire instanceof NextFireDecision.Write), params);
-        return updated == 0 ? insertOrRedecide(definition, params, now) : definition;
-    }
-
-    /**
-     * The INSERT of a new key. The UPDATE-first shape does not close the race on its own: two nodes
-     * registering the same job at boot may both see 0 rows and both attempt an INSERT — the loser
-     * receives a {@link DuplicateKeyException} (job_key already exists, the other won) and turns into
-     * an UPDATE, not an error propagated to the bootstrap.
-     */
-    private JobDefinition insertOrRedecide(JobDefinition definition, MapSqlParameterSource params, Instant now) {
-        // A new row: Preserve is impossible here by construction (the snapshot saw the row exist, and
-        // a row is never deleted — remove is a soft retire); the guard reconstructs the initial value
-        // so that a violation of that invariant does not become a cryptic bind error in an INSERT that
-        // creates the row from scratch anyway.
-        if (!params.hasValue("nextFireAt")) {
-            params.addValue("nextFireAt",
-                    JdbcTimestamps.toUtcLocalDateTimeOrNull(initialNextFire(definition.schedule(), now)));
-        }
-        // The id enters only the INSERT: an existing row keeps the id it already had (a stable primary
-        // key for the job_key's lifetime, never rewritten).
-        // UUIDv7 (io.github.robsonkades:uuidv7) — the same generation as mohs_execution.execution_id.
-        params.addValue("id", UUIDv7.randomUUIDString())
-                .addValue("createdAt", JdbcTimestamps.toUtcLocalDateTime(now))
-                .addValue("paused", definition.startPaused());
-        try {
+        ScheduleColumns schedule = ScheduleColumns.of(definition.schedule());
+        NextFireDecision nextFire = upsertNextFire(definition, owner, now);
+        var input = binding.input();
+        MapSqlParameterSource params = upsertParams(definition, schedule, nextFire, JdbcTimestamps.toUtcLocalDateTime(now))
+                .addValue("executableKey", binding.executableKey().value())
+                .addValue("recurringPayload", input == null ? null : input.json())
+                .addValue("inputContract", definition.inputContract());
+        if (owner == null) {
+            // A competing insert is retried outside the savepoint, before it can change ownership.
+            params.addValue("createdAt", JdbcTimestamps.toUtcLocalDateTime(now))
+                    .addValue("paused", definition.startPaused());
             jdbcTemplate.update(delegate.insertJob(), params);
-        } catch (DuplicateKeyException _) {
-            // The other node won the INSERT: re-decide against the row that now exists — a decision
-            // taken against a snapshot dies with the snapshot (an identical schedule becomes
-            // Preserve, and the re-UPDATE does not touch next_fire_at). It terminates in one level:
-            // the row exists, and the second pass's UPDATE always finds it.
-            return upsert(definition);
+        } else {
+            jdbcTemplate.update(delegate.upsertBoundJobUpdate(nextFire instanceof NextFireDecision.Write), params);
         }
-        return definition;
     }
 
-    /**
-     * Every column both the UPDATE and the INSERT bind. {@code nextFireAt} is bound only under
-     * {@link NextFireDecision.Write}: its ABSENCE is what keeps the column out of the UPDATE
-     * ({@code delegate.upsertJobUpdate(false)}), which is how {@code Preserve} preserves.
-     */
+    private static void requireInputContract(BindingOwner owner, JobDefinition incoming) {
+        if (!owner.inputContract().equals(incoming.inputContract())) {
+            throw new IllegalArgumentException("input contract cannot be changed for a retained executable; use a new job ID");
+        }
+    }
+
+    private Optional<BindingOwner> lockBindingOwner(JobKey key) {
+        return JdbcSupport.findOne(jdbcTemplate, delegate.lockBindingOwner(),
+                new MapSqlParameterSource("jobKey", key.value()),
+                rs -> new BindingOwner(DefinitionSource.valueOf(rs.getString("source")), rs.getString("executable_key"),
+                        rs.getBoolean("retired"), rs.getString("input_contract"), readSchedule(rs, key.value())));
+    }
+
+    private record BindingOwner(DefinitionSource source, @Nullable String executableKey, boolean retired,
+            String inputContract, Schedule schedule) {}
+
+    @Override
+    public Optional<JobBinding> findBinding(JobKey key) {
+        return JdbcJobBindings.find(jdbcTemplate, delegate, key);
+    }
+
+    @Override
+    public Optional<JobKey> findExecutableKey(JobKey key) {
+        return JdbcSupport.findOne(jdbcTemplate, delegate.findExecutableKey(),
+                new MapSqlParameterSource("jobKey", key.value()), rs -> JobKey.of(rs.getString("executable_key")));
+    }
+
+    @Override
+    public boolean hasActiveDependents(JobKey key) {
+        return Integer.valueOf(1).equals(jdbcTemplate.queryForObject(delegate.hasActiveJobDependents(),
+                new MapSqlParameterSource("jobKey", key.value()).addValue("retired", false), Integer.class));
+    }
+
+    @Override
+    public List<JobBinding> bindings() {
+        return jdbcTemplate.query(delegate.findActiveJobBindings(), new MapSqlParameterSource("retired", false),
+                (rs, _) -> JdbcJobBindings.map(rs));
+    }
+
+    @Override
+    public JobDefinition upsert(JobDefinition definition) {
+        return writeExecutable(definition, false);
+    }
+
+    void reconcileExecutable(JobDefinition incoming, io.mohs.engine.CatalogStore.Conflict conflict) {
+        BindingOwner owner = lockBindingOwner(incoming.key()).orElse(null);
+        if (owner != null) {
+            requireInputContract(owner, incoming);
+            if (!incoming.key().value().equals(owner.executableKey())) {
+                throw new IllegalStateException("executable collides with a retained named recurrence: " + incoming.key().value());
+            }
+            if (owner.retired()) return;
+            var stored = find(incoming.key()).orElseThrow().definition();
+            if (!stored.equals(incoming)) {
+                if (conflict == io.mohs.engine.CatalogStore.Conflict.FAIL) {
+                    throw new IllegalStateException("job '" + incoming.key().value() + "' definition diverged from the stored one");
+                }
+                if (conflict == io.mohs.engine.CatalogStore.Conflict.PRESERVE) return;
+            }
+        }
+        writeExecutable(incoming, true);
+    }
+
+    private JobDefinition writeExecutable(JobDefinition definition, boolean catalogRegistration) {
+        Objects.requireNonNull(definition, "definition");
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return Objects.requireNonNull(bindingTransaction.execute(_ -> {
+                    if (!catalogRegistration) new JdbcCatalog(jdbcTemplate, delegate).requireExistingExecutable(definition.executableKey());
+                    BindingOwner owner = lockBindingOwner(definition.key()).orElse(null);
+                    if (owner != null && owner.retired()) throw new IllegalStateException("job is retired; use reactivate before updating it");
+                    if (owner != null && !owner.executableKey().equals(definition.executableKey().value())) {
+                        throw new IllegalArgumentException("executable identity cannot be changed for a retained job");
+                    }
+                    if (owner != null) requireInputContract(owner, definition);
+                    Instant now = clock.instant();
+                    ScheduleColumns columns = ScheduleColumns.of(definition.schedule());
+                    NextFireDecision next = upsertNextFire(definition, owner, now);
+                    var params = upsertParams(definition, columns, next, JdbcTimestamps.toUtcLocalDateTime(now));
+                    if (owner == null) {
+                        params.addValue("createdAt", JdbcTimestamps.toUtcLocalDateTime(now))
+                                .addValue("paused", definition.startPaused());
+                        jdbcTemplate.update(delegate.insertJob(), params);
+                    } else {
+                        jdbcTemplate.update(delegate.upsertJobUpdate(next instanceof NextFireDecision.Write), params);
+                    }
+                    return definition;
+                }));
+            } catch (DuplicateKeyException conflict) {
+                if (attempt >= 2) throw conflict;
+            }
+        }
+    }
+
     private static MapSqlParameterSource upsertParams(JobDefinition definition, ScheduleColumns scheduleColumns,
             NextFireDecision nextFire, LocalDateTime updatedAt) {
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("jobKey", definition.key().value())
                 .addValue("name", definition.name())
-                .addValue("handlerType", definition.handlerType().getName())
                 .addValue("scheduleType", scheduleType(definition.schedule()))
                 .addValue("cronExpression", scheduleColumns.cronExpression())
                 .addValue("cronZone", scheduleColumns.cronZone())
-                .addValue("intervalDuration", scheduleColumns.intervalDuration())
+                .addValue("intervalMicros", scheduleColumns.intervalMicros())
                 .addValue("intervalAfterFinish", scheduleColumns.intervalAfterFinish())
                 .addValue("runner", definition.runner())
                 .addValue("windowName", definition.window())
                 .addValue("rateLimit", definition.rateLimit())
                 .addValue("misfire", definition.misfire().name())
                 .addValue("startPaused", definition.startPaused())
-                .addValue("allowConcurrentExecutions", definition.allowConcurrentExecutions())
                 .addValue("maxConcurrentExecutions", definition.maxConcurrentExecutions())
                 .addValue("retries", definition.retries())
-                .addValue("timeout", definition.timeout() == null ? null : definition.timeout().toString())
+                .addValue("timeout_micros", definition.timeout() == null ? null : io.mohs.core.TimePrecision.micros(definition.timeout()))
                 .addValue("retryPolicy", definition.retryPolicy())
                 .addValue("source", definition.source().name())
-                .addValue("orphaned", false)
+                .addValue("executableKey", definition.executableKey().value())
+                .addValue("recurringPayload", null)
+                .addValue("inputContract", definition.inputContract())
+
                 .addValue("retired", false)
                 .addValue("updatedAt", updatedAt);
         // A record pattern Write(Instant v) would not match a null component (a type pattern) — bind the whole record
@@ -210,41 +305,11 @@ public final class JdbcJobStore implements JobStore {
         return params;
     }
 
-    /**
-     * The trigger's initial state belongs to the upsert: a new or altered schedule recomputes it
-     * ({@code cron.next(now)}; an interval becomes {@code now + interval} — a fixed-delay job's first
-     * firing anchors on the definition, there being no "previous end"), while an unchanged schedule
-     * preserves it — otherwise every redeploy of an {@code every PT30M} job would push the firing
-     * forward forever. An unrealisable cron fails HERE (an {@code IllegalArgumentException} from
-     * {@link NextFireCalculator}) — fail fast at the definition rather than failing every tick.
-     *
-     * <p>Preserving means {@link NextFireDecision.Preserve not writing the column}, never rewriting the
-     * value that was read: between the snapshot and the UPDATE, the firing CAS may advance the trigger
-     * and a completion may rearm the chain — rewriting the observed value would regress the series (a
-     * lost update, DDIA ch. 7) and re-fire an already materialised batch. The writes that remain are
-     * deliberate: an altered schedule overwrites (an explicit reconfiguration beats a concurrent
-     * firing), and the {@code NULL} cure races only against the completion's rearm, with near-identical
-     * values (a disarmed trigger is not a candidate for the firing CAS).
-     *
-     * <p>The {@code NULL} cure on an unchanged recurring schedule (a new column on an old database; a
-     * fixed-delay chain whose completion never rearmed): for {@code afterFinish}, only when there is no
-     * live scheduler occurrence — arming with the chain alive would create the overlap fixed-delay
-     * promises not to have.
-     */
-    private NextFireDecision upsertNextFire(JobDefinition definition, ScheduleColumns incoming, Instant now) {
-        Schedule schedule = definition.schedule();
-        TriggerSnapshot existing = selectTriggerSnapshot(definition.key());
-        if (existing == null || !existing.sameSchedule(scheduleType(schedule), incoming)) {
-            return new NextFireDecision.Write(initialNextFire(schedule, now));
-        }
-        if (existing.nextFireAt() != null || schedule instanceof OnDemandSpec) {
-            return new NextFireDecision.Preserve();
-        }
-        if (schedule instanceof IntervalSpec interval && interval.afterFinish()
-                && hasLiveSchedulerOccurrence(definition.key())) {
-            return new NextFireDecision.Preserve();
-        }
-        return new NextFireDecision.Write(initialNextFire(schedule, now));
+    /** The locking projection is current even when a MySQL host retains an older consistent snapshot. */
+    private NextFireDecision upsertNextFire(JobDefinition definition, @Nullable BindingOwner existing, Instant now) {
+        return existing == null || existing.retired() || !existing.schedule().equals(definition.schedule())
+                ? new NextFireDecision.Write(initialNextFire(definition.schedule(), now))
+                : new NextFireDecision.Preserve();
     }
 
     /** {@link #upsertNextFire}'s verdict: {@code Write} enters the UPDATE/INSERT; {@code Preserve} leaves the column out of the statement (see the lost-update comment in {@link #upsert}). */
@@ -257,52 +322,65 @@ public final class JdbcJobStore implements JobStore {
     }
 
     private @Nullable Instant initialNextFire(Schedule schedule, Instant now) {
-        return nextFireCalculator.nextFireAfter(schedule, now).orElse(null);
-    }
-
-    private @Nullable TriggerSnapshot selectTriggerSnapshot(JobKey key) {
-        return JdbcSupport.findOne(jdbcTemplate, delegate.findTriggerSnapshot(),
-                new MapSqlParameterSource("jobKey", key.value()),
-                rs -> new TriggerSnapshot(rs.getString("schedule_type"), rs.getString("cron_expression"),
-                        rs.getString("cron_zone"), rs.getString("interval_duration"),
-                        rs.getObject("interval_after_finish", Boolean.class),
-                        JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject("next_fire_at", LocalDateTime.class))))
-                .orElse(null);
-    }
-
-    private boolean hasLiveSchedulerOccurrence(JobKey key) {
-        // A cold path (the upsert), where the per-job sweep serves
-        Integer live = jdbcTemplate.queryForObject(delegate.countLiveSchedulerOccurrences(),
-                new MapSqlParameterSource("jobKey", key.value()).addValue("actor", Execution.SCHEDULER_ACTOR),
-                Integer.class);
-        return live != null && live > 0;
-    }
-
-    /** The persisted schedule plus {@code next_fire_at} of an existing row — what {@link #upsertNextFire} compares to decide preserve versus recompute. */
-    private record TriggerSnapshot(String scheduleType, @Nullable String cronExpression, @Nullable String cronZone,
-            @Nullable String intervalDuration, @Nullable Boolean intervalAfterFinish, @Nullable Instant nextFireAt) {
-
-        boolean sameSchedule(String incomingType, ScheduleColumns incoming) {
-            return scheduleType.equals(incomingType)
-                    && Objects.equals(cronExpression, incoming.cronExpression())
-                    && Objects.equals(cronZone, incoming.cronZone())
-                    && Objects.equals(intervalDuration, incoming.intervalDuration())
-                    && Objects.equals(intervalAfterFinish, incoming.intervalAfterFinish());
-        }
+        return nextFireCalculator.nextFireAfter(schedule, now).map(io.mohs.core.TimePrecision::eligible).orElse(null);
     }
 
     @Override
     public Optional<StoredJob> find(JobKey key) {
         Objects.requireNonNull(key, "key");
-        List<String> unresolvedHandlerJobKeys = new ArrayList<>();
         // job_key is UNIQUE — at most one row. retired stays out of every read (as a parameter, not a
         // literal: SQL Server's BIT does not accept FALSE): a retired job does not exist for the facade
         // or the claim, only the row remains for the foreign key.
         Optional<StoredJob> result = JdbcSupport.findOne(jdbcTemplate, delegate.findJobByKey(),
                 new MapSqlParameterSource("jobKey", key.value()).addValue("retired", false),
-                rs -> mapRowOrNull(rs, unresolvedHandlerJobKeys));
-        markOrphanedForUnresolvedHandlers(unresolvedHandlerJobKeys);
+                JdbcJobStore::mapRow);
         return result;
+    }
+
+    @Override
+    public boolean reactivate(JobKey key, io.mohs.engine.ExecutableCatalog catalog) {
+        Objects.requireNonNull(key, "key");
+        return Boolean.TRUE.equals(bindingTransaction.execute(_ -> {
+            new JdbcCatalog(jdbcTemplate, delegate).join(catalog);
+            var binding = findBinding(key).orElse(null);
+            if (binding == null) return false;
+            new JdbcExecutionTransitions(jdbcTemplate, delegate).lockJobs(List.of(key, binding.executableKey()));
+            var stored = lockBindingOwner(key).orElse(null);
+            if (stored == null || !stored.retired()) return false;
+            catalog.require(binding.executableKey(), stored.inputContract());
+            if (!key.equals(binding.executableKey())
+                    && lockBindingOwner(binding.executableKey()).filter(owner -> !owner.retired()).isEmpty()) {
+                throw new IllegalStateException("reactivate the executable before its named recurrences");
+            }
+            Instant now = clock.instant();
+            jdbcTemplate.update("""
+                    UPDATE mohs_job_definitions SET retired = :active, schedule_revision = schedule_revision + 1,
+                        next_fire_at = :nextFireAt, updated_at = :now WHERE job_key = :key
+                    """, new MapSqlParameterSource("key", key.value()).addValue("active", false)
+                    .addValue("nextFireAt", JdbcTimestamps.toUtcLocalDateTimeOrNull(initialNextFire(stored.schedule(), now)))
+                    .addValue("now", JdbcTimestamps.toUtcLocalDateTime(now)));
+            return true;
+        }));
+    }
+
+    @Override
+    public List<StoredJob> findByKeys(java.util.Collection<JobKey> keys) {
+        var found = new ArrayList<StoredJob>();
+        for (var chunk : JdbcSupport.chunksOf(keys.stream().map(JobKey::value).distinct().toList())) {
+            found.addAll(tickTemplate.query(delegate.findJobsByKeys(), new MapSqlParameterSource("jobKeys", chunk)
+                    .addValue("retired", false), (rs, _) -> mapRow(rs)));
+        }
+        return List.copyOf(found);
+    }
+
+    @Override
+    public Optional<Instant> nextFireAfter(Instant now) {
+        Objects.requireNonNull(now, "now");
+        return Optional.ofNullable(tickTemplate.queryForObject("""
+                SELECT MIN(next_fire_at) AS next_fire_at FROM mohs_job_definitions
+                WHERE retired = :inactive AND paused = :inactive AND next_fire_at > :now
+                """, new MapSqlParameterSource("inactive", false).addValue("now", delegate.splitTimestamp(now)),
+                (rs, _) -> JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject("next_fire_at", LocalDateTime.class))));
     }
 
     @Override
@@ -310,11 +388,6 @@ public final class JdbcJobStore implements JobStore {
         return queryForJobStream(delegate.findAllJobs(), new MapSqlParameterSource("retired", false));
     }
 
-    @Override
-    public Stream<StoredJob> findAllAnnotationSourced() {
-        return queryForJobStream(delegate.findAllAnnotationSourcedJobs(),
-                new MapSqlParameterSource("source", DefinitionSource.ANNOTATION.name()).addValue("retired", false));
-    }
 
     /**
      * The ceiling is in the SQL ({@code LIMIT}/{@code TOP}), not a {@code Stream.limit} over the
@@ -327,23 +400,16 @@ public final class JdbcJobStore implements JobStore {
      * PostgreSQL 16 at 1M due.
      */
     @Override
-    public List<StoredJob> findDueRecurring(Instant now, int limit) {
-        Objects.requireNonNull(now, "now");
-        try (Stream<StoredJob> due = queryForJobStream(delegate.findDueRecurringJobs(),
-                new MapSqlParameterSource("retired", false).addValue("paused", false).addValue("orphaned", false)
-                        .addValue("now", JdbcTimestamps.toUtcLocalDateTime(now)).addValue("limit", limit))) {
-            return due.toList();
-        }
-    }
-
-    @Override
-    public void armNextFire(JobKey key, Instant nextFireAt) {
-        Objects.requireNonNull(key, "key");
-        Objects.requireNonNull(nextFireAt, "nextFireAt");
-        // The IS NULL guard — the port's Javadoc: the cure only arms a disarmed trigger
-        jdbcTemplate.update(delegate.armNextFire(),
-                new MapSqlParameterSource("jobKey", key.value())
-                        .addValue("nextFireAt", JdbcTimestamps.toUtcLocalDateTime(nextFireAt)));
+    public DueJobs findDueRecurring(Instant horizon, int limit) {
+        Objects.requireNonNull(horizon, "horizon");
+        if (limit < 1 || limit > 1000) throw new IllegalArgumentException("due page limit must be in [1, 1000]");
+        Instant sampled = JdbcDatabaseTime.now(tickTemplate, delegate);
+        Instant now = io.mohs.core.TimePrecision.observed(horizon.isBefore(sampled) ? horizon : sampled);
+        var jobs = tickTemplate.query(delegate.findDueRecurringJobs(),
+                new MapSqlParameterSource("retired", false).addValue("paused", false)
+                        .addValue("now", delegate.splitTimestamp(now)).addValue("limit", (long) limit, java.sql.Types.BIGINT),
+                (rs, _) -> mapRow(rs));
+        return new DueJobs(now, jobs);
     }
 
     /**
@@ -365,7 +431,7 @@ public final class JdbcJobStore implements JobStore {
                         .addValue("scheduleType", scheduleType(schedule))
                         .addValue("cronExpression", columns.cronExpression())
                         .addValue("cronZone", columns.cronZone())
-                        .addValue("intervalDuration", columns.intervalDuration())
+                        .addValue("intervalMicros", columns.intervalMicros())
                         .addValue("intervalAfterFinish", columns.intervalAfterFinish())
                         .addValue("nextFireAt", JdbcTimestamps.toUtcLocalDateTimeOrNull(nextFireAt))
                         .addValue("updatedAt", JdbcTimestamps.toUtcLocalDateTime(now))
@@ -374,33 +440,7 @@ public final class JdbcJobStore implements JobStore {
     }
 
     private Stream<StoredJob> queryForJobStream(String sql, MapSqlParameterSource params) {
-        List<String> unresolvedHandlerJobKeys = new ArrayList<>();
-        return jdbcTemplate.queryForStream(sql, params,
-                        (rs, _) -> mapRowOrNull(rs, unresolvedHandlerJobKeys))
-                .filter(Objects::nonNull)
-                // Registered after queryForStream's internal cursor — it runs only once that cursor has
-                // closed, so the UPDATE below never contends for the connection with a ResultSet that is
-                // still open.
-                .onClose(() -> markOrphanedForUnresolvedHandlers(unresolvedHandlerJobKeys));
-    }
-
-    /**
-     * A self-healing routine: previously, a row with an unresolved {@code handler_type} simply vanished
-     * from {@link #find}/{@link #findAll} — the same failure mode already solved for "annotation absent
-     * from the code" (it becomes ORPHANED, never silently disappears), except that this more severe
-     * class of failure (the class no longer exists at all) did not trigger the same mechanism.
-     *
-     * <p>Called after the read has finished — never during it, so as not to write with a cursor still
-     * open on the same connection.
-     */
-    private void markOrphanedForUnresolvedHandlers(List<String> jobKeys) {
-        jobKeys.forEach(jobKey -> markOrphaned(JobKey.of(jobKey)));
-    }
-
-    @Override
-    public void markOrphaned(JobKey key) {
-        jdbcTemplate.update(delegate.markJobOrphaned(),
-                new MapSqlParameterSource("jobKey", key.value()).addValue("orphaned", true));
+        return jdbcTemplate.queryForStream(sql, params, (rs, _) -> mapRow(rs));
     }
 
     @Override
@@ -416,23 +456,29 @@ public final class JdbcJobStore implements JobStore {
     }
 
     /**
-     * A soft retire, never a {@code DELETE}: "preserve history" ({@code Mohs#remove}) requires the job's
-     * row to stay alive anyway — history in {@code mohs_execution} keeps pointing at it.
-     *
-     * <p>Its own transaction: draining the QUEUE and marking {@code retired} are an indivisible pair
-     * (draining without marking leaves the firer materialising new occurrences; marking without
-     * draining would leave entries stuck in {@code mohs_ready} forever — the queue does not filter
-     * retired, this drain does).
-     *
-     * <p>A lease in flight ends on its own: the terminal outcome writes normally, and a post-retire
-     * retry dies in failBeforeDispatch — it is {@link #find}'s {@code retired} filter that kills it (the
-     * Engine's snapshot heal queries fresh, and a retired job must stay invisible there; removing that
-     * filter would resurrect queue zombies).
+     * Retains the definition identity and atomically cancels queued work. A held job lock excludes
+     * all supported writers; the current locking scan determines the batch of cancellations.
+     * Acquired work remains fenced and may finish, but retirement suppresses further retries.
+     * The host must use READ_COMMITTED; standalone retirement has a 30-second deadline.
      */
     @Override
     public void remove(JobKey key) {
         Objects.requireNonNull(key, "key");
         transactionTemplate.executeWithoutResult(_ -> {
+            // A retained REPEATABLE_READ snapshot can miss work accepted before this job lock.
+            jdbcTemplate.getJdbcTemplate().execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                if (connection.getTransactionIsolation() != java.sql.Connection.TRANSACTION_READ_COMMITTED) {
+                    throw new org.springframework.transaction.IllegalTransactionStateException(
+                            "job retirement requires READ_COMMITTED; use that isolation for the host transaction or retire outside it");
+                }
+                return null;
+            });
+            if (lockBindingOwner(key).isPresent()) {
+                if (hasActiveDependents(key)) {
+                    throw new IllegalArgumentException("executable '" + key.value()
+                            + "' still has active recurring schedules; remove those schedules first");
+                }
+            }
             List<String> drained = drainQueue(key);
             // ONE clock read for the whole logical act: two calls to clock.instant() in the same
             // transaction used to write two different instants
@@ -446,19 +492,14 @@ public final class JdbcJobStore implements JobStore {
     private List<String> drainQueue(JobKey key) {
         List<String> queued = jdbcTemplate.queryForList(delegate.findQueuedExecutionIdsByJob(),
                 new MapSqlParameterSource("jobKey", key.value()), String.class);
-        List<String> drained = new ArrayList<>(queued.size());
-        for (String executionId : queued) {
-            // The DELETE decides the race against a concurrent claim: 0 rows means the claim took the
-            // entry and its lease ends on its own — never CANCELLED over a claimed execution (a
-            // subquery predicate evaluates against a snapshot and serialises nothing; the DELETE's
-            // row lock serialises — DDIA ch. 7). A cold path: N round trips per retirement do not
-            // matter
-            if (jdbcTemplate.update(delegate.deleteReadyById(),
-                    new MapSqlParameterSource("executionId", executionId)) == 1) {
-                drained.add(executionId);
+        // Every live writer takes this job lock first; the locking read fixes the complete set.
+        for (List<String> chunk : JdbcSupport.chunksOf(queued)) {
+            int deleted = jdbcTemplate.update(delegate.readyDelete(), new MapSqlParameterSource("ids", chunk));
+            if (deleted != chunk.size()) {
+                throw new IllegalStateException("queued work changed while the retirement held its job and work locks");
             }
         }
-        return drained;
+        return queued;
     }
 
     /**
@@ -480,14 +521,14 @@ public final class JdbcJobStore implements JobStore {
      * entries in the queue, and two concurrent removes over overlapping batches would cross — the
      * stable order the {@link SortedMap} returns is what keeps the pair of UPDATEs free of deadlock.
      */
-    private SortedMap<String, Integer> cancelDrained(List<String> drained, LocalDateTime now) {
-        SortedMap<String, Integer> cancelledPerBatch = new TreeMap<>();
+    private SortedMap<String, Long> cancelDrained(List<String> drained, LocalDateTime now) {
+        SortedMap<String, Long> cancelledPerBatch = new TreeMap<>();
         for (List<String> chunk : JdbcSupport.chunksOf(drained)) {
             jdbcTemplate.update(delegate.cancelDrainedExecutions(),
                     new MapSqlParameterSource("ids", chunk).addValue("now", now));
             for (Map<String, Object> member : drainedBatchMembers(chunk)) {
                 cancelledPerBatch.merge((String) member.get("batch_id"),
-                        ((Number) member.get("pending")).intValue(), Integer::sum);
+                        ((Number) member.get("pending")).longValue(), Math::addExact);
             }
         }
         return cancelledPerBatch;
@@ -497,19 +538,8 @@ public final class JdbcJobStore implements JobStore {
         return jdbcTemplate.queryForList(delegate.drainedBatchMembers(), new MapSqlParameterSource("ids", drained));
     }
 
-    /**
-     * A stable order by {@code batch_id} (the caller's {@link SortedMap} order): two concurrent removes
-     * touching the same batches do not cross.
-     *
-     * <p>{@code mohs_batches} SQL lives here rather than in {@code BatchStore} because the increment is
-     * done in bulk ({@code + :n} per batch, not N calls), a shape the port does not have. If a third
-     * case appears, it becomes {@code incrementFailedBy} on the port.
-     */
-    private void countCancelledMembers(SortedMap<String, Integer> cancelledPerBatch) {
-        for (Map.Entry<String, Integer> batch : cancelledPerBatch.entrySet()) {
-            jdbcTemplate.update(delegate.countCancelledBatchMembers(),
-                    new MapSqlParameterSource("id", batch.getKey()).addValue("pending", batch.getValue()));
-        }
+    private void countCancelledMembers(SortedMap<String, Long> cancelledPerBatch) {
+        new JdbcExecutionTransitions(jdbcTemplate, delegate).countFailedMembers(cancelledPerBatch);
     }
 
     private void markRetired(JobKey key, LocalDateTime now) {
@@ -533,47 +563,31 @@ public final class JdbcJobStore implements JobStore {
      * it already did in {@link #scheduleType}, instead of silently becoming four {@code null} columns.
      */
     private record ScheduleColumns(@Nullable String cronExpression, @Nullable String cronZone,
-                                    @Nullable String intervalDuration, @Nullable Boolean intervalAfterFinish) {
+                                    @Nullable Long intervalMicros, @Nullable Boolean intervalAfterFinish) {
 
         static ScheduleColumns of(Schedule schedule) {
             return switch (schedule) {
                 case CronSpec cron -> new ScheduleColumns(cron.expression(), cron.zone().getId(), null, null);
-                case IntervalSpec interval -> new ScheduleColumns(null, null, interval.interval().toString(), interval.afterFinish());
+                case IntervalSpec interval -> new ScheduleColumns(null, null, io.mohs.core.TimePrecision.micros(interval.interval()), interval.afterFinish());
                 case OnDemandSpec _ -> new ScheduleColumns(null, null, null, null);
             };
         }
     }
 
-    /**
-     * {@code null} if {@code handler_type} no longer resolves (the handler was removed from the code) —
-     * the row is skipped from the result, a WARN is logged, and the {@code job_key} is noted in
-     * {@code unresolvedHandlerJobKeys} for {@link #markOrphanedForUnresolvedHandlers} to mark
-     * afterwards.
-     */
-    private static @Nullable StoredJob mapRowOrNull(ResultSet rs, List<String> unresolvedHandlerJobKeys) throws SQLException {
+    /** Reads metadata only; executable classes and input decoding belong to the frozen local catalog. */
+    private static StoredJob mapRow(ResultSet rs) throws SQLException {
         String jobKey = rs.getString("job_key");
-        String handlerTypeName = rs.getString("handler_type");
-        Class<?> handlerType;
-        try {
-            handlerType = ClassUtils.forName(handlerTypeName, ClassUtils.getDefaultClassLoader());
-        } catch (ClassNotFoundException e) {
-            log.warn("handler type '{}' for job '{}' not found on classpath, marking orphaned", handlerTypeName, jobKey);
-            unresolvedHandlerJobKeys.add(jobKey);
-            return null;
-        }
-
         Schedule schedule = readSchedule(rs, jobKey);
-        String timeoutValue = rs.getString("timeout");
-        Duration timeout = timeoutValue == null ? null : Duration.parse(timeoutValue);
+        Long timeoutValue = rs.getObject("timeout_micros", Long.class);
+        Duration timeout = timeoutValue == null ? null : io.mohs.core.TimePrecision.duration(timeoutValue);
         JobDefinition definition = new JobDefinition(
-                JobKey.of(jobKey), rs.getString("name"), handlerType, schedule,
+                JobKey.of(jobKey), rs.getString("name"), JobKey.of(rs.getString("executable_key")), schedule,
                 rs.getString("runner"), rs.getString("window_name"), rs.getString("rate_limit"),
-                Misfire.valueOf(rs.getString("misfire")), rs.getBoolean("start_paused"),
-                rs.getBoolean("allow_concurrent_executions"), rs.getInt("max_concurrent_executions"),
+                Misfire.valueOf(rs.getString("misfire")), rs.getBoolean("start_paused"), rs.getInt("max_concurrent_executions"),
                 rs.getInt("retries"), timeout, rs.getString("retry_policy"),
-                DefinitionSource.valueOf(rs.getString("source")));
-        return new StoredJob(definition, rs.getBoolean("orphaned"), rs.getBoolean("paused"),
-                JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject("next_fire_at", LocalDateTime.class)));
+                DefinitionSource.valueOf(rs.getString("source")), rs.getString("input_contract"));
+        return new StoredJob(definition, rs.getBoolean("paused"),
+                JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject("next_fire_at", LocalDateTime.class)), rs.getLong("schedule_revision"));
     }
 
     /** The inverse of {@link ScheduleColumns#of}: the four schedule columns back into the {@link Schedule} variant {@code schedule_type} names. */
@@ -581,7 +595,7 @@ public final class JdbcJobStore implements JobStore {
         String scheduleType = rs.getString("schedule_type");
         return switch (scheduleType) {
             case "CRON" -> new CronSpec(rs.getString("cron_expression"), ZoneId.of(rs.getString("cron_zone")));
-            case "INTERVAL" -> new IntervalSpec(Duration.parse(rs.getString("interval_duration")), rs.getBoolean("interval_after_finish"));
+            case "INTERVAL" -> new IntervalSpec(io.mohs.core.TimePrecision.duration(rs.getLong("interval_micros")), rs.getBoolean("interval_after_finish"));
             case "ON_DEMAND" -> new OnDemandSpec();
             default -> throw new IllegalStateException("unknown schedule_type '" + scheduleType + "' for job '" + jobKey + "'");
         };

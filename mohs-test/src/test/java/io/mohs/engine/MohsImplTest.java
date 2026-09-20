@@ -37,7 +37,6 @@ import io.mohs.core.NodeSnapshot;
 import io.mohs.core.OverviewSnapshot;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
-import io.mohs.core.definition.JobSpec;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.execution.ExecutionState;
@@ -89,6 +88,7 @@ class MohsImplTest {
     private HandlerRegistry handlerRegistry;
     private BatchStore batchStore;
     private MohsImpl mohs;
+    private SubmissionStore submissions;
 
     @BeforeEach
     void setUp() {
@@ -101,32 +101,36 @@ class MohsImplTest {
         rateLimitStore = mock(RateLimitStore.class);
         handlerRegistry = new HandlerRegistry();
         batchStore = mock(BatchStore.class);
-        mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, (work, onDurable) -> { work.run(); onDurable.run(); }, nodeStore, rateLimitStore, handlerRegistry, clock, mock(MohsLifecycle.class), batchStore, new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { }, List.of(), Runnable::run);
+        submissions = mock(SubmissionStore.class);
+        org.mockito.Mockito.doAnswer(call -> { ((Runnable) call.getArgument(2)).run(); return null; })
+                .when(submissions).accept(org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        mohs = new MohsImpl(jobStore, workQueue, historyStore, leaseStore, submissions, nodeStore, rateLimitStore, handlerRegistry, clock, mock(MohsLifecycle.class), batchStore, new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { }, List.of(), Runnable::run);
     }
 
-    private static JobDefinition onDemand(String key) {
-        return JobDefinition.of(key, Handler.class, JobSpec::onDemand);
+    private JobDefinition onDemand(String key) {
+        handlerRegistry.register(JobKey.of(key), (_, _) -> {}, String.class);
+        return JobDefinition.of(key, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false);
     }
 
     private static JobDefinition everyMinute(String key) {
-        return JobDefinition.of(key, Handler.class, spec -> spec.every(Duration.ofMinutes(1)));
+        return JobDefinition.of(key, new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false);
     }
 
     @Test
     void findJobReturnsEmptyForAnUnknownKey() {
-        assertThat(mohs.findJob(JobKey.of("ghost"))).isEmpty();
+        assertThat(mohs.findJob(JobKey.of("01991337-0000-7000-8000-000000000050"))).isEmpty();
     }
 
     /** A pending execution is cancelled by a direct CAS; the cooperative-flag path is not even attempted. */
     @Test
     void cancelOfAPendingExecutionCancelsDirectly() {
-        ExecutionId id = ExecutionId.of("exec-1");
-        Execution cancelled = new Execution(id, JobKey.of("welcome-email"), ExecutionState.CANCELLED, NOW, null, List.of(), "test");
-        when(workQueue.cancelQueued(eq(id), any())).thenReturn(true);
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        Execution cancelled = new Execution(id, JobKey.of("welcome-email"), ExecutionState.CANCELLED, NOW, null, Optional.empty(), "test");
+        when(workQueue.cancel(eq(id), any())).thenReturn(true);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(cancelled));
 
         assertThat(mohs.cancel(id)).contains(cancelled);
-        verify(leaseStore, never()).requestCancellation(any());
+        org.mockito.Mockito.verifyNoInteractions(leaseStore);
     }
 
     /**
@@ -136,14 +140,13 @@ class MohsImplTest {
      */
     @Test
     void cancelOfARunningExecutionFallsThroughToTheFlag() {
-        ExecutionId id = ExecutionId.of("exec-1");
-        Execution running = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RUNNING, NOW, null, List.of(), "test");
-        when(workQueue.cancelQueued(eq(id), any())).thenReturn(false);
-        when(leaseStore.requestCancellation(id)).thenReturn(true);
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        Execution running = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RUNNING, NOW, null, Optional.empty(), "test");
+        when(workQueue.cancel(eq(id), any())).thenReturn(false);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(running));
 
         assertThat(mohs.cancel(id)).contains(running);
-        verify(leaseStore).requestCancellation(id);
+        verify(workQueue).cancel(id, NOW);
     }
 
     /**
@@ -152,22 +155,20 @@ class MohsImplTest {
      * cancel does not fall into the gap and vanish.
      */
     @Test
-    void cancelRetriesThePairWhenAnAttemptCompletionRacesInBetween() {
-        ExecutionId id = ExecutionId.of("exec-1");
-        Execution cancelled = new Execution(id, JobKey.of("welcome-email"), ExecutionState.CANCELLED, NOW, null, List.of(), "test");
-        when(workQueue.cancelQueued(eq(id), any())).thenReturn(false, true);
-        when(leaseStore.requestCancellation(id)).thenReturn(false);
+    void cancelIssuesOneAtomicTransition() {
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        Execution cancelled = new Execution(id, JobKey.of("welcome-email"), ExecutionState.CANCELLED, NOW, null, Optional.empty(), "test");
+        when(workQueue.cancel(eq(id), any())).thenReturn(true);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(cancelled));
 
         assertThat(mohs.cancel(id)).contains(cancelled);
-        verify(workQueue, times(2)).cancelQueued(eq(id), any());
+        verify(workQueue).cancel(eq(id), any());
     }
 
     @Test
     void cancelOfAnUnknownExecutionIsEmpty() {
-        ExecutionId id = ExecutionId.of("ghost");
-        when(workQueue.cancelQueued(eq(id), any())).thenReturn(false);
-        when(leaseStore.requestCancellation(id)).thenReturn(false);
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-000000000050");
+        when(workQueue.cancel(eq(id), any())).thenReturn(false);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.empty());
 
         assertThat(mohs.cancel(id)).isEmpty();
@@ -181,14 +182,14 @@ class MohsImplTest {
     @Test
     void nodesAreListedMostRecentHeartbeatFirstWithAStableTiebreak() {
         when(nodeStore.findAll()).thenReturn(List.of(
-                new StoredNode("node-old", EngineState.RUNNING, NOW.minusSeconds(120), 1, NOW.minusSeconds(105)),
-                new StoredNode("node-tie-b", EngineState.RUNNING, NOW.minusSeconds(30), 1, NOW.minusSeconds(15)),
-                new StoredNode("node-fresh", EngineState.RUNNING, NOW, 1, NOW.plusSeconds(15)),
-                new StoredNode("node-tie-a", EngineState.STOPPED, NOW.minusSeconds(30), 1, NOW.minusSeconds(30))));
+                new StoredNode("01991337-0000-7000-8000-00000000006e", EngineState.RUNNING, NOW.minusSeconds(120), NOW.minusSeconds(105), true),
+                new StoredNode("01991337-0000-7000-8000-000000000072", EngineState.RUNNING, NOW.minusSeconds(30), NOW.minusSeconds(15), true),
+                new StoredNode("01991337-0000-7000-8000-00000000006a", EngineState.RUNNING, NOW, NOW.plusSeconds(15), false),
+                new StoredNode("01991337-0000-7000-8000-000000000071", EngineState.STOPPED, NOW.minusSeconds(30), NOW.minusSeconds(30), true)));
 
         assertThat(mohs.nodes())
                 .extracting(NodeSnapshot::nodeId)
-                .containsExactly("node-fresh", "node-tie-a", "node-tie-b", "node-old");
+                .containsExactly("01991337-0000-7000-8000-00000000006a", "01991337-0000-7000-8000-000000000071", "01991337-0000-7000-8000-000000000072", "01991337-0000-7000-8000-00000000006e");
     }
 
     /**
@@ -197,8 +198,8 @@ class MohsImplTest {
      */
     @Test
     void retryOfAFailedExecutionRearmsThroughTheStore() {
-        ExecutionId id = ExecutionId.of("exec-1");
-        Execution rearmed = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RETRY_WAITING, NOW, null, List.of(), "test");
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        Execution rearmed = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RETRY_WAITING, NOW, null, Optional.empty(), "test");
         when(workQueue.rearmForManualRetry(id, NOW)).thenReturn(true);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(rearmed));
 
@@ -207,7 +208,7 @@ class MohsImplTest {
 
     @Test
     void retryOfAnUnknownExecutionIsEmpty() {
-        ExecutionId id = ExecutionId.of("ghost");
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-000000000050");
         when(workQueue.rearmForManualRetry(id, NOW)).thenReturn(false);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.empty());
 
@@ -219,15 +220,15 @@ class MohsImplTest {
      * message must point at the removed job rather than at the state, which is a red herring here.
      */
     @Test
-    void retryOfARetiredJobsExecutionThrowsNamingTheRemovedJob() {
-        ExecutionId id = ExecutionId.of("exec-1");
-        Execution failed = new Execution(id, JobKey.of("welcome-email"), ExecutionState.FAILED, NOW, null, List.of(), "test");
+    void retryOfAnIneligibleFailedExecutionExplainsTheRequiredContract() {
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        Execution failed = new Execution(id, JobKey.of("welcome-email"), ExecutionState.FAILED, NOW, null, Optional.empty(), "test");
         when(workQueue.rearmForManualRetry(id, NOW)).thenReturn(false);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(failed));
 
         assertThatThrownBy(() -> mohs.retry(id))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("removed job");
+                .hasMessageContaining("standalone manual executions of an active job");
     }
 
     /**
@@ -236,8 +237,8 @@ class MohsImplTest {
      */
     @Test
     void retryOfAnAlreadyRearmedExecutionThrowsNamingTheDuplicate() {
-        ExecutionId id = ExecutionId.of("exec-1");
-        Execution rearmed = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RETRY_WAITING, NOW, null, List.of(), "test");
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        Execution rearmed = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RETRY_WAITING, NOW, null, Optional.empty(), "test");
         when(workQueue.rearmForManualRetry(id, NOW)).thenReturn(false);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(rearmed));
 
@@ -249,8 +250,8 @@ class MohsImplTest {
     /** State other than FAILED: the exception names the current state, so nobody has to guess at 3 a.m. why the retry "did not take". */
     @Test
     void retryOfANonFailedExecutionThrowsNamingTheState() {
-        ExecutionId id = ExecutionId.of("exec-1");
-        Execution running = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RUNNING, NOW, null, List.of(), "test");
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        Execution running = new Execution(id, JobKey.of("welcome-email"), ExecutionState.RUNNING, NOW, null, Optional.empty(), "test");
         when(workQueue.rearmForManualRetry(id, NOW)).thenReturn(false);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(running));
 
@@ -265,36 +266,34 @@ class MohsImplTest {
      * rearms the trigger, so cancellation is what keeps a fixed-delay chain from stalling forever.
      */
     @Test
-    void cancelOfAPendingSchedulerOccurrenceRearmsTheAfterFinishChain() {
+    void cancelDelegatesTheWholePendingTransitionToTheStore() {
         JobStore jobStoreMock = mock(JobStore.class);
-        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, workQueue, historyStore, leaseStore, (work, onDurable) -> { work.run(); onDurable.run(); }, nodeStore, rateLimitStore, handlerRegistry,
-                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { }, List.of(), Runnable::run);
-        ExecutionId id = ExecutionId.of("exec-1");
-        JobDefinition afterFinish = JobDefinition.of("poll", Handler.class, spec -> spec.everyAfterFinish(Duration.ofMinutes(5)));
-        when(jobStoreMock.find(JobKey.of("poll"))).thenReturn(Optional.of(new StoredJob(afterFinish, false, false, null)));
-        when(workQueue.cancelQueued(eq(id), any())).thenReturn(true);
+        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, workQueue, historyStore, leaseStore, submissions, nodeStore, rateLimitStore, handlerRegistry,
+                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { }, List.of(), Runnable::run);
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        when(workQueue.cancel(eq(id), any())).thenReturn(true);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(
-                new Execution(id, JobKey.of("poll"), ExecutionState.CANCELLED, NOW, null, List.of(), "scheduler")));
+                new Execution(id, JobKey.of("poll"), ExecutionState.CANCELLED, NOW, null, Optional.empty(), "scheduler")));
 
         mohsWithMockedJobStore.cancel(id);
 
-        verify(jobStoreMock).armNextFire(JobKey.of("poll"), NOW.plus(Duration.ofMinutes(5)));
+        verify(workQueue).cancel(id, NOW);
+        org.mockito.Mockito.verifyNoInteractions(jobStoreMock);
     }
 
     /** A cancelled manual execution is not part of the recurring chain, so there is nothing to rearm. */
     @Test
     void cancelOfAPendingManualExecutionDoesNotTouchTheChain() {
         JobStore jobStoreMock = mock(JobStore.class);
-        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, workQueue, historyStore, leaseStore, (work, onDurable) -> { work.run(); onDurable.run(); }, nodeStore, rateLimitStore, handlerRegistry,
-                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(), new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { }, List.of(), Runnable::run);
-        ExecutionId id = ExecutionId.of("exec-1");
-        when(workQueue.cancelQueued(eq(id), any())).thenReturn(true);
+        MohsImpl mohsWithMockedJobStore = new MohsImpl(jobStoreMock, workQueue, historyStore, leaseStore, submissions, nodeStore, rateLimitStore, handlerRegistry,
+                new MutableClock(NOW, ZoneId.of("UTC")), mock(MohsLifecycle.class), mock(BatchStore.class), new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { }, List.of(), Runnable::run);
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        when(workQueue.cancel(eq(id), any())).thenReturn(true);
         when(historyStore.find(eq(id), any())).thenReturn(Optional.of(
-                new Execution(id, JobKey.of("poll"), ExecutionState.CANCELLED, NOW, null, List.of(), "api:user")));
+                new Execution(id, JobKey.of("poll"), ExecutionState.CANCELLED, NOW, null, Optional.empty(), "api:user")));
 
         mohsWithMockedJobStore.cancel(id);
 
-        verify(jobStoreMock, never()).armNextFire(any(), any());
     }
 
     @Test
@@ -356,7 +355,7 @@ class MohsImplTest {
 
     @Test
     void rescheduleOfAnUnknownJobIsEmpty() {
-        assertThat(mohs.reschedule(JobKey.of("ghost"), new OnDemandSpec())).isEmpty();
+        assertThat(mohs.reschedule(JobKey.of("01991337-0000-7000-8000-000000000050"), new OnDemandSpec())).isEmpty();
     }
 
     @Test
@@ -392,50 +391,49 @@ class MohsImplTest {
      * ORPHANED. The error has to teach that, not merely refuse.
      */
     @Test
-    void removeRejectsAnAnnotationSourcedDefinitionWithAnErrorThatTeaches() {
+    void removeRetiresAnAnnotatedDefinition() {
         // The public builder always stamps PROGRAMMATIC; only the canonical constructor yields ANNOTATION
-        jobStore.upsert(new JobDefinition(JobKey.of("annotated"), null, Handler.class, new OnDemandSpec(),
-                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION));
+        jobStore.upsert(new JobDefinition(JobKey.of("annotated"), null,JobKey.of("annotated"), new OnDemandSpec(),
+                null, null, null, Misfire.IGNORE, false, 0, 0, null, null, DefinitionSource.ANNOTATION, JobKey.of("annotated").value()));
 
-        assertThatThrownBy(() -> mohs.remove(JobKey.of("annotated")))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("remove the annotation");
-        assertThat(mohs.findJob(JobKey.of("annotated"))).isPresent();
+        mohs.remove(JobKey.of("annotated"));
+        assertThat(mohs.findJob(JobKey.of("annotated"))).isEmpty();
     }
 
     /** Same stance as {@code pause}: an unknown job is a no-op, not an error. */
     @Test
     void removeOfAnUnknownJobIsANoOp() {
-        assertThatCode(() -> mohs.remove(JobKey.of("ghost"))).doesNotThrowAnyException();
+        assertThatCode(() -> mohs.remove(JobKey.of("01991337-0000-7000-8000-000000000050"))).doesNotThrowAnyException();
     }
 
     @Test
     void payloadTypeIsEmptyForAnUnregisteredHandler() {
-        assertThat(mohs.payloadType(JobKey.of("ghost"))).isEmpty();
+        assertThat(mohs.jobRef(JobKey.of("01991337-0000-7000-8000-000000000050"))).isEmpty();
     }
 
     @Test
-    void payloadTypeDelegatesToTheHandlerRegistry() {
+    void jobReferenceIncludesTheRegisteredTypeAndContract() {
+        jobStore.upsert(onDemand("welcome-email"));
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { }, String.class);
 
-        assertThat(mohs.payloadType(JobKey.of("welcome-email"))).contains(String.class);
+        assertThat(mohs.jobRef(JobKey.of("welcome-email"))).contains(io.mohs.core.job.JobRef.of("welcome-email", String.class));
     }
 
     @Test
     void findExecutionDelegatesToTheExecutionStore() {
-        Execution execution = new Execution(ExecutionId.of("exec-1"), JobKey.of("welcome-email"), ExecutionState.ENQUEUED, NOW, null, List.of(), "tester");
-        when(historyStore.find(eq(ExecutionId.of("exec-1")), any())).thenReturn(Optional.of(execution));
+        Execution execution = new Execution(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("welcome-email"), ExecutionState.ENQUEUED, NOW, null, Optional.empty(), "tester");
+        when(historyStore.find(eq(ExecutionId.of("01991337-0000-7000-8000-00000000001c")), any())).thenReturn(Optional.of(execution));
 
-        assertThat(mohs.findExecution(ExecutionId.of("exec-1"))).contains(execution);
+        assertThat(mohs.findExecution(ExecutionId.of("01991337-0000-7000-8000-00000000001c"))).contains(execution);
     }
 
     @Test
     void executionsResolvesTheCursorStringIntoAnExecutionId() {
         when(historyStore.findPage(any(), any(), any(), any(), any(), eq(21), any())).thenReturn(List.of());
 
-        mohs.executions(new ExecutionQuery(JobKey.of("welcome-email"), ExecutionState.ENQUEUED, null, null, "exec-9", 21));
+        mohs.executions(new ExecutionQuery(JobKey.of("welcome-email"), ExecutionState.ENQUEUED, null, null, "01991337-0000-7000-8000-000000000021", 21));
 
-        verify(historyStore).findPage(eq(JobKey.of("welcome-email")), eq(ExecutionState.ENQUEUED), eq(null), eq(null), eq(ExecutionId.of("exec-9")), eq(21), any());
+        verify(historyStore).findPage(eq(JobKey.of("welcome-email")), eq(ExecutionState.ENQUEUED), eq(null), eq(null), eq(ExecutionId.of("01991337-0000-7000-8000-000000000021")), eq(21), any());
     }
 
     @Test
@@ -505,8 +503,8 @@ class MohsImplTest {
         Clock advancing = mock(Clock.class);
         when(advancing.instant()).thenReturn(NOW, NOW.plusSeconds(5), NOW.plusSeconds(10));
         MohsImpl mohsWithAdvancingClock = new MohsImpl(jobStore, workQueue, historyStore, leaseStore,
-                (work, onDurable) -> { work.run(); onDurable.run(); }, nodeStore, rateLimitStore, handlerRegistry, advancing,
-                mock(MohsLifecycle.class), mock(BatchStore.class), new BatchCompletionCallbacks(),
+                submissions, nodeStore, rateLimitStore, handlerRegistry, advancing,
+                mock(MohsLifecycle.class), mock(BatchStore.class),
                 new RunnerRegistry(List.of(MohsRunner.io("io").build())), () -> { }, List.of(), Runnable::run);
         when(historyStore.countActiveByState(NOW)).thenReturn(Map.of());
         when(historyStore.countTerminalOutcomesSince(NOW.minusSeconds(60)))
@@ -562,12 +560,11 @@ class MohsImplTest {
             members.add(ref, "bob");
         });
 
-        verify(batchStore).insert(batch.batchId(), "nightly", 2);
         @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<HistoryStore.NewExecution>> recorded = ArgumentCaptor.forClass(List.class);
-        verify(historyStore, times(2)).record(recorded.capture());
-        assertThat(recorded.getAllValues()).allSatisfy(records -> assertThat(records).singleElement().satisfies(execution ->
-                assertThat(execution.correlationId()).isEqualTo(batch.batchId())));
+        ArgumentCaptor<List<SubmissionStore.NewExecution>> recorded = ArgumentCaptor.forClass(List.class);
+        verify(submissions).accept(recorded.capture(), org.mockito.ArgumentMatchers.eq(new SubmissionStore.NewBatch(batch.batchId(), "nightly")), org.mockito.ArgumentMatchers.any());
+        assertThat(recorded.getValue()).hasSize(2).allSatisfy(item ->
+                assertThat(item.batchId()).isEqualTo(batch.batchId()));
     }
 
     /** An empty batch could never complete, so it is refused at the door and nothing is persisted. */
@@ -594,14 +591,14 @@ class MohsImplTest {
     void aMemberWithoutARegisteredJobFailsBeforeAnythingIsWritten() {
         jobStore.upsert(onDemand("welcome-email"));
         JobRef<String> known = JobRef.of("welcome-email", String.class);
-        JobRef<String> unknown = JobRef.of("ghost", String.class);
+        JobRef<String> unknown = JobRef.of("01991337-0000-7000-8000-000000000050", String.class);
 
         assertThatThrownBy(() -> mohs.batch("nightly", members -> {
             members.add(known, "ana");
             members.add(unknown, "bob");
         }))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("no job registered for id 'ghost'");
+            .hasMessageContaining("no active job '01991337-0000-7000-8000-000000000050'");
 
         verifyNoInteractions(batchStore);
         verifyNoInteractions(historyStore);
@@ -612,12 +609,12 @@ class MohsImplTest {
     @Test
     void retryingABatchMemberExplainsWhyAndWhatToDoInstead() {
         jobStore.upsert(onDemand("welcome-email"));
-        Execution member = new Execution(ExecutionId.of("019abc-m"), JobKey.of("welcome-email"),
-                ExecutionState.FAILED, NOW, null, List.of(), "application", Priority.NORMAL, null, "b9", null);
+        Execution member = new Execution(ExecutionId.of("01991337-0000-7000-8000-000000000004"), JobKey.of("welcome-email"),
+                ExecutionState.FAILED, NOW, null, Optional.empty(), "application", Priority.NORMAL, null, "b9", null);
         when(workQueue.rearmForManualRetry(any(), any())).thenReturn(false);
-        when(historyStore.find(eq(ExecutionId.of("019abc-m")), any())).thenReturn(Optional.of(member));
+        when(historyStore.find(eq(ExecutionId.of("01991337-0000-7000-8000-000000000004")), any())).thenReturn(Optional.of(member));
 
-        assertThatThrownBy(() -> mohs.retry(ExecutionId.of("019abc-m")))
+        assertThatThrownBy(() -> mohs.retry(ExecutionId.of("01991337-0000-7000-8000-000000000004")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("member of batch b9")
                 .hasMessageContaining("Schedule the job standalone");

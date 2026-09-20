@@ -84,7 +84,7 @@ class NodeChurnScenario {
         };
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.delegate())) {
-            cluster.defineJob("churn", spec -> spec.retries(RETRIES));
+            cluster.defineJob("churn", spec -> spec.withRetries(RETRIES));
             for (int i = 0; i < 3; i++) {
                 cluster.addNode(settings(), List.of());
             }
@@ -111,7 +111,7 @@ class NodeChurnScenario {
             int heldByLeavingNode = leasesByNodeAtExit.getOrDefault(leftNodeId, 0);
 
             ScenarioCluster.Node joining = cluster.addNode(settings(), List.of());
-            joining.handlers().register(JobKey.of("churn"), handler);
+            joining.handlers().register(JobKey.of("churn"), handler, Object.class);
             joining.engine().start();
 
             boolean settled = ScenarioCluster.awaitUntil(OBSERVATION, cluster::isDrained);
@@ -127,9 +127,9 @@ class NodeChurnScenario {
             }
 
             assertThat(settled).as("the leaving node's shards must be re-claimed — a stalled queue means the assignment did not react").isTrue();
-            // With a retry budget, a reclaimed orphan is REBORN in the queue: the synthetic attempt
-            // shows up in failureKinds (which is why that is not required to be empty), but the
-            // EXECUTION must end well. The cause goes into the message so that a red build arrives
+            // With a retry budget, a reclaimed orphan is REBORN in the queue; a later success
+            // replaces the synthetic failure's stored diagnostics. The EXECUTION must end well.
+            // Any remaining latest failure goes into the message so that a red build arrives
             // already attributed, without anyone having to read stdout.
             assertThat(failed)
                     .as("a graceful exit must not lose work — with retries=%d a reclaimed orphan is redelivered, "
@@ -169,7 +169,7 @@ class NodeChurnScenario {
         };
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, clock, backend.delegate())) {
-            cluster.defineJob("churn", spec -> spec.retries(RETRIES));
+            cluster.defineJob("churn", spec -> spec.withRetries(RETRIES));
             for (int i = 0; i < 3; i++) {
                 cluster.addNode(settings(), List.of());
             }
@@ -185,7 +185,7 @@ class NodeChurnScenario {
             leaving.engine().stop(Duration.ofSeconds(20));
 
             ScenarioCluster.Node joining = cluster.addNode(settings(), List.of());
-            joining.handlers().register(JobKey.of("churn"), handler);
+            joining.handlers().register(JobKey.of("churn"), handler, Object.class);
             joining.engine().start();
 
             boolean settled = ScenarioCluster.awaitUntil(OBSERVATION, cluster::isDrained);
@@ -240,7 +240,7 @@ class NodeChurnScenario {
             // Zero budget DECLARED: it is this pair's independent variable — inheriting it from
             // the product default would make both tests measure the same thing the day that
             // default changed
-            cluster.defineJob("churn", spec -> spec.retries(0));
+            cluster.defineJob("churn", spec -> spec.withRetries(0));
             for (int i = 0; i < 3; i++) {
                 cluster.addNode(settings(), List.of());
             }
@@ -255,7 +255,7 @@ class NodeChurnScenario {
             int heldByLeavingNode = leasesByNodeAtExit.getOrDefault(stoppedNodeId(cluster), 0);
 
             ScenarioCluster.Node joining = cluster.addNode(settings(), List.of());
-            joining.handlers().register(JobKey.of("churn"), handler);
+            joining.handlers().register(JobKey.of("churn"), handler, Object.class);
             joining.engine().start();
 
             boolean settled = ScenarioCluster.awaitUntil(OBSERVATION, cluster::isDrained);
@@ -281,7 +281,7 @@ class NodeChurnScenario {
             // interval is [0, 32] over a universe of unknown size.
             assertThat(succeeded + failed)
                     .as("conservation: every seeded execution must reach a terminal state — one that leaves "
-                            + "mohs_ready without one is a loss the FAILED ceiling cannot see")
+                            + "mohs_work without one is a loss the FAILED ceiling cannot see")
                     .isEqualTo(SEED);
             assertThat(failed)
                     .as("KNOWN EDGE: with retries=0 a reclaimed orphan has nowhere to be rescheduled and becomes a "
@@ -293,7 +293,7 @@ class NodeChurnScenario {
 
     /** How many leases each node holds RIGHT NOW — the snapshot the re-execution bound uses. */
     private static Map<String, Integer> leasesByNode(ScenarioCluster cluster) {
-        return cluster.jdbc().query("SELECT node_id, count(*) AS held FROM mohs_lease GROUP BY node_id", rs -> {
+        return cluster.jdbc().query("SELECT node_id, count(*) AS held FROM mohs_work WHERE work_state = 'LEASED' GROUP BY node_id", rs -> {
             Map<String, Integer> held = new java.util.LinkedHashMap<>();
             while (rs.next()) {
                 held.put(rs.getString("node_id"), rs.getInt("held"));
@@ -321,30 +321,29 @@ class NodeChurnScenario {
     }
 
     private static EngineSettings settings() {
-        return new EngineSettings(Duration.ofMillis(25), Duration.ofMillis(200), 64, 32, 3,
-                Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60));
+        return new EngineSettings(Duration.ofMillis(25),Duration.ofMillis(200),64,32,3,Duration.ofSeconds(15),null,Duration.ofSeconds(60),Duration.ZERO,Duration.ZERO);
     }
 
-    /** What is left when something was lost: who owned it, and the full history of a few dead executions. */
+    /** What is left when something was lost: who owned the latest attempt of a few failed executions. */
     private static void dumpLostWork(ScenarioCluster cluster) {
         System.out.println("nodes at the end (the leaving one is the STOPPED row):");
         printRows(cluster, "SELECT node_id, state, last_heartbeat_at, expires_at FROM mohs_nodes");
         System.out.println("who owned the lost work:");
         printRows(cluster, """
-                SELECT a.node_id, count(*) AS lost
-                  FROM mohs_execution e JOIN mohs_attempt a ON a.execution_id = e.execution_id
-                 WHERE e.state = 'FAILED'
-                 GROUP BY a.node_id
-                """);
-        System.out.println("failed executions (up to 5, with every attempt):");
-        printRows(cluster, """
-                SELECT e.execution_id, e.state, e.scheduled_at, a.number, a.outcome, a.error_type, a.error,
-                       a.started_at, a.finished_at, a.node_id
+                SELECT e.last_attempt_node_id, count(*) AS lost
                   FROM mohs_execution e
-                  JOIN mohs_attempt a ON a.execution_id = e.execution_id
+                 WHERE e.state = 'FAILED'
+                 GROUP BY e.last_attempt_node_id
+                """);
+        System.out.println("failed executions (up to 5, latest attempt only):");
+        printRows(cluster, """
+                SELECT e.execution_id, e.state, e.scheduled_at, e.last_attempt_number, e.last_attempt_outcome,
+                       e.last_attempt_error_type, e.last_attempt_error, e.last_attempt_started_at,
+                       e.last_attempt_finished_at, e.last_attempt_node_id
+                  FROM mohs_execution e
                  WHERE e.state = 'FAILED'
                    AND e.execution_id IN (SELECT execution_id FROM mohs_execution WHERE state = 'FAILED' LIMIT 5)
-                 ORDER BY e.execution_id, a.number
+                 ORDER BY e.execution_id
                 """);
     }
 

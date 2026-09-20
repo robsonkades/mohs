@@ -15,58 +15,32 @@
  */
 package io.mohs.engine;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
-
+import java.util.Optional;
 import io.mohs.core.EngineState;
-import io.mohs.core.execution.Execution;
 
-/**
- * The node's heartbeat and lease registry — a Repository (PoEAA), the port
- * {@code io.mohs.store.jdbc} implements.
- *
- * <p>It stopped being merely informative: the reaper decides "dead" from this table's
- * {@code expires_at} (one write per node per tick), in place of the PER-EXECUTION lease renewal that
- * cost roughly five updates per execution on the system's hottest table.
- */
+/** Durable sessions. The store arbitrates renewal and irrevocable revocation with its own clock. */
 public interface NodeStore {
+    /** The identity is known but cannot be renewed or reused. */
+    final class SessionExpired extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
 
-    /**
-     * Records the node's most recent heartbeat — an upsert by {@code nodeId}.
-     *
-     * <p>The heartbeat now carries the NODE's lease: {@code epoch} (its incarnation) and
-     * {@code expiresAt} (the "I am alive until here" promise the reaper consults — the liveness
-     * authority that replaced per-execution renewal).
-     *
-     * @param nodeId the identity of the engine node
-     * @param state the current lifecycle state
-     * @param epoch the ownership generation used by the completion fence
-     * @param at the instant of the operation
-     * @param expiresAt the instant when the liveness lease expires
-     */
-    void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt);
-
-    /**
-     * Every node ever registered, with no "recent" filter — the staleness threshold depends on
-     * configuration that does not exist yet ({@code mohs.engine.node-heartbeat-interval}).
-     *
-     * <p>A {@code List}, not a {@code Stream}: this table's size is bounded by the cluster's size and
-     * does not grow without limit as {@link Execution} does.
-     *
-     * @return all recorded nodes, including stale nodes
-     */
+        public SessionExpired() {
+            super("session identity expired; rejoin with a fresh node ID");
+        }
+    }
+    /** Creates a fresh session; repeating an unconfirmed creation with the same ID is safe. */
+    StoredNode register(String nodeId, EngineState state, Duration ttl, ExecutableCatalog catalog);
+    /** Empty means the session expired or was revoked, and rejoining requires a fresh identity. */
+    Optional<StoredNode> renew(String nodeId, EngineState state, Duration ttl);
+    /** Revalidates expiration under the same lock as renewal, then irrevocably revokes the session. */
+    boolean revokeExpired(String nodeId);
+    /** Revokes after graceful draining; outstanding work becomes recoverable. */
+    void stop(String nodeId);
+    /** Includes revoked sessions awaiting cleanup; lifecycle and validity are separate facts. */
     List<StoredNode> findAll();
-
-    /**
-     * Removes heartbeats strictly older than {@code cutoff} — each boot generates a new
-     * {@code node_id}, so a dead or restarted instance's row only leaves through here.
-     *
-     * <p>Death is NOT written by whoever died (a crash gives no notice — "dead" is derived from
-     * staleness at read time); the purge merely collects what has already become unreadable through
-     * age.
-     *
-     * @param cutoff the exclusive retention cutoff
-     * @return how many rows were removed
-     */
+    /** Deletes only old revoked sessions without outstanding work. */
     int deleteHeartbeatsBefore(Instant cutoff);
 }

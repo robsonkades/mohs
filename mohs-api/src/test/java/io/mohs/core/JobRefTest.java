@@ -37,7 +37,7 @@ class JobRefTest {
 
     @Test
     void rejectsNullPayloadType() {
-        assertThatThrownBy(() -> new JobRef<>(JobKey.of("id"), null))
+        assertThatThrownBy(() -> new JobRef<>(JobKey.of("id"), null, "id"))
                 .isInstanceOf(NullPointerException.class);
     }
 }

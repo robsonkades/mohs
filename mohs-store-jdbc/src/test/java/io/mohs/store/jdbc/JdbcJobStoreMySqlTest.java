@@ -53,12 +53,12 @@ class JdbcJobStoreMySqlTest {
     /** {@code findDueRecurringJobs}: the ceiling is a bound {@code LIMIT}, and the order is still {@code next_fire_at}. */
     @Test
     void findDueRecurringBoundsWithLimitAndFiresOldestFirst() {
-        jobStore.upsert(JobDefinition.of("job-b-due-later", Handler.class, spec -> spec.every(Duration.ofMinutes(5))));
-        jobStore.upsert(JobDefinition.of("job-a-due-first", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        jobStore.upsert(JobDefinition.of("job-b-due-later", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(5), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        jobStore.upsert(JobDefinition.of("job-a-due-first", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
 
-        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 1))
+        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 1).jobs())
                 .extracting(job -> job.definition().key().value())
                 .containsExactly("job-a-due-first");
-        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 10)).hasSize(2);
+        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 10).jobs()).hasSize(2);
     }
 }

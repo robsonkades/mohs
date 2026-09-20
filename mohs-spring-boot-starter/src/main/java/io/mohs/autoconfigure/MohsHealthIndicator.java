@@ -42,7 +42,7 @@ import io.mohs.core.MohsLifecycle;
  *   <tr><td>{@code PAUSED}, {@code DRAINING}</td><td>{@code OUT_OF_SERVICE}</td>
  *       <td>Alive and heartbeating, deliberately not claiming — an operator's decision or a
  *           shutdown in progress, neither of which is a fault</td></tr>
- *   <tr><td>{@code CREATED}, {@code STOPPED}</td><td>{@code DOWN}</td>
+ *   <tr><td>{@code CREATED}, {@code STOPPED}, {@code FAILED}</td><td>{@code DOWN}</td>
  *       <td>No loop is running: work assigned to this node will not move</td></tr>
  * </table>
  *
@@ -74,7 +74,7 @@ public class MohsHealthIndicator implements HealthIndicator {
         Status status = switch (state) {
             case RUNNING -> Status.UP;
             case STARTING, PAUSED, DRAINING -> Status.OUT_OF_SERVICE;
-            case CREATED, STOPPED -> Status.DOWN;
+            case CREATED, STOPPED, FAILED -> Status.DOWN;
         };
         return Health.status(status).withDetail("state", state.name()).build();
     }

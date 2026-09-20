@@ -22,12 +22,18 @@ package io.mohs.core.schedule;
  */
 public enum Misfire {
 
-    /** Skips missed firings; the job resumes at the next regular occurrence. The default. */
+    /**
+     * Skips missed firings; the job resumes at the next regular occurrence. The default.
+     */
     IGNORE,
 
-    /** Fires once immediately for the most recent missed occurrence. */
+    /**
+     * Fires once immediately for the most recent missed occurrence.
+     */
     FIRE_NOW,
 
-    /** Replays every missed occurrence, capped and drained, never discarded. */
+    /**
+     * Replays every missed occurrence, capped and drained, never discarded.
+     */
     FIRE_ALL_MISSED
 }

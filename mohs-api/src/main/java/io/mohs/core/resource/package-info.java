@@ -16,7 +16,7 @@
 /**
  * Named resources — specs, never {@code Executor}s: {@link io.mohs.core.resource.MohsRunner}
  * (node-local capacity), {@link io.mohs.core.resource.RateLimit} (a cluster-wide throughput cap) and
- * {@link io.mohs.core.resource.ExecutionWindow} (a firing exclusion window). It depends on no other
+ * {@link io.mohs.core.resource.ExecutionWindow} (an admission exclusion window). It depends on no other
  * public subpackage.
  */
 @NullMarked

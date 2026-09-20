@@ -38,7 +38,7 @@ import io.mohs.core.event.ExecutionListener;
  * It does not close the executor it receives: the lifecycle belongs to whoever built it.
  *
  * <p>Package-private: its consumers are {@link Dispatcher}, for everything an attempt goes through,
- * and the facade ({@link MohsImpl}/{@link ScheduleCommandImpl}), for the {@code Enqueued} born on
+ * and the facade ({@link MohsImpl}), for the {@code Enqueued} born on
  * the scheduling side. It opens up to {@code public} the day code outside this package (a manual
  * retry through REST, say) needs to publish events too — YAGNI until then.
  */

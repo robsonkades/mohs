@@ -15,6 +15,8 @@
  */
 package io.mohs.store.jdbc;
 
+import io.mohs.engine.SubmissionStore;
+
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -56,10 +58,16 @@ class JdbcWorkQueuePostgresTest {
     void setUp() {
         dataSource = PostgresTestSupport.freshSchema();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDelegate(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC), new PostgresJdbcDelegate()));
+        io.mohs.store.jdbc.TestSessions.seed(dataSource, new PostgresJdbcDelegate(), "01991337-0000-7000-8000-00000000006f", io.mohs.core.EngineState.RUNNING, java.time.Duration.ofMinutes(5));
+        io.mohs.store.jdbc.TestSessions.seed(dataSource, new PostgresJdbcDelegate(), "01991337-0000-7000-8000-000000000067", io.mohs.core.EngineState.RUNNING, java.time.Duration.ofMinutes(5));
+        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDelegate());
     }
 
     private WorkQueue.ReadyEntry entry(String id, String jobKey, int priority, int attempt, Instant visibleAt) {
+        new JdbcJobStore(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), Clock.fixed(NOW, ZoneOffset.UTC),
+                new PostgresJdbcDelegate()).upsert(io.mohs.core.definition.JobDefinition.of(jobKey, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        TestWork.history(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new PostgresJdbcDelegate(), List.of(new io.mohs.engine.SubmissionStore.NewExecution(ExecutionId.of(id), JobKey.of(jobKey),
+                        0, priority, visibleAt, NOW, "test", null, null, io.mohs.test.InputFixtures.encode(JobKey.of(jobKey), "payload"), io.mohs.engine.SubmissionStore.Origin.MANUAL, null)));
         return new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, priority, attempt, visibleAt);
     }
 
@@ -74,13 +82,13 @@ class JdbcWorkQueuePostgresTest {
         List<Integer> owned = IntStream.range(0, Shards.SHARD_COUNT).filter(shard -> shard % 2 == 0).boxed().toList();
         assertThat(queue.hasVisibleWork(owned, NOW)).isFalse();
 
-        queue.offer(List.of(shardedEntry("exec-alheio", 7, NOW.minusSeconds(1))));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new PostgresJdbcDelegate(), List.of(shardedEntry("01991337-0000-7000-8000-000000000023", 7, NOW.minusSeconds(1))));
         assertThat(queue.hasVisibleWork(owned, NOW)).as("another node's shard").isFalse();
 
-        queue.offer(List.of(shardedEntry("exec-futuro", 8, NOW.plusSeconds(60))));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new PostgresJdbcDelegate(), List.of(shardedEntry("01991337-0000-7000-8000-000000000031", 8, NOW.plusSeconds(60))));
         assertThat(queue.hasVisibleWork(owned, NOW)).as("not visible yet").isFalse();
 
-        queue.offer(List.of(shardedEntry("exec-devido", 8, NOW.minusSeconds(1))));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new PostgresJdbcDelegate(), List.of(shardedEntry("01991337-0000-7000-8000-000000000029", 8, NOW.minusSeconds(1))));
         assertThat(queue.hasVisibleWork(owned, NOW)).isTrue();
     }
 
@@ -90,48 +98,48 @@ class JdbcWorkQueuePostgresTest {
 
     @Test
     void singleStatementClaimMovesQueueEntriesIntoLeases() {
-        queue.offer(List.of(
-                entry("exec-high", "job-a", 10, 1, NOW.minusSeconds(10)),
-                entry("exec-normal", "job-a", 20, 2, NOW.minusSeconds(20)),
-                entry("exec-future", "job-a", 10, 1, NOW.plusSeconds(60))));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new PostgresJdbcDelegate(), List.of(
+                entry("01991337-0000-7000-8000-000000000033", "job-a", 10, 1, NOW.minusSeconds(10)),
+                entry("01991337-0000-7000-8000-00000000003c", "job-a", 20, 2, NOW.minusSeconds(20)),
+                entry("01991337-0000-7000-8000-000000000030", "job-a", 10, 1, NOW.plusSeconds(60))));
 
-        List<WorkQueue.ClaimedWork> claimed = queue.claim(0, "node-pg", 3, 10, List.of(), NOW);
+        List<WorkQueue.ClaimedWork> claimed = queue.claim(0, "01991337-0000-7000-8000-00000000006f", 10, List.of(), NOW);
 
         // The ORDER is pinned on purpose: an INSERT's RETURNING guarantees no order, so the statement
         // returns from the ordered SELECT over picked — the port's contract is the same in all four
         // delegates
         assertThat(claimed).extracting(w -> w.executionId().value())
-                .containsExactly("exec-high", "exec-normal");
-        assertThat(claimed).filteredOn(w -> w.executionId().value().equals("exec-normal"))
+                .containsExactly("01991337-0000-7000-8000-000000000033", "01991337-0000-7000-8000-00000000003c");
+        assertThat(claimed).filteredOn(w -> w.executionId().value().equals("01991337-0000-7000-8000-00000000003c"))
                 .singleElement().satisfies(w -> assertThat(w.attemptNumber()).isEqualTo(2));
-        assertThat(rawJdbcTemplate.queryForList("SELECT execution_id FROM mohs_ready", String.class))
-                .containsExactly("exec-future");
+        assertThat(rawJdbcTemplate.queryForList("SELECT execution_id FROM mohs_work WHERE work_state = 'READY'", String.class))
+                .containsExactly("01991337-0000-7000-8000-000000000030");
         assertThat(rawJdbcTemplate.queryForList(
-                "SELECT execution_id FROM mohs_lease WHERE node_id = 'node-pg' AND epoch = 3", String.class))
-                .containsExactlyInAnyOrder("exec-high", "exec-normal");
+                "SELECT execution_id FROM mohs_work WHERE work_state = 'LEASED' AND  node_id = '01991337-0000-7000-8000-00000000006f'", String.class))
+                .containsExactlyInAnyOrder("01991337-0000-7000-8000-000000000033", "01991337-0000-7000-8000-00000000003c");
     }
 
     @Test
-    void singleStatementClaimHonoursTheInadmissibleList() {
-        queue.offer(List.of(
-                entry("exec-open", "job-open", 20, 1, NOW.minusSeconds(2)),
-                entry("exec-closed", "job-closed", 10, 1, NOW.minusSeconds(1))));
+    void singleStatementClaimRestrictsCandidateJobs() {
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new PostgresJdbcDelegate(), List.of(
+                entry("01991337-0000-7000-8000-000000000043", "job-open", 20, 1, NOW.minusSeconds(2)),
+                entry("01991337-0000-7000-8000-000000000027", "job-closed", 10, 1, NOW.minusSeconds(1))));
 
-        List<WorkQueue.ClaimedWork> claimed = queue.claim(0, "node-pg", 1, 10, List.of(JobKey.of("job-closed")), NOW);
+        List<WorkQueue.ClaimedWork> claimed = queue.claim(0, "01991337-0000-7000-8000-00000000006f", 10, List.of(JobKey.of("job-open")), NOW);
 
-        assertThat(claimed).extracting(w -> w.executionId().value()).containsExactly("exec-open");
-        assertThat(rawJdbcTemplate.queryForList("SELECT execution_id FROM mohs_ready", String.class))
-                .containsExactly("exec-closed");
+        assertThat(claimed).extracting(w -> w.executionId().value()).containsExactly("01991337-0000-7000-8000-000000000043");
+        assertThat(rawJdbcTemplate.queryForList("SELECT execution_id FROM mohs_work WHERE work_state = 'READY'", String.class))
+                .containsExactly("01991337-0000-7000-8000-000000000027");
     }
 
     /** The UTC OffsetDateTime crossing: the instant crosses the TIMESTAMPTZ column verbatim, regardless of the session's zone. */
     @Test
     void visibleAtRoundTripsThroughTimestamptzVerbatim() {
         Instant visibleAt = Instant.parse("2026-11-01T05:30:00.123456Z");
-        queue.offer(List.of(entry("exec-tz", "job-a", 20, 1, visibleAt)));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new PostgresJdbcDelegate(), List.of(entry("01991337-0000-7000-8000-00000000004a", "job-a", 20, 1, visibleAt)));
 
         Instant readBack = rawJdbcTemplate.queryForObject(
-                "SELECT visible_at FROM mohs_ready WHERE execution_id = 'exec-tz'", java.time.OffsetDateTime.class)
+                "SELECT visible_at FROM mohs_work WHERE work_state = 'READY' AND  execution_id = '01991337-0000-7000-8000-00000000004a'", java.time.OffsetDateTime.class)
                 .toInstant();
 
         assertThat(readBack).isEqualTo(visibleAt);
@@ -144,17 +152,17 @@ class JdbcWorkQueuePostgresTest {
      */
     @Test
     void claimSkipsRowsLockedByAConcurrentClaimant() throws Exception {
-        queue.offer(List.of(
-                entry("exec-locked", "job-a", 10, 1, NOW.minusSeconds(2)),
-                entry("exec-free", "job-a", 20, 1, NOW.minusSeconds(1))));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new PostgresJdbcDelegate(), List.of(
+                entry("01991337-0000-7000-8000-000000000036", "job-a", 10, 1, NOW.minusSeconds(2)),
+                entry("01991337-0000-7000-8000-00000000002f", "job-a", 20, 1, NOW.minusSeconds(1))));
         try (java.sql.Connection other = dataSource.getConnection()) {
             other.setAutoCommit(false);
             try (java.sql.Statement st = other.createStatement()) {
-                st.execute("SELECT execution_id FROM mohs_ready WHERE execution_id = 'exec-locked' FOR UPDATE");
+                st.execute("SELECT execution_id FROM mohs_work WHERE work_state = 'READY' AND  execution_id = '01991337-0000-7000-8000-000000000036' FOR UPDATE");
 
-                assertThat(queue.claim(0, "node-b", 1, 10, List.of(), NOW))
+                assertThat(queue.claim(0, "01991337-0000-7000-8000-000000000067", 10, List.of(), NOW))
                         .extracting(w -> w.executionId().value())
-                        .containsExactly("exec-free");
+                        .containsExactly("01991337-0000-7000-8000-00000000002f");
             } finally {
                 other.rollback();
             }
@@ -163,12 +171,12 @@ class JdbcWorkQueuePostgresTest {
 
     @Test
     void requeueFenceHoldsOnPostgresToo() {
-        queue.offer(List.of(entry("exec-1", "job-a", 20, 1, NOW.minusSeconds(1))));
-        queue.claim(0, "node-pg", 1, 10, List.of(), NOW);
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new PostgresJdbcDelegate(), List.of(entry("01991337-0000-7000-8000-00000000001c", "job-a", 20, 1, NOW.minusSeconds(1))));
+        queue.claim(0, "01991337-0000-7000-8000-00000000006f", 10, List.of(), NOW);
 
         assertThat(queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), "node-pg", 99, 1, entry("exec-1", "job-a", 20, 2, NOW))))).isZero();
+                ExecutionId.of("01991337-0000-7000-8000-00000000001c"), "01991337-0000-7000-8000-00000000006f", "01991337-0000-7000-8000-000000000085", 1, NOW)))).isZero();
         assertThat(queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), "node-pg", 1, 1, entry("exec-1", "job-a", 20, 2, NOW))))).isEqualTo(1);
+                ExecutionId.of("01991337-0000-7000-8000-00000000001c"), "01991337-0000-7000-8000-00000000006f", rawJdbcTemplate.queryForObject("SELECT claim_token FROM mohs_work WHERE work_state = 'LEASED' AND  execution_id = ?", String.class, ExecutionId.of("01991337-0000-7000-8000-00000000001c").value()), 1, NOW)))).isEqualTo(1);
     }
 }

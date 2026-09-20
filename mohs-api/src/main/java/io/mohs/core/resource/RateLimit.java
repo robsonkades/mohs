@@ -15,6 +15,9 @@
  */
 package io.mohs.core.resource;
 
+import io.mohs.core.TechnicalKey;
+import io.mohs.core.TimePrecision;
+
 import java.time.Duration;
 import java.util.Objects;
 
@@ -26,8 +29,8 @@ import java.util.Objects;
  * ({@code mohs.rate-limits.<name>.max}/{@code .window}). This is a spec, never an actual limiter —
  * the engine is what enforces it.
  *
- * @param name the stable name used by jobs to select this rate limit
- * @param max the positive token capacity of the shared bucket
+ * @param name   the stable name used by jobs to select this rate limit
+ * @param max    the positive token capacity of the shared bucket
  * @param window the positive window over which the rate is limited
  */
 public record RateLimit(String name, int max, Duration window) {
@@ -35,12 +38,12 @@ public record RateLimit(String name, int max, Duration window) {
     /**
      * Creates a {@code RateLimit} with the supplied values.
      *
-     * @param name the stable name used by jobs to select this rate limit
-     * @param max the positive token capacity of the shared bucket
+     * @param name   the stable name used by jobs to select this rate limit
+     * @param max    the positive token capacity of the shared bucket
      * @param window the positive window over which the rate is limited
      */
     public RateLimit {
-        Fields.requireNotBlank(name, "name");
+        TechnicalKey.require(name, "name");
         requireRefillable(max, window);
     }
 
@@ -55,7 +58,7 @@ public record RateLimit(String name, int max, Duration window) {
      * representable, and a division by {@code Duration.ZERO} in there would bring down the ENTIRE
      * claim round — including jobs with no limit at all.
      *
-     * @param max the positive token capacity of the shared bucket
+     * @param max    the positive token capacity of the shared bucket
      * @param window the positive window over which the rate is limited
      */
     public static void requireRefillable(int max, Duration window) {
@@ -66,9 +69,6 @@ public record RateLimit(String name, int max, Duration window) {
         if (!window.isPositive()) {
             throw new IllegalArgumentException("window must be positive");
         }
-        if (window.compareTo(Duration.ofNanos(max)) < 0) {
-            throw new IllegalArgumentException("window " + window + " is too short for max " + max
-                    + " — one token is issued every window/max, which needs at least " + max + "ns of window");
-        }
+        TimePrecision.micros(window);
     }
 }

@@ -15,6 +15,8 @@
  */
 package io.mohs.store.jdbc;
 
+import io.mohs.engine.SubmissionStore;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -50,7 +52,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Proves that the schema (all of it, not only what {@code JdbcWorkQueue} touches) and each store's DML
  * round-trip against a real SQL Server, not just H2 and Postgres — in particular
- * {@code mohs_execution.payload}/{@code mohs_attempt.error} ({@code NVARCHAR(MAX)}, not
+ * {@code mohs_execution.payload}/{@code mohs_execution.last_attempt_error} ({@code NVARCHAR(MAX)}, not
  * {@code CLOB}/{@code TEXT}, which are deprecated on SQL Server) and the
  * {@code DATETIME2}/{@code NVARCHAR}/{@code BIT} columns (see schema-sqlserver.sql).
  */
@@ -75,7 +77,7 @@ class SchemaSqlServerRoundTripTest {
     @Test
     void jobStoreRoundTripsAgainstSqlServer() {
         JdbcJobStore store = new JdbcJobStore(dataSource, clock, new SqlServerJdbcDelegate());
-        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io"));
+        JobDefinition definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRunner("io"), io.mohs.core.schedule.Misfire.IGNORE, false);
 
         store.upsert(definition);
         Optional<StoredJob> stored = store.find(JobKey.of("welcome-email"));
@@ -87,16 +89,16 @@ class SchemaSqlServerRoundTripTest {
     @Test
     void historyStoreRoundTripsThePayloadStoredAsNvarcharMax() {
         new JdbcJobStore(dataSource, clock, new SqlServerJdbcDelegate()).upsert(
-                JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
-        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new SqlServerJdbcDelegate());
+                JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRunner("io"), io.mohs.core.schedule.Misfire.IGNORE, false));
+        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, new SqlServerJdbcDelegate());
         Instant when = Instant.parse("2026-08-13T00:00:00Z");
 
-        store.record(List.of(new HistoryStore.NewExecution(ExecutionId.of("019abc-1"), JobKey.of("welcome-email"),
-                0, 20, when, when, "application", null, null, new WelcomeEmail("ana", 31))));
-        HistoryStore.PayloadBatch batch = store.findPayloads(List.of(ExecutionId.of("019abc-1")));
+        TestSubmissions.accept(dataSource, new SqlServerJdbcDelegate(), List.of(new SubmissionStore.NewExecution(ExecutionId.of("01991337-0000-7000-8000-000000000002"), JobKey.of("welcome-email"),
+                0, 20, when, when, "application", null, null, io.mohs.test.InputFixtures.encode(JobKey.of("welcome-email"), new WelcomeEmail("ana", 31)), io.mohs.engine.SubmissionStore.Origin.MANUAL, null)));
+        HistoryStore.PayloadBatch batch = store.findPayloads(List.of(ExecutionId.of("01991337-0000-7000-8000-000000000002")));
 
         assertThat(batch.unreadable()).isEmpty();
-        assertThat(batch.rows().get(ExecutionId.of("019abc-1")).payload()).isEqualTo(new WelcomeEmail("ana", 31));
+        assertThat(io.mohs.test.InputFixtures.decode(batch.rows().get(ExecutionId.of("01991337-0000-7000-8000-000000000002")).payload(), WelcomeEmail.class)).isEqualTo(new WelcomeEmail("ana", 31));
     }
 
     /**
@@ -107,38 +109,39 @@ class SchemaSqlServerRoundTripTest {
     @Test
     void idempotencyPrimaryKeyRejectsDuplicatesAndAllowsNullKeys() {
         new JdbcJobStore(dataSource, clock, new SqlServerJdbcDelegate()).upsert(
-                JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().runner("io")));
-        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new SqlServerJdbcDelegate());
+                JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRunner("io"), io.mohs.core.schedule.Misfire.IGNORE, false));
+        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, new SqlServerJdbcDelegate());
 
-        store.record(List.of(newExecutionWithKey("idem-1", "req-1")));
-        assertThatThrownBy(() -> store.record(List.of(newExecutionWithKey("idem-2", "req-1"))))
+        TestSubmissions.accept(dataSource, new SqlServerJdbcDelegate(), List.of(newExecutionWithKey("01991337-0000-7000-8000-000000000052", "req-1")));
+        assertThatThrownBy(() -> TestSubmissions.accept(dataSource, new SqlServerJdbcDelegate(), List.of(newExecutionWithKey("idem-2", "req-1"))))
                 .isInstanceOf(DuplicateKeyException.class);
-        store.record(List.of(newExecutionWithKey("idem-3", null)));
-        store.record(List.of(newExecutionWithKey("idem-4", null)));
+        TestSubmissions.accept(dataSource, new SqlServerJdbcDelegate(), List.of(newExecutionWithKey("idem-3", null)));
+        TestSubmissions.accept(dataSource, new SqlServerJdbcDelegate(), List.of(newExecutionWithKey("idem-4", null)));
 
-        assertThat(store.findByIdempotencyKey(JobKey.of("welcome-email"), "req-1"))
-                .contains(ExecutionId.of("idem-1"));
+        assertThat(store.findReceiptByIdempotencyKey(JobKey.of("welcome-email"), "req-1").map(io.mohs.core.event.Enqueued::executionId))
+                .contains(ExecutionId.of("01991337-0000-7000-8000-000000000052"));
     }
 
-    private static HistoryStore.NewExecution newExecutionWithKey(String id, @Nullable String idempotencyKey) {
+    private static SubmissionStore.NewExecution newExecutionWithKey(String id, @Nullable String idempotencyKey) {
+        id = io.mohs.test.TestIds.value(id);
         Instant when = Instant.parse("2026-08-13T00:00:00Z");
-        return new HistoryStore.NewExecution(ExecutionId.of(id), JobKey.of("welcome-email"), 0, 20, when, when,
-                "application", null, idempotencyKey, new WelcomeEmail("ana", 31));
+        return new SubmissionStore.NewExecution(ExecutionId.of(id), JobKey.of("welcome-email"), 0, 20, when, when,
+                "application", null, idempotencyKey, io.mohs.test.InputFixtures.encode(JobKey.of("welcome-email"), new WelcomeEmail("ana", 31)), io.mohs.engine.SubmissionStore.Origin.MANUAL, null);
     }
 
     @Test
     void batchStoreRoundTripsAgainstSqlServer() {
-        JdbcBatchStore store = new JdbcBatchStore(dataSource, clock, new SqlServerJdbcDelegate());
+        JdbcBatchStore store = new JdbcBatchStore(dataSource, new SqlServerJdbcDelegate());
 
-        store.insert("batch-1", "nightly", 10);
-        BatchCounters counters = store.find("batch-1").orElseThrow();
+        TestWork.batch(dataSource, new SqlServerJdbcDelegate(), "01991337-0000-7000-8000-00000000000e", "nightly", 10);
+        BatchCounters counters = store.find("01991337-0000-7000-8000-00000000000e").orElseThrow();
 
         assertThat(counters.total()).isEqualTo(10);
     }
 
     @Test
     void rateLimitStoreRoundTripsAgainstSqlServer() {
-        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, Clock.systemUTC(), new SqlServerJdbcDelegate());
+        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, new SqlServerJdbcDelegate());
         RateLimit rateLimit = new RateLimit("smtp", 100, Duration.ofMinutes(1));
 
         store.upsert(rateLimit);
@@ -167,21 +170,21 @@ class SchemaSqlServerRoundTripTest {
     @Test
     void chargingAcrossATokenBoundaryProvesRefilledAtKeepsItsFraction() {
         clock.advance(Duration.ofMillis(500));
-        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, clock, new SqlServerJdbcDelegate());
+        JdbcRateLimitStore store = new JdbcRateLimitStore(dataSource, io.mohs.store.jdbc.TestDatabaseClock.at(new SqlServerJdbcDelegate(), clock));
         store.upsert(new RateLimit("smtp", 100, Duration.ofMinutes(1)));
 
-        assertThat(store.charge("smtp", 50, clock.instant())).isTrue();
+        assertThat(store.charge("smtp", 50)).isTrue();
         clock.advance(Duration.ofSeconds(1));
-        assertThat(store.charge("smtp", 1, clock.instant())).isTrue();
+        assertThat(store.charge("smtp", 1)).isTrue();
 
-        assertThat(store.available("smtp", clock.instant())).isEqualTo(50);
+        assertThat(store.available("smtp")).isEqualTo(50);
     }
 
-    /** The sweep's three statements in the dialect's real shape — {@code DELETE TOP (:limit)} parses, ranges the primary key, and deletes exactly the window. */
+    /** The sweep's two statements in the dialect's real shape — {@code DELETE TOP (:limit)} parses, ranges the primary key, and deletes exactly the window. */
     @Test
     void historySweepRoundTripsTheDialectShapes() {
         SqlServerJdbcDelegate delegate = new SqlServerJdbcDelegate();
-        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), delegate);
+        JdbcHistoryStore store = new JdbcHistoryStore(dataSource, delegate);
         JdbcTemplate raw = new JdbcTemplate(dataSource);
         Instant old = clock.instant().minus(Duration.ofDays(60));
         long ms = old.toEpochMilli();
@@ -191,16 +194,16 @@ class SchemaSqlServerRoundTripTest {
                 batchId, delegate.splitTimestamp(old));
         raw.update("""
                 INSERT INTO mohs_execution (execution_id, job_key, shard, priority, state, scheduled_at, created_at,
-                    finished_at, actor, correlation_id, payload, payload_type)
+                    finished_at, actor, batch_id, payload, input_contract)
                 VALUES (?, 'welcome-email', 0, 20, 'SUCCEEDED', ?, ?, ?, 'test', ?, '{}', 'x')
                 """, executionId, delegate.splitTimestamp(old), delegate.splitTimestamp(old),
                 delegate.splitTimestamp(old), batchId);
         raw.update("""
-                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
-                VALUES (?, 1, 'node-a', ?, ?, 'SUCCEEDED')
-                """, executionId, delegate.splitTimestamp(old), delegate.splitTimestamp(old));
+                UPDATE mohs_execution SET last_attempt_number = 1, last_attempt_node_id = '01991337-0000-7000-8000-000000000065', last_attempt_started_at = ?, last_attempt_finished_at = ?, last_attempt_outcome = 'SUCCEEDED'
+                WHERE execution_id = ?
+                """, delegate.splitTimestamp(old), delegate.splitTimestamp(old), executionId);
 
         assertThat(store.pruneHistoryBefore(clock.instant().minus(Duration.ofDays(30)), 100))
-                .isEqualTo(new HistoryStore.PrunedHistory(1, 1, 1));
+                .isEqualTo(new HistoryStore.PrunedHistory(1, 1));
     }
 }

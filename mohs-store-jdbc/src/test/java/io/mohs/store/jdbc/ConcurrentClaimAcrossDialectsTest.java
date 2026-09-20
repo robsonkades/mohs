@@ -15,6 +15,8 @@
  */
 package io.mohs.store.jdbc;
 
+import io.mohs.engine.SubmissionStore;
+
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -74,17 +76,23 @@ class ConcurrentClaimAcrossDialectsTest {
     void concurrentClaimsHandEveryEntryToExactlyOneNode(String dialect, Supplier<DataSource> freshSchema,
             Supplier<JdbcDelegate> newDelegate) throws Exception {
         DataSource dataSource = freshSchema.get();
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC), newDelegate.get());
-        JdbcWorkQueue queue = new JdbcWorkQueue(dataSource, newDelegate.get(), batchStore);
-        queue.offer(IntStream.rangeClosed(1, ENTRIES)
-                .mapToObj(i -> new WorkQueue.ReadyEntry(ExecutionId.of("exec-" + i), JOB, 0, 20, 1, NOW.minusSeconds(1)))
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, newDelegate.get());
+        JdbcWorkQueue queue = new JdbcWorkQueue(dataSource, newDelegate.get());
+        new JdbcJobStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC), newDelegate.get()).upsert(
+                io.mohs.core.definition.JobDefinition.of(JOB.value(), new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        TestWork.history(dataSource, newDelegate.get(), IntStream.rangeClosed(1, ENTRIES).mapToObj(i -> new io.mohs.engine.SubmissionStore.NewExecution(
+                        ExecutionId.of(io.mohs.test.TestIds.value("exec-" + i)), JOB, 0, 20, NOW.minusSeconds(1), NOW,
+                        "test", null, null, io.mohs.test.InputFixtures.encode(JOB, "input"), io.mohs.engine.SubmissionStore.Origin.MANUAL, null)).toList());
+        TestWork.ready(dataSource, newDelegate.get(), IntStream.rangeClosed(1, ENTRIES)
+                .mapToObj(i -> new WorkQueue.ReadyEntry(ExecutionId.of(io.mohs.test.TestIds.value("exec-" + i)), JOB, 0, 20, 1, NOW.minusSeconds(1)))
                 .toList());
         // Every node starts its first claim on the same barrier, so the contention is real from the
         // first statement, not a sequence the executor happened to serialise
         CyclicBarrier allNodesReady = new CyclicBarrier(NODES);
         List<Callable<List<String>>> nodes = new ArrayList<>();
         for (int n = 0; n < NODES; n++) {
-            nodes.add(claimingUntilEmpty(queue, "node-" + n, allNodesReady));
+            new JdbcNodeStore(dataSource, newDelegate.get()).register(io.mohs.test.TestIds.value("node-" + n), io.mohs.core.EngineState.RUNNING, java.time.Duration.ofMinutes(5), io.mohs.store.jdbc.TestSessions.catalog(dataSource));
+            nodes.add(claimingUntilEmpty(queue, io.mohs.test.TestIds.value("node-" + n), allNodesReady));
         }
 
         List<String> claimed = new ArrayList<>();
@@ -97,10 +105,10 @@ class ConcurrentClaimAcrossDialectsTest {
         }
 
         assertThat(claimed).as("%s: every entry exactly once", dialect)
-                .containsExactlyInAnyOrderElementsOf(IntStream.rangeClosed(1, ENTRIES).mapToObj(i -> "exec-" + i).toList());
+                .containsExactlyInAnyOrderElementsOf(IntStream.rangeClosed(1, ENTRIES).mapToObj(i -> io.mohs.test.TestIds.value("exec-" + i)).toList());
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM mohs_ready", Integer.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isEqualTo(ENTRIES);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM mohs_work WHERE work_state = 'READY'", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM mohs_work WHERE work_state = 'LEASED'", Integer.class)).isEqualTo(ENTRIES);
     }
 
     /** One node's whole run: wait for the others, then claim the shard until it hands back nothing. */
@@ -110,7 +118,7 @@ class ConcurrentClaimAcrossDialectsTest {
             List<String> claimedByThisNode = new ArrayList<>();
             List<WorkQueue.ClaimedWork> batch;
             do {
-                batch = queue.claim(0, nodeId, 1, LIMIT, List.of(), NOW);
+                batch = queue.claim(0, nodeId, LIMIT, List.of(), NOW);
                 batch.forEach(work -> claimedByThisNode.add(work.executionId().value()));
             } while (!batch.isEmpty());
             return claimedByThisNode;

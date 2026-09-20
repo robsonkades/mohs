@@ -30,36 +30,34 @@ import java.util.Objects;
  * {@code "nightly-invoices"}. It is persisted and derived from nothing: it is the only way for an
  * operator to tie the batch back to the intent.
  *
- * @param batchId the identity of the batch
- * @param name the human-readable name
- * @param total the total number of batch members
+ * @param batchId   the identity of the batch
+ * @param name      the human-readable name
+ * @param total     the total number of batch members
  * @param succeeded the number of successful terminal executions
- * @param failed the number of failed terminal executions
+ * @param failed    the number of failed terminal executions
  */
-public record BatchSnapshot(String batchId, String name, int total, int succeeded, int failed) {
+public record BatchSnapshot(String batchId, String name, long total, long succeeded, long failed) {
 
     /**
      * Creates a {@code BatchSnapshot} with the supplied values.
      *
-     * @param batchId the identity of the batch
-     * @param name the human-readable name
-     * @param total the total number of batch members
+     * @param batchId   the identity of the batch
+     * @param name      the human-readable name
+     * @param total     the total number of batch members
      * @param succeeded the number of successful terminal executions
-     * @param failed the number of failed terminal executions
+     * @param failed    the number of failed terminal executions
      */
     public BatchSnapshot {
-        Objects.requireNonNull(batchId, "batchId");
-        if (batchId.isBlank()) {
-            throw new IllegalArgumentException("batchId must not be blank");
-        }
+        GeneratedId.require(batchId, "batchId");
         Objects.requireNonNull(name, "name");
+
         if (name.isBlank()) {
             throw new IllegalArgumentException("name must not be blank");
         }
         if (total < 0 || succeeded < 0 || failed < 0) {
             throw new IllegalArgumentException("counters must not be negative");
         }
-        if (succeeded + failed > total) {
+        if (succeeded > total || failed > total - succeeded) {
             throw new IllegalArgumentException("succeeded + failed must not exceed total");
         }
     }
@@ -69,7 +67,7 @@ public record BatchSnapshot(String batchId, String name, int total, int succeede
      *
      * @return the total minus successful and failed members
      */
-    public int pending() {
+    public long pending() {
         return total - succeeded - failed;
     }
 

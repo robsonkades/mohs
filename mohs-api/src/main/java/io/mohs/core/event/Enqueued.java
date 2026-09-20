@@ -15,23 +15,23 @@
  */
 package io.mohs.core.event;
 
+import io.mohs.core.TimePrecision;
+import io.mohs.core.execution.ExecutionId;
+import io.mohs.core.job.JobKey;
+
 import java.time.Instant;
 import java.util.Objects;
 
-import io.mohs.core.execution.ExecutionId;
-import io.mohs.core.job.JobKey;
-import io.mohs.core.ScheduleCommand;
-
 /**
- * A deliberate dual role: it is both the receipt returned by {@link ScheduleCommand}'s terminals
+ * A deliberate dual role: it is both the receipt returned by {@link io.mohs.core.Mohs#enqueue}
  * ({@code now}/{@code at}/{@code after}) and the corresponding {@link ExecutionEvent} variant —
  * "the return value is a receipt, never a {@code Future} of the result" already describes both
  * roles with the same data.
  *
  * @param executionId the identity of the execution
- * @param jobKey the stable identity of the job
+ * @param jobKey      the stable identity of the job
  * @param scheduledAt the intended firing instant
- * @param actor the identity attributed to the operation
+ * @param actor       the identity attributed to the operation
  */
 public record Enqueued(ExecutionId executionId, JobKey jobKey, Instant scheduledAt, String actor) implements ExecutionEvent {
 
@@ -39,14 +39,15 @@ public record Enqueued(ExecutionId executionId, JobKey jobKey, Instant scheduled
      * Creates a {@code Enqueued} with the supplied values.
      *
      * @param executionId the identity of the execution
-     * @param jobKey the stable identity of the job
+     * @param jobKey      the stable identity of the job
      * @param scheduledAt the intended firing instant
-     * @param actor the identity attributed to the operation
+     * @param actor       the identity attributed to the operation
      */
     public Enqueued {
         Objects.requireNonNull(executionId, "executionId");
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(scheduledAt, "scheduledAt");
+        scheduledAt = TimePrecision.eligible(scheduledAt);
         Objects.requireNonNull(actor, "actor");
         if (actor.isBlank()) {
             throw new IllegalArgumentException("actor must not be blank");

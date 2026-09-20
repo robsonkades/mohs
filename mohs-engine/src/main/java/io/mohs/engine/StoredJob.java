@@ -22,33 +22,22 @@ import org.jspecify.annotations.Nullable;
 
 import io.mohs.core.definition.JobDefinition;
 
-/**
- * A {@link JobDefinition} plus the operational state kept distinct from the definitional one —
- * {@code orphaned}/{@code paused} are deliberately not fields of {@link JobDefinition} (an upsert
- * never touches them); this type exists only for a combined read in {@link JobStore}.
- *
- * <p>{@code nextFireAt} is the trigger's state: {@code null} means nothing to fire — on-demand, or
- * fixed-delay awaiting the end of the previous execution. The per-job mutex counter of an earlier
- * era is gone: the cap now derives from {@code mohs_lease} ({@link LeaseStore#countByJob}) — a live
- * ownership IS the occupied slot.
- *
- * @param definition the registered job definition
- * @param orphaned whether an annotation-sourced job is absent from the local code
- * @param paused whether automatic firing is suspended
- * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
- */
-public record StoredJob(JobDefinition definition, boolean orphaned, boolean paused,
-        @Nullable Instant nextFireAt) {
+/** A retained active definition and its authoritative trigger state. Null nextFireAt means disarmed. */
+public record StoredJob(JobDefinition definition, boolean paused,
+        @Nullable Instant nextFireAt, long scheduleRevision) {
 
     /**
      * Creates a {@code StoredJob} with the supplied values.
      *
      * @param definition the registered job definition
-     * @param orphaned whether an annotation-sourced job is absent from the local code
+
      * @param paused whether automatic firing is suspended
      * @param nextFireAt the next automatic firing instant, or {@code null} when disarmed
+     * @param scheduleRevision the current series generation
      */
     public StoredJob {
         Objects.requireNonNull(definition, "definition");
+        if (nextFireAt != null) nextFireAt = io.mohs.core.TimePrecision.eligible(nextFireAt);
+        if (scheduleRevision < 1) throw new IllegalArgumentException("scheduleRevision must be positive");
     }
 }

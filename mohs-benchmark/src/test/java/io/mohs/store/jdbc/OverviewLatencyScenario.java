@@ -42,8 +42,8 @@ import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
  * <p>The two reads the endpoint performs have OPPOSITE cost profiles, and exposing that difference
  * is why the scenario exists:
  * <ul>
- *   <li>{@code countTerminalOutcomesSince} scans {@code mohs_attempt} through the
- *       {@code (finished_at, outcome)} index — it should cost the WINDOW (60s, the default for
+ *   <li>{@code countTerminalOutcomesSince} scans {@code mohs_execution} through the
+ *       {@code (finished_at, state)} index — it should cost the WINDOW (60s, the default for
  *       {@code ?window=}), not the archive. If that holds, history may grow freely;</li>
  *   <li>{@code countActiveByState} runs {@code COUNT(*)} with NO {@code WHERE} over
  *       {@code mohs_ready} — it costs the whole BACKLOG. This is where the endpoint hurts, and it
@@ -55,11 +55,8 @@ import io.mohs.store.jdbc.delegate.PostgresJdbcDelegate;
  * an index scan touching only the window is evidence that cost does not track the archive; the
  * absolute figure is not.
  *
- * <p>Historical note: {@code mohs_attempt} used to be partitioned by week on Postgres and is now
- * an ordinary table, as in the other dialects. This bench never exercised pruning — the 2M history
- * rows all landed in the DEFAULT partition — and it was precisely that number, 1.6 ms with the
- * {@code (finished_at, outcome)} index resolving it alone, which helped show that partitioning was
- * not buying what it cost.
+ * <p>V15 counts terminal executions. Older reports of this scenario measured all attempt
+ * outcomes and are historical measurements, not results for the current schema.
  *
  * <p>Run by name: {@code ./mvnw -pl mohs-benchmark test -Dtest=OverviewLatencyScenario}.
  */
@@ -88,12 +85,12 @@ class OverviewLatencyScenario {
         // production pays for the connection once per pool, not once per poll.
         DataSource measured = new SingleConnectionDataSource(dataSource.getConnection(), true);
         JdbcHistoryStore history =
-                new JdbcHistoryStore(measured, JsonMapper.builder().build(), new PostgresJdbcDelegate());
+                new JdbcHistoryStore(measured, new PostgresJdbcDelegate());
 
         seedHistory(jdbc);
         seedBacklog(jdbc);
-        jdbc.execute("ANALYZE mohs_attempt");
-        jdbc.execute("ANALYZE mohs_ready");
+        jdbc.execute("ANALYZE mohs_execution");
+        jdbc.execute("ANALYZE mohs_work");
 
         // warmup fora do registro: a primeira chamada paga plano e cache frio
         for (int i = 0; i < 5; i++) {
@@ -125,19 +122,20 @@ class OverviewLatencyScenario {
     /** History seeded in bulk via {@code generate_series}: 2M rows one at a time through the store would take longer than the measurement. */
     private static void seedHistory(JdbcTemplate jdbc) {
         jdbc.update("""
-                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
-                SELECT 'hist-' || g, 1, 'seed-node',
+                INSERT INTO mohs_execution (execution_id, job_key, scheduled_at, created_at, finished_at, state, actor, payload, input_contract)
+                SELECT 'hist-' || g, 'seed-job',
                        now() - (g || ' seconds')::interval,
                        now() - (g || ' seconds')::interval,
-                       CASE WHEN g % 7 = 0 THEN 'FAILED' ELSE 'SUCCEEDED' END
+                       now() - (g || ' seconds')::interval,
+                       CASE WHEN g % 7 = 0 THEN 'FAILED' ELSE 'SUCCEEDED' END, 'benchmark', '{}', 'java.util.Map'
                   FROM generate_series(1, ?) g
                 """, HISTORY_ROWS);
     }
 
     private static void seedBacklog(JdbcTemplate jdbc) {
         jdbc.update("""
-                INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
-                SELECT 'ready-' || g, 'seed-job', g % 64, 20, 1, now()
+                INSERT INTO mohs_work (work_state, execution_id, job_key, shard, priority, attempt, visible_at)
+                SELECT 'READY', 'ready-' || g, 'seed-job', g % 64, 20, 1, now()
                   FROM generate_series(1, ?) g
                 """, BACKLOG_ROWS);
     }
@@ -160,7 +158,7 @@ class OverviewLatencyScenario {
         System.out.printf("""
 
                 === S5 — GET /overview under history pressure ===
-                seeded               : %,d attempt rows · %,d ready rows (backlog seen: %,d)
+                seeded               : %,d execution rows · %,d ready rows (backlog seen: %,d)
                 countActiveByState   : p50 %.1f ms · worst %.1f ms   <- scales with the BACKLOG
                 countTerminalOutcomes: p50 %.1f ms · worst %.1f ms   <- should scale with the WINDOW, not the history
                 worst combined       : %.1f ms (target < %d ms)
@@ -172,11 +170,11 @@ class OverviewLatencyScenario {
         // The plan is the evidence that survives the bench's size: an index scan touching only the
         // window says cost does not track the archive; the millisecond figure does not
         explain(jdbc, "throughput query (the one that must ignore the history)", """
-                SELECT outcome, COUNT(*) FROM mohs_attempt
-                 WHERE finished_at >= now() - interval '%d seconds' AND outcome IN ('SUCCEEDED','FAILED')
-                 GROUP BY outcome
+                SELECT state, COUNT(*) FROM mohs_execution
+                 WHERE finished_at >= now() - interval '%d seconds' AND state IN ('SUCCEEDED','FAILED')
+                 GROUP BY state
                 """.formatted(WINDOW.toSeconds()));
-        explain(jdbc, "backlog count (the one that scales with the queue)", "SELECT COUNT(*) FROM mohs_ready");
+        explain(jdbc, "backlog count (the one that scales with the queue)", "SELECT COUNT(*) FROM mohs_work WHERE work_state = 'READY'");
     }
 
     private static double millis(long nanos) {
