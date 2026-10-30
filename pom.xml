@@ -65,7 +65,7 @@
         <maven.compiler.release>25</maven.compiler.release>
         <mockito.version>5.23.0</mockito.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <spring-boot.version>4.1.1</spring-boot.version>
+        <spring-boot.version>4.1.2</spring-boot.version>
         <project.build.outputTimestamp>2026-08-29T00:00:00Z</project.build.outputTimestamp>
         <gpg.skip>true</gpg.skip>
         <uuidv7.version>1.2.0</uuidv7.version>
