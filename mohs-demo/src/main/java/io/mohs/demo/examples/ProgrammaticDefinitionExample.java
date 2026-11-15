@@ -16,118 +16,139 @@
 package io.mohs.demo.examples;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneId;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.stereotype.Component;
-
 import io.mohs.core.Mohs;
-import io.mohs.core.definition.JobDefinition;
-import io.mohs.core.definition.JobSpec;
-import io.mohs.core.definition.MohsJob;
-import io.mohs.core.definition.PolicySpec;
+import io.mohs.core.SubmissionOptions;
+import io.mohs.core.definition.JobOptions;
+import io.mohs.core.definition.JobRegistration;
+import io.mohs.core.event.Enqueued;
+import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobKey;
+import io.mohs.core.job.JobRef;
+import io.mohs.core.schedule.CronSpec;
 import io.mohs.core.schedule.Misfire;
+import io.mohs.core.schedule.RecurringOptions;
+import io.mohs.core.schedule.RecurringSchedule;
 
 /**
- * <b>Scenario 6 — definitions built from data instead of from annotations.</b>
- *
- * <p>An annotation is a compile-time decision, so it cannot express "one synchronisation job per
- * tenant, with the cron each tenant chose". {@link JobDefinition#of} builds the same definition at
- * runtime, from whatever the application knows.
- *
- * <h2>The builder is staged, on purpose</h2>
- *
- * <p>{@link JobSpec} exposes only the four triggers, and each of them returns {@link PolicySpec},
- * which does not expose them again. "Cron and every" is therefore not a validation error at boot —
- * it does not compile. Both interfaces are sealed to one implementation, which is what lets them
- * gain methods in a minor release without breaking binary compatibility.
- *
- * <p>{@link PolicySpec} carries everything that is not the trigger: {@code runner}, {@code window},
- * {@code rateLimit}, {@code misfire}, {@code startPaused}, {@code preventOverlap},
- * {@code maxConcurrentExecutions}, {@code retries}, {@code timeout}, {@code retryPolicy} — the same
- * vocabulary as the annotation, in any order.
- *
- * <h2>Registration semantics</h2>
- *
- * <p>{@link Mohs#define} is an <b>upsert by {@code JobKey}</b>. It rewrites the definitional part
- * and never touches the operational part: a job an operator paused stays paused, and
- * {@code startPaused} applies at birth only. Redefining a job on every boot is therefore normal and
- * idempotent.
- *
- * <p>A definition built this way is {@code PROGRAMMATIC}, and that source is what decides
- * retirement: {@link Mohs#remove} works only on {@code PROGRAMMATIC} definitions (annotated jobs are
- * retired by deleting the annotation, which makes them {@code ORPHANED} on the next boot). An id
- * cannot be claimed by both sources — the collision fails the boot rather than picking a winner.
- *
- * <h2>Limitation, stated plainly</h2>
- *
- * <p>Defining a job is not the same as supplying its handler. Today the only public way to register
- * a handler is a {@code @MohsJob} method, and that produces an {@code ANNOTATION} definition — which
- * collides with a {@code PROGRAMMATIC} row of the same id. So this path currently registers,
- * reschedules and retires definitions; an execution of one would find no handler and fail through
- * the retry budget with {@code no handler registered for job ...}.
- *
- * <p>Nothing here calls {@link #defineTenantSync} at startup, for exactly that reason. Reach for
- * this API when you are managing definitions from data (an admin screen listing tenants, say), and
- * use {@link MohsJob @MohsJob} for the work itself until a public handler-registration seam exists.
+ * One executable registration, any number of tenants and submissions.
+ * Configuration runs once per application context; the methods below run on demand.
+ * Input is persisted as JSON; the injected service and its callback stay in the application.
  */
 @Component
 public class ProgrammaticDefinitionExample {
+    /** Shared executable signature. Tenant IDs are invocation data. */
+    public static final JobRef<SyncInput> SYNC = JobRef.of("example-tenant-sync", SyncInput.class);
+
+    /**
+     * Serializable invocation data, independent of the executable registration.
+     * @param tenantId the tenant whose data the application synchronizes
+     */
+    public record SyncInput(String tenantId) {}
+
+    /** The application's executable logic; this demonstration records the requested work. */
+    public static class TenantSynchronizer {
+        private static final Logger log = LoggerFactory.getLogger(TenantSynchronizer.class);
+        /** Creates the example application service. */
+        public TenantSynchronizer() {}
+        /**
+         * Records the requested synchronization in this example.
+         * @param input the independent input for this invocation
+         */
+        public void synchronize(SyncInput input) {
+            log.info("synchronizing tenant {}", input.tenantId());
+        }
+    }
+
+    /** One-time wiring. Spring supplies the service, including any advice on its proxy. */
+    @Configuration(proxyBeanMethods = false)
+    public static class Registration {
+        /** Creates the example's one-time configuration. */
+        public Registration() {}
+        /**
+         * Supplies the application logic through Spring.
+         * @return the application service used by the job
+         */
+        @Bean
+        TenantSynchronizer tenantSynchronizer() { return new TenantSynchronizer(); }
+
+        /**
+         * Declares one reusable executable.
+         * @param synchronizer the Spring-managed application service
+         * @return the reusable executable declaration; creating it submits no work
+         */
+        @Bean
+        JobRegistration<SyncInput> tenantSync(TenantSynchronizer synchronizer) {
+            return JobRegistration.of(SYNC, (input, context) -> synchronizer.synchronize(input))
+                    .withOptions(JobOptions.defaults().withRetries(5).withTimeout(Duration.ofMinutes(10)));
+        }
+    }
 
     private final Mohs mohs;
 
     /**
-     * Creates a {@code ProgrammaticDefinitionExample} with the supplied values.
-     *
+     * Creates the application's submission service.
      * @param mohs the scheduling and operations facade
      */
-    public ProgrammaticDefinitionExample(Mohs mohs) {
-        this.mohs = mohs;
-    }
+    public ProgrammaticDefinitionExample(Mohs mohs) { this.mohs = mohs; }
 
     /**
-     * One definition per tenant, each with the tenant's own cron in the tenant's own zone. The id is
-     * the stable identity — deriving it from the tenant id is what makes a redeploy an upsert
-     * rather than a duplicate.
-     *
-     * @param tenantId the tenant identity used to namespace the job
-     * @param cron the cron expression for the tenant job
-     * @param zone the time zone used to evaluate the schedule
+     * Submits one independent synchronization for background execution.
+     * @param tenantId the tenant supplied by the application
+     * @return one execution receipt, eligible after commit
      */
-    public void defineTenantSync(String tenantId, String cron, ZoneId zone) {
-        mohs.define(JobDefinition.of("tenant-" + tenantId + "-sync", TenantSync.class,
-                spec -> spec.cron(cron, zone)
-                        .runner("io")
-                        .misfire(Misfire.FIRE_NOW)
-                        .retries(5)
-                        .timeout(Duration.ofMinutes(10))
-                        .preventOverlap()));
+    public Enqueued synchronizeNow(String tenantId) {
+        return mohs.enqueue(SYNC, new SyncInput(tenantId));
     }
 
     /**
-     * The same definition without a trigger: it exists, it can be invoked, and it never fires by
-     * itself — the programmatic equivalent of {@code @OnDemandJob}.
-     *
-     * @param tenantId the tenant identity used to namespace the job
+     * Persists a synchronization to become eligible at the supplied instant.
+     * @param tenantId the tenant supplied by the application
+     * @param when the earliest execution instant
+     * @return one future execution receipt
      */
-    public void defineTenantExport(String tenantId) {
-        mohs.define(JobDefinition.of("tenant-" + tenantId + "-export", TenantSync.class,
-                spec -> spec.onDemand().retries(2)));
+    public Enqueued synchronizeAt(String tenantId, Instant when) {
+        return mohs.scheduleAt(SYNC, new SyncInput(tenantId), when);
     }
 
     /**
-     * Retirement: enqueued executions become {@code CANCELLED}, the row is flagged retired and
-     * disappears from the listings, and the history stays. It is reversible — defining the same key
-     * again resurrects it. Calling this on an annotated job throws, telling you to remove the
-     * annotation instead.
+     * Submits priority work with an application-supplied deduplication identity.
+     * @param tenantId the tenant supplied by the application
+     * @param requestId the application's retry identity, scoped to this executable
+     * @return the first accepted receipt for this request
+     */
+    public Enqueued synchronizeUrgently(String tenantId, String requestId) {
+        return mohs.enqueue(SYNC, new SyncInput(tenantId), SubmissionOptions.defaults()
+                .withPriority(Priority.HIGH).withIdempotencyKey(requestId));
+    }
+
+    /**
+     * Same schedule ID updates the recurrence; tenant inputs never need another handler registration.
+     * The explicit policy limits overlap independently for each tenant's recurring schedule.
      *
-     * @param tenantId the tenant identity used to namespace the job
+     * @param tenantId the tenant used to namespace the recurrence
+     * @param cron the seconds-first recurring expression
+     * @param zone the time zone in which to evaluate the expression
+     * @return the recurring schedule identity and current trigger state
+     */
+    public RecurringSchedule defineTenantSync(String tenantId, String cron, ZoneId zone) {
+        return mohs.scheduleRecurring("tenant-" + tenantId + "-sync", SYNC, new SyncInput(tenantId),
+                new CronSpec(cron, zone), RecurringOptions.defaults().withMisfire(Misfire.FIRE_NOW)
+                        .withJobOptions(JobOptions.defaults().withRetries(5)
+                                .withTimeout(Duration.ofMinutes(10)).withMaxConcurrentExecutions(1)));
+    }
+
+    /**
+     * Retires one tenant's recurring schedule and preserves its history.
+     * @param tenantId the tenant whose recurrence should stop; other tenants remain scheduled
      */
     public void retireTenant(String tenantId) {
         mohs.remove(JobKey.of("tenant-" + tenantId + "-sync"));
-    }
-
-    /** The class recorded as the definition's {@code handlerType}; it is persisted by name. */
-    static final class TenantSync {
     }
 }

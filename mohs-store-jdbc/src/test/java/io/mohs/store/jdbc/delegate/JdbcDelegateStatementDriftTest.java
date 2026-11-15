@@ -73,7 +73,7 @@ class JdbcDelegateStatementDriftTest {
             assertThat(sql.substring(sql.indexOf("LIMIT :limit")))
                     .as("%s lost the OUTER terminal guard — only the outer predicate is re-evaluated under the row lock",
                             delegate.getClass().getSimpleName())
-                    .contains("state IN");
+                    .contains("state IN", "finished_at < :cutoff");
         }
     }
 
@@ -171,34 +171,15 @@ class JdbcDelegateStatementDriftTest {
         return parameters;
     }
 
-    /**
-     * The invariant a static initialiser used to hold while the filtered claim was derived from the
-     * unfiltered one by {@code replace}: the filter cannot silently disappear.
-     *
-     * <p>Both variants are written out in full now, so the drift is no longer a broken anchor but an
-     * edit applied to one and not the other — which the cross-delegate check above cannot see, since it
-     * compares a statement against its peers rather than against its own sibling. Postgres runs the
-     * whole claim as one statement, SQL Server the queue half of it, and both reach this through their
-     * two constants instead.
-     */
     @Test
-    void theFilteredClaimNeverLosesItsInadmissiblePredicate() {
-        for (JdbcDelegate delegate : DELEGATES) {
-            assertThat(parametersOf(delegate.readyCandidatesFiltered()))
-                    .as("%s#readyCandidatesFiltered lost the predicate that excludes inadmissible jobs — "
-                            + "the claim would hand back work admission control had already refused",
-                            delegate.getClass().getSimpleName())
-                    .contains("inadmissible");
-            assertThat(parametersOf(delegate.readyCandidates()))
-                    .as("%s#readyCandidates binds :inadmissible, but a NOT IN over an empty list does not "
-                            + "expand — that is the whole reason the two statements are separate",
-                            delegate.getClass().getSimpleName())
-                    .doesNotContain("inadmissible");
+    void acquisitionOnlyVisitsAdmittedIdentitiesAndCandidateFilteringRemainsOptional() {
+        for (var delegate : DELEGATES) {
+            assertThat(parametersOf(delegate.admissionCandidates(true))).contains("candidateJobs");
+            assertThat(parametersOf(delegate.admissionCandidates(false))).doesNotContain("candidateJobs");
+            assertThat(parametersOf(delegate.readyCandidates())).contains("ids");
         }
-        assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY_FILTERED)).contains("inadmissible");
-        assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY)).doesNotContain("inadmissible");
-        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY_FILTERED)).contains("inadmissible");
-        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY)).doesNotContain("inadmissible");
+        assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY)).contains("ids");
+        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY)).contains("ids");
     }
 
     /**
@@ -209,12 +190,14 @@ class JdbcDelegateStatementDriftTest {
     @Test
     void aFoldedClaimBindsWhatThePickItReplacesBinds() {
         SqlServerJdbcDelegate sqlServer = new SqlServerJdbcDelegate();
-        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY)).isEqualTo(parametersOf(sqlServer.readyCandidates()));
-        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY_FILTERED)).isEqualTo(parametersOf(sqlServer.readyCandidatesFiltered()));
-        // Postgres folds the lease insert too, so its fold binds the pick's parameters plus the lease's
+        var expected = new LinkedHashSet<>(parametersOf(sqlServer.readyCandidates()));
+        expected.addAll(Set.of("nodeId", "claimToken", "grantedAt"));
+        assertThat(parametersOf(SqlServerJdbcDelegate.CLAIM_READY)).isEqualTo(expected);
+        // Both folds also carry the ownership update's parameters.
         PostgresJdbcDelegate postgres = new PostgresJdbcDelegate();
-        assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY)).containsAll(parametersOf(postgres.readyCandidates()));
-        assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY_FILTERED)).containsAll(parametersOf(postgres.readyCandidatesFiltered()));
+        var postgresExpected = new LinkedHashSet<>(parametersOf(postgres.readyCandidates()));
+        postgresExpected.addAll(Set.of("nodeId", "claimToken", "grantedAt"));
+        assertThat(parametersOf(PostgresJdbcDelegate.CLAIM_READY)).isEqualTo(postgresExpected);
     }
 
 }

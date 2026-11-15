@@ -37,17 +37,10 @@ class JobDefinitionTest {
 
     @Test
     void cronBuildsFullyConfiguredDefinition() {
-        JobDefinition definition = JobDefinition.of("welcome-email", Handler.class, spec -> spec
-                .cron("0 0 2 * * *", ZoneId.of("America/Sao_Paulo"))
-                .runner("smtp")
-                .window("business-days")
-                .misfire(Misfire.FIRE_NOW)
-                .retries(8)
-                .timeout(Duration.ofMinutes(5))
-                .retryPolicy("smtpRetryPolicy"));
+        JobDefinition definition = JobDefinition.of("welcome-email", new io.mohs.core.schedule.CronSpec("0 0 2 * * *", ZoneId.of("America/Sao_Paulo")), io.mohs.core.definition.JobOptions.defaults().withRunner("smtp").withWindow("business-days").withRetries(8).withTimeout(Duration.ofMinutes(5)).withRetryPolicy("smtpRetryPolicy"), Misfire.FIRE_NOW, false);
 
         assertThat(definition.key()).isEqualTo(JobKey.of("welcome-email"));
-        assertThat(definition.handlerType()).isEqualTo(Handler.class);
+        assertThat(definition.executableKey()).isEqualTo(definition.key());
         assertThat(definition.schedule()).isEqualTo(new CronSpec("0 0 2 * * *", ZoneId.of("America/Sao_Paulo")));
         assertThat(definition.runner()).isEqualTo("smtp");
         assertThat(definition.window()).isEqualTo("business-days");
@@ -60,24 +53,21 @@ class JobDefinitionTest {
 
     @Test
     void everyBuildsFixedRateSchedule() {
-        JobDefinition definition = JobDefinition.of("poll", Handler.class,
-                spec -> spec.every(Duration.ofSeconds(30)).runner("io"));
+        JobDefinition definition = JobDefinition.of("poll", new io.mohs.core.schedule.IntervalSpec(Duration.ofSeconds(30), false), io.mohs.core.definition.JobOptions.defaults().withRunner("io"), io.mohs.core.schedule.Misfire.IGNORE, false);
 
         assertThat(definition.schedule()).isEqualTo(new IntervalSpec(Duration.ofSeconds(30), false));
     }
 
     @Test
     void everyAfterFinishBuildsFixedDelaySchedule() {
-        JobDefinition definition = JobDefinition.of("drain", Handler.class,
-                spec -> spec.everyAfterFinish(Duration.ofMinutes(1)).runner("io"));
+        JobDefinition definition = JobDefinition.of("drain", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), true), io.mohs.core.definition.JobOptions.defaults().withRunner("io"), io.mohs.core.schedule.Misfire.IGNORE, false);
 
         assertThat(definition.schedule()).isEqualTo(new IntervalSpec(Duration.ofMinutes(1), true));
     }
 
     @Test
     void onDemandBuildsMinimalDefinition() {
-        JobDefinition definition = JobDefinition.of("import-file", Handler.class,
-                spec -> spec.onDemand().runner("io"));
+        JobDefinition definition = JobDefinition.of("import-file", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRunner("io"), io.mohs.core.schedule.Misfire.IGNORE, false);
 
         assertThat(definition.schedule()).isEqualTo(new OnDemandSpec());
         assertThat(definition.misfire()).isEqualTo(Misfire.IGNORE);
@@ -85,8 +75,7 @@ class JobDefinitionTest {
 
     @Test
     void aDefinitionWithoutPolicyIsBornWithRetryBudget() {
-        JobDefinition definition = JobDefinition.of("import-file", Handler.class,
-                spec -> spec.onDemand().runner("io"));
+        JobDefinition definition = JobDefinition.of("import-file", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRunner("io"), io.mohs.core.schedule.Misfire.IGNORE, false);
 
         assertThat(definition.retries())
                 .as("a job asking for no policy at all has to be born with budget: without it, lost ownership "
@@ -95,103 +84,80 @@ class JobDefinitionTest {
                 .isEqualTo(1);
     }
 
-    @Test
-    void requiresATriggerToBeChosen() {
-        assertThatThrownBy(() -> JobDefinition.of("no-trigger", Handler.class, spec -> {
-        })).isInstanceOf(IllegalStateException.class);
-    }
+
 
     @Test
     void rejectsNegativeRetries() {
-        assertThatThrownBy(() -> definitionWithPolicy(true, 0, -1))
+        assertThatThrownBy(() -> definitionWithPolicy( 0, -1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("retries");
     }
 
     @Test
-    void rejectsMaxConcurrentExecutionsSetWhenConcurrencyIsAllowed() {
-        assertThatThrownBy(() -> definitionWithPolicy(true, 1, 0))
+    void rejectsNegativeConcurrencyCap() {
+        assertThatThrownBy(() -> definitionWithPolicy( -1, 0))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("maxConcurrentExecutions must be 0");
-    }
-
-    @Test
-    void rejectsNonPositiveMaxConcurrentExecutionsWhenConcurrencyIsNotAllowed() {
-        assertThatThrownBy(() -> definitionWithPolicy(false, 0, 0))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("must be at least 1");
+                .hasMessageContaining("nonnegative");
     }
 
     @Test
     void maxConcurrentExecutionsOptsOutOfConcurrentExecutionsWithAnExplicitCap() {
-        JobDefinition definition = JobDefinition.of("report-summary", Handler.class,
-                spec -> spec.onDemand().maxConcurrentExecutions(10));
+        JobDefinition definition = JobDefinition.of("report-summary", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withMaxConcurrentExecutions(10), io.mohs.core.schedule.Misfire.IGNORE, false);
 
-        assertThat(definition.allowConcurrentExecutions()).isFalse();
         assertThat(definition.maxConcurrentExecutions()).isEqualTo(10);
     }
 
     @Test
     void preventOverlapCapsAtExactlyOne() {
-        JobDefinition definition = JobDefinition.of("import-file", Handler.class,
-                spec -> spec.onDemand().preventOverlap());
+        JobDefinition definition = JobDefinition.of("import-file", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withMaxConcurrentExecutions(1), io.mohs.core.schedule.Misfire.IGNORE, false);
 
         assertThat(definition.maxConcurrentExecutions()).isEqualTo(1);
     }
 
     @Test
-    void allowConcurrentExecutionsDefaultsToTrue() {
-        JobDefinition definition = JobDefinition.of("import-file", Handler.class, spec -> spec.onDemand());
+    void concurrencyDefaultsToUnlimited() {
+        JobDefinition definition = JobDefinition.of("import-file", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false);
 
-        assertThat(definition.allowConcurrentExecutions()).isTrue();
+        assertThat(definition.maxConcurrentExecutions()).isZero();
     }
 
     @Test
     void preventOverlapOptsOutOfConcurrentExecutions() {
-        JobDefinition definition = JobDefinition.of("import-file", Handler.class,
-                spec -> spec.onDemand().preventOverlap());
+        JobDefinition definition = JobDefinition.of("import-file", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withMaxConcurrentExecutions(1), io.mohs.core.schedule.Misfire.IGNORE, false);
 
-        assertThat(definition.allowConcurrentExecutions()).isFalse();
     }
 
     @Test
     void rejectsNonPositiveTimeout() {
-        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class,
-                spec -> spec.onDemand().timeout(Duration.ZERO)))
+        assertThatThrownBy(() -> JobDefinition.of("x", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withTimeout(Duration.ZERO), io.mohs.core.schedule.Misfire.IGNORE, false))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void rejectsBlankRunnerWindowRetryPolicy() {
-        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class, spec -> spec.onDemand().runner(" ")))
+        assertThatThrownBy(() -> JobDefinition.of("x", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRunner(" "), io.mohs.core.schedule.Misfire.IGNORE, false))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class, spec -> spec.onDemand().window(" ")))
+        assertThatThrownBy(() -> JobDefinition.of("x", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withWindow(" "), io.mohs.core.schedule.Misfire.IGNORE, false))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class, spec -> spec.onDemand().retryPolicy(" ")))
+        assertThatThrownBy(() -> JobDefinition.of("x", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetryPolicy(" "), io.mohs.core.schedule.Misfire.IGNORE, false))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void rejectsNullKeyHandlerTypeScheduleMisfireSource() {
-        assertThatThrownBy(() -> definitionWith(null, Handler.class, new OnDemandSpec(), Misfire.IGNORE, DefinitionSource.PROGRAMMATIC))
+        assertThatThrownBy(() -> definitionWith(null, JobKey.of("id"), new OnDemandSpec(), Misfire.IGNORE, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(NullPointerException.class).hasMessage("key");
         assertThatThrownBy(() -> definitionWith(JobKey.of("id"), null, new OnDemandSpec(), Misfire.IGNORE, DefinitionSource.PROGRAMMATIC))
-                .isInstanceOf(NullPointerException.class).hasMessage("handlerType");
-        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), Handler.class, null, Misfire.IGNORE, DefinitionSource.PROGRAMMATIC))
+                .isInstanceOf(NullPointerException.class).hasMessage("executableKey");
+        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), JobKey.of("id"), null, Misfire.IGNORE, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(NullPointerException.class).hasMessage("schedule");
-        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), Handler.class, new OnDemandSpec(), null, DefinitionSource.PROGRAMMATIC))
+        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), JobKey.of("id"), new OnDemandSpec(), null, DefinitionSource.PROGRAMMATIC))
                 .isInstanceOf(NullPointerException.class).hasMessage("misfire");
-        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), Handler.class, new OnDemandSpec(), Misfire.IGNORE, null))
+        assertThatThrownBy(() -> definitionWith(JobKey.of("id"), JobKey.of("id"), new OnDemandSpec(), Misfire.IGNORE, null))
                 .isInstanceOf(NullPointerException.class).hasMessage("source");
     }
 
-    @Test
-    void rejectsASecondTriggerChosenInSeparateStatements() {
-        assertThatThrownBy(() -> JobDefinition.of("x", Handler.class, spec -> {
-            spec.cron("0 0 2 * * *", ZoneId.of("UTC"));
-            spec.every(Duration.ofSeconds(30));
-        })).isInstanceOf(IllegalStateException.class);
-    }
+
 
     /**
      * A definition valid in everything but the five components the canonical constructor refuses to
@@ -200,19 +166,17 @@ class JobDefinitionTest {
      * {@code null} the test is about among the nine that are merely "unset".
      */
     private static JobDefinition definitionWith(
-            JobKey key, Class<?> handlerType, Schedule schedule, Misfire misfire, DefinitionSource source) {
-        return new JobDefinition(key, null, handlerType, schedule,
-                null, null, null, misfire, false, false, 1, 0, null, null, source);
+            JobKey key, JobKey executableKey, Schedule schedule, Misfire misfire, DefinitionSource source) {
+        return new JobDefinition(key, null, executableKey, schedule,
+                null, null, null, misfire, false, 1, 0, null, null, source, "input-v1");
     }
 
     /**
      * A definition valid in everything but the concurrency ceiling and the retry budget — the trio the
      * canonical constructor cross-validates, and the only thing the rejection tests vary.
      */
-    private static JobDefinition definitionWithPolicy(
-            boolean allowConcurrentExecutions, int maxConcurrentExecutions, int retries) {
-        return new JobDefinition(JobKey.of("id"), null, Handler.class, new OnDemandSpec(),
-                null, null, null, Misfire.IGNORE, false,
-                allowConcurrentExecutions, maxConcurrentExecutions, retries, null, null, DefinitionSource.PROGRAMMATIC);
+    private static JobDefinition definitionWithPolicy( int maxConcurrentExecutions, int retries) {
+        return new JobDefinition(JobKey.of("id"), null,JobKey.of("id"), new OnDemandSpec(),
+                null, null, null, Misfire.IGNORE, false, maxConcurrentExecutions, retries, null, null, DefinitionSource.PROGRAMMATIC, JobKey.of("id").value());
     }
 }

@@ -15,6 +15,8 @@
  */
 package io.mohs.store.jdbc;
 
+import io.mohs.engine.SubmissionStore;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -56,7 +58,7 @@ class JdbcHistoryStoreTest {
     void setUp() {
         DataSource dataSource = freshH2DataSource();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        store = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDelegate());
+        store = new JdbcHistoryStore(dataSource, new H2JdbcDelegate());
     }
 
     private static DataSource freshH2DataSource() {
@@ -68,105 +70,97 @@ class JdbcHistoryStoreTest {
         return h2;
     }
 
-    private HistoryStore.NewExecution execution(String id, String jobKey, @Nullable String idempotencyKey) {
-        return new HistoryStore.NewExecution(ExecutionId.of(id), JobKey.of(jobKey), 0, 20,
-                NOW, NOW, "test", null, idempotencyKey, new WelcomeEmail("a@b.c", 1));
+    private SubmissionStore.NewExecution execution(String id, String jobKey, @Nullable String idempotencyKey) {
+        return new SubmissionStore.NewExecution(ExecutionId.of(id), JobKey.of(jobKey), 0, 20,
+                NOW, NOW, "test", null, idempotencyKey, io.mohs.test.InputFixtures.encode(JobKey.of(jobKey), new WelcomeEmail("a@b.c", 1)), io.mohs.engine.SubmissionStore.Origin.MANUAL, null);
     }
 
     @Test
     void recordWritesThePendingBirthRow() {
-        store.record(List.of(execution("exec-1", "job-a", null)));
+        TestSubmissions.accept(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new H2JdbcDelegate(), List.of(execution("01991337-0000-7000-8000-00000000001c", "job-a", null)));
 
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
+                "SELECT state FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", String.class)).isEqualTo("PENDING");
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT payload_type FROM mohs_execution WHERE execution_id = 'exec-1'", String.class))
-                .isEqualTo(WelcomeEmail.class.getName());
+                "SELECT input_contract FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", String.class))
+                .isEqualTo("job-a");
     }
 
     /** Idempotent Receiver (EIP): the primary-key conflict in mohs_idempotency IS the check — it propagates before any history row is born. */
     @Test
     void recordWithADuplicateIdempotencyKeyFailsBeforeWritingHistory() {
-        store.record(List.of(execution("exec-1", "job-a", "key-1")));
+        TestSubmissions.accept(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new H2JdbcDelegate(), List.of(execution("01991337-0000-7000-8000-00000000001c", "job-a", "key-1")));
 
-        assertThatThrownBy(() -> store.record(List.of(execution("exec-2", "job-a", "key-1"))))
+        assertThatThrownBy(() -> TestSubmissions.accept(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new H2JdbcDelegate(), List.of(execution("01991337-0000-7000-8000-00000000001e", "job-a", "key-1"))))
                 .isInstanceOf(DuplicateKeyException.class);
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM mohs_execution WHERE execution_id = 'exec-2'", Integer.class)).isZero();
-        assertThat(store.findByIdempotencyKey(JobKey.of("job-a"), "key-1"))
-                .contains(ExecutionId.of("exec-1"));
+                "SELECT COUNT(*) FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001e'", Integer.class)).isZero();
+        assertThat(store.findReceiptByIdempotencyKey(JobKey.of("job-a"), "key-1").map(io.mohs.core.event.Enqueued::executionId))
+                .contains(ExecutionId.of("01991337-0000-7000-8000-00000000001c"));
     }
 
     /** The same key on different JOBS does not collide — the deduplication's scope is (job, key), as in the earlier era's unique index. */
     @Test
     void idempotencyKeysAreScopedPerJob() {
-        store.record(List.of(execution("exec-1", "job-a", "key-1")));
-        store.record(List.of(execution("exec-2", "job-b", "key-1")));
+        TestSubmissions.accept(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new H2JdbcDelegate(), List.of(execution("01991337-0000-7000-8000-00000000001c", "job-a", "key-1")));
+        TestSubmissions.accept(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new H2JdbcDelegate(), List.of(execution("01991337-0000-7000-8000-00000000001e", "job-b", "key-1")));
 
-        assertThat(store.findByIdempotencyKey(JobKey.of("job-b"), "key-1")).contains(ExecutionId.of("exec-2"));
+        assertThat(store.findReceiptByIdempotencyKey(JobKey.of("job-b"), "key-1").map(io.mohs.core.event.Enqueued::executionId)).contains(ExecutionId.of("01991337-0000-7000-8000-00000000001e"));
     }
 
     @Test
     void findByIdempotencyKeyIsEmptyForAnUnknownKey() {
-        assertThat(store.findByIdempotencyKey(JobKey.of("job-a"), "never-used")).isEmpty();
+        assertThat(store.findReceiptByIdempotencyKey(JobKey.of("job-a"), "never-used").map(io.mohs.core.event.Enqueued::executionId)).isEmpty();
     }
 
     /** Preserved on the new port: an unreadable row enters unreadable WITH its cause; its neighbours hydrate normally. */
     @Test
     void findPayloadsIsolatesUnreadableRows() {
-        store.record(List.of(execution("exec-ok", "job-a", null)));
+        TestSubmissions.accept(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new H2JdbcDelegate(), List.of(execution("01991337-0000-7000-8000-000000000041", "job-a", null)));
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
-                VALUES ('exec-bad', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'com.example.DoesNotExist')
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
+                VALUES ('01991337-0000-7000-8000-000000000026', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'invalid contract')
                 """, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW));
 
-        HistoryStore.PayloadBatch batch = store.findPayloads(List.of(ExecutionId.of("exec-ok"), ExecutionId.of("exec-bad")));
+        HistoryStore.PayloadBatch batch = store.findPayloads(List.of(ExecutionId.of("01991337-0000-7000-8000-000000000041"), ExecutionId.of("01991337-0000-7000-8000-000000000026")));
 
-        assertThat(batch.rows()).containsOnlyKeys(ExecutionId.of("exec-ok"));
-        assertThat(batch.rows().get(ExecutionId.of("exec-ok")).payload()).isEqualTo(new WelcomeEmail("a@b.c", 1));
-        assertThat(batch.rows().get(ExecutionId.of("exec-ok")).head().createdAt()).isEqualTo(NOW);
-        assertThat(batch.unreadable()).containsOnlyKeys(ExecutionId.of("exec-bad"));
-        assertThat(batch.unreadable().get(ExecutionId.of("exec-bad"))).hasMessageContaining("com.example.DoesNotExist");
+        assertThat(batch.rows()).containsOnlyKeys(ExecutionId.of("01991337-0000-7000-8000-000000000041"));
+        assertThat(io.mohs.test.InputFixtures.decode(batch.rows().get(ExecutionId.of("01991337-0000-7000-8000-000000000041")).payload(), WelcomeEmail.class)).isEqualTo(new WelcomeEmail("a@b.c", 1));
+        assertThat(batch.rows().get(ExecutionId.of("01991337-0000-7000-8000-000000000041")).head().createdAt()).isEqualTo(NOW);
+        assertThat(batch.unreadable()).containsOnlyKeys(ExecutionId.of("01991337-0000-7000-8000-000000000026"));
+        assertThat(batch.unreadable().get(ExecutionId.of("01991337-0000-7000-8000-000000000026"))).hasMessageContaining("inputContract");
     }
 
     @Test
-    void findAttemptsReturnsThemInNumberOrder() {
-        store.record(List.of(execution("exec-1", "job-a", null)));
-        rawJdbcTemplate.update("""
-                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome, error_type, error)
-                VALUES ('exec-1', 2, 'node-a', ?, ?, 'SUCCEEDED', NULL, NULL)
-                """, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(5)), JdbcTimestamps.toUtcLocalDateTime(NOW));
-        rawJdbcTemplate.update("""
-                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome, error_type, error)
-                VALUES ('exec-1', 1, 'node-a', ?, ?, 'FAILED', 'java.lang.IllegalStateException', 'boom')
-                """, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(20)), JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(15)));
-
-        assertThat(store.findAttempts(ExecutionId.of("exec-1"))).satisfiesExactly(
-                first -> {
-                    assertThat(first.number()).isEqualTo(1);
-                    assertThat(first.outcome()).isEqualTo(ExecutionState.FAILED);
-                    assertThat(first.error()).isEqualTo("boom");
-                },
-                second -> assertThat(second.outcome()).isEqualTo(ExecutionState.SUCCEEDED));
+    void detailReturnsTheLatestCompletedAttemptAndSummariesOmitIt() {
+        TestSubmissions.accept(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new H2JdbcDelegate(), List.of(execution("01991337-0000-7000-8000-00000000001c", "job-a", null)));
+        insertAttempt("01991337-0000-7000-8000-00000000001c", 3, NOW);
+        assertThat(store.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW).orElseThrow().lastAttempt()).hasValueSatisfying(attempt -> {
+            assertThat(attempt.number()).isEqualTo(3);
+            assertThat(attempt.outcome()).isEqualTo(ExecutionState.SUCCEEDED);
+            assertThat(attempt.finishedAt()).isEqualTo(NOW);
+        });
+        assertThat(store.findPage(null, null, null, null, null, 10, NOW)).singleElement()
+                .satisfies(execution -> assertThat(execution.lastAttempt()).isEmpty());
     }
 
     /** The pruning follows the idempotency window, not history's retention — a strict cutoff. */
     @Test
-    void pruneIdempotencyRemovesOnlyStrictlyOlderKeys() {
-        store.record(List.of(execution("exec-1", "job-a", "old-key")));
-        rawJdbcTemplate.update("UPDATE mohs_idempotency SET created_at = ? WHERE idempotency_key = 'old-key'",
+    void pruneIdempotencyRemovesOnlyExpiredKeys() {
+        TestSubmissions.accept(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new H2JdbcDelegate(), List.of(execution("01991337-0000-7000-8000-00000000001c", "job-a", "old-key")));
+        rawJdbcTemplate.update("UPDATE mohs_idempotency SET expires_at = ? WHERE idempotency_key = 'old-key'",
                 JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(90_000)));
-        store.record(List.of(execution("exec-2", "job-a", "fresh-key")));
+        TestSubmissions.accept(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new H2JdbcDelegate(), List.of(execution("01991337-0000-7000-8000-00000000001e", "job-a", "fresh-key")));
 
-        int pruned = store.pruneIdempotencyBefore(NOW.minusSeconds(86_400));
+        int pruned = store.pruneExpiredIdempotency();
 
         assertThat(pruned).isEqualTo(1);
-        assertThat(store.findByIdempotencyKey(JobKey.of("job-a"), "old-key")).isEmpty();
-        assertThat(store.findByIdempotencyKey(JobKey.of("job-a"), "fresh-key")).contains(ExecutionId.of("exec-2"));
+        assertThat(store.findReceiptByIdempotencyKey(JobKey.of("job-a"), "old-key").map(io.mohs.core.event.Enqueued::executionId)).isEmpty();
+        assertThat(store.findReceiptByIdempotencyKey(JobKey.of("job-a"), "fresh-key").map(io.mohs.core.event.Enqueued::executionId)).contains(ExecutionId.of("01991337-0000-7000-8000-00000000001e"));
     }
 
     // --- the history sweep -------------------------------------------------------------------------
-    // These fixtures carry realistic UUIDv7-shaped ids, unlike the 'exec-1' ones above: the sweep's
+    // These fixtures carry realistic UUIDv7-shaped ids, unlike the '01991337-0000-7000-8000-00000000001c' ones above: the sweep's
     // candidate read is a range of the primary key derived from the id's time prefix, so an id that
     // does not encode its birth instant would silently fall outside every window.
 
@@ -180,22 +174,23 @@ class JdbcHistoryStoreTest {
         return "%08x-%04x-7fff-8fff-%012x".formatted(ms >>> 16, ms & 0xFFFF, sequence);
     }
 
-    private void insertExecution(String id, String state, @Nullable Instant finishedAt, @Nullable String correlationId) {
+    private void insertExecution(String id, String state, @Nullable Instant finishedAt, @Nullable String batchId) {
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, finished_at,
-                    actor, correlation_id, payload, payload_type)
+                    actor, batch_id, payload, input_contract)
                 VALUES (?, 'job-a', ?, ?, ?, ?, 'test', ?, '{}', ?)
                 """, id, state, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW),
-                finishedAt == null ? null : JdbcTimestamps.toUtcLocalDateTime(finishedAt), correlationId,
+                finishedAt == null ? null : JdbcTimestamps.toUtcLocalDateTime(finishedAt), batchId,
                 WelcomeEmail.class.getName());
     }
 
     private void insertAttempt(String executionId, int number, Instant finishedAt) {
-        rawJdbcTemplate.update("""
-                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
-                VALUES (?, ?, 'node-a', ?, ?, 'SUCCEEDED')
-                """, executionId, number, JdbcTimestamps.toUtcLocalDateTime(finishedAt),
-                JdbcTimestamps.toUtcLocalDateTime(finishedAt));
+        assertThat(rawJdbcTemplate.update("""
+                UPDATE mohs_execution SET last_attempt_number = ?, last_attempt_node_id = '01991337-0000-7000-8000-000000000065',
+                    last_attempt_started_at = ?, last_attempt_finished_at = ?, last_attempt_outcome = 'SUCCEEDED'
+                WHERE execution_id = ?
+                """, number, JdbcTimestamps.toUtcLocalDateTime(finishedAt),
+                JdbcTimestamps.toUtcLocalDateTime(finishedAt), executionId)).isEqualTo(1);
     }
 
     private void insertBatch(String id, Instant createdAt) {
@@ -229,13 +224,11 @@ class JdbcHistoryStoreTest {
         HistoryStore.PrunedHistory pruned = store.pruneHistoryBefore(CUTOFF, 100);
 
         assertThat(pruned.executions()).isEqualTo(1);
-        assertThat(pruned.attempts()).isEqualTo(1);
         assertThat(pruned.drained(100)).isTrue();
         assertThat(countRows("mohs_execution", oldDone)).isZero();
-        assertThat(countRows("mohs_attempt", oldDone)).isZero();
         assertThat(countRows("mohs_execution", oldPending)).isOne();
         assertThat(countRows("mohs_execution", longRetry)).isOne();
-        assertThat(countRows("mohs_attempt", longRetry)).isOne();
+        assertThat(store.find(ExecutionId.of(longRetry), NOW).orElseThrow().lastAttempt()).isPresent();
         assertThat(countRows("mohs_execution", recent)).isOne();
     }
 
@@ -253,7 +246,7 @@ class JdbcHistoryStoreTest {
 
         HistoryStore.PrunedHistory secondPass = store.pruneHistoryBefore(CUTOFF, 2);
         assertThat(secondPass.executions()).isEqualTo(1);
-        assertThat(firstPass.attempts() + secondPass.attempts()).isEqualTo(3);
+        assertThat(firstPass.executions() + secondPass.executions()).isEqualTo(3);
         assertThat(store.pruneHistoryBefore(CUTOFF, 2).drained(2)).isTrue();
     }
 
@@ -282,14 +275,14 @@ class JdbcHistoryStoreTest {
         String id = v7At(OLD, 20);
         insertExecution(id, "SUCCEEDED", OLD, null);
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at)
-                VALUES ('job-a', 'key-old', ?, ?)
-                """, id, JdbcTimestamps.toUtcLocalDateTime(OLD));
+                INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at, scheduled_at, actor)
+                VALUES ('job-a', 'key-old', ?, ?, ?, 'test')
+                """, id, JdbcTimestamps.toUtcLocalDateTime(OLD), JdbcTimestamps.toUtcLocalDateTime(OLD));
 
         store.pruneHistoryBefore(CUTOFF, 100);
 
         assertThat(countRows("mohs_execution", id)).isZero();
-        assertThat(store.findByIdempotencyKey(JobKey.of("job-a"), "key-old")).contains(ExecutionId.of(id));
+        assertThat(store.findReceiptByIdempotencyKey(JobKey.of("job-a"), "key-old").map(io.mohs.core.event.Enqueued::executionId)).contains(ExecutionId.of(id));
     }
 
     /**
@@ -310,16 +303,15 @@ class JdbcHistoryStoreTest {
         assertThat(countRows("mohs_execution", atCutoff)).isOne();
     }
 
-    /** A crash between the sweep's statements leaves orphans; the next sweep's own predicate collects them without any carried state. */
+    /** Latest attempt fields share the execution row, so cleanup cannot leave detached detail. */
     @Test
-    void sweepCollectsOrphanedAttemptsLeftBehind() {
-        String vanished = v7At(OLD, 30);
-        insertAttempt(vanished, 1, OLD);
-
-        HistoryStore.PrunedHistory pruned = store.pruneHistoryBefore(CUTOFF, 100);
-
-        assertThat(pruned.executions()).isZero();
-        assertThat(pruned.attempts()).isEqualTo(1);
-        assertThat(countRows("mohs_attempt", vanished)).isZero();
+    void sweepDeletesLatestAttemptTogetherWithItsExecution() {
+        String id = v7At(OLD, 30);
+        insertExecution(id, "SUCCEEDED", OLD, null);
+        insertAttempt(id, 7, OLD);
+        assertThat(store.find(ExecutionId.of(id), NOW).orElseThrow().lastAttempt()).hasValueSatisfying(
+                attempt -> assertThat(attempt.number()).isEqualTo(7));
+        assertThat(store.pruneHistoryBefore(CUTOFF, 100).executions()).isEqualTo(1);
+        assertThat(store.find(ExecutionId.of(id), NOW)).isEmpty();
     }
 }

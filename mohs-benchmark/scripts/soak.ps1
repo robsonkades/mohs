@@ -1,22 +1,8 @@
-# Soak: the long run nothing in this bench has ever done (PLAN.md, P2).
-#
-# The ten *Scenario classes drain in about a minute. Everything that only
-# appears with uptime — a slow leak, clock drift, connection growth, a plan
-# degrading as history grows — is invisible to them by construction. This
-# script runs ONE node under modest, continuous load for hours and samples the
-# four series that would show each of those.
-#
-# Acceptance (PLAN.md P2): throughput and latency stable from start to finish,
-# heap with no trend, zero executions lost.
-#
-# Prerequisites, identical to write-amplification.ps1: the demo app running on
-# the host against the target Postgres, container named 'postgres'
-# (postgres/postgres), and the app's management port on 8090 (that is where
-# the Prometheus scrape in the root docker-compose expects it).
-#
-# The load is deliberately modest. A soak at the throughput ceiling measures
-# the ceiling; what this run is for is the SECOND derivative — whether a number
-# that is fine at hour 1 is still fine at hour 12.
+# Sustained SQL drain workload with scoped accounting and periodic metrics.
+# Requires a disposable PostgreSQL 13+ database, current schema, running demo and
+# PowerShell 7+. Disable history retention or retain longer than the run: deleted
+# history cannot prove loss-free processing. This bypasses API acceptance;
+# use api-load.ps1 for end-to-end submission.
 
 param(
     # Executions enqueued per wave. Small on purpose: the point is duration.
@@ -26,20 +12,26 @@ param(
     [int]$SampleIntervalSeconds = 60,
     [string]$JobKey = 'every-job',
     [string]$Container = 'postgres',
-    [string]$Database = 'mohs',
+    [string]$Database = 'postgres',
+    [string]$DbUser = 'postgres',
+    [string]$PayloadJson = '{}',
+    [int]$DrainTimeoutSeconds = 300,
     [string]$ActuatorBase = 'http://localhost:8090',
     [string]$OutputDirectory = "$PSScriptRoot/../target/soak"
 )
 
 $ErrorActionPreference = 'Stop'
 
-function Invoke-Psql([string]$Sql) {
-    docker exec $Container psql -U postgres -d $Database -t -A -c $Sql
-}
+. "$PSScriptRoot/benchmark-support.ps1"
+Assert-BenchmarkSchema
+Assert-BenchmarkJob $JobKey
+if ($WaveSize -lt 1 -or $WaveIntervalSeconds -lt 1 -or $DurationHours -lt 1 -or $SampleIntervalSeconds -lt 1 -or $DrainTimeoutSeconds -lt 1) { throw 'Counts and durations must be positive.' }
+$cohort = New-BenchmarkCohort 'soak'
+$cohortWhere = "actor LIKE '$cohort-%'"
 
-function Get-ActuatorMetric([string]$Name) {
+function Get-ActuatorMetric([string]$Name, [string]$Query = '') {
     try {
-        $response = Invoke-RestMethod -Uri "$ActuatorBase/actuator/metrics/$Name" -TimeoutSec 5
+        $response = Invoke-RestMethod -Uri "$ActuatorBase/actuator/metrics/$Name$Query" -TimeoutSec 5
         return [double]($response.measurements | Where-Object { $_.statistic -eq 'VALUE' } | Select-Object -First 1).value
     } catch {
         # A sample that could not be taken is recorded as NaN rather than skipped:
@@ -61,7 +53,7 @@ Write-Host "Samples -> $samplesPath"
 # without it a leak that started before the script did would read as flat.
 $startedAt = Get-Date
 $endsAt = $startedAt.AddHours($DurationHours)
-$baselineTerminal = [int](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE state IN ('SUCCEEDED','FAILED');")
+$baselineTerminal = 0
 $enqueued = 0
 $samples = @()
 $nextSample = $startedAt
@@ -71,31 +63,19 @@ while ((Get-Date) -lt $endsAt) {
     $now = Get-Date
 
     if ($now -ge $nextWave) {
-        # Same enqueue unit as write-amplification.ps1: a PENDING history row
-        # plus its mohs_ready entry, in one transaction. The prefix carries the
-        # wave so a lost execution can be traced back to when it was born.
-        $prefix = "soak-$stamp-$enqueued"
-        Invoke-Psql @"
-BEGIN;
-INSERT INTO mohs_execution (execution_id, job_key, shard, priority, state, scheduled_at, created_at, actor, payload, payload_type)
-SELECT '$prefix-' || g, '$JobKey', (g % 64), 20, 'PENDING', now(), now(), 'soak', '{}', 'java.lang.Object'
-  FROM generate_series(1, $WaveSize) g;
-INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
-SELECT '$prefix-' || g, '$JobKey', (g % 64), 20, 1, now()
-  FROM generate_series(1, $WaveSize) g;
-COMMIT;
-"@ | Out-Null
+        $prefix = "$cohort-$enqueued"
+        Add-BenchmarkSeed -Cohort $prefix -Count $WaveSize -Key $JobKey -PayloadJson $PayloadJson
         $enqueued += $WaveSize
         $nextWave = $now.AddSeconds($WaveIntervalSeconds)
     }
 
     if ($now -ge $nextSample) {
         $elapsed = [int]($now - $startedAt).TotalSeconds
-        $terminal = [int](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE state IN ('SUCCEEDED','FAILED');")
-        $queued = [int](Invoke-Psql "SELECT count(*) FROM mohs_ready;")
-        $running = [int](Invoke-Psql "SELECT count(*) FROM mohs_lease;")
+        $terminal = [int](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE $cohortWhere AND state IN ('SUCCEEDED','FAILED','CANCELLED');")
+        $queued = [int](Invoke-Psql "SELECT count(*) FROM mohs_work w JOIN mohs_execution e USING (execution_id) WHERE e.$cohortWhere AND w.work_state = 'READY';")
+        $running = [int](Invoke-Psql "SELECT count(*) FROM mohs_work w JOIN mohs_execution e USING (execution_id) WHERE e.$cohortWhere AND w.work_state = 'LEASED';")
         $history = [int](Invoke-Psql "SELECT count(*) FROM mohs_execution;")
-        $connections = [int](Invoke-Psql "SELECT count(*) FROM pg_stat_activity WHERE datname = '$Database';")
+        $connections = [int](Invoke-Psql "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database();")
         # Drift: the database's clock against this host's, the number
         # DatabaseClock would be correcting if mohs.time.mode=database
         $drift = [double](Invoke-Psql "SELECT EXTRACT(EPOCH FROM (now() - '$($now.ToUniversalTime().ToString('o'))'::timestamptz));")
@@ -109,12 +89,12 @@ COMMIT;
             history_rows  = $history
             db_conns      = $connections
             clock_drift_s = $drift
-            heap_used     = Get-ActuatorMetric 'jvm.memory.used'
+            heap_used     = Get-ActuatorMetric 'jvm.memory.used' '?tag=area:heap'
             live_threads  = Get-ActuatorMetric 'jvm.threads.live'
             mohs_queue    = Get-ActuatorMetric 'mohs.queue.depth'
         }
         $samples += $sample
-        $samples | Export-Csv -Path $samplesPath -NoTypeInformation
+        $sample | Export-Csv -Path $samplesPath -NoTypeInformation -Append
         Write-Host ("  {0,6}s  terminal={1,-8} queued={2,-6} heap={3:N0} threads={4} conns={5} drift={6:N3}s" -f `
             $sample.elapsed_s, $sample.terminal, $sample.queue_depth, $sample.heap_used, $sample.live_threads, `
             $sample.db_conns, $sample.clock_drift_s)
@@ -124,6 +104,17 @@ COMMIT;
     Start-Sleep -Seconds 1
 }
 
+# Stop arrivals, then distinguish unfinished work from absent retained history.
+$deadline = (Get-Date).AddSeconds($DrainTimeoutSeconds)
+do {
+    $pending = [long](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE $cohortWhere AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED')")
+    if ($pending -eq 0 -or (Get-Date) -ge $deadline) { break }
+    Start-Sleep -Milliseconds 500
+} while ($true)
+$finalTerminal = [long](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE $cohortWhere AND state IN ('SUCCEEDED','FAILED','CANCELLED')")
+$finalRetained = [long](Invoke-Psql "SELECT count(*) FROM mohs_execution WHERE $cohortWhere")
+$unaccounted = $enqueued - $finalRetained
+
 # The verdict is read off the two halves. A soak has no single number: what it
 # reports is whether the SECOND half looks like the first.
 $half = [int][math]::Floor($samples.Count / 2)
@@ -131,7 +122,7 @@ $first = $samples | Select-Object -First $half
 $second = $samples | Select-Object -Last $half
 $firstRate = if ($first.Count -gt 1) { ($first[-1].terminal - $first[0].terminal) / [math]::Max(1, ($first[-1].elapsed_s - $first[0].elapsed_s)) } else { 0 }
 $secondRate = if ($second.Count -gt 1) { ($second[-1].terminal - $second[0].terminal) / [math]::Max(1, ($second[-1].elapsed_s - $second[0].elapsed_s)) } else { 0 }
-$lost = $enqueued - $samples[-1].terminal
+$lost = $unaccounted
 
 @"
 # Soak — $stamp
@@ -141,8 +132,9 @@ $lost = $enqueued - $samples[-1].terminal
 | Duration | $DurationHours h ($($samples[-1].elapsed_s) s observed) |
 | Load | $WaveSize executions every $WaveIntervalSeconds s |
 | Enqueued | $enqueued |
-| Terminal | $($samples[-1].terminal) |
-| **Unaccounted** | **$lost** (must be 0 net of what is still queued/running) |
+| Terminal after final drain | $finalTerminal |
+| Still pending after final drain | $pending |
+| **Unaccounted** | **$lost** (submitted minus retained; retention must be disabled or exceed this run) |
 | Throughput, first half | $([math]::Round($firstRate, 2))/s |
 | Throughput, second half | $([math]::Round($secondRate, 2))/s |
 | Heap, first sample | $($samples[0].heap_used) |
@@ -151,7 +143,7 @@ $lost = $enqueued - $samples[-1].terminal
 | DB connections, first / last | $($samples[0].db_conns) / $($samples[-1].db_conns) |
 | History rows at the end | $($samples[-1].history_rows) |
 
-Acceptance (PLAN.md P2): throughput and latency stable start to finish, heap
+Acceptance: throughput and latency stable start to finish, heap
 with no trend, zero executions lost. The two throughput halves above are the
 stability check; heap, threads and connections are read as TRENDS across
 ``$samplesPath``, not as endpoints — one high last sample is a GC that had not
@@ -161,3 +153,5 @@ run yet, a monotonic climb is the finding.
 Write-Host ""
 Write-Host "Summary -> $summaryPath"
 Get-Content $summaryPath
+
+if ($pending -gt 0 -or $unaccounted -ne 0) { throw "Soak accounting failed: $pending pending, $unaccounted unaccounted. See $summaryPath." }

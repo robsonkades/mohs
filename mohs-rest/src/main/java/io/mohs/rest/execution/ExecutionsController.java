@@ -79,7 +79,7 @@ public class ExecutionsController {
     }
 
     /**
-     * {@code size} — see {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — attempts live in the detail view.
+     * {@code size} — see {@link CursorPage#DEFAULT_PAGE_SIZE}/{@link CursorPage#MAX_PAGE_SIZE}. The list is a summary ({@link ExecutionSummaryResponse}) — latest-attempt diagnostics live in the detail view.
      *
      * @param status the execution state filter, or {@code null} for all states
      * @param jobKey the stable identity of the job
@@ -100,16 +100,18 @@ public class ExecutionsController {
         int pageSize = CursorPage.clampSize(size);
         // A blank filter is no filter; only a present, non-blank one is turned into a key
         JobKey key = jobKey == null || jobKey.isBlank() ? null : RequestIdentifiers.jobKey(jobKey);
-        List<Execution> fetched = mohs.executions(new ExecutionQuery(key, status, from, to, cursor, pageSize + 1));
+        var query = io.mohs.rest.error.PayloadValidationException.validating("cursor",
+                () -> new ExecutionQuery(key, status, from, to, cursor, pageSize + 1));
+        List<Execution> fetched = mohs.executions(query);
         List<ExecutionSummaryResponse> responses = fetched.stream().map(ExecutionSummaryResponse::from).toList();
         return CursorPage.of(responses, pageSize, ExecutionSummaryResponse::executionId);
     }
 
     /**
-     * Returns one execution with its attempt history.
+     * Returns one execution with its latest completed attempt.
      *
      * @param id the identity of the execution
-     * @return the execution detail with attempt history
+     * @return the execution detail with the latest completed attempt
      */
     @GetMapping("/{id}")
     public ExecutionResponse get(@PathVariable String id) {

@@ -16,7 +16,6 @@
 package io.mohs.core.schedule;
 
 import io.mohs.core.definition.JobDefinition;
-import io.mohs.core.definition.JobSpec;
 
 /**
  * When a job fires: cron, fixed-rate, fixed-delay or on demand.
@@ -26,8 +25,7 @@ import io.mohs.core.definition.JobSpec;
  * silent {@code default} branch.
  *
  * <p>This type carries only the trigger. A job's policies (runner, window, misfire, retries,
- * timeout) live in {@link JobDefinition}; see {@link JobSpec} for the staged builder that assembles
- * both.
+ * timeout) live in {@link JobDefinition}. Each definition carries exactly one schedule value.
  */
 public sealed interface Schedule permits CronSpec, IntervalSpec, OnDemandSpec {
 }

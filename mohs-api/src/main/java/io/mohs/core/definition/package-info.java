@@ -14,10 +14,7 @@
  * limitations under the License.
  */
 /**
- * Job definition: {@link io.mohs.core.definition.JobDefinition}, {@link MohsJob @MohsJob} and the
- * staged builder ({@link io.mohs.core.definition.JobSpec}/{@link io.mohs.core.definition.PolicySpec})
- * for the programmatic path. Depends on {@code io.mohs.core.job} (identity) and
- * {@code io.mohs.core.schedule} (the trigger).
+ * Typed executable declarations, immutable execution policy and definition snapshots.
  */
 @NullMarked
 package io.mohs.core.definition;

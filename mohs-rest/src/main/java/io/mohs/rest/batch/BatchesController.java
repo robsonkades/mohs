@@ -55,7 +55,9 @@ public class BatchesController {
      */
     @GetMapping("/{id}")
     public BatchResponse get(@PathVariable String id) {
-        return mohs.findBatch(id)
+        String batchId = io.mohs.rest.error.PayloadValidationException.validating("id",
+                () -> io.mohs.core.GeneratedId.require(id, "batchId"));
+        return mohs.findBatch(batchId)
                 .map(BatchResponse::from)
                 .orElseThrow(() -> new BatchNotFoundException(id));
     }

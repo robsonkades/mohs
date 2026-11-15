@@ -34,9 +34,10 @@ import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.JobSnapshot;
 import io.mohs.core.Mohs;
-import io.mohs.core.ScheduleCommand;
+import io.mohs.core.SubmissionOptions;
+import io.mohs.core.NoInput;
+import io.mohs.core.job.JobRef;
 import io.mohs.core.definition.JobDefinition;
-import io.mohs.core.definition.JobSpec;
 import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionId;
@@ -88,7 +89,7 @@ class JobsControllerContractTest {
 
         @Bean
         JobsController jobsController(Mohs mohs, ActorResolver actorResolver) {
-            // Mirrors the starter's PayloadMapper.STRICT: the raw mapper refusing unknown properties,
+            // Mirrors InputCodec.JSON's format: the raw mapper refusing unknown properties,
             // never the slice's auto-configured one
             return new JobsController(mohs, actorResolver,
                     JsonMapper.builder().enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build(), ApiPaths.V1);
@@ -109,9 +110,38 @@ class JobsControllerContractTest {
     @MockitoBean
     private ActorResolver actorResolver;
 
+    @org.junit.jupiter.api.BeforeEach
+    void actorIsResolvedForEveryValidSubmission() {
+        when(actorResolver.resolve(any())).thenReturn("tester");
+    }
+
     private static JobSnapshot snapshot(String key, boolean paused) {
-        JobDefinition definition = JobDefinition.of(key, Handler.class, JobSpec::onDemand);
+        JobDefinition definition = JobDefinition.of(key, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false);
         return new JobSnapshot(definition, paused, null);
+    }
+
+    @Test
+    void pauseAndResumeRejectAnInvalidActorBeforeChangingState() throws Exception {
+        when(mohs.findJob(JobKey.of("welcome-email"))).thenReturn(Optional.of(snapshot("welcome-email", false)));
+        when(actorResolver.resolve(any())).thenThrow(new InvalidActorException("invalid actor"));
+        for (String action : List.of("pause", "resume")) {
+            mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/" + action))
+                    .andExpect(status().isBadRequest());
+        }
+        verify(mohs, never()).pause(any());
+        verify(mohs, never()).resume(any());
+    }
+
+    @Test
+    void aResponseReadTimeoutDoesNotClaimThatTheCommittedPauseWasRolledBack() throws Exception {
+        when(mohs.findJob(JobKey.of("welcome-email")))
+                .thenReturn(Optional.of(snapshot("welcome-email", false)))
+                .thenThrow(new org.springframework.dao.QueryTimeoutException("response read timed out"));
+
+        mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/pause"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.detail").value(containsString("may already have applied")));
+        verify(mohs).pause(JobKey.of("welcome-email"));
     }
 
     @Test
@@ -129,7 +159,7 @@ class JobsControllerContractTest {
         mockMvc.perform(get(ApiPaths.V1 + "/jobs/{jobKey}", " "))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.field").value("jobKey"))
-                .andExpect(jsonPath("$.detail").value(containsString("must not be blank")));
+                .andExpect(jsonPath("$.detail").value(containsString("spaces are not allowed")));
     }
 
     /** The ceiling is the command's (the column is 255 wide on every dialect); the controller only turns its refusal into the 422 the validation model promises. */
@@ -137,13 +167,8 @@ class JobsControllerContractTest {
     void scheduleRejectsAnIdempotencyKeyWiderThanTheColumn() throws Exception {
         JobKey key = JobKey.of("welcome-email");
         when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
-        when(mohs.payloadType(key)).thenReturn(Optional.empty());
+        when(mohs.jobRef(key)).thenReturn(Optional.of(JobRef.of(key.value(), NoInput.class)));
         when(actorResolver.resolve(any())).thenReturn("tester");
-        ScheduleCommand command = mock(ScheduleCommand.class);
-        when(mohs.schedule(eq("welcome-email"), any())).thenReturn(command);
-        when(command.as("tester")).thenReturn(command);
-        when(command.idempotencyKey("k".repeat(256)))
-                .thenThrow(new IllegalArgumentException("idempotency key must be at most 255 characters, got 256"));
 
         mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -152,7 +177,7 @@ class JobsControllerContractTest {
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.field").value("Idempotency-Key"))
                 .andExpect(jsonPath("$.detail").value(containsString("255")));
-        verify(command, never()).now();
+        verify(mohs, never()).enqueue(any(), any(), any());
     }
 
     @Test
@@ -169,19 +194,16 @@ class JobsControllerContractTest {
     void scheduleAcceptsAndPointsLocationAtTheExecution() throws Exception {
         JobKey key = JobKey.of("welcome-email");
         when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
-        when(mohs.payloadType(key)).thenReturn(Optional.empty());
+        when(mohs.jobRef(key)).thenReturn(Optional.of(JobRef.of(key.value(), NoInput.class)));
         when(actorResolver.resolve(any())).thenReturn("tester");
-        ScheduleCommand command = mock(ScheduleCommand.class);
-        when(mohs.schedule(eq("welcome-email"), any())).thenReturn(command);
-        when(command.as("tester")).thenReturn(command);
-        when(command.now()).thenReturn(new Enqueued(ExecutionId.of("exec-1"), key, NOW, "tester"));
+        when(mohs.enqueue(any(), any(), eq(SubmissionOptions.defaults().withActor("tester")))).thenReturn(new Enqueued(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), key, NOW, "tester"));
 
         mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"payload\":{}}"))
                 .andExpect(status().isAccepted())
-                .andExpect(header().string("Location", ApiPaths.V1 + "/executions/exec-1"))
-                .andExpect(jsonPath("$.executionId").value("exec-1"));
+                .andExpect(header().string("Location", ApiPaths.V1 + "/executions/01991337-0000-7000-8000-00000000001c"))
+                .andExpect(jsonPath("$.executionId").value("01991337-0000-7000-8000-00000000001c"));
     }
 
     /** A complete invocation: delay (computed on the server) and priority reach the ScheduleCommand — the core's three terminals at the REST boundary. */
@@ -189,19 +211,15 @@ class JobsControllerContractTest {
     void scheduleAcceptsDelayAndPriority() throws Exception {
         JobKey key = JobKey.of("welcome-email");
         when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
-        when(mohs.payloadType(key)).thenReturn(Optional.empty());
+        when(mohs.jobRef(key)).thenReturn(Optional.of(JobRef.of(key.value(), NoInput.class)));
         when(actorResolver.resolve(any())).thenReturn("tester");
-        ScheduleCommand command = mock(ScheduleCommand.class);
-        when(mohs.schedule(eq("welcome-email"), any())).thenReturn(command);
-        when(command.as("tester")).thenReturn(command);
-        when(command.priority(Priority.HIGH)).thenReturn(command);
-        when(command.after(Duration.ofMinutes(5))).thenReturn(new Enqueued(ExecutionId.of("exec-2"), key, NOW.plusSeconds(300), "tester"));
+        when(mohs.scheduleAfter(any(), any(), eq(Duration.ofMinutes(5)), eq(SubmissionOptions.defaults().withActor("tester").withPriority(Priority.HIGH)))).thenReturn(new Enqueued(ExecutionId.of("01991337-0000-7000-8000-00000000001e"), key, NOW.plusSeconds(300), "tester"));
 
         mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"payload\":{},\"delay\":\"PT5M\",\"priority\":\"HIGH\"}"))
                 .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.executionId").value("exec-2"));
+                .andExpect(jsonPath("$.executionId").value("01991337-0000-7000-8000-00000000001e"));
     }
 
     /** at and delay are exclusive — the record's validation fires during deserialisation and becomes a 422 that teaches. */
@@ -295,7 +313,7 @@ class JobsControllerContractTest {
     void scheduleRejectsAPayloadTheHandlerDoesNotAccept() throws Exception {
         JobKey key = JobKey.of("welcome-email");
         when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
-        when(mohs.payloadType(key)).thenReturn(Optional.empty());
+        when(mohs.jobRef(key)).thenReturn(Optional.of(JobRef.of(key.value(), NoInput.class)));
 
         mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -312,7 +330,7 @@ class JobsControllerContractTest {
     void scheduleRejectsAPayloadWithAnUnknownPropertyAs422() throws Exception {
         JobKey key = JobKey.of("welcome-email");
         when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
-        when(mohs.payloadType(key)).thenReturn(Optional.of(CountPayload.class));
+        when(mohs.jobRef(key)).thenReturn(Optional.of(JobRef.of(key.value(), CountPayload.class)));
 
         mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -329,7 +347,7 @@ class JobsControllerContractTest {
     void scheduleRejectsAPayloadIncompatibleWithTheDeclaredTypeAs422() throws Exception {
         JobKey key = JobKey.of("welcome-email");
         when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
-        when(mohs.payloadType(key)).thenReturn(Optional.<Class<?>>of(CountPayload.class));
+        when(mohs.jobRef(key)).thenReturn(Optional.of(JobRef.of(key.value(), CountPayload.class)));
 
         mockMvc.perform(post(ApiPaths.V1 + "/jobs/welcome-email/schedule")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -366,15 +384,15 @@ class JobsControllerContractTest {
     void executionsSignalsANextPageViaCursorWhenThereAreMoreRows() throws Exception {
         JobKey key = JobKey.of("welcome-email");
         when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
-        Execution first = new Execution(ExecutionId.of("exec-2"), key, ExecutionState.ENQUEUED, NOW, null, List.of(), "tester");
-        Execution second = new Execution(ExecutionId.of("exec-1"), key, ExecutionState.ENQUEUED, NOW.minusSeconds(1), null, List.of(), "tester");
+        Execution first = new Execution(ExecutionId.of("01991337-0000-7000-8000-00000000001e"), key, ExecutionState.ENQUEUED, NOW, null, Optional.empty(), "tester");
+        Execution second = new Execution(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), key, ExecutionState.ENQUEUED, NOW.minusSeconds(1), null, Optional.empty(), "tester");
         when(mohs.executions(any())).thenReturn(List.of(first, second));
 
         mockMvc.perform(get(ApiPaths.V1 + "/jobs/welcome-email/executions").param("size", "1"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items.length()").value(1))
-                .andExpect(jsonPath("$.items[0].executionId").value("exec-2"))
-                .andExpect(jsonPath("$.nextCursor").value("exec-2"));
+                .andExpect(jsonPath("$.items[0].executionId").value("01991337-0000-7000-8000-00000000001e"))
+                .andExpect(jsonPath("$.nextCursor").value("01991337-0000-7000-8000-00000000001e"));
     }
 
     /** size=0 and size=-1 saturate at 1 (CursorPage.clampSize) — previously 0 threw IndexOutOfBounds and a negative threw IAE, both 500s. */
@@ -382,8 +400,8 @@ class JobsControllerContractTest {
     void executionsSaturatesANonPositiveSizeInsteadOfFailing() throws Exception {
         JobKey key = JobKey.of("welcome-email");
         when(mohs.findJob(key)).thenReturn(Optional.of(snapshot("welcome-email", false)));
-        Execution first = new Execution(ExecutionId.of("exec-2"), key, ExecutionState.ENQUEUED, NOW, null, List.of(), "tester");
-        Execution second = new Execution(ExecutionId.of("exec-1"), key, ExecutionState.ENQUEUED, NOW.minusSeconds(1), null, List.of(), "tester");
+        Execution first = new Execution(ExecutionId.of("01991337-0000-7000-8000-00000000001e"), key, ExecutionState.ENQUEUED, NOW, null, Optional.empty(), "tester");
+        Execution second = new Execution(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), key, ExecutionState.ENQUEUED, NOW.minusSeconds(1), null, Optional.empty(), "tester");
         when(mohs.executions(any())).thenReturn(List.of(first, second));
 
         mockMvc.perform(get(ApiPaths.V1 + "/jobs/welcome-email/executions").param("size", "0"))

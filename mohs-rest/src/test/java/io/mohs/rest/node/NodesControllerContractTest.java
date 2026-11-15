@@ -67,16 +67,16 @@ class NodesControllerContractTest {
     @Test
     void listReturnsTheClusterNodesInFacadeOrder() throws Exception {
         when(mohs.nodes()).thenReturn(List.of(
-                new NodeSnapshot("node-fresh", EngineState.RUNNING, NOW),
-                new NodeSnapshot("node-stopped", EngineState.STOPPED, NOW.minusSeconds(30))));
+                new NodeSnapshot("01991337-0000-7000-8000-00000000006a", EngineState.RUNNING, NOW),
+                new NodeSnapshot("01991337-0000-7000-8000-000000000070", EngineState.STOPPED, NOW.minusSeconds(30))));
 
         mockMvc.perform(get(ApiPaths.V1 + "/nodes"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(2))
-                .andExpect(jsonPath("$[0].nodeId").value("node-fresh"))
+                .andExpect(jsonPath("$[0].nodeId").value("01991337-0000-7000-8000-00000000006a"))
                 .andExpect(jsonPath("$[0].state").value("RUNNING"))
                 .andExpect(jsonPath("$[0].lastHeartbeatAt").value("2026-08-16T12:00:00Z"))
-                .andExpect(jsonPath("$[1].nodeId").value("node-stopped"))
+                .andExpect(jsonPath("$[1].nodeId").value("01991337-0000-7000-8000-000000000070"))
                 .andExpect(jsonPath("$[1].state").value("STOPPED"));
     }
 

@@ -22,12 +22,15 @@ identical — inert for the host, and with **no conditional path in the hot code
 | `mohs.node.inflight` | Gauge | — | Executions currently dispatched on this node |
 | `mohs.queue.depth` | Gauge | — | Entries visible to a claim — the backlog, **cluster-wide**. Sampled by the engine's tick every 10 s, never on the scrape, so a metrics pipeline cannot decide the load it is measuring. Every node publishes the same number: aggregate with `max`, never `sum` |
 | `mohs.node.capacity` | Gauge | — | This node's `dispatch-concurrency` |
+| `mohs.idempotency.pruned` | Counter | — | Expired receipts physically removed |
+| `mohs.idempotency.prune.duration` | Timer | — | Duration of each bounded cleanup pass |
+| `mohs.idempotency.prune.deferred` | Counter | — | Passes requiring a short continuation after a full page or failure |
 
 ### Label values
 
 | Label | Values |
 | --- | --- |
-| `job` | The `JobKey` — bounded by the number of definitions |
+| `job` | Registered executable key (`executableKey`), or `_unresolved` when the definition is unavailable |
 | `outcome` | `succeeded`, `failed`, `cancelled` (and the state names for the terminal counter) |
 | `reason` on `mohs.claim.requeued` | `concurrency-cap`, `rate-limit`, `window-closed`, `stray-lease` |
 | `reason` on `mohs.lease.reclaimed` | `retry`, `attempts_exhausted`, `job_retired`, `cancelled` |
@@ -39,8 +42,13 @@ dashboard freezes that vocabulary.
 
 ## The cardinality rule
 
-Enforced in code rather than by convention: **an execution id NEVER becomes a label.** The only
-unbounded-looking label is `job`, and it is bounded by the number of definitions.
+Enforced in code rather than by convention: **an execution id NEVER becomes a label.** The
+`job` dimension uses the registered executable catalog. Dynamic recurrence identities do not create
+new series; execution history and events retain their concrete job keys.
+
+The tag name remains `job`, but its value changed from the recurrence key to the executable key.
+Update dashboards and alert filters that selected a dynamic recurrence. Direct executable jobs
+retain their existing label. No arbitrary label limit drops measurements.
 
 ## Two design decisions worth understanding
 
@@ -53,7 +61,7 @@ All four `reason` values are registered as counters at construction, before any 
 
 ### `attempt.total` versus `execution.total`
 
-Every attempt counts in `mohs.attempt.total`; only a **terminal transition** counts in
+Every confirmed completion, including a reaper result, counts in `mohs.attempt.total`; only a **terminal transition** counts in
 `mohs.execution.total`. A retry is not yet the execution's outcome, and
 
 > the attempts-to-executions ratio is the health indicator.

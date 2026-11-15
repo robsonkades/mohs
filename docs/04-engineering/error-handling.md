@@ -20,7 +20,7 @@ The handler being allowed to throw checked exceptions is deliberate: `MohsJobs#a
 `InvocationTargetException` and rethrows the original, so `Attempt.error` records the real message
 rather than the string `"InvocationTargetException"`.
 
-## The five error classes, and how each is treated
+## Error classes and their treatment
 
 This is the operative taxonomy — not by exception type, but by what the system must do:
 
@@ -30,7 +30,8 @@ This is the operative taxonomy — not by exception type, but by what the system
 | **Configuration error** | Missing dialect, duplicate job id, unsupported handler signature, invalid `@OnExecution` declaration | **Fail the boot** | No |
 | **Transient infrastructure** | The payload query threw, the tick step threw, the rate-limit lock timed out | Log, back off, leave ownership intact; a reaper resolves it if this node dies | Yes, implicitly |
 | **Terminal-by-nature** | Unreadable payload, removed definition, unresolvable runner | Terminal `FAILED` with `attemptsExhausted = false` | No |
-| **Handler failure** | Whatever the job threw | Retry through the budget, or terminal | Per the budget |
+| **Handler failure** | Exception or nonfatal Error from the job/interceptors | Retry through the budget, or terminal | Per the budget |
+| **Fatal runtime failure** | `VirtualMachineError`, `ThreadDeath` | Propagates; never reclassified or persisted as an ordinary handler failure | Ownership recovery remains fenced |
 
 The distinction between *transient infrastructure* and *terminal-by-nature* is structural, not a
 judgement call at the catch site. `HistoryStore#findPayloads` returns `PayloadBatch {rows,
@@ -165,7 +166,7 @@ code fails loudly and names the work required.
 | --- | --- |
 | `ExecutionId` in every log line about an execution | A cross-cutting request/correlation id propagated by the framework |
 | `JobKey` in claim, dispatch and completion logs | MDC populated automatically |
-| `nodeId` in `mohs_attempt.node_id` — forensic "who executed this attempt" | Trace/span ids |
+| `nodeId` in `mohs_execution.last_attempt_node_id` — who executed the latest completed attempt | Trace/span ids |
 | `actor` on every execution | |
 
 The intended extension point is `ExecutionInterceptor`, which runs on the attempt's own thread and

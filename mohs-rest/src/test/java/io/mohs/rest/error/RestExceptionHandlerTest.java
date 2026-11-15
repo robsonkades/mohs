@@ -66,7 +66,7 @@ class RestExceptionHandlerTest {
 
     @Test
     void executionNotFoundBecomes404() {
-        ExecutionNotFoundException ex = new ExecutionNotFoundException(ExecutionId.of("exec-1"));
+        ExecutionNotFoundException ex = new ExecutionNotFoundException(ExecutionId.of("01991337-0000-7000-8000-00000000001c"));
 
         ProblemDetail problem = handler.handleExecutionNotFound(ex);
 
@@ -81,8 +81,9 @@ class RestExceptionHandlerTest {
                 .doesNotContain(supplied).hasSizeLessThan(300);
         assertThat(handler.handleBatchNotFound(new BatchNotFoundException(supplied)).getDetail())
                 .doesNotContain(supplied).hasSizeLessThan(300);
-        assertThat(handler.handleExecutionNotFound(new ExecutionNotFoundException(ExecutionId.of(supplied))).getDetail())
-                .doesNotContain(supplied).hasSizeLessThan(300);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> io.mohs.rest.RequestIdentifiers.executionId(supplied))
+                .isInstanceOf(io.mohs.rest.error.PayloadValidationException.class)
+                .hasMessageNotContaining(supplied);
     }
 
     @Test

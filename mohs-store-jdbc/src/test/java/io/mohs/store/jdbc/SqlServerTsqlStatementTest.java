@@ -15,6 +15,8 @@
  */
 package io.mohs.store.jdbc;
 
+import io.mohs.engine.SubmissionStore;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -76,6 +78,7 @@ class SqlServerTsqlStatementTest {
     }
 
     private DataSource dataSource;
+    private JdbcNodeStore nodes;
     private JdbcWorkQueue queue;
     private JdbcLeaseStore leaseStore;
     private JdbcHistoryStore historyStore;
@@ -84,13 +87,16 @@ class SqlServerTsqlStatementTest {
     void setUp() {
         dataSource = SqlServerTestSupport.freshSchema();
         SqlServerJdbcDelegate delegate = new SqlServerJdbcDelegate();
+        nodes = new JdbcNodeStore(dataSource, delegate);
+        TestSessions.seed(dataSource, delegate, "01991337-0000-7000-8000-000000000069", io.mohs.core.EngineState.RUNNING, Duration.ofMinutes(5));
+        TestSessions.seed(dataSource, delegate, "01991337-0000-7000-8000-000000000066", io.mohs.core.EngineState.RUNNING, Duration.ofMinutes(5));
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, delegate);
-        queue = new JdbcWorkQueue(dataSource, delegate, batchStore);
-        leaseStore = new JdbcLeaseStore(dataSource, delegate, batchStore);
-        historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), delegate);
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, delegate);
+        queue = new JdbcWorkQueue(dataSource, delegate);
+        leaseStore = new JdbcLeaseStore(dataSource, delegate);
+        historyStore = new JdbcHistoryStore(dataSource, delegate);
         new JdbcJobStore(dataSource, clock, delegate).upsert(
-                JobDefinition.of("job-a", Handler.class, spec -> spec.onDemand().runner("io")));
+                JobDefinition.of("job-a", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRunner("io"), io.mohs.core.schedule.Misfire.IGNORE, false));
     }
 
     /**
@@ -101,13 +107,13 @@ class SqlServerTsqlStatementTest {
     @Test
     void findDueRecurringBoundsWithTopAndFiresOldestFirst() {
         JdbcJobStore jobStore = new JdbcJobStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC), new SqlServerJdbcDelegate());
-        jobStore.upsert(JobDefinition.of("job-b-due-later", Handler.class, spec -> spec.every(Duration.ofMinutes(5))));
-        jobStore.upsert(JobDefinition.of("job-a-due-first", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        jobStore.upsert(JobDefinition.of("job-b-due-later", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(5), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        jobStore.upsert(JobDefinition.of("job-a-due-first", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
 
-        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 1))
+        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 1).jobs())
                 .extracting(job -> job.definition().key().value())
                 .containsExactly("job-a-due-first");
-        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 10)).hasSize(2);
+        assertThat(jobStore.findDueRecurring(NOW.plus(Duration.ofMinutes(10)), 10).jobs()).hasSize(2);
     }
 
     /**
@@ -118,10 +124,10 @@ class SqlServerTsqlStatementTest {
      */
     @Test
     void countVisibleAnswersOnSqlServer() {
-        queue.offer(List.of(
-                entry("exec-due-1", 20, 1, NOW.minusSeconds(2)),
-                entry("exec-due-2", 20, 1, NOW.minusSeconds(1)),
-                entry("exec-not-yet", 20, 2, NOW.plusSeconds(60))));
+        TestWork.ready(dataSource, new SqlServerJdbcDelegate(), List.of(
+                entry("01991337-0000-7000-8000-00000000002c", 20, 1, NOW.minusSeconds(2)),
+                entry("01991337-0000-7000-8000-00000000002d", 20, 1, NOW.minusSeconds(1)),
+                entry("01991337-0000-7000-8000-00000000003f", 20, 2, NOW.plusSeconds(60))));
 
         assertThat(queue.countVisible(NOW)).isEqualTo(2);
     }
@@ -135,30 +141,32 @@ class SqlServerTsqlStatementTest {
     void findOrphanedBoundsWithTopAndDrainsOldestFirst() {
         // The ids are chosen so lexicographic order CONTRADICTS the expected one: the primary key is
         // clustered on execution_id (SQL Server's default), so a lost ORDER BY makes the scan answer
-        // "exec-new" first. Rename these to exec-a/exec-b and the ORDER BY half stops guarding anything
-        queue.offer(List.of(entry("exec-old", 20, 1, NOW.minusSeconds(30))));
-        queue.claim(shardOf("exec-old"), "node-dead", 1, 10, List.of(), NOW.minusSeconds(20));
-        queue.offer(List.of(entry("exec-new", 20, 1, NOW.minusSeconds(10))));
-        queue.claim(shardOf("exec-new"), "node-dead", 1, 10, List.of(), NOW);
+        // "01991337-0000-7000-8000-00000000003b" first. Rename these to exec-a/exec-b and the ORDER BY half stops guarding anything
+        TestWork.ready(dataSource, new SqlServerJdbcDelegate(), List.of(entry("01991337-0000-7000-8000-000000000042", 20, 1, NOW.minusSeconds(30))));
+        queue.claim(shardOf("01991337-0000-7000-8000-000000000042"), "01991337-0000-7000-8000-000000000069", 10, List.of(), NOW.minusSeconds(20));
+        TestWork.ready(dataSource, new SqlServerJdbcDelegate(), List.of(entry("01991337-0000-7000-8000-00000000003b", 20, 1, NOW.minusSeconds(10))));
+        queue.claim(shardOf("01991337-0000-7000-8000-00000000003b"), "01991337-0000-7000-8000-000000000069", 10, List.of(), NOW);
 
-        List<LeaseStore.Lease> firstOnly = leaseStore.findOrphaned(List.of(), 1);
+        nodes.stop("01991337-0000-7000-8000-000000000069");
+        List<LeaseStore.Lease> firstOnly = leaseStore.findOrphaned( 1);
 
         assertThat(firstOnly).hasSize(1);
-        assertThat(firstOnly.getFirst().executionId().value()).isEqualTo("exec-old");
-        assertThat(leaseStore.findOrphaned(List.of(), 10)).hasSize(2);
+        assertThat(firstOnly.getFirst().executionId().value()).isEqualTo("01991337-0000-7000-8000-000000000042");
+        assertThat(leaseStore.findOrphaned( 10)).hasSize(2);
     }
 
     /** {@code findOrphanedLeasesExceptAlive}: the same {@code TOP}, plus the {@code NOT IN} that spares the living. */
     @Test
     void findOrphanedExceptAliveSparesTheLivingNodes() {
-        queue.offer(List.of(entry("exec-dead", 20, 1, NOW.minusSeconds(30))));
-        queue.claim(shardOf("exec-dead"), "node-dead", 1, 10, List.of(), NOW.minusSeconds(20));
-        queue.offer(List.of(entry("exec-alive", 20, 1, NOW.minusSeconds(10))));
-        queue.claim(shardOf("exec-alive"), "node-alive", 1, 10, List.of(), NOW);
+        TestWork.ready(dataSource, new SqlServerJdbcDelegate(), List.of(entry("01991337-0000-7000-8000-000000000028", 20, 1, NOW.minusSeconds(30))));
+        queue.claim(shardOf("01991337-0000-7000-8000-000000000028"), "01991337-0000-7000-8000-000000000069", 10, List.of(), NOW.minusSeconds(20));
+        TestWork.ready(dataSource, new SqlServerJdbcDelegate(), List.of(entry("01991337-0000-7000-8000-000000000024", 20, 1, NOW.minusSeconds(10))));
+        queue.claim(shardOf("01991337-0000-7000-8000-000000000024"), "01991337-0000-7000-8000-000000000066", 10, List.of(), NOW);
 
-        assertThat(leaseStore.findOrphaned(List.of("node-alive"), 10))
+        nodes.stop("01991337-0000-7000-8000-000000000069");
+        assertThat(leaseStore.findOrphaned( 10))
                 .extracting(lease -> lease.executionId().value())
-                .containsExactly("exec-dead");
+                .containsExactly("01991337-0000-7000-8000-000000000028");
     }
 
     /**
@@ -170,20 +178,20 @@ class SqlServerTsqlStatementTest {
     @Test
     void findPageBoundsWithTopAndHonoursTheCallersFilters() {
         // Same reasoning as the ids above, in the other direction: the page orders execution_id DESC
-        // while the clustered scan runs ascending, so a lost ORDER BY answers "019a-1" first
-        historyStore.record(List.of(
-                newExecution("019a-1"), newExecution("019a-2"), newExecution("019a-3")));
+        // while the clustered scan runs ascending, so a lost ORDER BY answers "01991337-0003-7000-8000-0000000000a1" first
+        TestSubmissions.accept(dataSource, new SqlServerJdbcDelegate(), List.of(
+                newExecution("01991337-0003-7000-8000-0000000000a1"), newExecution("01991337-0003-7000-8000-0000000000a2"), newExecution("01991337-0003-7000-8000-0000000000a3")));
 
         List<Execution> firstPage = historyStore.findPage(null, null, null, null, null, 2, NOW);
         assertThat(firstPage).hasSize(2);
         assertThat(firstPage)
                 .extracting(execution -> execution.id().value())
-                .containsExactly("019a-3", "019a-2");
+                .containsExactly("01991337-0003-7000-8000-0000000000a3", "01991337-0003-7000-8000-0000000000a2");
 
         assertThat(historyStore.findPage(JobKey.of("job-a"), null, null, null,
-                ExecutionId.of("019a-3"), 10, NOW))
+                ExecutionId.of("01991337-0003-7000-8000-0000000000a3"), 10, NOW))
                 .extracting(execution -> execution.id().value())
-                .containsExactly("019a-2", "019a-1");
+                .containsExactly("01991337-0003-7000-8000-0000000000a2", "01991337-0003-7000-8000-0000000000a1");
 
         assertThat(historyStore.findPage(JobKey.of("no-such-job"), ExecutionState.SUCCEEDED,
                 null, null, null, 10, NOW)).isEmpty();
@@ -194,9 +202,9 @@ class SqlServerTsqlStatementTest {
                 shardOf(id), priority, attempt, visibleAt);
     }
 
-    private static HistoryStore.NewExecution newExecution(String id) {
-        return new HistoryStore.NewExecution(ExecutionId.of(id), JobKey.of("job-a"), shardOf(id), 20,
-                NOW, NOW, "application", null, null, new Payload("ana"));
+    private static SubmissionStore.NewExecution newExecution(String id) {
+        return new SubmissionStore.NewExecution(ExecutionId.of(id), JobKey.of("job-a"), shardOf(id), 20,
+                NOW, NOW, "application", null, null, io.mohs.test.InputFixtures.encode(JobKey.of("job-a"), new Payload("ana")), io.mohs.engine.SubmissionStore.Origin.MANUAL, null);
     }
 
     /** The shard an entry lands in — the claim is single-shard per statement, so a test that claims has to ask for the right one. */

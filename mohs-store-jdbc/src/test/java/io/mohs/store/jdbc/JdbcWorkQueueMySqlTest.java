@@ -15,6 +15,8 @@
  */
 package io.mohs.store.jdbc;
 
+import io.mohs.engine.SubmissionStore;
+
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -49,10 +51,15 @@ class JdbcWorkQueueMySqlTest {
     void setUp() {
         DataSource dataSource = MySqlTestSupport.freshSchema();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
-        queue = new JdbcWorkQueue(dataSource, new MySqlJdbcDelegate(), new JdbcBatchStore(dataSource, Clock.fixed(NOW, ZoneOffset.UTC), new MySqlJdbcDelegate()));
+        io.mohs.store.jdbc.TestSessions.seed(dataSource, new MySqlJdbcDelegate(), "01991337-0000-7000-8000-00000000006d", io.mohs.core.EngineState.RUNNING, java.time.Duration.ofMinutes(5));
+        queue = new JdbcWorkQueue(dataSource, new MySqlJdbcDelegate());
     }
 
     private WorkQueue.ReadyEntry entry(String id, String jobKey, int priority, int attempt, Instant visibleAt) {
+        new JdbcJobStore(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), Clock.fixed(NOW, ZoneOffset.UTC),
+                new MySqlJdbcDelegate()).upsert(io.mohs.core.definition.JobDefinition.of(jobKey, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        TestWork.history(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new MySqlJdbcDelegate(), List.of(new io.mohs.engine.SubmissionStore.NewExecution(ExecutionId.of(id), JobKey.of(jobKey),
+                        0, priority, visibleAt, NOW, "test", null, null, io.mohs.test.InputFixtures.encode(JobKey.of(jobKey), "payload"), io.mohs.engine.SubmissionStore.Origin.MANUAL, null)));
         return new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), 0, priority, attempt, visibleAt);
     }
 
@@ -67,13 +74,13 @@ class JdbcWorkQueueMySqlTest {
         List<Integer> owned = IntStream.range(0, Shards.SHARD_COUNT).filter(shard -> shard % 2 == 0).boxed().toList();
         assertThat(queue.hasVisibleWork(owned, NOW)).isFalse();
 
-        queue.offer(List.of(shardedEntry("exec-alheio", 7, NOW.minusSeconds(1))));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new MySqlJdbcDelegate(), List.of(shardedEntry("01991337-0000-7000-8000-000000000023", 7, NOW.minusSeconds(1))));
         assertThat(queue.hasVisibleWork(owned, NOW)).as("another node's shard").isFalse();
 
-        queue.offer(List.of(shardedEntry("exec-futuro", 8, NOW.plusSeconds(60))));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new MySqlJdbcDelegate(), List.of(shardedEntry("01991337-0000-7000-8000-000000000031", 8, NOW.plusSeconds(60))));
         assertThat(queue.hasVisibleWork(owned, NOW)).as("not visible yet").isFalse();
 
-        queue.offer(List.of(shardedEntry("exec-devido", 8, NOW.minusSeconds(1))));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new MySqlJdbcDelegate(), List.of(shardedEntry("01991337-0000-7000-8000-000000000029", 8, NOW.minusSeconds(1))));
         assertThat(queue.hasVisibleWork(owned, NOW)).isTrue();
     }
 
@@ -83,29 +90,29 @@ class JdbcWorkQueueMySqlTest {
 
     @Test
     void claimMovesQueueEntriesIntoLeasesInOrder() {
-        queue.offer(List.of(
-                entry("exec-normal", "job-a", 20, 1, NOW.minusSeconds(20)),
-                entry("exec-high", "job-a", 10, 2, NOW.minusSeconds(10)),
-                entry("exec-future", "job-a", 10, 1, NOW.plusSeconds(60))));
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new MySqlJdbcDelegate(), List.of(
+                entry("01991337-0000-7000-8000-00000000003c", "job-a", 20, 1, NOW.minusSeconds(20)),
+                entry("01991337-0000-7000-8000-000000000033", "job-a", 10, 2, NOW.minusSeconds(10)),
+                entry("01991337-0000-7000-8000-000000000030", "job-a", 10, 1, NOW.plusSeconds(60))));
 
-        List<WorkQueue.ClaimedWork> claimed = queue.claim(0, "node-mysql", 1, 10, List.of(), NOW);
+        List<WorkQueue.ClaimedWork> claimed = queue.claim(0, "01991337-0000-7000-8000-00000000006d", 10, List.of(), NOW);
 
         assertThat(claimed).extracting(w -> w.executionId().value())
-                .containsExactly("exec-high", "exec-normal");
-        assertThat(rawJdbcTemplate.queryForList("SELECT execution_id FROM mohs_ready", String.class))
-                .containsExactly("exec-future");
+                .containsExactly("01991337-0000-7000-8000-000000000033", "01991337-0000-7000-8000-00000000003c");
+        assertThat(rawJdbcTemplate.queryForList("SELECT execution_id FROM mohs_work WHERE work_state = 'READY'", String.class))
+                .containsExactly("01991337-0000-7000-8000-000000000030");
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT attempt_number FROM mohs_lease WHERE execution_id = 'exec-high'", Integer.class)).isEqualTo(2);
+                "SELECT attempt FROM mohs_work WHERE work_state = 'LEASED' AND  execution_id = '01991337-0000-7000-8000-000000000033'", Integer.class)).isEqualTo(2);
     }
 
     @Test
     void requeueFenceHoldsOnMySqlToo() {
-        queue.offer(List.of(entry("exec-1", "job-a", 20, 1, NOW.minusSeconds(1))));
-        queue.claim(0, "node-mysql", 1, 10, List.of(), NOW);
+        TestWork.ready(java.util.Objects.requireNonNull(rawJdbcTemplate.getDataSource()), new MySqlJdbcDelegate(), List.of(entry("01991337-0000-7000-8000-00000000001c", "job-a", 20, 1, NOW.minusSeconds(1))));
+        queue.claim(0, "01991337-0000-7000-8000-00000000006d", 10, List.of(), NOW);
 
         assertThat(queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), "node-mysql", 99, 1, entry("exec-1", "job-a", 20, 2, NOW))))).isZero();
+                ExecutionId.of("01991337-0000-7000-8000-00000000001c"), "01991337-0000-7000-8000-00000000006d", "01991337-0000-7000-8000-000000000085", 1, NOW)))).isZero();
         assertThat(queue.requeue(List.of(new WorkQueue.Requeue(
-                ExecutionId.of("exec-1"), "node-mysql", 1, 1, entry("exec-1", "job-a", 20, 2, NOW))))).isEqualTo(1);
+                ExecutionId.of("01991337-0000-7000-8000-00000000001c"), "01991337-0000-7000-8000-00000000006d", rawJdbcTemplate.queryForObject("SELECT claim_token FROM mohs_work WHERE work_state = 'LEASED' AND  execution_id = ?", String.class, ExecutionId.of("01991337-0000-7000-8000-00000000001c").value()), 1, NOW)))).isEqualTo(1);
     }
 }

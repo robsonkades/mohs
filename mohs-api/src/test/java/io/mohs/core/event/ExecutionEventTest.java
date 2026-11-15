@@ -47,12 +47,12 @@ class ExecutionEventTest {
     @Test
     void dispatchesEachVariant() {
         Instant now = Instant.now();
-        ExecutionId id = ExecutionId.of("exec-1");
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
         JobKey key = JobKey.of("welcome-email");
 
         assertThat(describe(new Enqueued(id, key, now, "application"))).isEqualTo("enqueued:welcome-email");
         assertThat(describe(new Failed(id, key, 3, new RuntimeException("boom"), true)))
                 .isEqualTo("failed:true");
-        assertThat(describe(new BatchCompleted("batch-1", "n", 1, 1, 0))).isEqualTo("batch-completed:batch-1");
+        assertThat(describe(new BatchCompleted("01991337-0000-7000-8000-00000000000e", "n", 1, 1, 0))).isEqualTo("batch-completed:01991337-0000-7000-8000-00000000000e");
     }
 }

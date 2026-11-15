@@ -1,0 +1,19 @@
+# Catálogo executável e retirada
+
+Cada processo publica um catálogo imutável de pares `(executableKey, inputContract)`. O SHA-256 usa as chaves ordenadas e separadores que o alfabeto de chaves não permite. Classes Java, instâncias de handlers e implementações de métodos não são persistidas nem participam desse hash. Usar o mesmo contrato para formatos incompatíveis continua sendo erro de quem declara os jobs.
+
+O scanner normaliza annotations e `JobRegistration` antes da publicação. `CatalogStore.reconcile` publica todas as definições em uma transação e aplica a política `OVERRIDE`, `PRESERVE` ou `FAIL` sob lock. A publicação preserva identidades retiradas. Todos os executáveis exigidos por definições ativas ou execuções ainda `PENDING` precisam existir no catálogo, incluindo trabalho adquirido antes da retirada de sua definição.
+
+`mohs_catalog` contém exatamente uma linha, criada pelo installer: `singleton=1` e o fingerprint, inicialmente `NULL`. Um `UPDATE` dessa linha obtém o mutex transacional usado tanto por publicação quanto por ingresso de sessão. O mutex existe mesmo quando ainda não há jobs nem nós. Sem ele, dois primeiros ingressos podem observar uma tabela vazia e aceitar catálogos incompatíveis. Não basta selecionar os nós existentes com lock; o H2 também documenta que seu `SERIALIZABLE` não garante equivalência serial para todas as transações de escrita. [Isolamento no H2](https://h2database.com/html/advanced.html#transaction_isolation).
+
+Quando o fingerprint muda, a publicação trava as sessões existentes em ordem e consulta o relógio do banco. Uma sessão válida, inclusive pausada ou drenando, impede a mudança. Sessões expiradas não podem renovar; sessões antigas que tentarem reingressar apresentam o catálogo antigo e são recusadas. Ingressos com o mesmo catálogo continuam permitidos. Renovação e aquisição normais não acessam o mutex do catálogo.
+
+A ordem interna de locks é catálogo → sessões → definições ordenadas → trabalho/histórico → batches ordenados, omitindo as etapas que a operação não usa. Não há lock mantido durante execução do código do job. Timeouts/resultado desconhecido continuam exigindo reconciliação: repetir um ingresso não confirmado usa a mesma identidade, e a expiração exige outra identidade.
+
+Uma mudança no conjunto de executáveis exige parar ou deixar expirar as sessões anteriores antes da publicação. Não há protocolo de rolling update entre catálogos diferentes. É possível reiniciar processos com classes renomeadas e o mesmo conjunto de contratos; o hash não prova igualdade de comportamento dos handlers nem execução exatamente uma vez de seus efeitos externos.
+
+`remove(key)` cancela o trabalho em fila, impede novos disparos e mantém a definição e o histórico. Trabalho adquirido pode concluir; sua falha não cria retry enquanto a definição permanece retirada. Uma nova inicialização preserva essa retirada. `reactivate(key)` exige o catálogo instalado e o executável local, preserva a pausa do operador, avança a revisão da agenda e calcula um novo disparo. Execuções canceladas não são reabertas. Recorrências nomeadas exigem reativar primeiro seu executável.
+
+A flag persistida `orphaned`, a reconciliação baseada em classes ausentes e a escrita pública de rearm foram removidas. Metadados podem ser lidos sem carregar classes ou alterar o catálogo. Rearm de fixed delay pertence à transação de conclusão/cancelamento.
+
+Esse protocolo acrescenta uma tabela tipada de metadados à base anterior de oito tabelas. As alternativas físicas passam a ter **nove** tabelas com ready/lease separados, **oito** com trabalho unificado, ou **sete** com trabalho incorporado ao histórico. Essa contagem inclui `mohs_catalog`; os relatórios históricos V14/V15 conservam suas contagens originais. A escolha física ainda depende de testes e medições equivalentes.

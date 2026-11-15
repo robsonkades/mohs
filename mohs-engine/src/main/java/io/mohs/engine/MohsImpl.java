@@ -43,7 +43,11 @@ import io.mohs.core.NodeSnapshot;
 import io.mohs.core.OverviewSnapshot;
 import io.mohs.core.RateLimitSnapshot;
 import io.mohs.core.RunnerSnapshot;
-import io.mohs.core.ScheduleCommand;
+import io.mohs.core.SubmissionOptions;
+import io.mohs.core.definition.JobOptions;
+import io.mohs.core.schedule.OnDemandSpec;
+import io.mohs.core.schedule.RecurringOptions;
+import io.mohs.core.schedule.RecurringSchedule;
 import io.mohs.core.ThroughputReading;
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
@@ -62,12 +66,10 @@ import io.mohs.core.schedule.Schedule;
 
 /**
  * {@link Mohs} over the persistence ports ({@link WorkQueue}/{@link HistoryStore}/
- * {@link LeaseStore}) — {@code define} and {@code remove} delegate directly, while
- * {@code schedule} assembles a {@link ScheduleCommandImpl}. {@link #lifecycle()} returns the
- * injected {@link Engine}, which implements {@link MohsLifecycle} directly.
+ * {@link LeaseStore}) with typed acceptance and operational controls.
  *
  * <p>{@link #batch} writes the batch row and its members — history plus queue — in a SINGLE
- * transaction ({@link StoreTransactions}): the partial failure of "a batch written with only some of
+ * transaction ({@link SubmissionStore}): the partial failure of "a batch written with only some of
  * its members" becomes structurally impossible. The completion count stays in the completion
  * transaction — there is no counter here.
  */
@@ -92,21 +94,20 @@ public final class MohsImpl implements Mohs {
 
     private static final Logger log = LoggerFactory.getLogger(MohsImpl.class);
 
-    /** The actor for callers of {@link Mohs#schedule}/{@link Mohs#batch} without an explicit {@link ScheduleCommand#as(String)} — the process itself, not an identifiable user. */
+    /** Default application audit identity for batch members. */
     static final String DEFAULT_ACTOR = "application";
 
     private final JobStore jobStore;
     private final WorkQueue workQueue;
     private final HistoryStore historyStore;
     private final LeaseStore leaseStore;
-    private final StoreTransactions storeTransactions;
+    private final SubmissionStore submissionStore;
     private final NodeStore nodeStore;
     private final RateLimitStore rateLimitStore;
     private final HandlerRegistry handlerRegistry;
     private final Clock clock;
     private final MohsLifecycle lifecycle;
     private final BatchStore batchStore;
-    private final BatchCompletionCallbacks callbacks;
     private final RunnerRegistry runnerRegistry;
     /** The local wake-up tier: wakes the local engine's loop after the commit — {@code Engine#signalWorkScheduled}; best-effort by contract. */
     private final Runnable localWakeSignal;
@@ -120,36 +121,34 @@ public final class MohsImpl implements Mohs {
      * @param workQueue the persistence port for ready work
      * @param historyStore the persistence port for execution history
      * @param leaseStore the persistence port for execution ownership
-     * @param storeTransactions the transaction boundary shared by store operations
+     * @param submissionStore the transaction boundary shared by store operations
      * @param nodeStore the persistence port for node heartbeats
      * @param rateLimitStore the persistence port for shared rate-limit buckets
      * @param handlerRegistry the registry of local job handlers and payload types
      * @param clock the time source used by the component
      * @param lifecycle the local engine lifecycle controls
      * @param batchStore the persistence port for batch counters
-     * @param callbacks the process-local batch completion callbacks
      * @param runnerRegistry the registry of local execution resources
      * @param localWakeSignal the callback that wakes the local poll loop after durable enqueue
      * @param listeners the listeners receiving execution events
      * @param eventExecutor the executor that delivers execution events
      */
     public MohsImpl(JobStore jobStore, WorkQueue workQueue, HistoryStore historyStore, LeaseStore leaseStore,
-            StoreTransactions storeTransactions, NodeStore nodeStore, RateLimitStore rateLimitStore,
+            SubmissionStore submissionStore, NodeStore nodeStore, RateLimitStore rateLimitStore,
             HandlerRegistry handlerRegistry, Clock clock, MohsLifecycle lifecycle, BatchStore batchStore,
-            BatchCompletionCallbacks callbacks, RunnerRegistry runnerRegistry, Runnable localWakeSignal,
+            RunnerRegistry runnerRegistry, Runnable localWakeSignal,
             List<ExecutionListener> listeners, AsyncTaskExecutor eventExecutor) {
         this.jobStore = Objects.requireNonNull(jobStore, "jobStore");
         this.workQueue = Objects.requireNonNull(workQueue, "workQueue");
         this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
         this.leaseStore = Objects.requireNonNull(leaseStore, "leaseStore");
-        this.storeTransactions = Objects.requireNonNull(storeTransactions, "storeTransactions");
+        this.submissionStore = Objects.requireNonNull(submissionStore, "submissionStore");
         this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
         this.rateLimitStore = Objects.requireNonNull(rateLimitStore, "rateLimitStore");
         this.handlerRegistry = Objects.requireNonNull(handlerRegistry, "handlerRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.batchStore = Objects.requireNonNull(batchStore, "batchStore");
-        this.callbacks = Objects.requireNonNull(callbacks, "callbacks");
         this.runnerRegistry = Objects.requireNonNull(runnerRegistry, "runnerRegistry");
         this.localWakeSignal = Objects.requireNonNull(localWakeSignal, "localWakeSignal");
         this.events = new ExecutionEventPublisher(Objects.requireNonNull(listeners, "listeners"),
@@ -157,19 +156,100 @@ public final class MohsImpl implements Mohs {
     }
 
     @Override
-    public <T> ScheduleCommand schedule(JobRef<T> ref, T payload) {
-        Objects.requireNonNull(ref, "ref");
-        Objects.requireNonNull(payload, "payload");
-        return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, ref.key(), payload,
-                localWakeSignal, events);
+    public <T> Enqueued enqueue(JobRef<T> job, T input, SubmissionOptions options) {
+        return scheduleAt(job, input, clock.instant(), options);
     }
 
     @Override
-    public ScheduleCommand schedule(String jobId, Object payload) {
-        Objects.requireNonNull(jobId, "jobId");
-        Objects.requireNonNull(payload, "payload");
-        return new ScheduleCommandImpl(jobStore, historyStore, workQueue, storeTransactions, clock, JobKey.of(jobId), payload,
-                localWakeSignal, events);
+    public <T> Enqueued scheduleAfter(JobRef<T> job, T input, Duration delay, SubmissionOptions options) {
+        Objects.requireNonNull(delay, "delay");
+        if (delay.isNegative()) throw new IllegalArgumentException("delay must not be negative");
+        final Instant when;
+        try {
+            when = clock.instant().plus(delay);
+        } catch (java.time.DateTimeException | ArithmeticException e) {
+            throw new IllegalArgumentException("delay exceeds the supported instant range", e);
+        }
+        return scheduleAt(job, input, when, options);
+    }
+
+    @Override
+    public <T> Enqueued scheduleAt(JobRef<T> job, T input, Instant when, SubmissionOptions options) {
+        Objects.requireNonNull(when, "when");
+        Objects.requireNonNull(options, "options");
+        requireExecutable(job, input);
+        JobPayload encoded = prepare(job, input);
+        ExecutionId id = ExecutionId.of(UUIDv7.randomUUIDString());
+        Enqueued receipt = new Enqueued(id, job.key(), when, options.actor());
+        var execution = new SubmissionStore.NewExecution(id, job.key(), Shards.of(id), options.priority().value(),
+                receipt.scheduledAt(), clock.instant(), options.actor(), null, options.idempotencyKey(), encoded,
+                SubmissionStore.Origin.MANUAL, null);
+        try {
+            submissionStore.accept(List.of(execution), null, () -> {
+                events.publish(receipt);
+                if (!receipt.scheduledAt().isAfter(clock.instant())) localWakeSignal.run();
+            });
+            return receipt;
+        } catch (org.springframework.dao.DuplicateKeyException conflict) {
+            if (options.idempotencyKey() == null) throw conflict;
+            return historyStore.findReceiptByIdempotencyKey(job.key(), options.idempotencyKey()).orElseThrow(() -> conflict);
+        }
+    }
+
+    @Override
+    public <T> RecurringSchedule scheduleRecurring(String scheduleId, JobRef<T> job, T input,
+            Schedule recurrence, RecurringOptions options) {
+        Objects.requireNonNull(recurrence, "recurrence");
+        Objects.requireNonNull(options, "options");
+        JobKey key = JobKey.of(scheduleId);
+        if (recurrence instanceof OnDemandSpec) {
+            throw new IllegalArgumentException("scheduleRecurring requires CronSpec or IntervalSpec");
+        }
+        ResolvedExecutable executable = requireExecutable(job, input);
+        if (key.equals(job.key())) throw new IllegalArgumentException("schedule ID must differ from executable ID");
+        if (!job.key().equals(executable.key())) {
+            throw new IllegalArgumentException("a recurrence must reference executable code, not another recurrence");
+        }
+        JobOptions policy = options.jobOptions() == null ? JobDefinitions.options(executable.definition()) : options.jobOptions();
+        JobDefinition definition = JobDefinitions.definition(key, policy, recurrence, options.misfire(), options.startPaused())
+                .withExecutableKey(job.key()).withInputContract(job.inputContract());
+        handlerRegistry.validatePolicy(definition);
+        JobPayload encoded = prepare(job, input);
+        StoredJob stored = jobStore.upsertBound(definition, new JobBinding(key, job.key(), encoded));
+        return new RecurringSchedule(key, job.key(), stored.definition().schedule(), stored.paused(), stored.nextFireAt());
+    }
+
+    private ResolvedExecutable requireExecutable(JobRef<?> ref, Object input) {
+        Objects.requireNonNull(ref, "job");
+        Objects.requireNonNull(input, "input");
+        StoredJob stored = jobStore.find(ref.key()).orElseThrow(() ->
+                new IllegalArgumentException("no active job '" + ref.key().value()
+                        + "'; declare a JobRegistration bean or an @OnDemandJob handler"));
+        JobKey executable = stored.definition().executableKey();
+        if (handlerRegistry.find(executable).isEmpty()) {
+            throw new IllegalArgumentException("job '" + ref.key().value()
+                    + "' has no registered executable; declare a JobRegistration bean or an @OnDemandJob handler");
+        }
+        Class<?> expected = org.springframework.util.ClassUtils.resolvePrimitiveIfNecessary(
+                handlerRegistry.payloadType(executable).orElseThrow(() ->
+                new IllegalArgumentException("job '" + ref.key().value() + "' declares no typed input")));
+        if (!expected.equals(org.springframework.util.ClassUtils.resolvePrimitiveIfNecessary(ref.payloadType()))
+                || !expected.isInstance(input)) {
+            throw new IllegalArgumentException("job '" + ref.key().value() + "' expects " + expected.getName()
+                    + "; reference declares " + ref.payloadType().getName() + "; received " + input.getClass().getName());
+        }
+        handlerRegistry.requireContract(executable, ref.inputContract());
+        return new ResolvedExecutable(executable, stored.definition());
+    }
+
+    private record ResolvedExecutable(JobKey key, JobDefinition definition) {}
+
+    private JobPayload prepare(JobRef<?> ref, Object input) {
+        try {
+            return InputCodec.JSON.encode(ref, input);
+        } catch (RuntimeException e) {
+            throw new IllegalArgumentException("invalid input for job '" + ref.key().value() + "': " + e.getMessage(), e);
+        }
     }
 
     /**
@@ -191,22 +271,22 @@ public final class MohsImpl implements Mohs {
         requireAllDefined(members);
 
         String batchId = UUIDv7.randomUUIDString();
-        // The batch row plus its members (history AND queue) in a single transaction: the partial
-        // failure that left the batch written with M < N members — and a BatchCompleted that never
-        // comes — dies by construction
-        // Each member is an execution accepted: the unit publishes one Enqueued per member once the
-        // batch is durable, which inside a host transaction means after ITS commit — a listener must
-        // never see an Enqueued that a rollback then erases
+        Instant scheduledAt = clock.instant();
+        List<SubmissionStore.NewExecution> prepared = new ArrayList<>(members.size());
         List<Enqueued> receipts = new ArrayList<>(members.size());
-        storeTransactions.inTransaction(() -> {
-            batchStore.insert(batchId, name, members.size());
-            receipts.addAll(enqueueMembers(members, batchId));
-        }, () -> {
+        for (Member member : members) {
+            ExecutionId id = ExecutionId.of(UUIDv7.randomUUIDString());
+            JobPayload encoded = InputCodec.JSON.encode(member.job(), member.payload());
+            var execution = new SubmissionStore.NewExecution(id, member.job().key(), Shards.of(id), Priority.NORMAL.value(),
+                    scheduledAt, scheduledAt, DEFAULT_ACTOR, batchId, null, encoded, SubmissionStore.Origin.MANUAL, null);
+            prepared.add(execution);
+            receipts.add(new Enqueued(id, member.job().key(), scheduledAt, DEFAULT_ACTOR));
+        }
+        submissionStore.accept(prepared, new SubmissionStore.NewBatch(batchId, name), () -> {
             receipts.forEach(events::publish);
-            // members are born due (scheduledAt = now) — tier 1 wakes the loop
             localWakeSignal.run();
         });
-        return new BatchImpl(batchId, callbacks);
+        return new Batch(batchId);
     }
 
     /**
@@ -233,25 +313,6 @@ public final class MohsImpl implements Mohs {
     }
 
     /**
-     * Every member is born {@code ENQUEUED} carrying the {@code batchId} — that is what makes its
-     * completion count towards the batch — and they all share the same {@code scheduledAt}, because
-     * the batch was requested in one go.
-     */
-    private List<Enqueued> enqueueMembers(List<Member> members, String batchId) {
-        Instant scheduledAt = clock.instant();
-        List<Enqueued> receipts = new ArrayList<>(members.size());
-        for (Member member : members) {
-            ExecutionId id = ExecutionId.of(UUIDv7.randomUUIDString());
-            int shard = Shards.of(id);
-            historyStore.record(List.of(new HistoryStore.NewExecution(id, member.key(), shard, Priority.NORMAL.value(),
-                    scheduledAt, scheduledAt, DEFAULT_ACTOR, batchId, null, member.payload())));
-            workQueue.offer(List.of(new WorkQueue.ReadyEntry(id, member.key(), shard, Priority.NORMAL.value(), 1, scheduledAt)));
-            receipts.add(new Enqueued(id, member.key(), scheduledAt, DEFAULT_ACTOR));
-        }
-        return receipts;
-    }
-
-    /**
      * ALL members are validated before any write, rather than one at a time during enqueueing: a
      * nonexistent job halfway through would leave the batch row written with a full {@code total} and
      * only part of the members queued — the rest would never exist, the batch would never close, and
@@ -262,20 +323,19 @@ public final class MohsImpl implements Mohs {
      * validating 1,000 members of a single job is one question, not a thousand.
      */
     private void requireAllDefined(List<Member> members) {
-        members.stream().map(Member::key).distinct().forEach(this::requireDefined);
-    }
-
-    /** The same reason as {@code ScheduleCommandImpl.at}: without this the caller would see a raw foreign-key violation rather than a message that teaches. */
-    private void requireDefined(JobKey key) {
-        if (jobStore.find(key).isEmpty()) {
-            throw new IllegalArgumentException(
-                    "no job registered for id '" + key.value() + "' — call Mohs.define first");
+        Map<JobKey, JobDefinition> definitions = new java.util.HashMap<>();
+        for (Member member : members) {
+            JobDefinition definition = definitions.computeIfAbsent(member.job().key(), key ->
+                    jobStore.find(key).orElseThrow(() ->
+                            new IllegalArgumentException("no active job '" + key.value() + "'")).definition());
+            handlerRegistry.validateInput(definition.executableKey(), member.payload(), member.job().payloadType());
+            handlerRegistry.requireContract(definition.executableKey(), member.job().inputContract());
         }
     }
 
     @Override
     public Optional<BatchSnapshot> findBatch(String batchId) {
-        Objects.requireNonNull(batchId, "batchId");
+        io.mohs.core.GeneratedId.require(batchId, "batchId");
         return batchStore.find(batchId)
                 .map(counters -> new BatchSnapshot(counters.batchId(), counters.name(), counters.total(), counters.succeeded(),
                         counters.failed()));
@@ -295,7 +355,7 @@ public final class MohsImpl implements Mohs {
                 + " to redo the work");
     }
 
-    private record Member(JobKey key, Object payload) {
+    private record Member(JobRef<?> job, Object payload) {
     }
 
     /** Accumulates the members; nothing is persisted while the total is not closed. */
@@ -307,38 +367,20 @@ public final class MohsImpl implements Mohs {
         public <T> void add(JobRef<T> ref, T payload) {
             Objects.requireNonNull(ref, "ref");
             Objects.requireNonNull(payload, "payload");
-            members.add(new Member(ref.key(), payload));
+            members.add(new Member(ref, payload));
         }
-    }
-
-    /** The receipt: {@code batchId} is already durable when this returns. */
-    private record BatchImpl(String batchId, BatchCompletionCallbacks callbacks) implements Batch {
-
-        @Override
-        public Batch onCompletion(Consumer<BatchCompleted> callback) {
-            callbacks.register(batchId, callback);
-            return this;
-        }
-    }
-
-    @Override
-    public void define(JobDefinition definition) {
-        Objects.requireNonNull(definition, "definition");
-        jobStore.upsert(definition);
     }
 
     /** An unknown (or already retired) job is a no-op — the same stance as {@link Mohs#pause}. */
     @Override
     public void remove(JobKey jobKey) {
         Objects.requireNonNull(jobKey, "jobKey");
-        jobStore.find(jobKey).ifPresent(stored -> {
-            if (stored.definition().source() == DefinitionSource.ANNOTATION) {
-                throw new IllegalArgumentException("job '" + jobKey.value()
-                        + "' is @MohsJob-annotated — Mohs.remove only retires PROGRAMMATIC definitions; "
-                        + "remove the annotation instead and the scanner marks it ORPHANED on the next boot");
-            }
-            jobStore.remove(jobKey);
-        });
+        jobStore.remove(jobKey);
+    }
+
+    @Override
+    public boolean reactivate(JobKey jobKey) {
+        return jobStore.reactivate(Objects.requireNonNull(jobKey, "jobKey"), handlerRegistry.freeze());
     }
 
     @Override
@@ -370,6 +412,12 @@ public final class MohsImpl implements Mohs {
     public Optional<JobSnapshot> reschedule(JobKey jobKey, Schedule schedule) {
         Objects.requireNonNull(jobKey, "jobKey");
         Objects.requireNonNull(schedule, "schedule");
+        if (!(schedule instanceof OnDemandSpec)
+                && jobStore.findBinding(jobKey).filter(binding -> binding.input() == null).isPresent()
+                && jobStore.find(jobKey).filter(job -> job.definition().schedule() instanceof OnDemandSpec).isPresent()) {
+            throw new IllegalArgumentException("job '" + jobKey.value()
+                    + "' has no recurring input; use scheduleRecurring with parameters and a distinct schedule ID");
+        }
 
         if (!jobStore.reschedule(jobKey, schedule)) {
             return Optional.empty();
@@ -379,70 +427,22 @@ public final class MohsImpl implements Mohs {
     }
 
     @Override
-    public Optional<Class<?>> payloadType(JobKey jobKey) {
+    public Optional<JobRef<?>> jobRef(JobKey jobKey) {
         Objects.requireNonNull(jobKey, "jobKey");
-        return handlerRegistry.payloadType(jobKey);
+        return jobStore.find(jobKey).flatMap(stored -> {
+            var executable = stored.definition().executableKey();
+            if (handlerRegistry.find(executable).isEmpty()) return Optional.empty();
+            var local = handlerRegistry.reference(executable);
+            return Optional.of(new JobRef<>(jobKey, local.payloadType(), local.inputContract()));
+        });
     }
 
-    /**
-     * The orchestration of cancellation's two halves: first the pending CAS; if that loses (the row is
-     * already running, or already finished), it tries {@code RUNNING}'s cooperative flag.
-     *
-     * <p>The two predicates partition the state space, but the state can migrate BETWEEN the checks
-     * (time-of-check/time-of-use — DDIA ch. 7: a CAS covers a predicate, not a sequence): an attempt
-     * completion taking {@code RUNNING} to {@code RETRY_WAITING} in the middle of the pair would let
-     * the operator's order fall into the gap. The second pass closes the window — another migration
-     * would require a whole attempt cycle within microseconds. On a terminal state both remain no-ops:
-     * cancelling what has already decided changes nothing, and the return shows the state that stood.
-     *
-     * <p>A declared window: the cooperative flag lives on the LEASE and dies with it — a cancel landing
-     * between the end of the handler and the flush's commit (at most the flush interval) is lost, and
-     * an eventual retry runs. Acceptable for cooperative cancellation (the operator re-cancels the
-     * retry); the era with the flag on the execution row had no such window.
-     */
+    /** The store arbitrates queued cancellation and a running cancellation request in one transaction. */
     @Override
     public Optional<Execution> cancel(ExecutionId executionId) {
         Objects.requireNonNull(executionId, "executionId");
-
-        boolean cancelledPending = workQueue.cancelQueued(executionId, clock.instant());
-
-        if (!cancelledPending && !leaseStore.requestCancellation(executionId)) {
-            cancelledPending = workQueue.cancelQueued(executionId, clock.instant());
-            if (!cancelledPending) {
-                leaseStore.requestCancellation(executionId);
-            }
-        }
-
-        Optional<Execution> result = historyStore.find(executionId, clock.instant());
-        if (cancelledPending) {
-            result.ifPresent(this::rearmAfterFinishChain);
-        }
-
-        return result;
-    }
-
-    /**
-     * The fixed-delay chain's cure: a cancelled scheduler occurrence that is still pending never goes
-     * through the completion path that rearms the trigger, and without this the chain would die in
-     * silence ({@code next_fire_at} left {@code NULL}, awaiting an end that never comes).
-     *
-     * <p>Only a scheduler occurrence — a cancelled manual execution is not the chain.
-     * {@link JobStore#armNextFire}'s {@code IS NULL} guard protects against rearming a series that is
-     * already live.
-     *
-     * <p>An accepted residual window: a crash between {@code cancelIfPending} and this rearm leaves the
-     * chain disarmed — the upsert's {@code NULL} cure (at boot, or on define) rearms it. Making it
-     * transactional would require leaking the storage boundary up to here.
-     */
-    private void rearmAfterFinishChain(Execution execution) {
-        if (!Execution.SCHEDULER_ACTOR.equals(execution.actor())) {
-            return;
-        }
-        jobStore.find(execution.jobKey()).ifPresent(stored -> {
-            if (stored.definition().schedule() instanceof IntervalSpec(Duration interval, boolean afterFinish) && afterFinish) {
-                jobStore.armNextFire(execution.jobKey(), clock.instant().plus(interval));
-            }
-        });
+        workQueue.cancel(executionId, clock.instant());
+        return historyStore.find(executionId, clock.instant());
     }
 
     @Override
@@ -474,8 +474,8 @@ public final class MohsImpl implements Mohs {
         throw switch (current.state()) {
             case FAILED -> current.batchId() != null
                     ? batchMemberNotRetryable(executionId, current.batchId())
-                    : new IllegalStateException("execution " + executionId + " belongs to a removed job — "
-                            + "a retried execution of a retired job would never be claimed");
+                    : new IllegalStateException("execution " + executionId + " cannot be reopened — only standalone manual executions of an active job can be retried; "
+                            + "submit a new execution to repeat a completed automatic occurrence");
             case ENQUEUED, RETRY_WAITING -> new IllegalStateException("execution " + executionId
                     + " is already queued to run again — likely a duplicate retry request");
             default -> new IllegalStateException("execution " + executionId + " is " + current.state()
@@ -487,9 +487,7 @@ public final class MohsImpl implements Mohs {
     @Override
     public List<Execution> executions(ExecutionQuery query) {
         Objects.requireNonNull(query, "query");
-        // A blank cursor (?cursor= from REST) means the first page, not an IAE from ExecutionId.of
-        String rawCursor = query.cursor();
-        ExecutionId cursor = rawCursor == null || rawCursor.isBlank() ? null : ExecutionId.of(rawCursor);
+        ExecutionId cursor = query.cursor() == null ? null : ExecutionId.of(query.cursor());
         return historyStore.findPage(query.jobKey(), query.status(), query.from(), query.to(), cursor, query.limit(), clock.instant());
     }
 

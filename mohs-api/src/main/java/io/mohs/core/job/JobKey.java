@@ -15,8 +15,7 @@
  */
 package io.mohs.core.job;
 
-import java.util.Objects;
-
+import io.mohs.core.TechnicalKey;
 import io.mohs.core.definition.JobDefinition;
 
 /**
@@ -43,14 +42,7 @@ public record JobKey(String value) {
      * @param value the serialized identity value
      */
     public JobKey {
-        Objects.requireNonNull(value, "value");
-        if (value.isBlank()) {
-            throw new IllegalArgumentException("JobKey value must not be blank");
-        }
-        if (value.length() > MAX_LENGTH) {
-            throw new IllegalArgumentException(
-                    "JobKey value must be at most " + MAX_LENGTH + " characters, got " + value.length());
-        }
+        TechnicalKey.require(value, "JobKey value");
     }
 
     /**

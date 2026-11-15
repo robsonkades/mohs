@@ -34,6 +34,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class CronExpressionTest {
 
     @Test
+    void incrementLargerThanIntegerRangeRemainderDoesNotWrap() {
+        CronExpression cron = CronExpression.parse("1/2147483647 * * * * *");
+        ZonedDateTime seed = ZonedDateTime.of(2026, 8, 13, 10, 0, 1, 0, ZoneOffset.UTC);
+
+        assertThat(cron.next(seed)).isEqualTo(seed.plusMinutes(1));
+    }
+
+    @Test
     void everyTenSeconds() {
         CronExpression cron = CronExpression.parse("*/10 * * * * *");
         ZonedDateTime seed = ZonedDateTime.of(2026, 8, 13, 10, 0, 3, 0, ZoneOffset.UTC);

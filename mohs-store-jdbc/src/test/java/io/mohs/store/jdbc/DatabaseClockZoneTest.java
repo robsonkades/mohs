@@ -100,6 +100,8 @@ class DatabaseClockZoneTest {
         h2.setURL("jdbc:h2:mem:clock-zone-test-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
         h2.setUser("sa");
         h2.setPassword("");
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(
+                new org.springframework.core.io.ClassPathResource("schema-h2.sql")).execute(h2);
         return h2;
     }
 

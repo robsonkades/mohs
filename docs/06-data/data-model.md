@@ -1,254 +1,83 @@
 # Data model
 
-Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository (`mohs-store-jdbc/src/main/resources`)
+Status: Active · Last reviewed: 2026-09-10 · Source of truth: the four canonical JDBC installers.
 
-## The nine tables
-
-Every table carries the `mohs_` prefix, because Mohs is an **embedded library sharing the host
-application's database and schema**.
+Mohs uses **eight tables**, all prefixed `mohs_` because the library shares its application's database. The [installers](schema.md) define the current layout; work and retained execution snapshots have separate tables and indexes.
 
 ```mermaid
 erDiagram
-    mohs_job_definitions ||--o{ mohs_ready : "job_key"
-    mohs_job_definitions ||--o{ mohs_lease : "job_key"
-    mohs_job_definitions ||--o{ mohs_execution : "job_key"
-    mohs_execution ||--o{ mohs_attempt : "execution_id"
-    mohs_execution ||--o| mohs_ready : "execution_id (while queued)"
-    mohs_execution ||--o| mohs_lease : "execution_id (while owned)"
-    mohs_execution ||--o| mohs_idempotency : "execution_id"
-    mohs_batches ||--o{ mohs_execution : "correlation_id"
-    mohs_nodes ||--o{ mohs_lease : "node_id, epoch"
+    mohs_job_definitions ||--o{ mohs_job_definitions : executable_key
+    mohs_job_definitions ||--o{ mohs_execution : job_key
+    mohs_execution ||--o| mohs_work : execution_id
+    mohs_nodes ||--o{ mohs_work : node_id
+    mohs_batches ||--o{ mohs_execution : batch_id
+    mohs_job_definitions ||--o{ mohs_idempotency : job_key
+    mohs_catalog {
+        short singleton PK
+        string fingerprint
+    }
     mohs_rate_limits {
         string name PK
         int max_count
-        string window_duration
+        long window_micros
         int tokens
+        long refill_remainder
         timestamp refilled_at
     }
 ```
 
-> **No foreign keys are declared** on the split tables. The relationships above are logical. The
-> only declared FKs in the tree were on the legacy single-table schema, dropped in `V4`.
+The executable self-reference is a declared foreign key. The execution, work, session, receipt and batch links are logical relationships maintained by complete transactions. In particular, a receipt may survive removal of its execution history; there is deliberately no cascading history-to-receipt relationship.
 
-## The four write profiles
+| Table | Identity and cardinality | Authority and write profile | Lifetime |
+|---|---|---|---|
+| `mohs_catalog` | Exactly one row, `singleton = 1` | Serializes catalog publication and session entry, including an empty installation | Installation |
+| `mohs_job_definitions` | `job_key` PK; one executable or named recurrence per key | Policy, binding, current recurring input, pause/retirement, trigger and schedule revision | Retained after retirement |
+| `mohs_work` | `execution_id` PK; exactly one per active execution | READY or LEASED; claim, requeue and retry update the same row; terminal completion deletes it | Active work only |
+| `mohs_execution` | `execution_id` PK | Immutable input snapshot and origin; latest completed attempt and terminal outcome | Configurable terminal-history retention |
+| `mohs_idempotency` | `(job_key, idempotency_key)` PK | Original acceptance receipt and fixed expiry; unique insertion arbitrates submissions | Independent expiry, or indefinite when configured |
+| `mohs_nodes` | UUIDv7 `node_id` PK per process session | State, last heartbeat, expiry and irreversible revocation | Until revoked, old and without outstanding grants |
+| `mohs_batches` | UUIDv7 `id` PK | Total members and terminal success/failure counters, updated in completion transactions | Until no member history remains and retention permits removal |
+| `mohs_rate_limits` | Technical `name` PK | Capacity, refill window, balance and fractional credit; conditional charging/configuration | Declared resource |
 
-The table split exists because four *shapes of write* exist, and mixing them made the hottest table
-pay for the coldest.
+## Definitions and input snapshots
 
-| Table | Write profile | Size proportional to | Read on the hot path? |
-| --- | --- | --- | --- |
-| `mohs_ready` | INSERT on enqueue/retry/requeue, DELETE on claim | **The backlog** | Yes — the claim |
-| `mohs_lease` | INSERT on claim, DELETE on completion | **Work executing across the cluster** (`nodes × dispatch-concurrency`) — thousands of rows, never millions | Yes — the cap, the reaper, the cancel poll |
-| `mohs_execution` | One INSERT at birth, one UPDATE at terminal | Grows forever | Once per claim round (a batched payload read) |
-| `mohs_attempt` | Append-only | Grows forever | No — only the detail view and the throughput window |
+`job_key` is the only definition identity. Every definition has a non-null `executable_key` and `input_contract`. An executable binds to itself and has no stored recurring input. A named recurrence binds directly to an executable and stores its current input JSON. Chains of recurrences are rejected. Annotation and programmatic registration produce this same model.
 
-The operationally important consequence: **history size does not affect claim cost**, because the
-claim statement references only `mohs_ready` and `mohs_lease`. This was measured as a release gate —
-throughput flat between ~0 and 2 M history rows in a clean A/B on the same binary and session.
+`ck_mohs_job_input` represents these two shapes; there is no null legacy binding shape. The local catalog resolves Java code and input classes. Class names are not persisted to select a handler or decoder.
 
-The `mohs_lease` size bound is what makes the derived concurrency cap (`countByJob`) an index scan
-that is always cached, and what allowed a hot per-job `running_execution_count` counter to be
-deleted entirely (`V4`).
+Policy includes schedule, runner/window/rate names, misfire policy, retries, timeout and an optional named retry policy. `max_concurrent_executions = 0` means unlimited; a positive value is the global acquisition ceiling. `start_paused` is initial policy; `paused` and `retired` are durable controls. There is no second allow-concurrency boolean or persistent orphaned flag.
 
-## The control plane
+`next_fire_at` and `schedule_revision` identify the automatic series. Changed schedules and reactivation create a new revision. A completion from an older series cannot rearm the replacement. An on-demand definition, or a fixed-delay series awaiting its execution, has no armed next fire.
 
-Four control tables with different update cadences:
+Updating recurring JSON affects later occurrences only. Firing locks the definition and reads the current JSON in the transaction that advances its trigger and creates occurrences. The execution retains that snapshot throughout queueing, retries and history. Metadata queries omit recurring JSON; the dispatcher loads execution inputs in a batch.
 
-| Table | Rows | Written by |
-| --- | --- | --- |
-| `mohs_job_definitions` | One per job | Boot upsert; pause/resume; reschedule; the firing CAS; the fixed-delay rearm |
-| `mohs_rate_limits` | One per declared limit | Boot upsert; `charge` on the claim path; `PATCH` |
-| `mohs_nodes` | One per node incarnation | One heartbeat per node per tick; the stale purge |
-| `mohs_batches` | One per batch | Insert at creation; one atomic increment per member completion |
+## Active work
 
-## Table reference
+Every `mohs_work` row has identity, job key, shard, priority and one-based attempt number. Its state constraint permits exactly these shapes:
 
-### `mohs_job_definitions`
+| State | Required fields | Absent fields | Meaning |
+|---|---|---|---|
+| READY | `visible_at` | node, claim token and claimed time | Eligible when visibility is reached; no pending cancellation flag |
+| LEASED | `node_id`, `claim_token`, `claimed_at` | `visible_at` | Owned by that exact session/grant; cancellation may be requested |
 
-The definition, plus the operational state deliberately kept separate from it.
+A claim checks database time and session validity, locks candidate jobs in canonical order, rechecks global occupancy and changes selected READY rows to LEASED. Every grant gets a fresh UUIDv7 token, including reacquisition of the same attempt. Completion and recovery match execution, node, token and attempt.
 
-| Column | Type (PostgreSQL) | Notes |
-| --- | --- | --- |
-| `id` | `VARCHAR(255)` PK | UUIDv7 |
-| `job_key` | `VARCHAR(255)` **UNIQUE** | The domain identity |
-| `name` | `VARCHAR(255)` | Optional display label |
-| `handler_type` | `VARCHAR(500)` | The declaring class's name — never a CGLIB proxy name, which would not resolve stably across restarts |
-| `schedule_type` | `VARCHAR(20)` | `CRON` / `INTERVAL` / `ON_DEMAND` |
-| `cron_expression`, `cron_zone` | | Populated for `CRON` |
-| `interval_duration`, `interval_after_finish` | | Populated for `INTERVAL`. The duration is an ISO-8601 string |
-| `runner`, `window_name`, `rate_limit` | `VARCHAR(255)` | References **by name** |
-| `misfire` | `VARCHAR(20)` | |
-| `start_paused` | boolean | **Definitional** — read only at first registration |
-| `allow_concurrent_executions`, `max_concurrent_executions` | | The second is non-zero only when the first is false |
-| `retries`, `timeout`, `retry_policy` | | `timeout` is an ISO-8601 string; `retry_policy` names the `RetryPolicy` bean consulted on failure |
-| `source` | `VARCHAR(20)` | `ANNOTATION` / `PROGRAMMATIC` |
-| `orphaned` | boolean | **Operational** |
-| `paused` | boolean | **Operational** |
-| `retired` | boolean | **Operational** — soft retire; the row and history survive |
-| `next_fire_at` | timestamp, nullable | **The trigger's state.** `NULL` = nothing to fire: on-demand, or fixed-delay awaiting a completion |
-| `created_at`, `updated_at` | timestamp | From the injected `Clock` |
+Terminal completion removes work and updates history atomically. Retry updates work back to READY and records the completed attempt in history. A concurrent cancel request suppresses retry/requeue inside the winning transaction. A successful handler result may still win over a cooperative cancel request. Retirement cancels queued work; an already acquired snapshot may finish, while retry is suppressed if its definition remains retired.
 
-### `mohs_ready` — the queue
+The coordinator reads at most 128 visible job identities per shard page, loads their policies in bulk and supplies a positive eligible-job filter. Cursors advance through closed windows. Priority applies inside that page and shard; it is not global FIFO. The database still decides capacity under job locks.
 
-| Column | Notes |
-| --- | --- |
-| `execution_id` PK | |
-| `job_key` | Used by the claim's `NOT IN` admission filter |
-| `shard` `SMALLINT` | `FNV-1a(execution_id) mod 64` — a **function of the id**, re-derived everywhere, not transported state |
-| `priority` `INT` | Default 20 (`NORMAL`). Lower claims first |
-| `attempt` `INT` | The attempt this entry **will become** once claimed. Nothing else counts attempts on the hot path |
-| `visible_at` | The single admission rule: `visible_at <= now` |
+## Execution and latest attempt
 
-On PostgreSQL the table carries `fillfactor = 70` and aggressive autovacuum settings
-(`autovacuum_vacuum_scale_factor = 0.0`, `threshold = 1000`, `cost_delay = 0`) — it is
-insert/delete churn, and the defaults would let dead tuples accumulate faster than the vacuum
-collects them.
+An execution stores `payload`, `input_contract`, scheduling/audit metadata, `batch_id`, and explicit `origin`. MANUAL executions have no schedule revision; SCHEDULED executions carry the positive revision that created them. `actor` is audit text and does not determine rearm behavior.
 
-### `mohs_lease` — ownership
+The stored nonterminal outcome is PENDING. Read models derive ENQUEUED/RETRY_WAITING/RUNNING from the single joined work row. A PENDING execution without a valid work row is an invariant violation, not a fabricated queue state. A single read sees the committed state on either side of completion.
 
-| Column | Notes |
-| --- | --- |
-| `execution_id` PK | |
-| `job_key` | Serves the derived concurrency cap |
-| `node_id`, `epoch` | **The fencing token.** Every write over owned work carries the pair |
-| `attempt_number` | Copied from the queue entry at claim time |
-| `priority` | Travels queue → ownership so the reaper can rebuild a requeue entry **without reading history** |
-| `claimed_at` | The stray-lease grace measures against it |
-| `cancel_requested` | The cooperative cancel flag. It lives here, so it dies with the lease |
+`last_attempt_*` and `last_claim_token` describe only the latest completed attempt and permit recognition of repeated completion after an uncertain commit. Retry does not erase that result. No `mohs_attempt` table or list of past attempts exists. Terminal outcome, fixed-delay rearm and batch counters commit with the work transition.
 
-Same PostgreSQL storage parameters as `mohs_ready`, for the same reason.
+## Types, cost and installation
 
-### `mohs_execution` — history
+See the [type contract](type-contract.md): canonical UUIDv7 strings have width 36; technical names use exact ASCII comparison; instants use UTC microseconds; durations and batch counters use BIGINT. The Java/JDBC boundary normalizes types before SQL. JSON is a typed job snapshot, not a replacement for relational scheduling state.
 
-| Column | Notes |
-| --- | --- |
-| `execution_id` | Primary key on all four dialects |
-| `job_key`, `shard`, `priority` | |
-| `state` | **Advisory**: `PENDING` from birth until a terminal write |
-| `scheduled_at` | When it was due |
-| `created_at` | When the row was **born**. In a `FIRE_ALL_MISSED` replay this differs from `scheduled_at` — history would otherwise record a birth that did not happen then |
-| `finished_at` | Written by the terminal update |
-| `actor` | |
-| `correlation_id` | Carries the `batchId` until it is generalised |
-| `idempotency_key` | Denormalised for reads; uniqueness lives in `mohs_idempotency` |
-| `payload`, `payload_type` | JSON plus the concrete class name. `TEXT` on PostgreSQL/H2, `MEDIUMTEXT` on MySQL, `NVARCHAR(MAX)` on SQL Server — **never `CLOB`**, which PostgreSQL does not have |
+Work indexes grow with active work rather than retained history. That structural separation does not make runtime performance independent of history: shared cache, storage, writes and history queries can still compete. Fewer tables did not improve every measured workload.
 
-PostgreSQL uses the same execution identity key as the other dialects. The current installer
-and migration chain normalize the former time-leading keys. The completion still carries
-`created_at` from the payload read, but it is not part of the primary key. See
-[indexes](indexes.md) and [migrations](migrations.md) before upgrading an older schema.
-
-### `mohs_attempt` — the append-only attempt log
-
-| Column | Notes |
-| --- | --- |
-| `execution_id`, `number` | Composite primary key on all four dialects |
-| `node_id` | **Forensics: which node executed this attempt** |
-| `started_at`, `finished_at` | |
-| `outcome` | `SUCCEEDED` / `FAILED` / `CANCELLED` — never `ENQUEUED` or `RETRY_WAITING`, which describe the owning execution |
-| `error_type` | The exception's class name — the number-one operational query |
-| `error` | The exception's **message** only, never the stack trace — and at most 256 KB of it, the tail replaced by `… [truncated N chars]` |
-
-### `mohs_idempotency`
-
-| Column | Notes |
-| --- | --- |
-| `job_key`, `idempotency_key` | PK. **The primary-key conflict *is* the deduplication check** |
-| `execution_id` | The winner of the race |
-| `created_at` | Pruned by the idempotency window, not by history retention |
-
-A separate table because the uniqueness must be independent of history's physical layout.
-
-**SQL Server diverges here**, and the reason is a hard limit rather than a preference: with
-`NVARCHAR` the key measures `2 × (255 × 2) = 1020` bytes, above the 900-byte ceiling for a
-**clustered** index (the non-clustered ceiling rose to 1700 in 2016+; the clustered one did not).
-Measured: 225+225 characters inserts, 256+255 fails with `Msg 1946` at enqueue time. So the PK is
-`NONCLUSTERED` and the clustered index is `created_at`.
-
-That choice is not neutral, and both sides are recorded. **For**: `created_at` is monotonic (from
-the injected clock), so inserts stay at the tail and the retention prune becomes a range delete on
-the clustered index itself — which is why this dialect does **not** carry
-`idx_mohs_idempotency_created`. **Against**: the insert now maintains two structures, the dedup
-`SELECT` becomes a seek plus key lookup, and the same monotonicity concentrates every node on the
-last page (`PAGELATCH_EX`). The change was mandatory; the net balance has not yet been measured.
-
-### `mohs_rate_limits`
-
-| Column | Notes |
-| --- | --- |
-| `name` PK | |
-| `max_count`, `window_duration` | The spec. The window is an ISO-8601 string |
-| `tokens` | The bucket's balance **as of the last charge** |
-| `refilled_at` | The instant up to which time has already become tokens. The refill is applied **in memory at read time** |
-
-### `mohs_nodes`
-
-| Column | Notes |
-| --- | --- |
-| `node_id` PK | A UUIDv7 generated per `Engine` instance — a restart is a new node |
-| `state` | `CREATED` / `RUNNING` / `PAUSED` / `DRAINING` / `STOPPED` |
-| `last_heartbeat_at` | |
-| `epoch` `BIGINT` | The node's incarnation |
-| `expires_at`, nullable | **The node lease.** `NULL` only on a row written by an older jar, in which case the reaper falls back to heartbeat staleness |
-
-### `mohs_batches`
-
-| Column | Notes |
-| --- | --- |
-| `id` PK | |
-| `name` `NOT NULL` | The caller's label. Durable data — an operator must be able to tie a batch back to intent |
-| `total`, `succeeded`, `failed` | `pending` is **derived, never stored** |
-| `created_at` | |
-
-### The table that is not there
-
-Mohs used to keep `mohs_schema_history` for its own migration engine. Both are gone: the library
-executes no DDL, so nothing records which schema versions a database has seen — **that is now yours
-to track**. See [installing and upgrading the schema](migrations.md).
-
-## Key strategy
-
-| Rule | Enforcement |
-| --- | --- |
-| Every generated PK is **UUIDv7** (`io.github.robsonkades:uuidv7`) | `KeyGenerationScanTest` in `mohs-store-jdbc` forbids `randomUUID` outside the UUIDv7 library in that module's sources; elsewhere it is convention |
-| No `IDENTITY`, `SERIAL`, `AUTO_INCREMENT`, `SEQUENCE` anywhere | The same scan reads every `.sql` in the store and fails on any of them |
-| Natural keys are fine | `job_key`, `rate_limits.name`, `mohs_attempt.number` |
-| Ids are stored as `VARCHAR(255)` / `NVARCHAR(255)`, not a native UUID type | Portability across four dialects |
-
-Why UUIDv7 rather than v4: it is **time-ordered**, so inserts stay localised at the index tail on
-the system's hottest table, and it is lexicographically sortable as a string — which is what makes
-keyset pagination by id chronological.
-
-## Type mapping across dialects
-
-| Concept | PostgreSQL | H2 | MySQL | SQL Server |
-| --- | --- | --- | --- | --- |
-| Identifier / short text | `VARCHAR` | `VARCHAR` | `VARCHAR` | **`NVARCHAR`** (`VARCHAR` is not Unicode by default) |
-| Long text | `TEXT` | `TEXT` | `MEDIUMTEXT` | `NVARCHAR(MAX)` |
-| Boolean | `BOOLEAN` | `BOOLEAN` | `BOOLEAN` | **`BIT`** (compared against `1`, never `TRUE`) |
-| Control-plane timestamp | `TIMESTAMP` | `TIMESTAMP` | `DATETIME(6)` | **`DATETIME2`** (`TIMESTAMP` in T-SQL is `ROWVERSION`, a binary counter) |
-| Split-table timestamp | **`TIMESTAMPTZ`** | `TIMESTAMP` | `DATETIME(6)` | `DATETIME2` |
-
-## The temporal contract
-
-**Every temporal column stores the wall clock in UTC.** The crossing is `LocalDateTime` (or
-`OffsetDateTime` for PostgreSQL's `TIMESTAMPTZ`) via JDBC 4.2 `setObject`/`getObject` — **never**
-`java.sql.Timestamp`.
-
-The reason is a reproduced defect. The legacy path converted through the **JVM's default zone** at
-both ends. The constant offset cancelled out within one JVM, but the **daylight-saving gap did
-not**: `Timestamp.valueOf` resolves a nonexistent `LocalDateTime` by pushing it forward, so during
-the gap hour every instant written came out an hour wrong. In `refilled_at` that means an apparently
-empty token bucket — a burst above the limit, which is precisely the failure the rate limit exists
-to prevent.
-
-`LocalDateTime` consults no zone at all: the UTC wall clock crosses verbatim in all four dialects,
-and the two conversion functions are inverses at **every** instant, gap included.
-
-For PostgreSQL's tz-aware split tables the crossing is `OffsetDateTime` in UTC — a `LocalDateTime`
-against a tz-aware column would be interpreted in the **session's** zone, which is exactly the class
-of bug the zoneless crossing killed.
-
-**Why not `timestamptz` everywhere**: MySQL makes uniformity impossible — its `TIMESTAMP` ends in
-2038, which is unacceptable for a scheduler's `next_fire_at`. The newer tables are born tz-aware
-where the dialect supports it.
+The [installers](migrations.md) define one fresh schema per database. V14/V15 explain historical changes; they are not upgrade paths in this unreleased version. Tables `mohs_job_bindings`, `mohs_attempt`, `mohs_ready` and `mohs_lease` are absent from the current installer.

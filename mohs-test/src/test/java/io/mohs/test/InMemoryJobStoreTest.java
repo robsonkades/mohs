@@ -35,22 +35,38 @@ import io.mohs.engine.StoredJob;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class InMemoryJobStoreTest {
+    @Test
+    void invalidCatalogPublicationLeavesNoPartialDefinitionsAndRetainedContractsAreImmutable() {
+        var catalog = new io.mohs.engine.ExecutableCatalog(java.util.Map.of(JobKey.of("a"), "a", JobKey.of("b"), "b"));
+        var a = definition("a");
+        var b = definition("b");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> store.reconcile(catalog, List.of(a),
+                io.mohs.engine.CatalogStore.Conflict.OVERRIDE)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(store.find(a.key())).isEmpty();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> store.reconcile(catalog, List.of(a, a),
+                io.mohs.engine.CatalogStore.Conflict.OVERRIDE)).isInstanceOf(IllegalArgumentException.class);
+        store.reconcile(catalog, List.of(a, b), io.mohs.engine.CatalogStore.Conflict.OVERRIDE);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> store.upsert(a.withInputContract("changed")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(store.find(a.key()).orElseThrow().definition()).isEqualTo(a);
+    }
+
 
     record Handler() {
     }
 
     private static JobDefinition definition(String id) {
-        return JobDefinition.of(id, Handler.class, spec -> spec.onDemand().runner("io"));
+        return JobDefinition.of(id, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRunner("io"), io.mohs.core.schedule.Misfire.IGNORE, false);
     }
 
     private static JobDefinition definitionWithCap(String id, int max) {
-        return JobDefinition.of(id, Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(max));
+        return JobDefinition.of(id, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withMaxConcurrentExecutions(max), io.mohs.core.schedule.Misfire.IGNORE, false);
     }
 
     /** The public builder always stamps PROGRAMMATIC; only the canonical constructor yields ANNOTATION. */
     private static JobDefinition annotationSourcedDefinition(String id) {
-        return new JobDefinition(JobKey.of(id), null, Handler.class, new OnDemandSpec(),
-                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
+        return new JobDefinition(JobKey.of(id), null,JobKey.of(id), new OnDemandSpec(),
+                null, null, null, Misfire.IGNORE, false, 0, 0, null, null, DefinitionSource.ANNOTATION, JobKey.of(id).value());
     }
 
     private final InMemoryJobStore store = new InMemoryJobStore();
@@ -64,7 +80,6 @@ class InMemoryJobStoreTest {
 
         assertThat(stored).isPresent();
         assertThat(stored.get().definition()).isEqualTo(definition);
-        assertThat(stored.get().orphaned()).isFalse();
         assertThat(stored.get().paused()).isFalse();
     }
 
@@ -77,7 +92,7 @@ class InMemoryJobStoreTest {
     void upsertArmsPreservesAndRecomputesTheTrigger() {
         MutableClock clock = MutableClock.startingAt(Instant.parse("2026-08-15T12:00:00Z"));
         InMemoryJobStore clocked = new InMemoryJobStore(clock);
-        JobDefinition every5m = JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofMinutes(5)));
+        JobDefinition every5m = JobDefinition.of("poll", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(5), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false);
 
         clocked.upsert(every5m);
         Instant armedAt = clocked.find(JobKey.of("poll")).orElseThrow().nextFireAt();
@@ -87,7 +102,7 @@ class InMemoryJobStoreTest {
         clocked.upsert(every5m);
         assertThat(clocked.find(JobKey.of("poll")).orElseThrow().nextFireAt()).isEqualTo(armedAt);
 
-        clocked.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        clocked.upsert(JobDefinition.of("poll", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         assertThat(clocked.find(JobKey.of("poll")).orElseThrow().nextFireAt())
                 .isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
     }
@@ -99,7 +114,7 @@ class InMemoryJobStoreTest {
      */
     @Test
     void startPausedAppliesOnlyAtBirth() {
-        JobDefinition dormant = JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused());
+        JobDefinition dormant = JobDefinition.of("dormant", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, true);
         store.upsert(dormant);
         assertThat(store.find(JobKey.of("dormant")).orElseThrow().paused()).isTrue();
 
@@ -112,19 +127,19 @@ class InMemoryJobStoreTest {
     void findDueRecurringReturnsDueUnpausedJobsOldestFirstWithinTheLimit() {
         MutableClock clock = MutableClock.startingAt(Instant.parse("2026-08-15T12:00:00Z"));
         InMemoryJobStore clocked = new InMemoryJobStore(clock);
-        clocked.upsert(JobDefinition.of("due-late", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        clocked.upsert(JobDefinition.of("due-late", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         clock.advance(Duration.ofMinutes(2));
-        clocked.upsert(JobDefinition.of("due-recent", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
-        clocked.upsert(JobDefinition.of("not-due", Handler.class, spec -> spec.every(Duration.ofHours(6))));
-        clocked.upsert(JobDefinition.of("import-file", Handler.class, spec -> spec.onDemand()));
-        clocked.upsert(JobDefinition.of("paused", Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        clocked.upsert(JobDefinition.of("due-recent", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        clocked.upsert(JobDefinition.of("not-due", new io.mohs.core.schedule.IntervalSpec(Duration.ofHours(6), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        clocked.upsert(JobDefinition.of("import-file", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        clocked.upsert(JobDefinition.of("paused", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         clocked.pause(JobKey.of("paused"));
         clock.advance(Duration.ofMinutes(2));
 
-        assertThat(clocked.findDueRecurring(clock.instant(), 10))
+        assertThat(clocked.findDueRecurring(clock.instant(), 10).jobs())
                 .extracting(stored -> stored.definition().key().value())
                 .containsExactly("due-late", "due-recent");
-        assertThat(clocked.findDueRecurring(clock.instant(), 1))
+        assertThat(clocked.findDueRecurring(clock.instant(), 1).jobs())
                 .extracting(stored -> stored.definition().key().value())
                 .containsExactly("due-late");
     }
@@ -137,7 +152,7 @@ class InMemoryJobStoreTest {
     void rescheduleSwapsTheScheduleAndRearmsTheTrigger() {
         MutableClock clock = MutableClock.startingAt(Instant.parse("2026-08-15T12:00:00Z"));
         InMemoryJobStore clocked = new InMemoryJobStore(clock);
-        clocked.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofMinutes(5)).retries(3)));
+        clocked.upsert(JobDefinition.of("poll", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(5), false), io.mohs.core.definition.JobOptions.defaults().withRetries(3), io.mohs.core.schedule.Misfire.IGNORE, false));
         clocked.pause(JobKey.of("poll"));
 
         boolean rescheduled = clocked.reschedule(JobKey.of("poll"), new CronSpec("0 0 2 * * *", ZoneId.of("UTC")));
@@ -151,24 +166,12 @@ class InMemoryJobStoreTest {
         assertThat(clocked.reschedule(JobKey.of("ghost"), new OnDemandSpec())).isFalse();
     }
 
-    @Test
-    void armNextFireOnlyArmsAnUnarmedTrigger() {
-        store.upsert(definition("import-file")); // on-demand jobs are born with no trigger armed
-        Instant armAt = Instant.parse("2026-08-15T12:00:00Z");
-
-        store.armNextFire(JobKey.of("import-file"), armAt);
-        assertThat(store.find(JobKey.of("import-file")).orElseThrow().nextFireAt()).isEqualTo(armAt);
-
-        store.armNextFire(JobKey.of("import-file"), armAt.plusSeconds(60));
-        assertThat(store.find(JobKey.of("import-file")).orElseThrow().nextFireAt()).isEqualTo(armAt);
-    }
 
     @Test
     void upsertOnExistingKeyAppliesDefinitionalChanges() {
         store.upsert(definition("welcome-email"));
 
-        JobDefinition changed = JobDefinition.of("welcome-email", Handler.class,
-                spec -> spec.cron("0 0 2 * * *", ZoneId.of("UTC")).retries(5));
+        JobDefinition changed = JobDefinition.of("welcome-email", new io.mohs.core.schedule.CronSpec("0 0 2 * * *", ZoneId.of("UTC")), io.mohs.core.definition.JobOptions.defaults().withRetries(5), io.mohs.core.schedule.Misfire.IGNORE, false);
         store.upsert(changed);
 
         StoredJob stored = store.find(JobKey.of("welcome-email")).orElseThrow();
@@ -203,39 +206,8 @@ class InMemoryJobStoreTest {
         }
     }
 
-    /** Same contract as {@code JdbcJobStore#findAllAnnotationSourced}: PROGRAMMATIC never leaves the cursor. */
-    @Test
-    void findAllAnnotationSourcedExcludesProgrammaticJobs() {
-        store.upsert(definition("programmatic-job"));
-        store.upsert(annotationSourcedDefinition("annotation-job"));
 
-        try (Stream<StoredJob> annotationSourced = store.findAllAnnotationSourced()) {
-            List<JobKey> keys = annotationSourced.map(job -> job.definition().key()).toList();
-            assertThat(keys).containsExactly(JobKey.of("annotation-job"));
-        }
-    }
 
-    @Test
-    void markOrphanedSetsTheFlag() {
-        JobKey key = JobKey.of("welcome-email");
-        store.upsert(definition("welcome-email"));
-
-        store.markOrphaned(key);
-
-        assertThat(store.find(key)).map(StoredJob::orphaned).contains(true);
-    }
-
-    /** orphaned is inferred by the system, unlike paused, which an operator chose: a re-upsert means the annotation is back, so it clears. */
-    @Test
-    void upsertClearsOrphanedOnReupsert() {
-        JobKey key = JobKey.of("welcome-email");
-        store.upsert(definition("welcome-email"));
-        store.markOrphaned(key);
-
-        store.upsert(definition("welcome-email"));
-
-        assertThat(store.find(key)).map(StoredJob::orphaned).contains(false);
-    }
 
     @Test
     void pauseAndResumeToggleTheFlag() {
@@ -259,10 +231,4 @@ class InMemoryJobStoreTest {
         assertThat(store.find(key)).isEmpty();
     }
 
-    @Test
-    void markOrphanedOnUnknownKeyIsANoOp() {
-        store.markOrphaned(JobKey.of("ghost"));
-
-        assertThat(store.find(JobKey.of("ghost"))).isEmpty();
-    }
 }

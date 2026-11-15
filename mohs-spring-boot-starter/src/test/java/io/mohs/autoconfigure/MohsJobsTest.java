@@ -81,6 +81,10 @@ class MohsJobsTest {
         void throwsCheckedFromHandler() throws IOException {
             throw new IOException("boom");
         }
+
+        java.util.concurrent.CompletableFuture<Void> asyncFailure() {
+            return java.util.concurrent.CompletableFuture.failedFuture(new IOException("boom"));
+        }
     }
 
     static class AnnotatedFixtures {
@@ -116,11 +120,11 @@ class MohsJobsTest {
         void unnamedMethod() {
         }
 
-        @MohsJob(id = "exclusive-job", allowConcurrentExecutions = false, maxConcurrentExecutions = 3)
+        @MohsJob(id = "exclusive-job", maxConcurrentExecutions = 3)
         void exclusiveMethod() {
         }
 
-        @MohsJob(id = "invalid-exclusive-job", allowConcurrentExecutions = false)
+        @MohsJob(id = "invalid-exclusive-job", maxConcurrentExecutions = -1)
         void invalidExclusiveMethod() {
         }
 
@@ -154,7 +158,7 @@ class MohsJobsTest {
 
             @Override
             public ExecutionId executionId() {
-                return ExecutionId.of("exec-1");
+                return ExecutionId.of("01991337-0000-7000-8000-00000000001c");
             }
 
             @Override
@@ -180,6 +184,13 @@ class MohsJobsTest {
     }
 
     // ---- adaptHandler ----
+
+    @Test
+    void rejectsAnAsyncResultBeforeItCanBeMistakenForSuccess() {
+        assertThatThrownBy(() -> MohsJobs.adaptHandler(new Handlers(), method("asyncFailure")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("asyncFailure").hasMessageContaining("must return void");
+    }
 
     @Test
     void invokesNoArgMethod() throws Exception {
@@ -347,8 +358,8 @@ class MohsJobsTest {
     /** startPaused travels from the annotation into the definition; when absent, the job is born armed (the long-standing default). */
     @Test
     void translatesStartPaused() {
-        JobDefinition dormant = MohsJobs.toDefinition(JobKey.of("dormant-job"), annotationOf("dormantMethod"), AnnotatedFixtures.class);
-        JobDefinition armed = MohsJobs.toDefinition(JobKey.of("every-job"), annotationOf("everyMethod"), AnnotatedFixtures.class);
+        JobDefinition dormant = MohsJobs.toDefinition(JobKey.of("dormant-job"), annotationOf("dormantMethod"));
+        JobDefinition armed = MohsJobs.toDefinition(JobKey.of("every-job"), annotationOf("everyMethod"));
 
         assertThat(dormant.startPaused()).isTrue();
         assertThat(armed.startPaused()).isFalse();
@@ -356,37 +367,37 @@ class MohsJobsTest {
 
     @Test
     void translatesCronTrigger() {
-        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("cron-job"), annotationOf("cronMethod"), AnnotatedFixtures.class);
+        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("cron-job"), annotationOf("cronMethod"));
 
         assertThat(definition.schedule()).isEqualTo(new CronSpec("0 0 2 * * *", ZoneId.of("UTC")));
         assertThat(definition.source()).isEqualTo(DefinitionSource.ANNOTATION);
-        assertThat(definition.handlerType()).isEqualTo(AnnotatedFixtures.class);
+        assertThat(definition.executableKey()).isEqualTo(definition.key());
     }
 
     @Test
     void translatesEveryTrigger() {
-        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("every-job"), annotationOf("everyMethod"), AnnotatedFixtures.class);
+        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("every-job"), annotationOf("everyMethod"));
 
         assertThat(definition.schedule()).isEqualTo(new IntervalSpec(Duration.ofSeconds(30), false));
     }
 
     @Test
     void translatesEveryAfterFinishTrigger() {
-        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("every-after-finish-job"), annotationOf("everyAfterFinishMethod"), AnnotatedFixtures.class);
+        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("every-after-finish-job"), annotationOf("everyAfterFinishMethod"));
 
         assertThat(definition.schedule()).isEqualTo(new IntervalSpec(Duration.ofMinutes(1), true));
     }
 
     @Test
     void noTriggerFieldsMeanOnDemand() {
-        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("on-demand-job"), annotationOf("onDemandMethod"), AnnotatedFixtures.class);
+        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("on-demand-job"), annotationOf("onDemandMethod"));
 
         assertThat(definition.schedule()).isEqualTo(new OnDemandSpec());
     }
 
     @Test
     void anAnnotationWithoutRetriesIsBornWithRetryBudget() {
-        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("on-demand-job"), annotationOf("onDemandMethod"), AnnotatedFixtures.class);
+        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("on-demand-job"), annotationOf("onDemandMethod"));
 
         assertThat(definition.retries())
                 .as("the declarative path has to be born with the same budget as the builder: without it, reclaiming "
@@ -397,44 +408,43 @@ class MohsJobsTest {
 
     @Test
     void rejectsMutuallyExclusiveTriggers() {
-        assertThatThrownBy(() -> MohsJobs.toDefinition(JobKey.of("conflicting-job"), annotationOf("conflictingTriggersMethod"), AnnotatedFixtures.class))
+        assertThatThrownBy(() -> MohsJobs.toDefinition(JobKey.of("conflicting-job"), annotationOf("conflictingTriggersMethod")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("mutually exclusive");
     }
 
     @Test
     void rejectsCronWithoutZone() {
-        assertThatThrownBy(() -> MohsJobs.toDefinition(JobKey.of("cron-no-zone-job"), annotationOf("cronWithoutZoneMethod"), AnnotatedFixtures.class))
+        assertThatThrownBy(() -> MohsJobs.toDefinition(JobKey.of("cron-no-zone-job"), annotationOf("cronWithoutZoneMethod")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("zone");
     }
 
     @Test
     void blankNameBecomesNull() {
-        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("unnamed-job"), annotationOf("unnamedMethod"), AnnotatedFixtures.class);
+        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("unnamed-job"), annotationOf("unnamedMethod"));
 
         assertThat(definition.name()).isNull();
     }
 
     @Test
     void nonBlankNameIsKept() {
-        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("named-job"), annotationOf("namedMethod"), AnnotatedFixtures.class);
+        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("named-job"), annotationOf("namedMethod"));
 
         assertThat(definition.name()).isEqualTo("Friendly Name");
     }
 
     @Test
-    void mapsAllowConcurrentExecutionsFalseWithExplicitMax() {
-        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("exclusive-job"), annotationOf("exclusiveMethod"), AnnotatedFixtures.class);
+    void mapsExplicitConcurrencyCap() {
+        JobDefinition definition = MohsJobs.toDefinition(JobKey.of("exclusive-job"), annotationOf("exclusiveMethod"));
 
-        assertThat(definition.allowConcurrentExecutions()).isFalse();
         assertThat(definition.maxConcurrentExecutions()).isEqualTo(3);
     }
 
     /** maxConcurrentExecutions left at the annotation's default (0) — JobDefinition's compact constructor rejects it, and its message already teaches. */
     @Test
-    void allowConcurrentExecutionsFalseWithoutMaxFailsViaJobDefinitionConstructor() {
-        assertThatThrownBy(() -> MohsJobs.toDefinition(JobKey.of("invalid-exclusive-job"), annotationOf("invalidExclusiveMethod"), AnnotatedFixtures.class))
+    void rejectsNegativeConcurrencyCap() {
+        assertThatThrownBy(() -> MohsJobs.toDefinition(JobKey.of("invalid-exclusive-job"), annotationOf("invalidExclusiveMethod")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("maxConcurrentExecutions");
     }
@@ -443,10 +453,10 @@ class MohsJobsTest {
 
     @Test
     void diffReportsOnlyChangedFields() {
-        JobDefinition original = new JobDefinition(JobKey.of("job"), null, AnnotatedFixtures.class, new OnDemandSpec(),
-                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
-        JobDefinition changed = new JobDefinition(JobKey.of("job"), null, AnnotatedFixtures.class, new OnDemandSpec(),
-                null, null, null, Misfire.IGNORE, false, true, 0, 5, null, null, DefinitionSource.ANNOTATION);
+        JobDefinition original = new JobDefinition(JobKey.of("job"), null,JobKey.of("job"), new OnDemandSpec(),
+                null, null, null, Misfire.IGNORE, false, 0, 0, null, null, DefinitionSource.ANNOTATION, JobKey.of("job").value());
+        JobDefinition changed = new JobDefinition(JobKey.of("job"), null,JobKey.of("job"), new OnDemandSpec(),
+                null, null, null, Misfire.IGNORE, false, 0, 5, null, null, DefinitionSource.ANNOTATION, JobKey.of("job").value());
 
         String diff = MohsJobs.diff(original, changed);
 

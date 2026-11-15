@@ -61,52 +61,52 @@ class JdbcLeaseStorePostgresTest {
     void setUp() {
         DataSource dataSource = PostgresTestSupport.freshSchema();
         rawJdbcTemplate = new JdbcTemplate(dataSource);
+        io.mohs.store.jdbc.TestSessions.seed(dataSource, new PostgresJdbcDelegate(), "01991337-0000-7000-8000-00000000006f", io.mohs.core.EngineState.RUNNING, java.time.Duration.ofMinutes(5));
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new PostgresJdbcDelegate());
-        store = new JdbcLeaseStore(dataSource, new PostgresJdbcDelegate(), batchStore);
-        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDelegate(), batchStore);
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, new PostgresJdbcDelegate());
+        store = new JdbcLeaseStore(dataSource, new PostgresJdbcDelegate());
+        queue = new JdbcWorkQueue(dataSource, new PostgresJdbcDelegate());
         jobStore = new JdbcJobStore(dataSource, clock, new PostgresJdbcDelegate());
+        jobStore.upsert(io.mohs.core.definition.JobDefinition.of("job-a", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
     }
 
     @Test
     void terminalUpdateFindsTheRowByItsPrimaryKey() {
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
-                VALUES ('exec-1', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
-                """, JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT), JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT));
-        queue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("job-a"), 0, 20, 1, NOW.minusSeconds(1))));
-        queue.claim(0, "node-pg", 1, 10, List.of(), NOW);
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
+                VALUES ('01991337-0000-7000-8000-00000000001c', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, JdbcTimestamps.toUtcLocalDateTime(CREATED_AT), JdbcTimestamps.toUtcLocalDateTime(CREATED_AT));
+        TestWork.ready(rawJdbcTemplate.getDataSource(), new PostgresJdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-a"), 0, 20, 1, NOW.minusSeconds(1))));
+        queue.claim(0, "01991337-0000-7000-8000-00000000006f", 10, List.of(), NOW);
 
         Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(new LeaseStore.CompletionResult(
-                ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-pg", 1, 1,
-                NOW.minusSeconds(2), NOW, ExecutionState.SUCCEEDED, null, null,
-                ExecutionState.SUCCEEDED, null)), jobStore);
+                ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-a"), "01991337-0000-7000-8000-00000000006f", rawJdbcTemplate.queryForObject("SELECT claim_token FROM mohs_work WHERE work_state = 'LEASED' AND  execution_id = '01991337-0000-7000-8000-00000000001c'", String.class), 1,
+                NOW.minusSeconds(2), NOW, ExecutionState.SUCCEEDED, null, null, null)));
 
-        assertThat(verdicts.get(ExecutionId.of("exec-1")).owned()).isTrue();
+        assertThat(verdicts.get(ExecutionId.of("01991337-0000-7000-8000-00000000001c")).owned()).isTrue();
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("SUCCEEDED");
+                "SELECT state FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", String.class)).isEqualTo("SUCCEEDED");
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT outcome FROM mohs_attempt WHERE execution_id = 'exec-1'", String.class)).isEqualTo("SUCCEEDED");
-        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isZero();
+                "SELECT last_attempt_outcome FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", String.class)).isEqualTo("SUCCEEDED");
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_work WHERE work_state = 'LEASED'", Integer.class)).isZero();
     }
 
     @Test
     void epochFenceDiscardsTheZombieOnPostgresToo() {
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
-                VALUES ('exec-1', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
-                """, JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT), JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT));
-        queue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("job-a"), 0, 20, 1, NOW.minusSeconds(1))));
-        queue.claim(0, "node-pg", 2, 10, List.of(), NOW);
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
+                VALUES ('01991337-0000-7000-8000-00000000001c', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, JdbcTimestamps.toUtcLocalDateTime(CREATED_AT), JdbcTimestamps.toUtcLocalDateTime(CREATED_AT));
+        TestWork.ready(rawJdbcTemplate.getDataSource(), new PostgresJdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-a"), 0, 20, 1, NOW.minusSeconds(1))));
+        queue.claim(0, "01991337-0000-7000-8000-00000000006f", 10, List.of(), NOW);
 
         Map<ExecutionId, LeaseStore.Completion> verdicts = store.complete(List.of(new LeaseStore.CompletionResult(
-                ExecutionId.of("exec-1"), JobKey.of("job-a"), "node-pg", 1, 1,
-                NOW.minusSeconds(2), NOW, ExecutionState.SUCCEEDED, null, null,
-                ExecutionState.SUCCEEDED, null)), jobStore);
+                ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-a"), "01991337-0000-7000-8000-00000000006f", "01991337-0000-7000-8000-000000000085", 1,
+                NOW.minusSeconds(2), NOW, ExecutionState.SUCCEEDED, null, null, null)));
 
-        assertThat(verdicts.get(ExecutionId.of("exec-1"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
+        assertThat(verdicts.get(ExecutionId.of("01991337-0000-7000-8000-00000000001c"))).isEqualTo(LeaseStore.Completion.FENCED_OUT);
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
+                "SELECT state FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", String.class)).isEqualTo("PENDING");
     }
 
     /**
@@ -119,29 +119,29 @@ class JdbcLeaseStorePostgresTest {
     @Test
     void theSchemaRefusesASecondRowWithTheSameExecutionId() {
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
-                VALUES ('exec-1', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
-                """, JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT), JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT));
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
+                VALUES ('01991337-0000-7000-8000-00000000001c', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, JdbcTimestamps.toUtcLocalDateTime(CREATED_AT), JdbcTimestamps.toUtcLocalDateTime(CREATED_AT));
 
         assertThatThrownBy(() -> rawJdbcTemplate.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
-                VALUES ('exec-1', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
-                """, JdbcTimestamps.toUtcOffsetDateTime(NOW), JdbcTimestamps.toUtcOffsetDateTime(NOW)))
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
+                VALUES ('01991337-0000-7000-8000-00000000001c', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW)))
                 .isInstanceOf(DuplicateKeyException.class);
     }
 
-    /** The same, one level down: an attempt is identified by its execution and its number, with no finished_at in the key. */
+    /** A partial latest-attempt update cannot leave a number without its corresponding result. */
     @Test
-    void theSchemaRefusesASecondAttemptWithTheSameNumber() {
+    void theSchemaRejectsAnIncompleteLatestAttempt() {
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
-                VALUES ('exec-1', 1, 'node-pg', ?, ?, 'SUCCEEDED')
-                """, JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT), JdbcTimestamps.toUtcOffsetDateTime(NOW));
-
-        assertThatThrownBy(() -> rawJdbcTemplate.update("""
-                INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome)
-                VALUES ('exec-1', 1, 'node-pg', ?, ?, 'FAILED')
-                """, JdbcTimestamps.toUtcOffsetDateTime(CREATED_AT), JdbcTimestamps.toUtcOffsetDateTime(NOW.plusSeconds(1))))
-                .isInstanceOf(DuplicateKeyException.class);
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
+                VALUES ('01991337-0000-7000-8000-00000000001c', 'job-a', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                """, JdbcTimestamps.toUtcLocalDateTime(CREATED_AT), JdbcTimestamps.toUtcLocalDateTime(CREATED_AT));
+        assertThatThrownBy(() -> rawJdbcTemplate.update(
+                "UPDATE mohs_execution SET last_attempt_number = 2 WHERE execution_id = '01991337-0000-7000-8000-00000000001c'"))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class)
+                .hasMessageContaining("ck_mohs_execution_attempt");
+        assertThat(rawJdbcTemplate.queryForObject(
+                "SELECT last_attempt_number FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", Integer.class)).isZero();
     }
 }

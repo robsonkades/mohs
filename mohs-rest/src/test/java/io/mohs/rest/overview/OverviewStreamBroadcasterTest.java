@@ -96,6 +96,131 @@ class OverviewStreamBroadcasterTest {
         verify(mohs).executions(any());
     }
 
+    @Test
+    void dashboardInvalidationsNeverReadAnExecutionPage() {
+        stubSnapshotReads();
+        broadcaster.subscribe(false);
+        broadcaster.tick();
+
+        verify(mohs, never()).executions(any());
+        verify(mohs, org.mockito.Mockito.times(2)).overview(any());
+    }
+
+    @Test
+    void simultaneousDashboardJoinsReuseTheRecentSnapshot() {
+        stubSnapshotReads();
+        broadcaster.subscribe(false);
+        broadcaster.subscribe(false);
+        broadcaster.subscribe(false);
+
+        verify(mohs).overview(any());
+        verify(mohs).jobs();
+        verify(mohs, never()).executions(any());
+    }
+
+    @Test
+    void aLegacySubscriberStillReceivesExecutionSnapshotsAfterAnInvalidationClient() {
+        stubSnapshotReads();
+        broadcaster.subscribe(false);
+        broadcaster.subscribe();
+
+        verify(mohs).executions(any());
+        clearInvocations(mohs);
+        broadcaster.tick();
+        verify(mohs).executions(any());
+    }
+
+    @Test
+    @Timeout(10)
+    void aLegacySubscriberJoiningDuringAnInvalidationTickReceivesOnlyItsOwnInitialSnapshot() throws Exception {
+        stubSnapshotReads();
+        var stream = new java.util.concurrent.atomic.AtomicReference<OverviewStreamBroadcaster>();
+        var joinDuringTick = new AtomicBoolean();
+        var createdEmitters = new AtomicInteger();
+        var legacyFrames = new AtomicInteger();
+        Clock joiningClock = new Clock() {
+            @Override public java.time.ZoneId getZone() { return ZoneOffset.UTC; }
+            @Override public Clock withZone(java.time.ZoneId zone) { return this; }
+            @Override public Instant instant() {
+                // The tick already chose its frame shape, but has not captured its recipients in
+                // the broken implementation. A reentrant join places the new client exactly there.
+                if (joinDuringTick.compareAndSet(true, false)) stream.get().subscribe(true);
+                return NOW;
+            }
+        };
+        var concurrent = new OverviewStreamBroadcaster(mohs, joiningClock, () -> {
+            if (createdEmitters.getAndIncrement() == 0) return new SseEmitter(0L);
+            return new SseEmitter(0L) {
+                @Override public void send(SseEventBuilder builder) {
+                    legacyFrames.incrementAndGet();
+                }
+            };
+        });
+        stream.set(concurrent);
+        var senders = (java.util.concurrent.ExecutorService)
+                org.springframework.test.util.ReflectionTestUtils.getField(concurrent, "senders");
+        try {
+            concurrent.subscribe(false);
+            joinDuringTick.set(true);
+            concurrent.tick();
+        } finally {
+            concurrent.close();
+        }
+        // Drain asynchronous sends before asserting absence of an incompatible older frame.
+        assertThat(senders.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(createdEmitters).hasValue(2);
+        assertThat(legacyFrames).hasValue(5);
+        verify(mohs).executions(any());
+    }
+
+    @Test
+    @Timeout(12)
+    void readersIgnoringCancellationKeepTheirPermitsAcrossLaterSnapshots() throws Exception {
+        CountDownLatch started = new CountDownLatch(5);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(5);
+        Runnable blockedRead = () -> {
+            started.countDown();
+            try {
+                boolean done = false;
+                while (!done) {
+                    try {
+                        release.await();
+                        done = true;
+                    } catch (InterruptedException ignored) {
+                        // A driver that cannot cancel the running statement.
+                    }
+                }
+            } finally {
+                finished.countDown();
+            }
+        };
+        when(mohs.overview(any())).thenAnswer(_ -> {
+            blockedRead.run();
+            return new OverviewSnapshot(Map.of(), new ThroughputReading(Duration.ofSeconds(60), 0L, 0L), RECENT);
+        });
+        when(mohs.jobs()).thenAnswer(_ -> { blockedRead.run(); return List.of(); });
+        when(mohs.nodes()).thenAnswer(_ -> { blockedRead.run(); return List.of(); });
+        when(mohs.runners()).thenAnswer(_ -> { blockedRead.run(); return List.of(); });
+        when(mohs.executions(any())).thenAnswer(_ -> { blockedRead.run(); return List.of(); });
+        try (var caller = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var first = caller.submit(() -> { return broadcaster.subscribe(); });
+            try {
+                assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+                assertThatThrownBy(() -> first.get(6, TimeUnit.SECONDS))
+                        .isInstanceOf(java.util.concurrent.ExecutionException.class)
+                        .hasCauseInstanceOf(IllegalStateException.class);
+                clearInvocations(mohs);
+                assertThatThrownBy(broadcaster::subscribe).isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("read capacity");
+                verifyNoInteractions(mohs);
+            } finally {
+                release.countDown();
+                assertThat(finished.await(5, TimeUnit.SECONDS)).isTrue();
+            }
+        }
+    }
+
     /**
      * An initial snapshot that fails (a degraded database) becomes the subscribe's 500 WITHOUT
      * leaving an orphan emitter registered — an emitter that was never initialised fires no removal

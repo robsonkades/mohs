@@ -23,24 +23,9 @@ import java.time.ZoneOffset;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Binding and reading instants against zoneless temporal columns (H2's and Postgres's
- * {@code TIMESTAMP}, MySQL's {@code DATETIME}, SQL Server's {@code DATETIME2}): the crossing is
- * {@link LocalDateTime} through JDBC 4.2 ({@code setObject}/{@code getObject}), NEVER
- * {@code java.sql.Timestamp}.
- *
- * <p>The legacy path converted through the <b>JVM's default zone</b> at both ends; the constant offset
- * cancelled out within one JVM, but the daylight-saving gap did not — {@code Timestamp.valueOf} resolves
- * a nonexistent {@code LocalDateTime} by pushing it forward, and during the gap hour every instant
- * written came out an hour wrong (reported 2026-08-19; in {@code refilled_at} that means an apparently
- * empty token bucket — a burst above the limit, the failure mode the rate limit exists to prevent).
- * {@link LocalDateTime} consults no zone at all: the UTC wall clock crosses verbatim in all four
- * databases, and the two functions are inverses at EVERY instant, gap included.
- *
- * <p>The project's contract, unchanged: every temporal column stores the wall clock in UTC. Why not
- * {@code timestamptz}/{@code datetimeoffset} yet: MySQL makes uniformity impossible (its
- * {@code TIMESTAMP} ends in 2038 — unacceptable for a scheduler's {@code next_fire_at}) and converting
- * the type on the current tables buys nothing this crossing does not already provide; the newer tables
- * are born tz-aware.
+ * Operational instants cross JDBC 4.2 as UTC LocalDateTime values at microsecond precision.
+ * No JVM or connection time zone participates in persistence. OffsetDateTime is used only
+ * to read database clock expressions that return an explicit offset.
  */
 public final class JdbcTimestamps {
 
@@ -54,7 +39,7 @@ public final class JdbcTimestamps {
      * @return the instant expressed as a UTC local timestamp
      */
     public static LocalDateTime toUtcLocalDateTime(Instant instant) {
-        return LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
+        return LocalDateTime.ofInstant(io.mohs.core.TimePrecision.observed(instant), ZoneOffset.UTC);
     }
 
     /**
@@ -80,23 +65,6 @@ public final class JdbcTimestamps {
      */
     public static @Nullable Instant fromUtcLocalDateTimeOrNull(@Nullable LocalDateTime dateTime) {
         return dateTime == null ? null : fromUtcLocalDateTime(dateTime);
-    }
-
-    /**
-     * The crossing for the TZ-AWARE tables (Postgres's {@code TIMESTAMPTZ}): {@link OffsetDateTime} in
-     * UTC through JDBC 4.2.
-     *
-     * <p>A {@link LocalDateTime} would be interpreted in the SESSION's zone against a tz-aware column —
-     * exactly the class of bug the zoneless crossing killed; an explicit offset crosses verbatim
-     * regardless of the session's {@code TimeZone}. The databases with no tz-aware column (H2, MySQL, SQL
-     * Server, the split's functional equivalents) stay on the LocalDateTime crossing — the choice belongs
-     * to {@code JdbcDelegate}.
-     *
-     * @param instant the instant to evaluate
-     * @return the instant expressed with a UTC offset
-     */
-    public static OffsetDateTime toUtcOffsetDateTime(Instant instant) {
-        return instant.atOffset(ZoneOffset.UTC);
     }
 
     /**

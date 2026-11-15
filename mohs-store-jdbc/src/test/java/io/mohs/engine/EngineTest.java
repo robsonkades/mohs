@@ -61,7 +61,6 @@ import tools.jackson.databind.json.JsonMapper;
 
 import io.mohs.core.EngineState;
 import io.mohs.core.definition.JobDefinition;
-import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.event.AttemptFailed;
 import io.mohs.core.event.Cancelled;
 import io.mohs.core.event.ExecutionListener;
@@ -81,7 +80,7 @@ import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcNodeStore;
 import io.mohs.store.jdbc.JdbcRateLimitStore;
 import io.mohs.store.jdbc.JdbcTimestamps;
-import io.mohs.store.jdbc.JdbcTriggerFirer;
+import io.mohs.store.jdbc.JdbcSubmissionStore;
 import io.mohs.store.jdbc.JdbcWorkQueue;
 import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
@@ -126,11 +125,11 @@ class EngineTest {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
-        historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDelegate());
-        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), batchStore);
-        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate(), batchStore);
-        rateLimitStore = new JdbcRateLimitStore(dataSource, clock, new H2JdbcDelegate());
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, new H2JdbcDelegate());
+        historyStore = new JdbcHistoryStore(dataSource, new H2JdbcDelegate());
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate());
+        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate());
+        rateLimitStore = new JdbcRateLimitStore(dataSource, io.mohs.store.jdbc.TestDatabaseClock.at(new H2JdbcDelegate(), clock));
         nodeStore = new JdbcNodeStore(dataSource, new H2JdbcDelegate());
         handlerRegistry = new HandlerRegistry();
     }
@@ -149,7 +148,7 @@ class EngineTest {
     }
 
     private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry) {
-        return newEngine(nodeStoreOverride, listeners, runnerRegistry, new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+        return newEngine(nodeStoreOverride, listeners, runnerRegistry, new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
     }
 
     private Engine newEngine(NodeStore nodeStoreOverride, List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings) {
@@ -206,7 +205,7 @@ class EngineTest {
             List<ExecutionListener> listeners, RunnerRegistry runnerRegistry, EngineSettings settings, Clock engineClock,
             MeterRegistry meterRegistry) {
         return assembleEngine(jobStoreOverride, workQueueOverride, leaseStoreOverride, historyStoreOverride, nodeStoreOverride,
-                new JdbcTriggerFirer(dataSource, historyStore, workQueue, new H2JdbcDelegate()), windowRegistry, listeners,
+                new JdbcSubmissionStore(dataSource, new H2JdbcDelegate(), java.time.Duration.ofDays(7)), windowRegistry, listeners,
                 runnerRegistry, settings, engineClock, meterRegistry);
     }
 
@@ -234,8 +233,15 @@ class EngineTest {
     private Engine newEngineWithTickTrace(List<String> trace, CountingNodeStore counting, List<ExecutionListener> listeners, EngineSettings settings) {
         WorkQueue tracingQueue = new WorkQueue() {
             @Override
-            public List<ClaimedWork> claim(int shard, String nodeId, long epoch, int limit, Collection<JobKey> inadmissible, Instant now) {
-                List<ClaimedWork> claimed = workQueue.claim(shard, nodeId, epoch, limit, inadmissible, now);
+            public List<JobKey> findCandidateJobs(int shard, @Nullable JobKey after, int limit, Instant horizon) {
+                var page = workQueue.findCandidateJobs(shard, after, limit, horizon);
+                trace.add("page:" + page.size());
+                return page;
+            }
+
+            @Override
+            public List<ClaimedWork> claim(int shard, String nodeId, int limit, Collection<JobKey> inadmissible, Instant now) {
+                List<ClaimedWork> claimed = workQueue.claim(shard, nodeId, limit, inadmissible, now);
                 trace.add("claim:" + claimed.size());
                 return claimed;
             }
@@ -253,18 +259,13 @@ class EngineTest {
             }
 
             @Override
-            public void offer(List<ReadyEntry> entries) {
-                workQueue.offer(entries);
-            }
-
-            @Override
             public int requeue(List<Requeue> orders) {
                 return workQueue.requeue(orders);
             }
 
             @Override
-            public boolean cancelQueued(ExecutionId id, Instant now) {
-                return workQueue.cancelQueued(id, now);
+            public boolean cancel(ExecutionId id, Instant now) {
+                return workQueue.cancel(id, now);
             }
 
             @Override
@@ -274,10 +275,21 @@ class EngineTest {
         };
         NodeStore tracingNodeStore = new NodeStore() {
             @Override
-            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+            public StoredNode register(String nodeId, EngineState state, Duration ttl, io.mohs.engine.ExecutableCatalog catalog) {
                 trace.add("tick");
-                counting.heartbeat(nodeId, state, epoch, at, expiresAt);
+                var result = counting.register(nodeId, state, ttl, catalog);
+                return result;
             }
+
+            @Override
+            public java.util.Optional<StoredNode> renew(String nodeId, EngineState state, Duration ttl) {
+                trace.add("tick");
+                var result = counting.renew(nodeId, state, ttl);
+                return result;
+            }
+
+            @Override public boolean revokeExpired(String nodeId) { return counting.revokeExpired(nodeId); }
+            @Override public void stop(String nodeId) { counting.stop(nodeId); }
 
             @Override
             public List<StoredNode> findAll() {
@@ -366,12 +378,10 @@ class EngineTest {
      * {@link #aManuallyRearmedExecutionRunsOnceMoreAndFailsTerminally} does.
      */
     private void seedEnqueuedExecution(String id, String jobKey, Object payload, Instant scheduledAt, @Nullable String runner) {
-        jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> {
-            PolicySpec policySpec = spec.onDemand().retries(0);
-            if (runner != null) {
-                policySpec.runner(runner);
-            }
-        }));
+        var options = io.mohs.core.definition.JobOptions.defaults().withRetries(0);
+        if (runner != null) options = options.withRunner(runner);
+        jobStore.upsert(JobDefinition.of(jobKey, new io.mohs.core.schedule.OnDemandSpec(), options,
+                io.mohs.core.schedule.Misfire.IGNORE, false));
         recordAndOffer(id, jobKey, payload, scheduledAt);
     }
 
@@ -381,9 +391,9 @@ class EngineTest {
     }
 
     private void recordAndOffer(String id, String jobKey, Object payload, Instant scheduledAt, int shard) {
-        historyStore.record(List.of(new HistoryStore.NewExecution(ExecutionId.of(id), JobKey.of(jobKey), shard, 20,
-                scheduledAt, NOW, "test", null, null, payload)));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), shard, 20, 1, scheduledAt)));
+        io.mohs.store.jdbc.TestWork.history(dataSource, new H2JdbcDelegate(), List.of(new SubmissionStore.NewExecution(ExecutionId.of(id), JobKey.of(jobKey), shard, 20,
+                scheduledAt, NOW, "test", null, null, io.mohs.test.InputFixtures.encode(JobKey.of(jobKey), payload), io.mohs.engine.SubmissionStore.Origin.MANUAL, null)));
+        io.mohs.store.jdbc.TestWork.ready(dataSource, new H2JdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of(jobKey), shard, 20, 1, scheduledAt)));
     }
 
     /** The derived read model's state: advisory plus lease plus queue — what the public API sees. */
@@ -393,12 +403,12 @@ class EngineTest {
 
     /** RUNNING derivado = posse viva ({@code mohs_lease}); ENQUEUED = entrada na fila. */
     private int leaseCount() {
-        Integer count = rawJdbcTemplate.queryForObject("SELECT count(*) FROM mohs_lease", Integer.class);
+        Integer count = rawJdbcTemplate.queryForObject("SELECT count(*) FROM mohs_work WHERE work_state = 'LEASED'", Integer.class);
         return count == null ? 0 : count;
     }
 
     private int readyCount() {
-        Integer count = rawJdbcTemplate.queryForObject("SELECT count(*) FROM mohs_ready", Integer.class);
+        Integer count = rawJdbcTemplate.queryForObject("SELECT count(*) FROM mohs_work WHERE work_state = 'READY'", Integer.class);
         return count == null ? 0 : count;
     }
 
@@ -409,9 +419,9 @@ class EngineTest {
 
     @Test
     void startClaimsAndDispatchesUntilSuccess() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
         CountDownLatch succeeded = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
@@ -426,7 +436,7 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     /**
@@ -441,8 +451,8 @@ class EngineTest {
      */
     @Test
     void aFailingMaintenanceStepDoesNotStopTheClaimInTheSameTick() throws Exception {
-        jobStore.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofSeconds(10))));
-        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { });
+        jobStore.upsert(JobDefinition.of("poll", new io.mohs.core.schedule.IntervalSpec(Duration.ofSeconds(10), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> { }, Object.class);
         CountDownLatch succeeded = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
@@ -451,9 +461,19 @@ class EngineTest {
         };
         NodeStore purgeAlwaysFails = new NodeStore() {
             @Override
-            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
-                nodeStore.heartbeat(nodeId, state, epoch, at, expiresAt);
+            public StoredNode register(String nodeId, EngineState state, Duration ttl, io.mohs.engine.ExecutableCatalog catalog) {
+                var result = nodeStore.register(nodeId, state, ttl, catalog);
+                return result;
             }
+
+            @Override
+            public java.util.Optional<StoredNode> renew(String nodeId, EngineState state, Duration ttl) {
+                var result = nodeStore.renew(nodeId, state, ttl);
+                return result;
+            }
+
+            @Override public boolean revokeExpired(String nodeId) { return nodeStore.revokeExpired(nodeId); }
+            @Override public void stop(String nodeId) { nodeStore.stop(nodeId); }
 
             @Override
             public List<StoredNode> findAll() {
@@ -481,9 +501,9 @@ class EngineTest {
     /** End to end: a due trigger materialises the occurrence within the tick (history plus queue), the SAME tick's claim takes it and the dispatch runs it — and the trigger advances along the series. */
     @Test
     void recurringJobFiresWhenDueAndAdvancesTheTrigger() throws Exception {
-        jobStore.upsert(JobDefinition.of("poll", Handler.class, spec -> spec.every(Duration.ofSeconds(10))));
+        jobStore.upsert(JobDefinition.of("poll", new io.mohs.core.schedule.IntervalSpec(Duration.ofSeconds(10), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         handlerRegistry.register(JobKey.of("poll"), (payload, ctx) -> {
-        });
+        }, Object.class);
         CountDownLatch succeeded = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
@@ -541,17 +561,16 @@ class EngineTest {
     void recurringJobFiresOnItsOwnIntervalNotOnTheBackoffPoints() throws Exception {
         Clock realClock = Clock.systemUTC();
         JdbcJobStore punctualJobStore = new JdbcJobStore(dataSource, realClock, new H2JdbcDelegate());
-        punctualJobStore.upsert(JobDefinition.of("punctual", Handler.class, spec -> spec.every(Duration.ofSeconds(1))));
+        punctualJobStore.upsert(JobDefinition.of("punctual", new io.mohs.core.schedule.IntervalSpec(Duration.ofSeconds(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         List<Instant> firedAt = new CopyOnWriteArrayList<>();
         CountDownLatch fired = new CountDownLatch(4);
         handlerRegistry.register(JobKey.of("punctual"), (payload, ctx) -> {
             firedAt.add(realClock.instant());
             fired.countDown();
-        });
+        }, Object.class);
         Engine engine = assembleEngine(punctualJobStore, workQueue, leaseStore, historyStore, nodeStore,
                 new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
-                new EngineSettings(Duration.ofMillis(25), Duration.ofSeconds(2), BATCH_SIZE, 10, 1,
-                        LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD), realClock);
+                new EngineSettings(Duration.ofMillis(25),Duration.ofSeconds(2),BATCH_SIZE,10,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO), realClock);
 
         engine.start();
         try {
@@ -584,26 +603,25 @@ class EngineTest {
      */
     @Test
     void theHorizonSeesExactlyWhatFindDueRecurringWouldFire() {
-        for (String key : List.of("paused", "orphaned", "retired")) {
-            jobStore.upsert(JobDefinition.of(key, Handler.class, spec -> spec.every(Duration.ofMinutes(5))));
+        for (String key : List.of("paused", "retired")) {
+            jobStore.upsert(JobDefinition.of(key, new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(5), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         }
         jobStore.pause(JobKey.of("paused"));
-        jobStore.markOrphaned(JobKey.of("orphaned"));
         jobStore.remove(JobKey.of("retired"));
         // The healthy one is armed LATER, and therefore LATER in time: if any of the three leaked into the
         // horizon, the earliest of them would win the comparison
         clock.advance(Duration.ofMinutes(1));
-        jobStore.upsert(JobDefinition.of("healthy", Handler.class, spec -> spec.every(Duration.ofMinutes(5))));
+        jobStore.upsert(JobDefinition.of("healthy", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(5), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         Instant healthyFire = jobStore.find(JobKey.of("healthy")).orElseThrow().nextFireAt();
         List<StoredJob> snapshot;
         try (var all = jobStore.findAll()) {
             snapshot = all.toList();
         }
 
-        assertThat(jobStore.findDueRecurring(NOW.plusSeconds(600), 100))
+        assertThat(jobStore.findDueRecurring(NOW.plusSeconds(600), 100).jobs())
                 .extracting(job -> job.definition().key().value())
                 .containsExactly("healthy");
-        assertThat(Engine.earliestArmedFire(snapshot, null, NOW))
+        assertThat(jobStore.nextFireAfter(NOW).orElse(null))
                 .as("waking for a trigger nobody fires is a silent failure — visible only in ticks per second")
                 .isEqualTo(healthyFire);
     }
@@ -637,8 +655,9 @@ class EngineTest {
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngine(counting, List.of());
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
 
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         engine.start();
         try {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
@@ -653,10 +672,10 @@ class EngineTest {
             counting.resetLatch(new CountDownLatch(2));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
-            seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+            seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
             counting.resetLatch(new CountDownLatch(3));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
-            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.ENQUEUED);
+            assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.ENQUEUED);
 
             // No listener here — the final assertion is about persisted state, not an event; waiting a few
             // more real ticks is enough for a no-op handler to be claimed and completed.
@@ -666,7 +685,7 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     /**
@@ -678,13 +697,13 @@ class EngineTest {
      */
     @Test
     void aHandlerOutlivingItsExecutionLeaseSurvivesWhileTheNodeTicks() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             handlerStarted.countDown();
             releaseHandler.await(10, TimeUnit.SECONDS);
-        });
+        }, Object.class);
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngine(counting, List.of());
 
@@ -696,14 +715,14 @@ class EngineTest {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
             // The ownership still belongs to this node and no synthetic attempt was written
-            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+            assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RUNNING);
             assertThat(rawJdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM mohs_attempt WHERE execution_id = 'exec-1'", Integer.class)).isZero();
+                    "SELECT COALESCE(SUM(last_attempt_number), 0) FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", Integer.class)).isZero();
         } finally {
             releaseHandler.countDown();
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     /**
@@ -714,7 +733,7 @@ class EngineTest {
     @Test
     void claimIsBoundedByTheFreeDispatchCapacity() throws Exception {
         for (int i = 1; i <= 5; i++) {
-            seedEnqueuedExecution("exec-" + i, "welcome-email", "hello");
+            seedEnqueuedExecution(io.mohs.test.TestIds.value("exec-" + i), "welcome-email", "hello");
         }
         int dispatchConcurrency = 2;
         CountDownLatch handlersStarted = new CountDownLatch(dispatchConcurrency);
@@ -723,7 +742,7 @@ class EngineTest {
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             handlersStarted.countDown();
             releaseHandlers.await(10, TimeUnit.SECONDS);
-        });
+        }, Object.class);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 allSucceeded.countDown();
@@ -731,7 +750,7 @@ class EngineTest {
         };
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngine(counting, List.of(listener), defaultRunnerRegistry(),
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, dispatchConcurrency, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,dispatchConcurrency,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -765,9 +784,9 @@ class EngineTest {
      */
     @Test
     void aJobBornAfterTheTickSnapshotStillDispatches() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
         JobStore snapshotBlind = mock(JobStore.class, delegatesTo(jobStore));
         doAnswer(_ -> java.util.stream.Stream.<StoredJob>empty()).when(snapshotBlind).findAll();
         CountDownLatch succeeded = new CountDownLatch(1);
@@ -777,7 +796,7 @@ class EngineTest {
             }
         };
         Engine engine = assembleEngine(snapshotBlind, workQueue, leaseStore, historyStore, nodeStore, List.of(listener),
-                defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+                defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -785,7 +804,7 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     /**
@@ -799,16 +818,16 @@ class EngineTest {
      */
     @Test
     void aJobBornAfterTheSnapshotStillHonoursItsConcurrencyCapAcrossClaimRounds() throws Exception {
-        jobStore.upsert(JobDefinition.of("single-file", Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(1)));
-        recordAndOffer("exec-1", "single-file", "hello", NOW.minusSeconds(2));
-        recordAndOffer("exec-2", "single-file", "hello", NOW.minusSeconds(1));
+        jobStore.upsert(JobDefinition.of("single-file", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withMaxConcurrentExecutions(1), io.mohs.core.schedule.Misfire.IGNORE, false));
+        recordAndOffer("01991337-0000-7000-8000-00000000001c", "single-file", "hello", NOW.minusSeconds(2));
+        recordAndOffer("01991337-0000-7000-8000-00000000001e", "single-file", "hello", NOW.minusSeconds(1));
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandlers = new CountDownLatch(1);
         CountDownLatch bothSucceeded = new CountDownLatch(2);
         handlerRegistry.register(JobKey.of("single-file"), (payload, ctx) -> {
             handlerStarted.countDown();
             releaseHandlers.await(10, TimeUnit.SECONDS);
-        });
+        }, Object.class);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 bothSucceeded.countDown();
@@ -821,7 +840,7 @@ class EngineTest {
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = assembleEngine(blindOnce, workQueue, leaseStore, historyStore, counting, List.of(listener),
                 defaultRunnerRegistry(),
-                new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, 1, 10, 2, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,1,10,2,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -839,7 +858,7 @@ class EngineTest {
             releaseHandlers.countDown();
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(rawJdbcTemplate.queryForList("SELECT number FROM mohs_attempt", Integer.class)).containsExactly(1, 1);
+        assertThat(rawJdbcTemplate.queryForList("SELECT last_attempt_number FROM mohs_execution WHERE last_attempt_number > 0", Integer.class)).containsExactly(1, 1);
     }
 
     /**
@@ -850,10 +869,10 @@ class EngineTest {
      */
     @Test
     void aJobBornAfterTheSnapshotInsideAClosedWindowIsRequeuedNotDispatched() throws Exception {
-        jobStore.upsert(JobDefinition.of("night-batch", Handler.class, spec -> spec.onDemand().window("night")));
-        recordAndOffer("exec-1", "night-batch", "hello", NOW.minusSeconds(1));
+        jobStore.upsert(JobDefinition.of("night-batch", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withWindow("night"), io.mohs.core.schedule.Misfire.IGNORE, false));
+        recordAndOffer("01991337-0000-7000-8000-00000000001c", "night-batch", "hello", NOW.minusSeconds(1));
         AtomicBoolean handlerRan = new AtomicBoolean();
-        handlerRegistry.register(JobKey.of("night-batch"), (payload, ctx) -> handlerRan.set(true));
+        handlerRegistry.register(JobKey.of("night-batch"), (payload, ctx) -> handlerRan.set(true), Object.class);
         JobStore alwaysBlind = mock(JobStore.class, delegatesTo(jobStore));
         // ALWAYS blind: every round exercises the heal path — the guard's worst case
         doAnswer(_ -> java.util.stream.Stream.<StoredJob>empty()).when(alwaysBlind).findAll();
@@ -861,7 +880,7 @@ class EngineTest {
                 List.of(new ExecutionWindow("night", List.of(_ -> true))));
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
         Engine engine = assembleEngine(alwaysBlind, workQueue, leaseStore, historyStore, counting, closedWindow,
-                List.of(), defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+                List.of(), defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -869,64 +888,43 @@ class EngineTest {
             assertThat(handlerRan.get()).isFalse();
             assertThat(leaseCount()).isZero();
             assertThat(readyCount()).isEqualTo(1);
-            assertThat(rawJdbcTemplate.queryForObject("SELECT attempt FROM mohs_ready", Integer.class)).isEqualTo(1);
-            assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_attempt", Integer.class)).isZero();
+            assertThat(rawJdbcTemplate.queryForObject("SELECT attempt FROM mohs_work WHERE work_state = 'READY'", Integer.class)).isEqualTo(1);
+            assertThat(rawJdbcTemplate.queryForObject("SELECT COALESCE(SUM(last_attempt_number), 0) FROM mohs_execution", Integer.class)).isZero();
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
     }
 
     @Test
-    void jobsBeyondTheInadmissibleFilterAreDeferredWithoutBurningAnAttempt() throws Exception {
-        for (int i = 0; i <= Engine.MAX_INADMISSIBLE_FILTER; i++) {
-            String key = "closed-" + i;
-            jobStore.upsert(JobDefinition.of(key, Handler.class, spec -> spec.onDemand().window("closed")));
-            String id = "overflow-" + i;
-            recordAndOffer(id, key, "hello", NOW.minusSeconds(1), Shards.of(ExecutionId.of(id)));
+    void closedPagesDoNotStarveAnAdmissibleSuccessorOrConsumeAttempts() throws Exception {
+        int closedJobs = Engine.CANDIDATE_JOBS_PER_PAGE * 2 + 1;
+        for (int i = 0; i < closedJobs; i++) {
+            String key = "closed-%04d".formatted(i);
+            handlerRegistry.register(JobKey.of(key), (payload, ctx) -> {}, Object.class);
+            jobStore.upsert(JobDefinition.of(key, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withWindow("closed"), io.mohs.core.schedule.Misfire.IGNORE, false));
+            recordAndOffer(io.mohs.test.TestIds.value("closed-page-" + i), key, "input", NOW.minusSeconds(1), 0);
         }
-        // One admissible successor on every shard, so the omitted job cannot hide behind a lucky
-        // shard assignment. A single-row claim must get past it before that shard's successor runs.
-        jobStore.upsert(JobDefinition.of("admissible", Handler.class, spec -> spec.onDemand()));
-        handlerRegistry.register(JobKey.of("admissible"), (payload, ctx) -> {});
-        var successors = new java.util.HashMap<Integer, String>();
-        for (int i = 0; successors.size() < Shards.SHARD_COUNT; i++) {
-            String id = "successor-" + i;
-            successors.putIfAbsent(Shards.of(ExecutionId.of(id)), id);
-        }
-        for (String id : successors.values()) {
-            recordAndOffer(id, "admissible", "hello", NOW, Shards.of(ExecutionId.of(id)));
-        }
-        CountDownLatch succeeded = new CountDownLatch(successors.size());
-        ExecutionListener listener = event -> {
-            if (event instanceof Succeeded) {
-                succeeded.countDown();
-            }
-        };
-        CompletableFuture<List<WorkQueue.Requeue>> returned = new CompletableFuture<>();
-        WorkQueue recording = mock(WorkQueue.class, delegatesTo(workQueue));
-        doAnswer(invocation -> {
-            List<WorkQueue.Requeue> orders = invocation.getArgument(0);
-            int changed = workQueue.requeue(orders);
-            returned.complete(List.copyOf(orders));
-            return changed;
-        }).when(recording).requeue(any());
+        jobStore.upsert(JobDefinition.of("zzz-admissible", new io.mohs.core.schedule.OnDemandSpec(),
+                io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        CountDownLatch ran = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("zzz-admissible"), (payload, ctx) -> ran.countDown(), Object.class);
+        recordAndOffer(io.mohs.test.TestIds.value("last-page-open"), "zzz-admissible", "input", NOW, 0);
+        JobStore bounded = mock(JobStore.class, delegatesTo(jobStore));
+        doThrow(new AssertionError("the coordinator must not scan all definitions")).when(bounded).findAll();
+        doThrow(new AssertionError("policies must be loaded in bulk")).when(bounded).find(any());
         ExecutionWindowRegistry windows = new ExecutionWindowRegistry(
                 List.of(new ExecutionWindow("closed", List.of(_ -> true))));
-        Engine engine = assembleEngine(jobStore, recording, leaseStore, historyStore, nodeStore, windows,
-                List.of(listener), defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL, 1, LEASE_TTL));
-
+        Engine engine = assembleEngine(bounded, workQueue, leaseStore, historyStore, nodeStore, windows,
+                List.of(), defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,1,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
         engine.start();
         try {
-            assertThat(returned.get(10, TimeUnit.SECONDS)).isNotEmpty().allSatisfy(order -> {
-                assertThat(order.entry().visibleAt()).isEqualTo(NOW.plus(POLL_INTERVAL));
-                assertThat(order.entry().attempt()).isEqualTo(1);
-            });
-            assertThat(succeeded.await(10, TimeUnit.SECONDS)).as("admissible work progresses on every shard").isTrue();
+            assertThat(ran.await(10, TimeUnit.SECONDS)).as("the third page progresses beyond 257 earlier closed jobs on the same shard").isTrue();
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
+        assertThat(readyCount()).isEqualTo(closedJobs);
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM mohs_attempt WHERE execution_id LIKE 'overflow-%'", Integer.class)).isZero();
+                "SELECT COALESCE(SUM(last_attempt_number), 0) FROM mohs_execution WHERE job_key LIKE 'closed-%'", Integer.class)).isZero();
         assertThat(leaseCount()).isZero();
     }
 
@@ -940,16 +938,16 @@ class EngineTest {
      */
     @Test
     void admissionCapOverflowRequeuesTheLoserWithoutBurningBudget() throws Exception {
-        jobStore.upsert(JobDefinition.of("single-file", Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(1)));
-        recordAndOffer("exec-1", "single-file", "hello", NOW.minusSeconds(2));
-        recordAndOffer("exec-2", "single-file", "hello", NOW.minusSeconds(1));
+        jobStore.upsert(JobDefinition.of("single-file", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withMaxConcurrentExecutions(1), io.mohs.core.schedule.Misfire.IGNORE, false));
+        recordAndOffer("01991337-0000-7000-8000-00000000001c", "single-file", "hello", NOW.minusSeconds(2));
+        recordAndOffer("01991337-0000-7000-8000-00000000001e", "single-file", "hello", NOW.minusSeconds(1));
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandlers = new CountDownLatch(1);
         CountDownLatch bothSucceeded = new CountDownLatch(2);
         handlerRegistry.register(JobKey.of("single-file"), (payload, ctx) -> {
             handlerStarted.countDown();
             releaseHandlers.await(10, TimeUnit.SECONDS);
-        });
+        }, Object.class);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 bothSucceeded.countDown();
@@ -967,8 +965,8 @@ class EngineTest {
             // one running, one back in the queue — the attempt intact, no attempt recorded
             assertThat(leaseCount()).isEqualTo(1);
             assertThat(readyCount()).isEqualTo(1);
-            assertThat(rawJdbcTemplate.queryForObject("SELECT attempt FROM mohs_ready", Integer.class)).isEqualTo(1);
-            assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_attempt", Integer.class)).isZero();
+            assertThat(rawJdbcTemplate.queryForObject("SELECT attempt FROM mohs_work WHERE work_state = 'READY'", Integer.class)).isEqualTo(1);
+            assertThat(rawJdbcTemplate.queryForObject("SELECT COALESCE(SUM(last_attempt_number), 0) FROM mohs_execution", Integer.class)).isZero();
 
             releaseHandlers.countDown();
             assertThat(bothSucceeded.await(5, TimeUnit.SECONDS)).isTrue();
@@ -977,7 +975,7 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         // Each ran exactly once — the admission loss did not become an attempt
-        assertThat(rawJdbcTemplate.queryForList("SELECT number FROM mohs_attempt", Integer.class)).containsExactly(1, 1);
+        assertThat(rawJdbcTemplate.queryForList("SELECT last_attempt_number FROM mohs_execution WHERE last_attempt_number > 0", Integer.class)).containsExactly(1, 1);
     }
 
     /**
@@ -989,16 +987,16 @@ class EngineTest {
      */
     @Test
     void aManuallyRearmedExecutionRunsOnceMoreAndFailsTerminally() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
-        rawJdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = 'exec-1'");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
+        rawJdbcTemplate.update("DELETE FROM mohs_work WHERE work_state = 'READY' AND  execution_id = '01991337-0000-7000-8000-00000000001c'");
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             throw new RuntimeException("still broken");
-        });
-        rawJdbcTemplate.update("UPDATE mohs_execution SET state = 'FAILED' WHERE execution_id = 'exec-1'");
+        }, Object.class);
+        rawJdbcTemplate.update("UPDATE mohs_execution SET state = 'FAILED' WHERE execution_id = '01991337-0000-7000-8000-00000000001c'");
         for (int number = 1; number <= 2; number++) {
             rawJdbcTemplate.update(
-                    "INSERT INTO mohs_attempt (execution_id, number, node_id, started_at, finished_at, outcome, error_type, error) VALUES (?, ?, 'node-a', ?, ?, 'FAILED', 'java.lang.RuntimeException', 'boom')",
-                    "exec-1", number, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW));
+                    "UPDATE mohs_execution SET last_attempt_number = ?, last_attempt_node_id = '01991337-0000-7000-8000-000000000065', last_attempt_started_at = ?, last_attempt_finished_at = ?, last_attempt_outcome = 'FAILED', last_attempt_error_type = 'java.lang.RuntimeException', last_attempt_error = 'boom' WHERE execution_id = ?",
+                    number, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW), "01991337-0000-7000-8000-00000000001c");
         }
         CountDownLatch failedTerminally = new CountDownLatch(1);
         ExecutionListener listener = event -> {
@@ -1006,7 +1004,7 @@ class EngineTest {
                 failedTerminally.countDown();
             }
         };
-        assertThat(workQueue.rearmForManualRetry(ExecutionId.of("exec-1"), NOW)).isTrue();
+        assertThat(workQueue.rearmForManualRetry(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW)).isTrue();
         Engine engine = newEngine(nodeStore, List.of(listener));
 
         engine.start();
@@ -1016,8 +1014,8 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
 
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
-        Integer attempts = rawJdbcTemplate.queryForObject("SELECT count(*) FROM mohs_attempt WHERE execution_id = 'exec-1'", Integer.class);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
+        Integer attempts = rawJdbcTemplate.queryForObject("SELECT COALESCE(SUM(last_attempt_number), 0) FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", Integer.class);
         assertThat(attempts).isEqualTo(3);
     }
 
@@ -1033,7 +1031,7 @@ class EngineTest {
     void stopWritesAFinalStoppedHeartbeat() throws Exception {
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(1));
         Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
-                new EngineSettings(Duration.ofMinutes(5), BATCH_SIZE, LEASE_TTL));
+                new EngineSettings(Duration.ofMinutes(5),Duration.ofMinutes(5),BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
         engine.start();
         assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
@@ -1053,9 +1051,19 @@ class EngineTest {
         CountDownLatch tickDone = new CountDownLatch(1);
         NodeStore tickCompletionProbe = new NodeStore() {
             @Override
-            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
-                blinkingStore.heartbeat(nodeId, state, epoch, at, expiresAt);
+            public StoredNode register(String nodeId, EngineState state, Duration ttl, io.mohs.engine.ExecutableCatalog catalog) {
+                var result = blinkingStore.register(nodeId, state, ttl, catalog);
+                return result;
             }
+
+            @Override
+            public java.util.Optional<StoredNode> renew(String nodeId, EngineState state, Duration ttl) {
+                var result = blinkingStore.renew(nodeId, state, ttl);
+                return result;
+            }
+
+            @Override public boolean revokeExpired(String nodeId) { return blinkingStore.revokeExpired(nodeId); }
+            @Override public void stop(String nodeId) { blinkingStore.stop(nodeId); }
 
             @Override
             public List<StoredNode> findAll() {
@@ -1070,11 +1078,11 @@ class EngineTest {
             }
         };
         Engine engine = newEngine(tickCompletionProbe, List.of(), defaultRunnerRegistry(),
-                new EngineSettings(Duration.ofMinutes(5), BATCH_SIZE, LEASE_TTL));
+                new EngineSettings(Duration.ofMinutes(5),Duration.ofMinutes(5),BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
         engine.start();
         assertThat(tickDone.await(5, TimeUnit.SECONDS)).isTrue();
         doThrow(new DataAccessResourceFailureException("database down during shutdown"))
-                .when(blinkingStore).heartbeat(any(), any(), anyLong(), any(), any());
+                .when(blinkingStore).stop(any());
 
         engine.stop(Duration.ofSeconds(5));
 
@@ -1085,8 +1093,11 @@ class EngineTest {
     @Test
     void tickPurgesNodeRowsWithStaleHeartbeats() throws Exception {
         Instant staleAt = NOW.minus(LEASE_TTL.multipliedBy(10)).minusSeconds(1);
-        nodeStore.heartbeat("dead-node", EngineState.RUNNING, 1, staleAt, staleAt.plus(LEASE_TTL));
-        nodeStore.heartbeat("recent-node", EngineState.RUNNING, 1, NOW.minusSeconds(1), NOW.minusSeconds(1).plus(LEASE_TTL));
+        nodeStore.register("01991337-0001-7000-8000-000000000092", EngineState.RUNNING, Duration.between(staleAt, staleAt.plus(LEASE_TTL)), handlerRegistry.freeze());
+        nodeStore.register("01991337-0001-7000-8000-000000000093", EngineState.RUNNING, Duration.between(NOW.minusSeconds(1), NOW.minusSeconds(1).plus(LEASE_TTL)), handlerRegistry.freeze());
+        nodeStore.stop("01991337-0001-7000-8000-000000000092");
+        rawJdbcTemplate.update("UPDATE mohs_nodes SET last_heartbeat_at = ? WHERE node_id = '01991337-0001-7000-8000-000000000092'",
+                JdbcTimestamps.toUtcLocalDateTime(staleAt));
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngine(counting, List.of());
 
@@ -1094,8 +1105,8 @@ class EngineTest {
         try {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(nodeStore.findAll()).extracting(StoredNode::nodeId)
-                    .doesNotContain("dead-node")
-                    .contains("recent-node");
+                    .doesNotContain("01991337-0001-7000-8000-000000000092")
+                    .contains("01991337-0001-7000-8000-000000000093");
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
@@ -1111,11 +1122,11 @@ class EngineTest {
     @Test
     void aFullBatchChainsAnotherClaimRoundWithinTheSameTick() throws Exception {
         for (int i = 1; i <= 6; i++) {
-            seedEnqueuedExecution("exec-" + i, "welcome-email", "hello");
+            seedEnqueuedExecution(io.mohs.test.TestIds.value("exec-" + i), "welcome-email", "hello");
         }
         CountDownLatch releaseHandlers = new CountDownLatch(1);
         CountDownLatch allSucceeded = new CountDownLatch(6);
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseHandlers.await(10, TimeUnit.SECONDS));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseHandlers.await(10, TimeUnit.SECONDS), Object.class);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 allSucceeded.countDown();
@@ -1124,7 +1135,7 @@ class EngineTest {
         List<String> trace = Collections.synchronizedList(new ArrayList<>());
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(4));
         Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
-                new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, 2, 6, 2, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,2,6,2,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -1148,11 +1159,11 @@ class EngineTest {
     @Test
     void aShortBatchEndsTheClaimRoundsEarly() throws Exception {
         for (int i = 1; i <= 3; i++) {
-            seedEnqueuedExecution("exec-" + i, "welcome-email", "hello");
+            seedEnqueuedExecution(io.mohs.test.TestIds.value("exec-" + i), "welcome-email", "hello");
         }
         CountDownLatch releaseHandlers = new CountDownLatch(1);
         CountDownLatch allSucceeded = new CountDownLatch(3);
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseHandlers.await(10, TimeUnit.SECONDS));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseHandlers.await(10, TimeUnit.SECONDS), Object.class);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 allSucceeded.countDown();
@@ -1161,7 +1172,7 @@ class EngineTest {
         List<String> trace = Collections.synchronizedList(new ArrayList<>());
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
-                new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, 2, 10, 3, LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,2,10,3,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -1194,7 +1205,7 @@ class EngineTest {
         List<String> trace = Collections.synchronizedList(new ArrayList<>());
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
         Engine engine = newEngineWithTickTrace(trace, counting, List.of(),
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -1203,7 +1214,8 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
 
-        assertThat(rawClaimStatementsInTick(trace, 0)).isEqualTo(Shards.SHARD_COUNT);
+        assertThat(rawClaimStatementsInTick(trace, 0)).isZero();
+        assertThat(trace.stream().filter(item -> item.equals("page:0")).count()).isEqualTo(Shards.SHARD_COUNT);
         assertThat(emptyGateProbesInTick(trace, 0)).isZero();
         assertThat(rawClaimStatementsInTick(trace, 1)).isZero();
         assertThat(emptyGateProbesInTick(trace, 1)).isEqualTo(1);
@@ -1216,7 +1228,7 @@ class EngineTest {
     @Test
     void workOfferedWhileIdleRunsWithoutAnExtraTick() throws Exception {
         CountDownLatch succeeded = new CountDownLatch(1);
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { }, Object.class);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 succeeded.countDown();
@@ -1225,12 +1237,13 @@ class EngineTest {
         List<String> trace = Collections.synchronizedList(new ArrayList<>());
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
         Engine engine = newEngineWithTickTrace(trace, counting, List.of(listener),
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         engine.start();
         try {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
-            seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+            seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
             assertThat(succeeded.await(5, TimeUnit.SECONDS)).isTrue();
         } finally {
             engine.stop(Duration.ofSeconds(5));
@@ -1272,8 +1285,7 @@ class EngineTest {
     void idleBackoffNeverStretchesTheHeartbeatPastAThirdOfTheNodeLease() throws Exception {
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(4));
         Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
-                new EngineSettings(Duration.ofMillis(20), Duration.ofHours(1), BATCH_SIZE, 10, 1,
-                        LEASE_TTL, Duration.ofMillis(300), null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(Duration.ofMillis(20),Duration.ofHours(1),BATCH_SIZE,10,1,Duration.ofMillis(300),null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -1289,8 +1301,7 @@ class EngineTest {
     void emptyTicksBackOffTheLoopTowardsTheCeiling() throws Exception {
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(3));
         Engine engine = newEngine(counting, List.of(), defaultRunnerRegistry(),
-                new EngineSettings(Duration.ofMillis(20), Duration.ofSeconds(1), BATCH_SIZE, 10, 1,
-                        LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(Duration.ofMillis(20),Duration.ofSeconds(1),BATCH_SIZE,10,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -1309,9 +1320,9 @@ class EngineTest {
     /** The local wake-up tier: an already-due local enqueue wakes the loop immediately — dispatch latency does not wait for the poll interval. */
     @Test
     void aDueLocalEnqueueWakesTheLoopWithoutWaitingThePoll() throws Exception {
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
         CountDownLatch succeeded = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
@@ -1322,13 +1333,12 @@ class EngineTest {
         // A 2s floor: without the wake, the next claim would only come 2s after the first empty tick — the
         // 1s await below is impossible without the local tier
         Engine engine = newEngine(counting, List.of(listener), defaultRunnerRegistry(),
-                new EngineSettings(Duration.ofSeconds(2), Duration.ofSeconds(2), BATCH_SIZE, 10, 1,
-                        LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD));
+                new EngineSettings(Duration.ofSeconds(2),Duration.ofSeconds(2),BATCH_SIZE,10,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue(); // the first (empty) tick has already passed
-            recordAndOffer("exec-1", "welcome-email", "hello", NOW.minusSeconds(1));
+            recordAndOffer("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello", NOW.minusSeconds(1));
             engine.signalWorkScheduled(); // what the enqueue unit calls once the row is durable
             assertThat(succeeded.await(1, TimeUnit.SECONDS)).isTrue();
         } finally {
@@ -1339,17 +1349,16 @@ class EngineTest {
     /**
      * With a live RUNNING peer, the partition derived from the ordered node ids gives each node half the
      * shards — this node does NOT claim from the peer's shards, even with the execution due and plenty of
-     * headroom. "zzz-peer" sorts after this engine's UUID node_id, so this node is index 0 and owns the
+     * headroom. "ffffffff-ffff-7fff-bfff-fffffffffff0" sorts after this engine's UUID node_id, so this node is index 0 and owns the
      * EVEN shards.
      */
     @Test
     void shardOwnershipLeavesThePeersShardsUnclaimed() throws Exception {
-        nodeStore.heartbeat("zzz-peer", EngineState.RUNNING, 1, NOW, NOW.plusSeconds(3600));
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
-        recordAndOffer("exec-mine", "welcome-email", "hello", NOW.minusSeconds(1), 0);
-        recordAndOffer("exec-peers", "welcome-email", "hello", NOW.minusSeconds(1), 1);
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        recordAndOffer("01991337-0000-7000-8000-00000000003a", "welcome-email", "hello", NOW.minusSeconds(1), 0);
+        recordAndOffer("01991337-0000-7000-8000-000000000045", "welcome-email", "hello", NOW.minusSeconds(1), 1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
         CountDownLatch succeeded = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
@@ -1357,6 +1366,7 @@ class EngineTest {
             }
         };
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(1));
+        nodeStore.register("ffffffff-ffff-7fff-bfff-fffffffffff0", EngineState.RUNNING, Duration.between(NOW, NOW.plusSeconds(3600)), handlerRegistry.freeze());
         Engine engine = newEngine(counting, List.of(listener));
 
         engine.start();
@@ -1367,8 +1377,8 @@ class EngineTest {
             CountDownLatch twoMoreTicks = new CountDownLatch(2);
             counting.resetLatch(twoMoreTicks);
             assertThat(twoMoreTicks.await(5, TimeUnit.SECONDS)).isTrue();
-            assertThat(stateOf("exec-mine")).isEqualTo(ExecutionState.SUCCEEDED);
-            assertThat(stateOf("exec-peers")).isEqualTo(ExecutionState.ENQUEUED);
+            assertThat(stateOf("01991337-0000-7000-8000-00000000003a")).isEqualTo(ExecutionState.SUCCEEDED);
+            assertThat(stateOf("01991337-0000-7000-8000-000000000045")).isEqualTo(ExecutionState.ENQUEUED);
             assertThat(readyCount()).isEqualTo(1);
         } finally {
             engine.stop(Duration.ofSeconds(5));
@@ -1378,19 +1388,19 @@ class EngineTest {
     /** A non-RUNNING peer (DRAINING/PAUSED) does not claim — keeping it in the assignment would leave 1/n of the queue stalled; with both excluded, their shards come back here and the execution runs. */
     @Test
     void aNonRunningPeerIsExcludedFromShardAssignment() throws Exception {
-        nodeStore.heartbeat("zzz-peer", EngineState.DRAINING, 1, NOW, NOW.plusSeconds(3600));
-        nodeStore.heartbeat("zzz-peer2", EngineState.PAUSED, 1, NOW, NOW.plusSeconds(3600));
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
-        recordAndOffer("exec-even", "welcome-email", "hello", NOW.minusSeconds(1), 0);
-        recordAndOffer("exec-odd", "welcome-email", "hello", NOW.minusSeconds(1), 1);
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        recordAndOffer("01991337-0000-7000-8000-00000000002e", "welcome-email", "hello", NOW.minusSeconds(1), 0);
+        recordAndOffer("01991337-0000-7000-8000-000000000040", "welcome-email", "hello", NOW.minusSeconds(1), 1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
         CountDownLatch bothSucceeded = new CountDownLatch(2);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 bothSucceeded.countDown();
             }
         };
+        nodeStore.register("ffffffff-ffff-7fff-bfff-fffffffffff0", EngineState.DRAINING, Duration.between(NOW, NOW.plusSeconds(3600)), handlerRegistry.freeze());
+        nodeStore.register("ffffffff-ffff-7fff-bfff-fffffffffff1", EngineState.PAUSED, Duration.between(NOW, NOW.plusSeconds(3600)), handlerRegistry.freeze());
         Engine engine = newEngine(nodeStore, List.of(listener));
 
         engine.start();
@@ -1404,20 +1414,20 @@ class EngineTest {
 
     /**
      * Lost ownership (an external reclaim) has no active detection — the zombie finishes on its own and its
-     * late result is discarded by the {@code (node_id, epoch, attempt_number)} fence: the lease now belongs to the new
+     * late result is discarded by the {@code (node_id, claim_token, attempt_number)} fence: the lease now belongs to the new
      * incarnation, and the zombie's completion neither deletes somebody else's ownership, nor writes an
      * attempt, nor touches the advisory. Without the fence, the zombie's completion would kill the healthy
      * new incarnation.
      */
     @Test
     void aZombieResultAfterAnExternalReclaimIsDiscardedByTheFencedCompletion() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             handlerStarted.countDown();
             releaseHandler.await(10, TimeUnit.SECONDS);
-        });
+        }, Object.class);
         Engine engine = newEngine(nodeStore, List.of());
 
         engine.start();
@@ -1426,18 +1436,18 @@ class EngineTest {
             // A simulated external re-claim: another LIVE node (otherwise this engine's reaper would declare
             // it dead and reclaim mid-test) is already re-executing the same row — the ownership belongs to
             // another incarnation
-            nodeStore.heartbeat("other-node", EngineState.RUNNING, 1, NOW, NOW.plusSeconds(3600));
+            nodeStore.register("01991337-0001-7000-8000-000000000096", EngineState.RUNNING, Duration.between(NOW, NOW.plusSeconds(3600)), handlerRegistry.freeze());
             rawJdbcTemplate.update(
-                    "UPDATE mohs_lease SET node_id = 'other-node', epoch = 9 WHERE execution_id = 'exec-1'");
+                    "UPDATE mohs_work SET node_id = '01991337-0001-7000-8000-000000000096', claim_token = '01991337-0001-7000-8000-000000000097' WHERE execution_id = '01991337-0000-7000-8000-00000000001c'");
         } finally {
             releaseHandler.countDown();
             engine.stop(Duration.ofSeconds(5)); // drains the handler — the late completion runs and loses the FENCE
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RUNNING);
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT node_id FROM mohs_lease WHERE execution_id = 'exec-1'", String.class)).isEqualTo("other-node");
+                "SELECT node_id FROM mohs_work WHERE work_state = 'LEASED' AND  execution_id = '01991337-0000-7000-8000-00000000001c'", String.class)).isEqualTo("01991337-0001-7000-8000-000000000096");
         assertThat(rawJdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM mohs_attempt WHERE execution_id = 'exec-1'", Integer.class)).isZero();
+                "SELECT COALESCE(SUM(last_attempt_number), 0) FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", Integer.class)).isZero();
     }
 
     /**
@@ -1449,9 +1459,8 @@ class EngineTest {
     void jobTimeoutInterruptsTheHandlerAndTheOutcomeFollowsTheRetryBudget() throws Exception {
         // retries(0) declared: it is what makes the timeout the OUTCOME rather than one more attempt — the
         // test measures the outcome with the budget exhausted
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class,
-                spec -> spec.onDemand().timeout(Duration.ofMillis(50)).retries(0)));
-        recordAndOffer("exec-1", "welcome-email", "hello", NOW.minusSeconds(1));
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withTimeout(Duration.ofMillis(50)).withRetries(0), io.mohs.core.schedule.Misfire.IGNORE, false));
+        recordAndOffer("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello", NOW.minusSeconds(1));
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch never = new CountDownLatch(1);
         AtomicBoolean interrupted = new AtomicBoolean();
@@ -1463,7 +1472,7 @@ class EngineTest {
                 interrupted.set(true);
                 throw e;
             }
-        });
+        }, Object.class);
         CountDownLatch failedPublished = new CountDownLatch(1);
         AtomicReference<Failed> failed = new AtomicReference<>();
         ExecutionListener listener = event -> {
@@ -1482,7 +1491,7 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
         }
         assertThat(interrupted).isTrue();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
         assertThat(failed.get().error().getMessage()).contains("exceeded job timeout");
     }
 
@@ -1492,31 +1501,44 @@ class EngineTest {
      * none of this happens: a drain is not a cancel.
      */
     @Test
-    void drainGraceOverflowInterruptsInFlightWorkAndItFailsWithNodeShutdown() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+    void drainGraceOverflowInterruptsTheHandlerAndFencesItsLateCompletion() throws Exception {
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
-        CountDownLatch never = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        CountDownLatch releaseLateResult = new CountDownLatch(1);
+        CountDownLatch handlerExited = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             handlerStarted.countDown();
-            never.await(10, TimeUnit.SECONDS);
-        });
-        CountDownLatch failedPublished = new CountDownLatch(1);
-        AtomicReference<Failed> failed = new AtomicReference<>();
-        ExecutionListener listener = event -> {
-            if (event instanceof Failed f) {
-                failed.set(f);
-                failedPublished.countDown();
+            try {
+                new CountDownLatch(1).await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                interrupted.countDown();
+                releaseLateResult.await(10, TimeUnit.SECONDS);
+                throw e;
+            } finally {
+                handlerExited.countDown();
             }
-        };
-        Engine engine = newEngine(nodeStore, List.of(listener));
-
+        }, Object.class);
+        Engine engine = newEngine(nodeStore, List.of());
         engine.start();
-        assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
-        engine.stop(Duration.ofMillis(50));
-
-        assertThat(failedPublished.await(5, TimeUnit.SECONDS)).as("escalation interrupts and the attempt fails").isTrue();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
-        assertThat(failed.get().error().getMessage()).contains("node shutdown");
+        try {
+            assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            engine.stop(Duration.ofMillis(50));
+            assertThat(interrupted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(nodeStore.findAll()).filteredOn(n -> n.nodeId().equals(engine.nodeId()))
+                    .singleElement().satisfies(n -> assertThat(n.revoked()).isTrue());
+            releaseLateResult.countDown();
+            assertThat(handlerExited.await(5, TimeUnit.SECONDS)).isTrue();
+            var lease = leaseStore.findOrphaned(10).getFirst();
+            assertThat(lease.executionId()).isEqualTo(ExecutionId.of("01991337-0000-7000-8000-00000000001c"));
+            assertThat(leaseStore.reclaim(List.of(new LeaseStore.CompletionResult(lease.executionId(), lease.jobKey(),
+                    lease.nodeId(), lease.claimToken(), lease.attemptNumber(), NOW, NOW, ExecutionState.FAILED,
+                    "NodeShutdown", "node shutdown", null))).get(lease.executionId()).owned()).isTrue();
+            assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
+        } finally {
+            releaseLateResult.countDown();
+            if (engine.state() != EngineState.STOPPED) engine.stop(Duration.ofSeconds(5));
+        }
     }
 
     /**
@@ -1528,7 +1550,7 @@ class EngineTest {
      */
     @Test
     void manualCancelRequestedInTheDatabaseCancelsTheRunningExecution() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             handlerStarted.countDown();
@@ -1536,7 +1558,7 @@ class EngineTest {
                 Thread.onSpinWait();
             }
             throw new IllegalStateException("stopping: cancellation observed");
-        });
+        }, Object.class);
         CountDownLatch cancelledPublished = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Cancelled) {
@@ -1548,12 +1570,12 @@ class EngineTest {
         engine.start();
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            assertThat(leaseStore.requestCancellation(ExecutionId.of("exec-1"))).isTrue();
+            assertThat(workQueue.cancel(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW)).isTrue();
             assertThat(cancelledPublished.await(5, TimeUnit.SECONDS)).as("tick observes the flag and the handler exits").isTrue();
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.CANCELLED);
     }
 
     /**
@@ -1565,11 +1587,11 @@ class EngineTest {
      */
     @Test
     void aStrayLeaseOnAHealthyNodeIsRequeuedAndCompletes() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
-        rawJdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = 'exec-1'");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
+        rawJdbcTemplate.update("DELETE FROM mohs_work WHERE work_state = 'READY' AND  execution_id = '01991337-0000-7000-8000-00000000001c'");
         CountDownLatch succeeded = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 succeeded.countDown();
@@ -1578,8 +1600,8 @@ class EngineTest {
         Engine engine = newEngine(nodeStore, List.of(listener));
         // the ownership belongs to THIS engine (real nodeId/epoch), but no dispatch knows about it
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested)
-                VALUES ('exec-1', 'welcome-email', ?, 1, 1, 20, ?, FALSE)
+                INSERT INTO mohs_work (work_state, execution_id, job_key, node_id, claim_token, attempt, priority, claimed_at, cancel_requested)
+                VALUES ('LEASED', '01991337-0000-7000-8000-00000000001c', 'welcome-email', ?, '01991337-0001-7000-8000-000000000098', 1, 20, ?, FALSE)
                 """, engine.nodeId(), JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)));
 
         engine.start();
@@ -1588,9 +1610,9 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
         // It ran ONCE, attempt 1 — the reconciliation returned it, it did not punish it
-        assertThat(rawJdbcTemplate.queryForList("SELECT number FROM mohs_attempt WHERE execution_id = 'exec-1'", Integer.class))
+        assertThat(rawJdbcTemplate.queryForList("SELECT last_attempt_number FROM mohs_execution WHERE last_attempt_number > 0 AND execution_id = '01991337-0000-7000-8000-00000000001c'", Integer.class))
                 .containsExactly(1);
     }
 
@@ -1602,11 +1624,11 @@ class EngineTest {
      */
     @Test
     void aFreshStrayLeaseWaitsTheClaimedAtGraceBeforeRequeue() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
-        rawJdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = 'exec-1'");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
+        rawJdbcTemplate.update("DELETE FROM mohs_work WHERE work_state = 'READY' AND  execution_id = '01991337-0000-7000-8000-00000000001c'");
         CountDownLatch succeeded = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
-        });
+        }, Object.class);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 succeeded.countDown();
@@ -1616,8 +1638,8 @@ class EngineTest {
         Engine engine = newEngine(counting, List.of(listener));
         // Ownership held by this engine WITHOUT an incarnation, claimed_at = now — inside the grace
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested)
-                VALUES ('exec-1', 'welcome-email', ?, 1, 1, 20, ?, FALSE)
+                INSERT INTO mohs_work (work_state, execution_id, job_key, node_id, claim_token, attempt, priority, claimed_at, cancel_requested)
+                VALUES ('LEASED', '01991337-0000-7000-8000-00000000001c', 'welcome-email', ?, '01991337-0001-7000-8000-000000000098', 1, 20, ?, FALSE)
                 """, engine.nodeId(), JdbcTimestamps.toUtcLocalDateTime(NOW));
 
         engine.start();
@@ -1633,35 +1655,40 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
-        assertThat(rawJdbcTemplate.queryForList("SELECT number FROM mohs_attempt WHERE execution_id = 'exec-1'", Integer.class))
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(rawJdbcTemplate.queryForList("SELECT last_attempt_number FROM mohs_execution WHERE last_attempt_number > 0 AND execution_id = '01991337-0000-7000-8000-00000000001c'", Integer.class))
                 .containsExactly(1);
     }
 
     /** A mass death one row wider than a reclaim chunk, with retry budget: the sweep needs two transactions to clear it. */
     private void seedOrphanedLeasesSpanningTwoReclaimChunks() {
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1), io.mohs.core.schedule.Misfire.IGNORE, false));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { }, Object.class);
         for (int i = 1; i <= Engine.RECLAIM_CHUNK + 1; i++) {
-            seedOrphanedLease("exec-" + i, "welcome-email", false);
+            seedOrphanedLease(io.mohs.test.TestIds.value("exec-" + i), "welcome-email", false);
         }
     }
 
     /** A lease owned by a node ABSENT from mohs_nodes (dead by definition) — the raw material of the reaper tests. */
     private void seedOrphanedLease(String id, String jobKey, boolean cancelRequested) {
+        if (handlerRegistry.find(JobKey.of(jobKey)).isEmpty()) handlerRegistry.register(JobKey.of(jobKey), (payload, ctx) -> {}, Object.class);
+        if (nodeStore.findAll().stream().noneMatch(node -> node.nodeId().equals("01991337-0001-7000-8000-000000000092"))) {
+            nodeStore.register("01991337-0001-7000-8000-000000000092", EngineState.RUNNING, LEASE_TTL, handlerRegistry.freeze());
+            nodeStore.stop("01991337-0001-7000-8000-000000000092");
+        }
         recordAndOffer(id, jobKey, "hello", NOW.minusSeconds(60));
-        rawJdbcTemplate.update("DELETE FROM mohs_ready WHERE execution_id = ?", id);
+        rawJdbcTemplate.update("DELETE FROM mohs_work WHERE work_state = 'READY' AND  execution_id = ?", id);
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_lease (execution_id, job_key, node_id, epoch, attempt_number, priority, claimed_at, cancel_requested)
-                VALUES (?, ?, 'dead-node', 1, 1, 20, ?, ?)
+                INSERT INTO mohs_work (work_state, execution_id, job_key, node_id, claim_token, attempt, priority, claimed_at, cancel_requested)
+                VALUES ('LEASED', ?, ?, '01991337-0001-7000-8000-000000000092', '01991337-0001-7000-8000-000000000098', 1, 20, ?, ?)
                 """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(60)), cancelRequested);
     }
 
     /** The reaper's outcome publishes the same events as a dispatch — the node-death alert (Javadoc de Failed) passa a disparar de verdade. */
     @Test
     void reclaimOfADeadNodesExecutionPublishesRetryEvents() throws Exception {
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
-        seedOrphanedLease("exec-1", "welcome-email", false);
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1), io.mohs.core.schedule.Misfire.IGNORE, false));
+        seedOrphanedLease("01991337-0000-7000-8000-00000000001c", "welcome-email", false);
         CountDownLatch retryScheduled = new CountDownLatch(1);
         CountDownLatch attemptFailed = new CountDownLatch(1);
         ExecutionListener listener = event -> {
@@ -1702,16 +1729,16 @@ class EngineTest {
             if (reclaimSizes.size() == 1) {
                 throw new RuntimeException("simulated deadline on the first chunk");
             }
-            return leaseStore.reclaim(results, invocation.getArgument(1));
-        }).when(firstChunkFails).reclaim(any(), any());
+            return leaseStore.reclaim(results);
+        }).when(firstChunkFails).reclaim(any());
         Engine engine = assembleEngine(workQueue, firstChunkFails, historyStore, nodeStore, List.of(), defaultRunnerRegistry(),
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
             Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                     assertThat(rawJdbcTemplate.queryForObject(
-                            "SELECT COUNT(*) FROM mohs_lease WHERE node_id = 'dead-node'", Integer.class)).isZero());
+                            "SELECT COUNT(*) FROM mohs_work WHERE work_state = 'LEASED' AND  node_id = '01991337-0001-7000-8000-000000000092'", Integer.class)).isZero());
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
@@ -1724,8 +1751,8 @@ class EngineTest {
     /** On the crash-recovery path: reclaiming a dead node's execution with a pending cancel publishes Cancelled — neither a retry nor a Failed; the operator's order survives the node's death. */
     @Test
     void reclaimOfACancelRequestedExecutionPublishesCancelled() throws Exception {
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(1)));
-        seedOrphanedLease("exec-1", "welcome-email", true);
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1), io.mohs.core.schedule.Misfire.IGNORE, false));
+        seedOrphanedLease("01991337-0000-7000-8000-00000000001c", "welcome-email", true);
         CountDownLatch cancelledPublished = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Cancelled) {
@@ -1740,7 +1767,7 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.CANCELLED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.CANCELLED);
     }
 
     /**
@@ -1750,7 +1777,7 @@ class EngineTest {
      */
     @Test
     void aZombieAfterAnExternalReclaimStillReceivesTheShutdownInterrupt() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch never = new CountDownLatch(1);
         CountDownLatch interrupted = new CountDownLatch(1);
@@ -1762,7 +1789,7 @@ class EngineTest {
                 interrupted.countDown();
                 throw e;
             }
-        });
+        }, Object.class);
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngine(counting, List.of());
 
@@ -1770,7 +1797,7 @@ class EngineTest {
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
             // An external reclaim: the ownership dropped, but the entry stays in the map until completion
-            rawJdbcTemplate.update("DELETE FROM mohs_lease WHERE execution_id = 'exec-1'");
+            rawJdbcTemplate.update("DELETE FROM mohs_work WHERE work_state = 'LEASED' AND  execution_id = '01991337-0000-7000-8000-00000000001c'");
             counting.resetLatch(new CountDownLatch(2));
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
         } finally {
@@ -1783,13 +1810,13 @@ class EngineTest {
     /** A drain is not a cancel: in-flight work keeps executing in PAUSED — the NODE's liveness promise has to follow the WORK, not the control loop's mode; without this, a pause or drain longer than the node's lease becomes a double execution of what the drain itself is waiting for. */
     @Test
     void theNodeLeaseKeepsBeingPromisedWhilePaused() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             handlerStarted.countDown();
             releaseHandler.await(10, TimeUnit.SECONDS);
-        });
+        }, Object.class);
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngine(counting, List.of());
 
@@ -1803,13 +1830,13 @@ class EngineTest {
             assertThat(counting.await(5, TimeUnit.SECONDS)).isTrue();
 
             assertThat(nodeLeaseExpiryOfTheOnlyNode()).isAfter(initialExpiry);
-            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+            assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RUNNING);
             engine.resume();
         } finally {
             releaseHandler.countDown();
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     private Instant nodeLeaseExpiryOfTheOnlyNode() {
@@ -1823,8 +1850,7 @@ class EngineTest {
     /** A backoff ceiling below the floor would invert the ramp — rejected at construction, naming both properties. */
     @Test
     void maxPollIntervalMustBeAtLeastThePollInterval() {
-        assertThatThrownBy(() -> new EngineSettings(Duration.ofSeconds(1), Duration.ofMillis(500), BATCH_SIZE, 10, 1,
-                LEASE_TTL, LEASE_TTL, null, EngineSettings.DEFAULT_MISFIRE_THRESHOLD))
+        assertThatThrownBy(() -> new EngineSettings(Duration.ofSeconds(1),Duration.ofMillis(500),BATCH_SIZE,10,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("mohs.engine.max-poll-interval")
                 .hasMessageContaining("mohs.engine.poll-interval");
@@ -1833,7 +1859,7 @@ class EngineTest {
     /** A bound at or below the NODE's lease would release ownership before the node could even be considered dead — rejected at construction, naming both properties. */
     @Test
     void watchdogTimeoutMustExceedNodeLeaseTtl() {
-        assertThatThrownBy(() -> new EngineSettings(POLL_INTERVAL, BATCH_SIZE, Duration.ofSeconds(30), Duration.ofSeconds(30)))
+        assertThatThrownBy(() -> new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,Duration.ofSeconds(30),Duration.ofSeconds(30),EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("mohs.engine.watchdog-timeout")
                 .hasMessageContaining("mohs.engine.node-lease-ttl");
@@ -1847,13 +1873,13 @@ class EngineTest {
      */
     @Test
     void watchdogBoundReleasesOwnershipAndFailsTheExecution() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             handlerStarted.countDown();
             releaseHandler.await(10, TimeUnit.SECONDS);
-        });
+        }, Object.class);
         CountDownLatch failedPublished = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Failed) {
@@ -1873,7 +1899,7 @@ class EngineTest {
         engineLogger.addAppender(watcher);
         CountingNodeStore counting = new CountingNodeStore(nodeStore, new CountDownLatch(2));
         Engine engine = newEngine(counting, List.of(listener), defaultRunnerRegistry(),
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, Duration.ofMillis(50), Duration.ofMillis(200)));
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,Duration.ofMillis(50),Duration.ofMillis(200),EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -1881,40 +1907,40 @@ class EngineTest {
             assertThat(boundWarned.await(5, TimeUnit.SECONDS)).as("watchdog bound warned within timeout").isTrue();
             assertThat(failedPublished.await(5, TimeUnit.SECONDS)).as("ownership released as a terminal failure").isTrue();
 
-            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+            assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
         } finally {
             releaseHandler.countDown();
             engine.stop(Duration.ofSeconds(5));
             engineLogger.detachAppender(watcher);
         }
         // o zumbi terminou no stop e o resultado tardio perdeu o fence
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
     }
 
     @Test
     void drainWaitsForInFlightDispatchWithoutCancellingIt() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             handlerStarted.countDown();
             releaseHandler.await(5, TimeUnit.SECONDS);
-        });
+        }, Object.class);
         Engine engine = newEngine(nodeStore, List.of());
 
         engine.start();
         try {
             assertThat(handlerStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+            assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RUNNING);
 
             CompletableFuture<Void> drainCall = CompletableFuture.runAsync(() -> engine.drain(Duration.ofSeconds(5)));
-            assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING); // drain ≠ cancel — still running
+            assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RUNNING); // drain ≠ cancel — still running
             releaseHandler.countDown();
             drainCall.get(5, TimeUnit.SECONDS);
         } finally {
             engine.stop(Duration.ZERO);
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     /**
@@ -1932,14 +1958,14 @@ class EngineTest {
      */
     @Test
     void stopWaitsForADispatchSubmittedButNotYetRegistered() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         CountDownLatch handlerStarted = new CountDownLatch(1);
         CountDownLatch releaseHandler = new CountDownLatch(1);
         CountDownLatch releaseSubmit = new CountDownLatch(1);
         handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> {
             handlerStarted.countDown();
             releaseHandler.await(10, TimeUnit.SECONDS);
-        });
+        }, Object.class);
         Engine engine = newEngine(nodeStore, List.of(), registryTrappingTheTickAfterSubmit(releaseSubmit));
 
         engine.start();
@@ -1970,7 +1996,7 @@ class EngineTest {
             releaseSubmit.countDown();
             releaseHandler.countDown();
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     /**
@@ -2008,14 +2034,14 @@ class EngineTest {
 
     @Test
     void unreadablePayloadFailsTheExecutionWithoutHangingTheTick() throws Exception {
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
-                VALUES ('exec-1', 'welcome-email', 'PENDING', ?, ?, 'test', '{}', 'com.example.DoesNotExist')
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
+                VALUES ('01991337-0000-7000-8000-00000000001c', 'welcome-email', 'PENDING', ?, ?, 'test', '{}', 'unknown-contract-v2')
                 """, JdbcTimestamps.toUtcLocalDateTime(NOW.minusSeconds(1)), JdbcTimestamps.toUtcLocalDateTime(NOW));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("exec-1"), JobKey.of("welcome-email"), 0, 20, 1, NOW.minusSeconds(1))));
+        io.mohs.store.jdbc.TestWork.ready(dataSource, new H2JdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("welcome-email"), 0, 20, 1, NOW.minusSeconds(1))));
         AtomicBoolean handlerCalled = new AtomicBoolean();
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true), Object.class);
         CountDownLatch failed = new CountDownLatch(1);
         AtomicReference<Failed> failedEvent = new AtomicReference<>();
         ExecutionListener listener = event -> {
@@ -2032,13 +2058,13 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
         assertThat(handlerCalled.get()).isFalse();
-        Execution found = historyStore.find(ExecutionId.of("exec-1"), NOW).orElseThrow();
-        assertThat(found.attempts().get(0).error()).contains("payload could not be read");
+        Execution found = historyStore.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), NOW).orElseThrow();
+        assertThat(found.lastAttempt().orElseThrow().error()).contains("does not match registered contract");
         // An unreadable payload also publishes Failed, the same path as any other terminal failure.
         assertThat(failedEvent.get()).isNotNull();
-        assertThat(failedEvent.get().error()).hasMessageContaining("payload could not be read");
+        assertThat(failedEvent.get().error()).hasMessageContaining("does not match registered contract");
         // Terminal by nature, not by budget: exhausted=false on a pre-dispatch failure
         assertThat(failedEvent.get().attemptsExhausted()).isFalse();
     }
@@ -2048,9 +2074,9 @@ class EngineTest {
         RunnerRegistry runnerRegistry = new RunnerRegistry(List.of(
                 MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(BATCH_SIZE).build(),
                 MohsRunner.io("s3").maxConcurrent(4).build()));
-        seedEnqueuedExecution("exec-1", "s3-upload", "hello", NOW.minusSeconds(1), "s3");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "s3-upload", "hello", NOW.minusSeconds(1), "s3");
         AtomicReference<String> dispatchThreadName = new AtomicReference<>();
-        handlerRegistry.register(JobKey.of("s3-upload"), (payload, ctx) -> dispatchThreadName.set(Thread.currentThread().getName()));
+        handlerRegistry.register(JobKey.of("s3-upload"), (payload, ctx) -> dispatchThreadName.set(Thread.currentThread().getName()), Object.class);
         CountDownLatch succeeded = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
@@ -2071,9 +2097,9 @@ class EngineTest {
     /** The same pattern as unreadablePayloadFailsTheExecutionWithoutHangingTheTick — it fails only the execution, not the tick nor the node. */
     @Test
     void unknownRunnerFailsTheExecutionWithoutHangingTheTick() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello", NOW.minusSeconds(1), "ghost-runner");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello", NOW.minusSeconds(1), "ghost-runner");
         AtomicBoolean handlerCalled = new AtomicBoolean();
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true), Object.class);
         CountDownLatch failed = new CountDownLatch(1);
         AtomicReference<Failed> failedEvent = new AtomicReference<>();
         ExecutionListener listener = event -> {
@@ -2090,7 +2116,7 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.FAILED);
         assertThat(handlerCalled.get()).isFalse();
         assertThat(failedEvent.get()).isNotNull();
         assertThat(failedEvent.get().error()).hasMessageContaining("runner could not be resolved");
@@ -2103,9 +2129,9 @@ class EngineTest {
      */
     @Test
     void transientPayloadQueryErrorLeavesTheBatchLeasedForTheReaper() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
         AtomicBoolean handlerCalled = new AtomicBoolean();
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true), Object.class);
         HistoryStore flakyHistoryStore = mock(HistoryStore.class, delegatesTo(historyStore));
         doThrow(new RuntimeException("simulated transient database error"))
                 .when(flakyHistoryStore).findPayloads(any());
@@ -2121,7 +2147,7 @@ class EngineTest {
         warnWatcher.start();
         engineLogger.addAppender(warnWatcher);
         Engine engine = assembleEngine(workQueue, leaseStore, flakyHistoryStore, nodeStore, List.of(),
-                defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+                defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -2130,7 +2156,7 @@ class EngineTest {
             engine.stop(Duration.ofSeconds(5));
             engineLogger.detachAppender(warnWatcher);
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RUNNING);
         assertThat(handlerCalled.get()).isFalse();
     }
 
@@ -2140,30 +2166,32 @@ class EngineTest {
      * resolved" (which would point the operator at the wrong problem).
      */
     @Test
-    void removedDefinitionFailsTheExecutionWithItsOwnError() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello");
-        rawJdbcTemplate.update("DELETE FROM mohs_job_definitions WHERE job_key = 'welcome-email'");
+    void retirementAfterClaimAllowsTheAcquiredSnapshotToFinish() throws Exception {
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello");
+
         AtomicBoolean handlerCalled = new AtomicBoolean();
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true));
-        CountDownLatch failed = new CountDownLatch(1);
-        AtomicReference<Failed> failedEvent = new AtomicReference<>();
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> handlerCalled.set(true), Object.class);
+        CountDownLatch succeeded = new CountDownLatch(1);
         ExecutionListener listener = event -> {
-            if (event instanceof Failed f) {
-                failedEvent.set(f);
-                failed.countDown();
+            if (event instanceof Succeeded) {
+                succeeded.countDown();
             }
         };
-        Engine engine = newEngine(nodeStore, List.of(listener));
+        WorkQueue retiring = retireAfterClaim("welcome-email");
+        JobStore missing = mock(JobStore.class, delegatesTo(jobStore));
+        doAnswer(_ -> java.util.stream.Stream.empty()).when(missing).findAll();
+        Engine engine = assembleEngine(missing, retiring, leaseStore, historyStore, nodeStore,
+                List.of(listener), defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
-            assertThat(failed.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(succeeded.await(5, TimeUnit.SECONDS)).isTrue();
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.FAILED);
-        assertThat(handlerCalled.get()).isFalse();
-        assertThat(failedEvent.get().error()).hasMessageContaining("was removed after this execution was claimed");
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(handlerCalled.get()).isTrue();
+
     }
 
     /**
@@ -2175,25 +2203,28 @@ class EngineTest {
     @Test
     void tickContinuesWhenRecordingATerminalFailureThrows() throws Exception {
         // exec-1: a job with no registered definition — the failBeforeDispatch path
-        recordAndOffer("exec-1", "ghost-job", "hello", NOW.minusSeconds(2));
-        seedEnqueuedExecution("exec-2", "welcome-email", "hello", NOW.minusSeconds(1));
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "ghost-job", "hello", NOW.minusSeconds(2));
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001e", "welcome-email", "hello", NOW.minusSeconds(1));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { }, Object.class);
+        handlerRegistry.register(JobKey.of("ghost-job"), (payload, ctx) -> {}, Object.class);
         LeaseStore failingForExec1 = mock(LeaseStore.class, delegatesTo(leaseStore));
         doAnswer(invocation -> {
             List<LeaseStore.CompletionResult> results = invocation.getArgument(0);
-            if (results.stream().anyMatch(result -> result.executionId().equals(ExecutionId.of("exec-1")))) {
+            if (results.stream().anyMatch(result -> result.executionId().equals(ExecutionId.of("01991337-0000-7000-8000-00000000001c")))) {
                 throw new RuntimeException("simulated database error completing exec-1");
             }
-            return leaseStore.complete(results, invocation.getArgument(1));
-        }).when(failingForExec1).complete(any(), any());
+            return leaseStore.complete(results);
+        }).when(failingForExec1).complete(any());
         CountDownLatch succeeded = new CountDownLatch(1);
         ExecutionListener listener = event -> {
             if (event instanceof Succeeded) {
                 succeeded.countDown();
             }
         };
-        Engine engine = assembleEngine(workQueue, failingForExec1, historyStore, nodeStore, List.of(listener),
-                defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL));
+        JobStore missing = mock(JobStore.class, delegatesTo(jobStore));
+        doAnswer(_ -> jobStore.findAll().filter(job -> !job.definition().key().value().equals("ghost-job"))).when(missing).findAll();
+        Engine engine = assembleEngine(missing, retireAfterClaim("ghost-job"), failingForExec1, historyStore, nodeStore,
+                List.of(listener), defaultRunnerRegistry(), new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO));
 
         engine.start();
         try {
@@ -2201,8 +2232,8 @@ class EngineTest {
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(stateOf("exec-2")).isEqualTo(ExecutionState.SUCCEEDED);
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.RUNNING);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001e")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.RUNNING);
     }
 
     /**
@@ -2217,11 +2248,11 @@ class EngineTest {
      */
     @Test
     void submitDispatchContinuesAfterDispatchExecutorRejectsOne() throws Exception {
-        seedEnqueuedExecution("exec-1", "welcome-email", "hello", NOW.minusSeconds(3));
-        seedEnqueuedExecution("exec-2", "welcome-email", "hello", NOW.minusSeconds(2));
-        seedEnqueuedExecution("exec-3", "welcome-email", "hello", NOW.minusSeconds(1));
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001c", "welcome-email", "hello", NOW.minusSeconds(3));
+        seedEnqueuedExecution("01991337-0000-7000-8000-00000000001e", "welcome-email", "hello", NOW.minusSeconds(2));
+        seedEnqueuedExecution("01991337-0000-7000-8000-000000000020", "welcome-email", "hello", NOW.minusSeconds(1));
         CountDownLatch releaseFirstHandler = new CountDownLatch(1);
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseFirstHandler.await(5, TimeUnit.SECONDS));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> releaseFirstHandler.await(5, TimeUnit.SECONDS), Object.class);
 
         // A CountDownLatch, not ListAppender.list: an Appender's append() runs on the tick scheduler's thread
         // while this assertion runs on the test's — counting a latch gives the safe publication (JCIP) that
@@ -2232,10 +2263,10 @@ class EngineTest {
             @Override
             protected void append(ILoggingEvent event) {
                 String message = event.getFormattedMessage();
-                if (message.contains("exec-2")) {
+                if (message.contains("01991337-0000-7000-8000-00000000001e")) {
                     exec2Rejected.countDown();
                 }
-                if (message.contains("exec-3")) {
+                if (message.contains("01991337-0000-7000-8000-000000000020")) {
                     exec3Rejected.countDown();
                 }
             }
@@ -2274,10 +2305,21 @@ class EngineTest {
         }
 
         @Override
-        public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+        public StoredNode register(String nodeId, EngineState state, Duration ttl, io.mohs.engine.ExecutableCatalog catalog) {
             ticks.incrementAndGet();
-            delegate.heartbeat(nodeId, state, epoch, at, expiresAt);
-        }
+            var result = delegate.register(nodeId, state, ttl, catalog);
+            return result;
+            }
+
+            @Override
+            public java.util.Optional<StoredNode> renew(String nodeId, EngineState state, Duration ttl) {
+            ticks.incrementAndGet();
+            var result = delegate.renew(nodeId, state, ttl);
+            return result;
+            }
+
+            @Override public boolean revokeExpired(String nodeId) { return delegate.revokeExpired(nodeId); }
+            @Override public void stop(String nodeId) { delegate.stop(nodeId); }
 
         @Override
         public List<StoredNode> findAll() {
@@ -2297,26 +2339,45 @@ class EngineTest {
      * is reachable again.
      */
     @Test
-    void aLostHeartbeatBumpsTheEpochOncePerObservedExpiryNotOncePerTick() throws Exception {
+    void aLostSessionIsReplacedAfterDatabaseConfirmation() throws Exception {
         AtomicBoolean partitioned = new AtomicBoolean();
         CountDownLatch firstHeartbeat = new CountDownLatch(1);
         CountDownLatch failedHeartbeats = new CountDownLatch(5);
         CountDownLatch recovered = new CountDownLatch(1);
-        List<Long> epochsOffered = new CopyOnWriteArrayList<>();
+        List<String> sessionsOffered = new CopyOnWriteArrayList<>();
         NodeStore flaky = new NodeStore() {
             @Override
-            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
-                epochsOffered.add(epoch);
+            public StoredNode register(String nodeId, EngineState state, Duration ttl, io.mohs.engine.ExecutableCatalog catalog) {
+                sessionsOffered.add(nodeId);
                 if (partitioned.get()) {
                     failedHeartbeats.countDown();
                     throw new IllegalStateException("simulated network partition: the heartbeat never reaches the database");
                 }
-                nodeStore.heartbeat(nodeId, state, epoch, at, expiresAt);
+                var result = nodeStore.register(nodeId, state, ttl, catalog);
                 firstHeartbeat.countDown();
                 if (failedHeartbeats.getCount() == 0) {
                     recovered.countDown();
                 }
+                return result;
             }
+
+            @Override
+            public java.util.Optional<StoredNode> renew(String nodeId, EngineState state, Duration ttl) {
+                sessionsOffered.add(nodeId);
+                if (partitioned.get()) {
+                    failedHeartbeats.countDown();
+                    throw new IllegalStateException("simulated network partition: the heartbeat never reaches the database");
+                }
+                var result = nodeStore.renew(nodeId, state, ttl);
+                firstHeartbeat.countDown();
+                if (failedHeartbeats.getCount() == 0) {
+                    recovered.countDown();
+                }
+                return result;
+            }
+
+            @Override public boolean revokeExpired(String nodeId) { return nodeStore.revokeExpired(nodeId); }
+            @Override public void stop(String nodeId) { nodeStore.stop(nodeId); }
 
             @Override
             public List<StoredNode> findAll() {
@@ -2347,8 +2408,8 @@ class EngineTest {
             // The clock moves first: a tick that slips in between the two lines then observes the
             // expiry with the database still reachable and bumps once all the same — the assertions
             // below hold in either interleaving
-            clock.advance(LEASE_TTL.plusSeconds(1));
             partitioned.set(true);
+            new JdbcTemplate(dataSource).update("UPDATE mohs_nodes SET expires_at = ? WHERE node_id = ?", JdbcTimestamps.toUtcLocalDateTime(NOW), engine.nodeId());
             assertThat(failedHeartbeats.await(10, TimeUnit.SECONDS)).isTrue();
             partitioned.set(false);
             assertThat(recovered.await(10, TimeUnit.SECONDS)).isTrue();
@@ -2357,12 +2418,8 @@ class EngineTest {
             engineLogger.detachAppender(bumpWatcher);
         }
 
-        assertThat(bumpsLogged).hasValue(1);
-        // One transition, 1 → 2, never back: however many ticks ran before the clock moved, and
-        // however many heartbeats failed, every offer after the bump carried the reincarnated epoch
-        assertThat(epochsOffered).isSorted().containsOnly(1L, 2L);
-        assertThat(epochsOffered.getFirst()).isEqualTo(1L);
-        assertThat(epochsOffered.getLast()).isEqualTo(2L);
+        assertThat(sessionsOffered.getFirst()).isNotEqualTo(sessionsOffered.getLast());
+        assertThat(sessionsOffered.stream().distinct()).hasSize(2);
     }
 
     /** A decorator purely to give the test a deterministic way to wait for N real ticks, without Thread.sleep. */
@@ -2384,10 +2441,21 @@ class EngineTest {
         }
 
         @Override
-        public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
-            delegate.heartbeat(nodeId, state, epoch, at, expiresAt);
+        public StoredNode register(String nodeId, EngineState state, Duration ttl, io.mohs.engine.ExecutableCatalog catalog) {
+            var result = delegate.register(nodeId, state, ttl, catalog);
             latch.get().countDown();
-        }
+            return result;
+            }
+
+            @Override
+            public java.util.Optional<StoredNode> renew(String nodeId, EngineState state, Duration ttl) {
+            var result = delegate.renew(nodeId, state, ttl);
+            latch.get().countDown();
+            return result;
+            }
+
+            @Override public boolean revokeExpired(String nodeId) { return delegate.revokeExpired(nodeId); }
+            @Override public void stop(String nodeId) { delegate.stop(nodeId); }
 
         @Override
         public List<StoredNode> findAll() {
@@ -2408,15 +2476,15 @@ class EngineTest {
      */
     @Test
     void theBacklogGaugeIsSampledByTheTickAndExistsFromBoot() throws Exception {
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
-        recordAndOffer("exec-1", "welcome-email", "a", NOW.minusSeconds(1));
-        recordAndOffer("exec-2", "welcome-email", "b", NOW.minusSeconds(1));
-        recordAndOffer("exec-3", "welcome-email", "c", NOW.minusSeconds(1));
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withWindow("closed"), io.mohs.core.schedule.Misfire.IGNORE, false));
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> { }, Object.class);
+        recordAndOffer("01991337-0000-7000-8000-00000000001c", "welcome-email", "a", NOW.minusSeconds(1));
+        recordAndOffer("01991337-0000-7000-8000-00000000001e", "welcome-email", "b", NOW.minusSeconds(1));
+        recordAndOffer("01991337-0000-7000-8000-000000000020", "welcome-email", "c", NOW.minusSeconds(1));
         MeterRegistry registry = new SimpleMeterRegistry();
         Engine engine = assembleEngine(jobStore, workQueue, leaseStore, historyStore, nodeStore,
-                new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), clock, registry);
+                new ExecutionWindowRegistry(List.of(new ExecutionWindow("closed", List.of(_ -> true)))), List.of(), defaultRunnerRegistry(),
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO), clock, registry);
 
         assertThat(registry.get("mohs.queue.depth").gauge().value())
                 .as("the series exists before the first tick — an alert cannot tell a missing series from zero")
@@ -2444,14 +2512,14 @@ class EngineTest {
     @Test
     void theFiringSweepStopsAtTheTicksBudgetAndResumesNextTick() throws Exception {
         for (int i = 1; i <= 4; i++) {
-            jobStore.upsert(JobDefinition.of("poll-" + i, Handler.class, spec -> spec.every(Duration.ofSeconds(10))));
-            handlerRegistry.register(JobKey.of("poll-" + i), (payload, ctx) -> { });
+            jobStore.upsert(JobDefinition.of("poll-" + i, new io.mohs.core.schedule.IntervalSpec(Duration.ofSeconds(10), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+            handlerRegistry.register(JobKey.of("poll-" + i), (payload, ctx) -> { }, Object.class);
         }
         clock.advance(Duration.ofSeconds(15));
         TickCountingNodeStore tickCounting = new TickCountingNodeStore(nodeStore);
-        TriggerFirer real = new JdbcTriggerFirer(dataSource, historyStore, workQueue, new H2JdbcDelegate());
+        TriggerFirer real = new JdbcSubmissionStore(dataSource, new H2JdbcDelegate(), java.time.Duration.ofDays(7));
         Map<Integer, Integer> firesPerTick = new ConcurrentHashMap<>();
-        TriggerFirer slow = (key, observed, next, occurrences, payload, now) -> {
+        TriggerFirer slow = (key, revision, observed, next, occurrences, now) -> {
             try {
                 Thread.sleep(40); // a slow CAS, deliberately — the budget is wall-clock
             } catch (InterruptedException e) {
@@ -2459,7 +2527,7 @@ class EngineTest {
                 throw new IllegalStateException("interrupted while simulating a slow CAS", e);
             }
             firesPerTick.merge(tickCounting.ticks(), 1, Integer::sum);
-            return real.fire(key, observed, next, occurrences, payload, now);
+            return real.fire(key, revision, observed, next, occurrences, now);
         };
         Engine engine = assembleEngine(jobStore, workQueue, leaseStore, historyStore, tickCounting, slow,
                 new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
@@ -2477,6 +2545,56 @@ class EngineTest {
         assertThat(firesPerTick).hasSize(4);
     }
 
+    /** One slow recovery read spends the round; the persistent cursor must still reach firing and claim. */
+    @Test
+    void recoveryAndFiringShareOneBudgetWithoutStarvingDispatch() throws Exception {
+        jobStore.upsert(JobDefinition.of("shared-budget", new io.mohs.core.schedule.IntervalSpec(Duration.ofHours(1), false),
+                io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        CountDownLatch ran = new CountDownLatch(1);
+        handlerRegistry.register(JobKey.of("shared-budget"), (payload, ctx) -> ran.countDown(), Object.class);
+        clock.advance(Duration.ofHours(1));
+        TickCountingNodeStore ticks = new TickCountingNodeStore(nodeStore);
+        java.util.Set<Integer> recoveryTicks = ConcurrentHashMap.newKeySet();
+        java.util.Set<Integer> firingTicks = ConcurrentHashMap.newKeySet();
+        java.util.Set<Integer> claimTicks = ConcurrentHashMap.newKeySet();
+        Map<Integer, List<String>> trace = new ConcurrentHashMap<>();
+        LeaseStore slow = mock(LeaseStore.class, delegatesTo(leaseStore));
+        doAnswer(invocation -> {
+            recoveryTicks.add(ticks.ticks());
+            trace.computeIfAbsent(ticks.ticks(), _ -> new java.util.concurrent.CopyOnWriteArrayList<>()).add("recovery");
+            Thread.sleep(40);
+            return leaseStore.findOrphaned(invocation.getArgument(0));
+        }).when(slow).findOrphaned(anyInt());
+        WorkQueue traced = mock(WorkQueue.class, delegatesTo(workQueue));
+        doAnswer(invocation -> {
+            claimTicks.add(ticks.ticks());
+            trace.computeIfAbsent(ticks.ticks(), _ -> new java.util.concurrent.CopyOnWriteArrayList<>()).add("claim");
+            return workQueue.claim(invocation.getArgument(0), invocation.getArgument(1), invocation.getArgument(2),
+                    invocation.getArgument(3), invocation.getArgument(4));
+        }).when(traced).claim(anyInt(), any(), anyInt(), any(), any());
+        TriggerFirer real = new JdbcSubmissionStore(dataSource, new H2JdbcDelegate(), Duration.ZERO);
+        TriggerFirer firing = (key, revision, observed, next, occurrences, now) -> {
+            firingTicks.add(ticks.ticks());
+            trace.computeIfAbsent(ticks.ticks(), _ -> new java.util.concurrent.CopyOnWriteArrayList<>()).add("fire");
+            return real.fire(key, revision, observed, next, occurrences, now);
+        };
+        Engine engine = assembleEngine(jobStore, traced, slow, historyStore, ticks, firing,
+                new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
+                settingsWithNodeLeaseTtl(Duration.ofMillis(120)), clock, new SimpleMeterRegistry());
+        engine.start();
+        try {
+            assertThat(ran.await(10, TimeUnit.SECONDS)).as("firing and dispatch eventually get their turn").isTrue();
+        } finally {
+            engine.stop(Duration.ofSeconds(5));
+        }
+        assertThat(recoveryTicks).isNotEmpty();
+        assertThat(firingTicks).isNotEmpty();
+        assertThat(trace.values()).allSatisfy(events -> {
+            if (events.contains("recovery")) assertThat(events.getLast()).isEqualTo("recovery");
+        });
+        assertThat(claimTicks).isNotEmpty();
+    }
+
     /**
      * A claimed row this node cannot even turn into an {@code Execution} — a priority outside the enum,
      * written by an operator or a data migration — is terminally broken, like an unreadable payload,
@@ -2486,12 +2604,12 @@ class EngineTest {
      */
     @Test
     void aRowThatCannotBecomeAnExecutionFailsAloneAndItsBatchSiblingsStillRun() throws Exception {
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(0)));
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(0), io.mohs.core.schedule.Misfire.IGNORE, false));
         CountDownLatch siblingRan = new CountDownLatch(1);
-        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> siblingRan.countDown());
-        recordAndOffer("exec-poisoned", "welcome-email", "hello", NOW.minusSeconds(2));
-        recordAndOffer("exec-healthy", "welcome-email", "hello", NOW.minusSeconds(1));
-        rawJdbcTemplate.update("UPDATE mohs_execution SET priority = 99 WHERE execution_id = 'exec-poisoned'");
+        handlerRegistry.register(JobKey.of("welcome-email"), (payload, ctx) -> siblingRan.countDown(), Object.class);
+        recordAndOffer("01991337-0000-7000-8000-000000000046", "welcome-email", "hello", NOW.minusSeconds(2));
+        recordAndOffer("01991337-0000-7000-8000-000000000032", "welcome-email", "hello", NOW.minusSeconds(1));
+        rawJdbcTemplate.update("UPDATE mohs_execution SET priority = 99 WHERE execution_id = '01991337-0000-7000-8000-000000000046'");
         Engine engine = newEngine(nodeStore, List.of());
 
         engine.start();
@@ -2501,12 +2619,12 @@ class EngineTest {
             // the very row this test poisons
             Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                     assertThat(rawJdbcTemplate.queryForObject(
-                            "SELECT state FROM mohs_execution WHERE execution_id = 'exec-poisoned'", String.class))
+                            "SELECT state FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-000000000046'", String.class))
                             .isEqualTo("FAILED"));
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
-        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class))
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_work WHERE work_state = 'LEASED'", Integer.class))
                 .as("nothing stays leased: the poisoned row was failed, not abandoned").isZero();
     }
 
@@ -2530,8 +2648,8 @@ class EngineTest {
                 throw new IllegalStateException("interrupted while simulating a slow reclaim", e);
             }
             reclaimsPerTick.merge(tickCounting.ticks(), 1, Integer::sum);
-            return leaseStore.reclaim(invocation.getArgument(0), invocation.getArgument(1));
-        }).when(slowReclaim).reclaim(any(), any());
+            return leaseStore.reclaim(invocation.getArgument(0));
+        }).when(slowReclaim).reclaim(any());
         Engine engine = assembleEngine(jobStore, workQueue, slowReclaim, historyStore, tickCounting,
                 new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
                 settingsWithNodeLeaseTtl(Duration.ofMillis(120)), clock, new SimpleMeterRegistry());
@@ -2540,7 +2658,7 @@ class EngineTest {
         try {
             Awaitility.await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                     assertThat(rawJdbcTemplate.queryForObject(
-                            "SELECT COUNT(*) FROM mohs_lease WHERE node_id = 'dead-node'", Integer.class)).isZero());
+                            "SELECT COUNT(*) FROM mohs_work WHERE work_state = 'LEASED' AND  node_id = '01991337-0001-7000-8000-000000000092'", Integer.class)).isZero());
         } finally {
             engine.stop(Duration.ofSeconds(5));
         }
@@ -2559,9 +2677,17 @@ class EngineTest {
     void aTickThatDiesOutsideAMaintenanceStepIsCountedUnderItsOwnLabel() {
         NodeStore heartbeatBroken = new NodeStore() {
             @Override
-            public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+            public StoredNode register(String nodeId, EngineState state, Duration ttl, io.mohs.engine.ExecutableCatalog catalog) {
                 throw new RuntimeException("simulated database error on the heartbeat");
             }
+
+            @Override
+            public java.util.Optional<StoredNode> renew(String nodeId, EngineState state, Duration ttl) {
+                throw new RuntimeException("simulated database error on the heartbeat");
+            }
+
+            @Override public boolean revokeExpired(String nodeId) { return nodeStore.revokeExpired(nodeId); }
+            @Override public void stop(String nodeId) { nodeStore.stop(nodeId); }
 
             @Override
             public List<StoredNode> findAll() {
@@ -2576,7 +2702,7 @@ class EngineTest {
         MeterRegistry registry = new SimpleMeterRegistry();
         Engine engine = assembleEngine(jobStore, workQueue, leaseStore, historyStore, heartbeatBroken,
                 new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), clock, registry);
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO), clock, registry);
 
         engine.start();
         try {
@@ -2595,8 +2721,8 @@ class EngineTest {
      */
     @Test
     void anIdempotencyKeyOlderThanTheRetentionIsPrunedOnTheTick() throws Exception {
-        insertIdempotencyKey("stale", NOW.minus(Duration.ofDays(2)));
-        insertIdempotencyKey("fresh", NOW.minus(Duration.ofHours(1)));
+        insertIdempotencyKey("stale", Instant.now().minus(Duration.ofDays(2)), Instant.now().minusSeconds(1));
+        insertIdempotencyKey("fresh", Instant.now().minus(Duration.ofHours(1)), Instant.now().plus(Duration.ofDays(1)));
         Engine engine = newEngine(nodeStore, List.of(), defaultRunnerRegistry(),
                 settingsWithIdempotencyRetention(Duration.ofDays(1)));
 
@@ -2613,7 +2739,7 @@ class EngineTest {
     /** Zero is the opt-out, not "prune everything": the operator who sets it keeps every key, and the growth that comes with it. */
     @Test
     void aZeroRetentionKeepsEveryIdempotencyKey() throws Exception {
-        insertIdempotencyKey("ancient", NOW.minus(Duration.ofDays(3650)));
+        insertIdempotencyKey("ancient", NOW.minus(Duration.ofDays(3650)), null);
         Engine engine = newEngine(nodeStore, List.of(), defaultRunnerRegistry(),
                 settingsWithIdempotencyRetention(Duration.ZERO));
 
@@ -2630,15 +2756,15 @@ class EngineTest {
     }
 
     private EngineSettings settingsWithIdempotencyRetention(Duration retention) {
-        return new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, BATCH_SIZE, BATCH_SIZE, 1, LEASE_TTL, LEASE_TTL, null,
-                EngineSettings.DEFAULT_MISFIRE_THRESHOLD, retention);
+        return new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,BATCH_SIZE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO);
     }
 
-    private void insertIdempotencyKey(String key, Instant createdAt) {
+    private void insertIdempotencyKey(String key, Instant createdAt, @Nullable Instant expiresAt) {
         rawJdbcTemplate.update("""
-                INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at)
-                VALUES ('welcome-email', ?, ?, ?)
-                """, key, "exec-" + key, JdbcTimestamps.toUtcLocalDateTime(createdAt));
+                INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at, expires_at, scheduled_at, actor)
+                VALUES ('welcome-email', ?, ?, ?, ?, ?, 'test')
+                """, key, "exec-" + key, JdbcTimestamps.toUtcLocalDateTime(createdAt),
+                expiresAt == null ? null : JdbcTimestamps.toUtcLocalDateTime(expiresAt), JdbcTimestamps.toUtcLocalDateTime(createdAt));
     }
 
     /**
@@ -2651,15 +2777,15 @@ class EngineTest {
     @Test
     void historySweepChainsPassesUntilEveryTableComesBackUnderTheBatch() {
         Queue<HistoryStore.PrunedHistory> script = new ConcurrentLinkedQueue<>(List.of(
-                new HistoryStore.PrunedHistory(1000, 1000, 1000),
-                new HistoryStore.PrunedHistory(1000, 4, 0),
-                new HistoryStore.PrunedHistory(3, 2, 1)));
+                new HistoryStore.PrunedHistory(1000, 1000),
+                new HistoryStore.PrunedHistory(1000, 0),
+                new HistoryStore.PrunedHistory(3, 1)));
         List<Instant> cutoffs = new CopyOnWriteArrayList<>();
         HistoryStore scripted = mock(HistoryStore.class, delegatesTo(historyStore));
         doAnswer(invocation -> {
             cutoffs.add(invocation.getArgument(0));
             HistoryStore.PrunedHistory next = script.poll();
-            return next != null ? next : new HistoryStore.PrunedHistory(0, 0, 0);
+            return next != null ? next : new HistoryStore.PrunedHistory(0, 0);
         }).when(scripted).pruneHistoryBefore(any(), anyInt());
         Engine engine = assembleEngine(workQueue, leaseStore, scripted, nodeStore, List.of(),
                 defaultRunnerRegistry(), settingsWithHistoryRetention(Duration.ofDays(30)));
@@ -2679,12 +2805,151 @@ class EngineTest {
     }
 
     private EngineSettings settingsWithNodeLeaseTtl(Duration nodeLeaseTtl) {
-        return new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, BATCH_SIZE, BATCH_SIZE, 1, LEASE_TTL, nodeLeaseTtl, null,
-                EngineSettings.DEFAULT_MISFIRE_THRESHOLD, EngineSettings.DEFAULT_IDEMPOTENCY_RETENTION, Duration.ZERO);
+        return new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,BATCH_SIZE,1,nodeLeaseTtl,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO);
+    }
+
+    @Test
+    void manualCancellationDoesNotDisableTheJobsTimeout() throws Exception {
+        JobKey key = JobKey.of("welcome-email");
+        ExecutionId id = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
+        jobStore.upsert(JobDefinition.of(key.value(), new io.mohs.core.schedule.OnDemandSpec(),
+                io.mohs.core.definition.JobOptions.defaults().withTimeout(Duration.ofSeconds(1)).withRetries(0),
+                io.mohs.core.schedule.Misfire.IGNORE, false));
+        recordAndOffer(id.value(), key.value(), "hello", NOW.minusSeconds(1));
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch manualObserved = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        handlerRegistry.register(key, (_, context) -> {
+            started.countDown();
+            while (!context.cancellationRequested()) Thread.sleep(1);
+            manualObserved.countDown();
+            try {
+                new CountDownLatch(1).await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException failure) {
+                interrupted.countDown();
+                throw failure;
+            }
+        }, Object.class);
+        Engine engine = newEngine(nodeStore, List.of());
+        engine.start();
+        try {
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(workQueue.cancel(id, NOW)).isTrue();
+            assertThat(manualObserved.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(interrupted.await(5, TimeUnit.SECONDS)).as("timeout still interrupts after manual cancellation").isTrue();
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertThat(stateOf(id.value())).isEqualTo(ExecutionState.CANCELLED));
+        } finally {
+            engine.stop(Duration.ofSeconds(1));
+        }
+    }
+
+    @Test
+    void failureOfTheLoopBecomesAnExplicitFailedStateAndCanBeStopped() {
+        jobStore.upsert(JobDefinition.of("broken-window", new io.mohs.core.schedule.OnDemandSpec(),
+                io.mohs.core.definition.JobOptions.defaults().withWindow("broken"), io.mohs.core.schedule.Misfire.IGNORE, false));
+        recordAndOffer("01991337-0000-7000-8000-00000000001c", "broken-window", "hello", NOW.minusSeconds(1));
+        handlerRegistry.register(JobKey.of("broken-window"), (_, _) -> {}, Object.class);
+        var windows = new ExecutionWindowRegistry(List.of(ExecutionWindow.named("broken")
+                .exclude(_ -> { throw new AssertionError("broken application predicate"); }).build()));
+        Engine engine = assembleEngine(jobStore, workQueue, leaseStore, historyStore, nodeStore, windows,
+                List.of(), defaultRunnerRegistry(), settingsWithHistoryRetention(Duration.ZERO));
+        engine.start();
+        try {
+            // This test deliberately kills the coordinator; assert its lifecycle outcome instead
+            // of letting Awaitility promote that expected uncaught Error to the test thread.
+            await().dontCatchUncaughtExceptions().atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(engine.state()).isEqualTo(EngineState.FAILED));
+            assertThatThrownBy(engine::resume).isInstanceOf(IllegalStateException.class);
+        } finally {
+            engine.stop(Duration.ofSeconds(1));
+        }
+        assertThat(engine.state()).isEqualTo(EngineState.STOPPED);
+    }
+
+    @Test
+    void reaperPublishesTheBatchItClosesAndRecordsTheTerminalAttempt() throws Exception {
+        String id = "01991337-0000-7000-8000-00000000001c";
+        String batchId = "01991337-0000-7000-8000-000000000080";
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(),
+                io.mohs.core.definition.JobOptions.defaults().withRetries(0), io.mohs.core.schedule.Misfire.IGNORE, false));
+        seedOrphanedLease(id, "welcome-email", false);
+        rawJdbcTemplate.update("INSERT INTO mohs_batches (id, name, total, succeeded, failed, created_at) VALUES (?, 'recovery', 1, 0, 0, ?)",
+                batchId, JdbcTimestamps.toUtcLocalDateTime(NOW));
+        rawJdbcTemplate.update("UPDATE mohs_execution SET batch_id = ? WHERE execution_id = ?", batchId, id);
+        List<io.mohs.core.event.BatchCompleted> closed = new CopyOnWriteArrayList<>();
+        var registry = new SimpleMeterRegistry();
+        Engine engine = assembleEngine(jobStore, workQueue, leaseStore, historyStore, nodeStore,
+                new ExecutionWindowRegistry(List.of()), List.of(event -> {
+                    if (event instanceof io.mohs.core.event.BatchCompleted batch) closed.add(batch);
+                }), defaultRunnerRegistry(), settingsWithHistoryRetention(Duration.ZERO), clock, registry);
+        engine.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(closed).hasSize(1));
+        } finally {
+            engine.stop(Duration.ofSeconds(1));
+        }
+        assertThat(closed.getFirst().batchId()).isEqualTo(batchId);
+        assertThat(closed.getFirst().failed()).isEqualTo(1);
+        assertThat(registry.get("mohs.attempt.total").tag("job", "welcome-email").tag("outcome", "failed").counter().count()).isEqualTo(1);
+        assertThat(registry.get("mohs.execution.total").tag("job", "welcome-email").tag("outcome", "failed").counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void idempotencyCleanupDrainsMoreThanOneBatchWithoutWaitingAnHour() {
+        AtomicInteger calls = new AtomicInteger();
+        HistoryStore scripted = mock(HistoryStore.class, delegatesTo(historyStore));
+        doAnswer(_ -> calls.incrementAndGet() <= 3 ? 1000 : 7).when(scripted).pruneExpiredIdempotency();
+        var registry = new SimpleMeterRegistry();
+        Engine engine = assembleEngine(jobStore, workQueue, leaseStore, scripted, nodeStore,
+                new ExecutionWindowRegistry(List.of()), List.of(), defaultRunnerRegistry(),
+                settingsWithHistoryRetention(Duration.ZERO), clock, registry);
+        engine.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(calls.get()).isEqualTo(4));
+        } finally {
+            engine.stop(Duration.ofSeconds(1));
+        }
+        assertThat(registry.get("mohs.idempotency.pruned").counter().count()).isEqualTo(3007);
+        assertThat(calls.get()).isEqualTo(4);
+    }
+
+    @Test
+    void idempotencyCleanupYieldsItsBudgetAndResumesOnAShortCadence() {
+        List<Long> calls = new CopyOnWriteArrayList<>();
+        HistoryStore scripted = mock(HistoryStore.class, delegatesTo(historyStore));
+        doAnswer(_ -> {
+            calls.add(System.nanoTime());
+            if (calls.size() == 1) {
+                Thread.sleep(120); // a single bounded store operation outlasts this tick's 100 ms budget
+                return 1000;
+            }
+            return 0;
+        }).when(scripted).pruneExpiredIdempotency();
+        Engine engine = assembleEngine(workQueue, leaseStore, scripted, nodeStore, List.of(),
+                defaultRunnerRegistry(), settingsWithNodeLeaseTtl(Duration.ofMillis(400)));
+        engine.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(calls).hasSize(2));
+            assertThat(calls.get(1) - calls.getFirst()).isGreaterThanOrEqualTo(Duration.ofSeconds(1).toNanos());
+            assertThat(engine.state()).isEqualTo(EngineState.RUNNING);
+        } finally {
+            engine.stop(Duration.ofSeconds(1));
+        }
     }
 
     private EngineSettings settingsWithHistoryRetention(Duration retention) {
-        return new EngineSettings(POLL_INTERVAL, POLL_INTERVAL, BATCH_SIZE, BATCH_SIZE, 1, LEASE_TTL, LEASE_TTL, null,
-                EngineSettings.DEFAULT_MISFIRE_THRESHOLD, EngineSettings.DEFAULT_IDEMPOTENCY_RETENTION, retention);
+        return new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,BATCH_SIZE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,retention,Duration.ZERO);
     }
+    private WorkQueue retireAfterClaim(String jobKey) {
+        WorkQueue retiring = mock(WorkQueue.class, delegatesTo(workQueue));
+        doAnswer(invocation -> {
+            List<WorkQueue.ClaimedWork> claimed = workQueue.claim(invocation.getArgument(0), invocation.getArgument(1),
+                    invocation.getArgument(2), invocation.getArgument(3), invocation.getArgument(4));
+            if (claimed.stream().anyMatch(work -> work.jobKey().value().equals(jobKey))) jobStore.remove(JobKey.of(jobKey));
+            return claimed;
+        }).when(retiring).claim(anyInt(), any(), anyInt(), any(), any());
+        return retiring;
+    }
+
 }

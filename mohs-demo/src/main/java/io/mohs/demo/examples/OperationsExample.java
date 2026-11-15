@@ -155,7 +155,7 @@ public class OperationsExample {
      * Executions are unbounded, so this one paginates: descending id (UUIDv7, chronological), and
      * {@code cursor} is the last id of the previous page.
      *
-     * <p>A listing is a SUMMARY — {@code attempts()} comes back empty, because a dashboard read must
+     * <p>A listing is a SUMMARY — {@code lastAttempt()} comes back empty, because a dashboard read must
      * not drag an arbitrarily large {@code error} column per row. {@link Mohs#findExecution} is the
      * detail view, attempts included.
      *
@@ -168,7 +168,7 @@ public class OperationsExample {
     }
 
     /**
-     * Looks up an execution and its recorded attempts.
+     * Looks up an execution and its latest completed attempt.
      *
      * @param executionId the identity of the execution
      * @return the execution with its attempts, or empty when absent

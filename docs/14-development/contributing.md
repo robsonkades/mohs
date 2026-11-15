@@ -98,7 +98,7 @@ Keep internal decision records, findings, audits and technical-debt ledgers out 
 | The schema changed | [Data model](../06-data/data-model.md), [schema](../06-data/schema.md), [indexes](../06-data/indexes.md), [migrations](../06-data/migrations.md) |
 | A metric was added | [Metrics](../09-observability/metrics.md) — **label values are contract** |
 | A limitation affects users | Document its observable effect and available workaround in the relevant guide |
-| A performance number was measured | [Performance characteristics](../10-performance/performance-characteristics.md), **with the environment stated** |
+| A performance number was measured | [Benchmark methodology](../10-performance/benchmarks.md), **with the environment stated** |
 
 The documentation's own rules: **never invent behaviour**, mark what could not be determined as
 `Unknown`, and distinguish *implemented* from *configured* from *referenced but not implemented*.

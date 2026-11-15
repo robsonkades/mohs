@@ -17,6 +17,11 @@ package io.mohs.autoconfigure;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+import jakarta.servlet.http.HttpServletRequest;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,8 +39,14 @@ import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import org.springframework.web.servlet.resource.PathResourceResolver;
 import org.springframework.web.servlet.resource.ResourceHttpRequestHandler;
+import org.springframework.web.servlet.resource.ResourceTransformer;
+import org.springframework.web.servlet.resource.ResourceTransformerChain;
+import org.springframework.web.servlet.resource.TransformedResource;
+import org.springframework.web.util.HtmlUtils;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
 
-import io.mohs.rest.ApiPaths;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Serves the {@code mohs-ui} dashboard when it is on the classpath.
@@ -101,7 +112,8 @@ public class MohsUiAutoConfiguration {
              * browser holding a stale {@code index.html} after a deploy must learn that its script
              * is gone, not receive HTML in its place and fail with an obscure syntax error. Everything
              * else ({@code index.html}, the icons, and the client routes that fall back to the page)
-             * is {@code no-cache}: revalidated on every load, so a deploy is picked up at once.
+             * is {@code no-store}: the page includes per-request host configuration and may carry
+             * a CSRF token, so it must not be reused for another session.
              * Deliberately no {@code public}: the host is told to put this path behind its own
              * authentication, and {@code public} is the one directive that lets a shared cache store
              * a response to an authenticated request — the browser's private cache honours
@@ -125,29 +137,77 @@ public class MohsUiAutoConfiguration {
                         .resourceChain(false);
                 registry.addResourceHandler(UI_PATH + "/**")
                         .addResourceLocations(WEBAPP_LOCATION)
-                        .setCacheControl(CacheControl.noCache())
+                        .setCacheControl(CacheControl.noStore())
+                        .setUseLastModified(false)
                         .resourceChain(false)
-                        .addResolver(new SpaFallbackResourceResolver());
+                        .addResolver(new SpaFallbackResourceResolver())
+                        .addTransformer(new DashboardConfigurationTransformer(properties));
             }
         };
     }
 
     /**
-     * The dashboard consumes the API but is not conditioned on it, and {@code api.ts} pins
-     * {@link ApiPaths#V1} while {@code mohs.api.base-path} is configurable. In both cases the page
-     * loaded, every fetch returned 404, and there was no log at all: the classic "I opened the
-     * dashboard and nothing shows up" at 3 a.m. A WARN closes the operational gap without inventing
-     * a new property.
+     * The dashboard consumes the API but is not conditioned on it. Warn when the host disables that
+     * API; a custom base path is supported through the per-request bootstrap configuration.
      */
     private static void warnIfDashboardHasNoApiToRead(MohsProperties properties) {
         if (!properties.api().enabled()) {
             log.warn("mohs-ui is on the classpath but mohs.api.enabled=false — the dashboard will load and stay"
                     + " empty, because it has no API to read. Set mohs.api.enabled=true, or drop the"
                     + " io.mohs:mohs-ui dependency.");
-        } else if (!ApiPaths.V1.equals(properties.api().basePath())) {
-            log.warn("mohs-ui is pinned to {} but mohs.api.base-path={} — the dashboard will 404 on every call."
-                    + " Serve the API at the default prefix, or proxy {} to it.",
-                    ApiPaths.V1, properties.api().basePath(), ApiPaths.V1);
+        }
+    }
+
+    /** Per-request bootstrap data: the host's context, API path and optional Spring Security CSRF token. */
+    private static final class DashboardConfigurationTransformer implements ResourceTransformer {
+        private final MohsProperties properties;
+        private final JsonMapper json = JsonMapper.builder().build();
+
+        private DashboardConfigurationTransformer(MohsProperties properties) {
+            this.properties = properties;
+        }
+
+        @Override
+        public Resource transform(HttpServletRequest request, Resource resource, ResourceTransformerChain chain)
+                throws IOException {
+            Resource transformed = chain.transform(request, resource);
+            if (!"index.html".equals(resource.getFilename())) {
+                return transformed;
+            }
+            String uiBase = request.getContextPath() + UI_PATH;
+            Map<String, Object> config = new LinkedHashMap<>();
+            config.put("apiBase", request.getContextPath() + properties.api().basePath());
+            config.put("uiBase", uiBase);
+            config.put("nodeLeaseTtlSeconds", properties.engine().nodeLeaseTtl().toNanos() / 1_000_000_000d);
+            addCsrf(request, config);
+            // Inert JSON works with a CSP that disallows inline executable scripts. Escape HTML
+            // delimiters as JSON unicode escapes so a value can never terminate the script element.
+            String encoded = json.writeValueAsString(config).replace("<", "\\u003c")
+                    .replace(">", "\\u003e").replace("&", "\\u0026");
+            String bootstrap = "<base href=\"" + HtmlUtils.htmlEscape(uiBase + "/") + "\">"
+                    + "<script type=\"application/json\" id=\"mohs-config\">" + encoded + "</script>";
+            String html = transformed.getContentAsString(StandardCharsets.UTF_8);
+            int head = html.indexOf("<head>");
+            html = head >= 0 ? html.substring(0, head + 6) + bootstrap + html.substring(head + 6)
+                    : bootstrap + html;
+            return new TransformedResource(transformed, html.getBytes(StandardCharsets.UTF_8));
+        }
+
+        private static void addCsrf(HttpServletRequest request, Map<String, Object> config) {
+            Object csrf = request.getAttribute("org.springframework.security.web.csrf.CsrfToken");
+            if (csrf == null) {
+                return;
+            }
+            // Spring Security is owned by the host and remains an optional dependency. Invoking
+            // its public interface also supports the deferred token wrappers installed by its filter.
+            Class<?> contract = ClassUtils.resolveClassName("org.springframework.security.web.csrf.CsrfToken",
+                    csrf.getClass().getClassLoader());
+            if (contract.isInstance(csrf)) {
+                config.put("csrfHeaderName", ReflectionUtils.invokeMethod(
+                        java.util.Objects.requireNonNull(ReflectionUtils.findMethod(contract, "getHeaderName")), csrf));
+                config.put("csrfToken", ReflectionUtils.invokeMethod(
+                        java.util.Objects.requireNonNull(ReflectionUtils.findMethod(contract, "getToken")), csrf));
+            }
         }
     }
 

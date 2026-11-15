@@ -15,18 +15,17 @@
  */
 package io.mohs.core.definition;
 
+import io.mohs.core.resource.ExecutionWindow;
+import io.mohs.core.resource.MohsRunner;
+import io.mohs.core.resource.RateLimit;
+import io.mohs.core.schedule.Misfire;
+import org.springframework.core.annotation.AliasFor;
+
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
-
-import org.springframework.core.annotation.AliasFor;
-
-import io.mohs.core.resource.ExecutionWindow;
-import io.mohs.core.resource.MohsRunner;
-import io.mohs.core.resource.RateLimit;
-import io.mohs.core.schedule.Misfire;
 
 /**
  * A {@link MohsJob} stereotype for the <b>automatic</b> job: a declared schedule, firing by itself,
@@ -146,24 +145,15 @@ public @interface RecurringJob {
     @AliasFor(annotation = MohsJob.class, attribute = "startPaused")
     boolean startPaused() default false;
 
-    /**
-     * See {@link MohsJob#allowConcurrentExecutions()}.
-     *
-     * @return whether concurrent execution is unrestricted
-     */
-    @AliasFor(annotation = MohsJob.class, attribute = "allowConcurrentExecutions")
-    boolean allowConcurrentExecutions() default true;
 
     /**
-     * See {@link MohsJob#maxConcurrentExecutions()}.
-     *
-     * @return the concurrency ceiling when overlap is restricted
+     * Global admitted grants per job; zero is unlimited, positive values impose the cap.
      */
     @AliasFor(annotation = MohsJob.class, attribute = "maxConcurrentExecutions")
     int maxConcurrentExecutions() default 0;
 
     /**
-     * See {@link MohsJob#retries()} — the default of 1 is what makes delivery at-least-once under node failure.
+     * See {@link MohsJob#retries()} — the default permits one additional attempt; it does not guarantee eventual success.
      *
      * @return the number of retry attempts beyond the first
      */

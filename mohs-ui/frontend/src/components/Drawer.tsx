@@ -15,8 +15,8 @@ export function Drawer({
   return (
     <Sheet open={open} onOpenChange={(next) => !next && onClose()}>
       <SheetContent className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-[560px]" aria-describedby={undefined}>
-        <SheetHeader className="border-b">
-          <SheetTitle className="text-headline">{title}</SheetTitle>
+        <SheetHeader className="min-w-0 border-b pr-14">
+          <SheetTitle className="text-headline [overflow-wrap:anywhere]">{title}</SheetTitle>
         </SheetHeader>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">{children}</div>
       </SheetContent>

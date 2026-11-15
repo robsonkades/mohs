@@ -25,7 +25,7 @@ Current practice, consistently applied:
 | Identifiers | **English**, domain vocabulary | `JobKey`, `Schedule`, `MohsRunner`, `ExecutionState` |
 | Interfaces | The role, no `I` prefix, no `Impl` suffix on the interface | `JobStore`, `WorkQueue`, `LeaseStore` |
 | Adapters | `Jdbc` + the port's name | `JdbcJobStore` implements `JobStore` |
-| The one `Impl` | `MohsImpl`, `JobSpecImpl` | Used only where the interface name is the domain noun and no better adapter name exists |
+| The one `Impl` | `MohsImpl` | Used only where the interface name is the domain noun and no better adapter name exists |
 | Read models | `*Snapshot` | `JobSnapshot`, `RunnerSnapshot`, `OverviewSnapshot` |
 | Wire DTOs | `*Response` by default; `*View` for a sealed-type mirror or a computed projection | `JobResponse`, `ScheduleView`, `ThroughputView` |
 | Requests | `*Request` | `ScheduleJobRequest`, `RateLimitPatchRequest` |
@@ -115,12 +115,12 @@ Items cited by name in the source, with real call sites:
 | Item | Where |
 | --- | --- |
 | **1** — static factory over constructor when the name helps | `JobKey.of`, `ExecutionId.of`, `JobDefinition.of`, `Execution.enqueued`, `OverviewStreamBroadcaster.start`, `CursorPage.of` |
-| **2** — builder for many/optional parameters | `MohsRunner.IoBuilder`/`CpuBuilder`, `ExecutionWindow.Builder`, the staged `JobSpec`/`PolicySpec` |
-| **15** — minimise accessibility | `MohsJobs`, `MohsRunners`, `MohsRateLimits`, `JobSpecImpl`, `ExecutionEventPublisher`, `CancellationSignal` are all package-private |
+| **2** — builder for many/optional parameters | `MohsRunner.IoBuilder`/`CpuBuilder`, `ExecutionWindow.Builder` |
+| **15** — minimise accessibility | `MohsJobs`, `MohsRunners`, `MohsRateLimits`, `ExecutionEventPublisher`, `CancellationSignal` are all package-private |
 | **17** — immutability | Records everywhere; the exceptions are named and justified |
 | **34** — enum with an instance field, never `ordinal()` | `Priority.value()` |
 | **49** — validate parameters | Compact constructors throughout |
-| **50** — defensive copies | `Execution.attempts`, `ExecutionWindow.exclusions` |
+| **50** — defensive copies | `ExecutionWindow.exclusions` |
 | **64** — refer to objects by their interface | Applied; the documented exception is `RunnerRegistry.LiveRunner`, which holds the concrete `CountingExecutor` precisely for the decorator's extra capability |
 
 `Execution.enqueued(...)` is worth calling out as a concrete Item 1 application: it **replaced two
@@ -133,7 +133,7 @@ itself a member of a batch that does not exist, with nothing to flag it.
 | Feature | Usage |
 | --- | --- |
 | Records | The default for every value object and DTO |
-| Sealed interfaces | `Schedule`, `ExecutionEvent`, `ScheduleView`, `JobSpec`, `PolicySpec` — so a new variant is a compilation error at every use site |
+| Sealed interfaces | `Schedule`, `ExecutionEvent`, `ScheduleView` — so a new variant is a compilation error at every use site |
 | Pattern matching in `switch` | `FiringPlanner#plan`, `NextFireCalculator#nextFireAfter`, `ScheduleView#from`/`toSchedule`, `RunnerRegistry#build` |
 | Record deconstruction patterns | `MohsImpl#rearmAfterFinishChain`: `instanceof IntervalSpec(Duration interval, boolean afterFinish)` |
 | Unnamed variables (`_`) | Used consistently in lambdas and switch arms that ignore their binding |

@@ -173,7 +173,7 @@ the part a consumer needs:
 
 | Element | Contract |
 | --- | --- |
-| `Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`, `BatchBuilder`, `JobContext` | **May gain methods in minor releases.** Do not implement them |
+| `Mohs`, `MohsLifecycle`, `Batch`, `BatchBuilder`, `JobContext` | **May gain methods in minor releases.** Do not implement them |
 | `ExecutionListener`, `ExecutionInterceptor`, `ActorResolver` | Stable extension points |
 | Sealed types | May grow freely — nothing outside can implement them, so a new method is always binary-compatible |
 | The REST API | Versioned in the path (`/v1`) |

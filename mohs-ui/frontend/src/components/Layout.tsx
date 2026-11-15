@@ -13,11 +13,11 @@ import { cn } from "@/lib/utils";
  * and the table it filters, a heading and its list — at 12px, close enough to read as one block.
  */
 export function PageStack({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cn("flex flex-col gap-6", className)}>{children}</div>;
+  return <div className={cn("flex min-w-0 flex-col gap-6", className)}>{children}</div>;
 }
 
 export function Section({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cn("flex flex-col gap-3", className)}>{children}</div>;
+  return <div className={cn("flex min-w-0 flex-col gap-3", className)}>{children}</div>;
 }
 
 /**

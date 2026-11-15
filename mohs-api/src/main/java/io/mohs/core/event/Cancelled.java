@@ -15,18 +15,18 @@
  */
 package io.mohs.core.event;
 
-import java.util.Objects;
-
 import io.mohs.core.execution.ExecutionId;
-import io.mohs.core.job.JobKey;
 import io.mohs.core.execution.JobContext;
+import io.mohs.core.job.JobKey;
+
+import java.util.Objects;
 
 /**
  * The execution was cancelled cooperatively (see {@link JobContext#cancellationRequested()}).
  *
  * @param executionId the identity of the execution
- * @param jobKey the stable identity of the job
- * @param attempt the one-based attempt number
+ * @param jobKey      the stable identity of the job
+ * @param attempt     the one-based attempt number
  */
 public record Cancelled(ExecutionId executionId, JobKey jobKey, int attempt) implements ExecutionEvent {
 
@@ -34,8 +34,8 @@ public record Cancelled(ExecutionId executionId, JobKey jobKey, int attempt) imp
      * Creates a {@code Cancelled} with the supplied values.
      *
      * @param executionId the identity of the execution
-     * @param jobKey the stable identity of the job
-     * @param attempt the one-based attempt number
+     * @param jobKey      the stable identity of the job
+     * @param attempt     the one-based attempt number
      */
     public Cancelled {
         Objects.requireNonNull(executionId, "executionId");

@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -33,6 +34,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 import org.slf4j.Logger;
@@ -85,7 +87,7 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
 
     /**
      * The ceiling on simultaneous subscribers. It is not capacity sizing: it is a guard against
-     * amplification, because every new connection pays a full {@code buildFrames()} before joining
+     * amplification, because new connections may need a snapshot before joining
      * and the API has no built-in authentication. 64 is generous for real use (a handful of
      * operators with the dashboard open) and low enough that abuse hits the limit before the
      * database does. Enforced by {@code seats}, taken BEFORE the snapshot's reads: a size check was
@@ -106,6 +108,11 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
     private final CopyOnWriteArrayList<Subscriber> subscribers = new CopyOnWriteArrayList<>();
     /** One permit per seat under {@link #MAX_SUBSCRIBERS}; a seat is taken by the join and given back by {@link #release}, exactly once. */
     private final Semaphore seats = new Semaphore(MAX_SUBSCRIBERS);
+    /** Retained by a running read even if its JDBC driver ignores cancellation. */
+    private final Semaphore readPermits = new Semaphore(5);
+    private final ReentrantLock snapshotLock = new ReentrantLock();
+    /** Guarded by snapshotLock; monotonic age avoids wall-clock adjustments. */
+    private CachedSnapshot cachedSnapshot;
     private final ScheduledExecutorService scheduler;
     private final ExecutorService senders = Executors.newThreadPerTaskExecutor(
             Thread.ofVirtual().name("mohs-overview-sse-send-", 0).factory());
@@ -172,6 +179,15 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
      * @return an emitter registered for overview updates
      */
     public SseEmitter subscribe() {
+        return subscribe(true);
+    }
+
+    /**
+     * Registers a client, optionally replacing execution snapshots with a lightweight invalidation.
+     * @param executionSnapshots whether this client consumes the legacy execution list
+     * @return the subscribed emitter
+     */
+    public SseEmitter subscribe(boolean executionSnapshots) {
         SseEmitter emitter = newEmitter.get();
         if (closed.get() || !seats.tryAcquire()) {
             // A closed door or a full house — why the house has a ceiling, and why the seat is taken
@@ -182,7 +198,7 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
         // could interleave its frames with these and deliver the OLD frame last. The API contract
         // admits that reorder and at the same time tells the client not to defend against it by
         // comparing asOf — the one able to not produce it is the server.
-        Subscriber subscriber = new Subscriber(emitter);
+        Subscriber subscriber = new Subscriber(emitter, executionSnapshots);
         emitter.onCompletion(() -> release(subscriber));
         emitter.onError(_ -> release(subscriber));
         try {
@@ -190,7 +206,7 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
             // becomes the subscribe's 500 without leaving an orphan subscriber in the list — an
             // emitter that was never initialised fires no callback and would buffer every future
             // tick's sends with no ceiling
-            List<Frame> initialSnapshot = buildFrames();
+            List<Frame> initialSnapshot = snapshot(executionSnapshots, false);
             subscribers.add(subscriber);
             if (closed.get()) {
                 release(subscriber);
@@ -234,18 +250,16 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
     /**
      * Package-private for deterministic testing — the scheduling only wraps this.
      *
-     * <p>Synchronous by construction: fixed-delay plus the read scope's quiescence guarantee that one
-     * tick never overlaps another. Against a degraded database the churn stays at four connections
-     * per roughly {@code STREAM_INTERVAL + FRAME_CANCEL_GRACE}, orders of magnitude below what the
-     * engine's own poll does under the same degradation; the right layer for a finer timeout is
-     * {@code Statement.setQueryTimeout} in the store.
+     * <p>Fixed delay and the snapshot lock prevent overlapping builds. The global read permits stay
+     * held by readers that ignore cancellation, bounding database work across later builds as well.
      */
     void tick() {
-        if (subscribers.isEmpty()) {
+        List<Subscriber> recipients = List.copyOf(subscribers);
+        if (recipients.isEmpty()) {
             return;
         }
-        List<Frame> frames = buildFrames();
-        for (Subscriber subscriber : subscribers) {
+        List<Frame> frames = snapshot(recipients.stream().anyMatch(Subscriber::executionSnapshots), true);
+        for (Subscriber subscriber : recipients) {
             // Conflation: a previous frame still in flight means a slow client, so skip it — it
             // delays only itself, and the next frame is the whole snapshot again
             if (subscriber.inFlight().compareAndSet(false, true)) {
@@ -291,20 +305,17 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
             // every connected dashboard would freeze on stale data with no end of stream and not one
             // line of log. buildFrames rethrows an Error coming out of ExecutionException, so there
             // is a real path down to here
-            log.error("overview stream tick died with an Error — the periodic task is CANCELLED and every connected"
-                    + " dashboard will silently freeze on stale data. Restart the application.", e);
+            log.error("overview stream tick died with an Error — closing streams so clients can fall back to polling", e);
+            close();
             throw e;
         }
     }
 
     /**
-     * The current snapshot, one named event per type — a client subscribes only to what it consumes
-     * ({@code EventSource.addEventListener}). The {@code executions} frame uses
-     * {@link CursorPage#DEFAULT_PAGE_SIZE} on purpose: the dashboard's panel shows the SAME slice as
-     * the first page of {@code GET /executions}, and if they ever diverge, the divergence should be a
-     * decision rather than an accident.
+     * Share a recent snapshot across joins. Legacy clients receive an execution page; clients that
+     * opt into invalidations receive only a refresh signal and read their own filtered page.
      *
-     * <p>The five reads are independent — a structural fan-out in the shape of JEP 505 (fork the
+     * <p>The reads are independent — a structural fan-out in the shape of JEP 505 (fork the
      * subtasks, join with a deadline, one failure cancels its siblings), but with the stable API:
      * {@code StructuredTaskScope} is preview on JDK 25 and {@code --enable-preview} would pin the
      * library's host to one exact JDK (a project rule — the migration is mechanical once it
@@ -312,14 +323,36 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
      * {@link #STREAM_INTERVAL} (a snapshot that does not close within a tick is already stale)
      * guarantees a hung read never freezes the timer forever.
      *
-     * <p>The scope is an executor PER CALL, closed in the {@code finally} with bounded quiescence
-     * ({@link #FRAME_CANCEL_GRACE}) — the central guarantee of a structural join: NO subtask outlives
-     * the scope. An earlier version waited for nothing: {@code cancel(true)} returns immediately with
-     * a sibling thread still reading the database — cancellation is a two-phase protocol, signal AND
-     * await (JCIP §7.1.5). Under failure, the snapshot's worst case becomes
-     * {@code STREAM_INTERVAL + FRAME_CANCEL_GRACE}.
+     * <p>Cancellation signals every reader and waits up to {@link #FRAME_CANCEL_GRACE}. A driver
+     * may ignore interruption and outlive that grace; its global permit is released only when its
+     * read actually returns. Later requests therefore cannot accumulate unbounded blocked readers.
      */
-    private List<Frame> buildFrames() {
+    private List<Frame> snapshot(boolean executionSnapshots, boolean refresh) {
+        boolean locked = false;
+        try {
+            locked = snapshotLock.tryLock(STREAM_INTERVAL.toNanos(), TimeUnit.NANOSECONDS);
+            if (!locked) {
+                throw new IllegalStateException("overview snapshot is still being built");
+            }
+            if (!refresh && cachedSnapshot != null
+                    && System.nanoTime() - cachedSnapshot.createdNanos() < STREAM_INTERVAL.toNanos()
+                    && (!executionSnapshots || cachedSnapshot.executionSnapshots())) {
+                return cachedSnapshot.frames();
+            }
+            List<Frame> frames = buildFrames(executionSnapshots);
+            cachedSnapshot = new CachedSnapshot(frames, System.nanoTime(), executionSnapshots);
+            return frames;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted waiting for the overview snapshot", e);
+        } finally {
+            if (locked) {
+                snapshotLock.unlock();
+            }
+        }
+    }
+
+    private List<Frame> buildFrames(boolean executionSnapshots) {
         long deadlineNanos = System.nanoTime() + STREAM_INTERVAL.toNanos();
         // One asOf per snapshot, from the injected clock (the house invariant): the five events of
         // the same tick carry the SAME instant — it is the stamp that lets the frontend order or
@@ -328,7 +361,7 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
         Instant asOf = clock.instant();
         ExecutorService scope = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("mohs-overview-frame-", 0).factory());
         try {
-            List<Future<Frame>> forks = List.of(
+            List<Future<Frame>> forks = new ArrayList<>(List.of(
                     fork(scope, "overview", asOf, () -> OverviewResponse.from(mohs.overview(OverviewController.DEFAULT_THROUGHPUT_WINDOW))),
                     fork(scope, "jobs", asOf, () -> mohs.jobs().stream().map(JobResponse::from).toList()),
                     fork(scope, "nodes", asOf, () -> mohs.nodes().stream().map(NodeResponse::from).toList()),
@@ -336,15 +369,20 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
                     // and concurrency without a denominator cannot say whether 59 is slack or
                     // saturation. An in-memory read of the RunnerRegistry, with no query — the
                     // cheapest of the five frames.
-                    fork(scope, "runners", asOf, () -> mohs.runners().stream().map(RunnerResponse::from).toList()),
-                    fork(scope, "executions", asOf, () -> mohs
+                    fork(scope, "runners", asOf, () -> mohs.runners().stream().map(RunnerResponse::from).toList())));
+            if (executionSnapshots) {
+                forks.add(fork(scope, "executions", asOf, () -> mohs
                             .executions(new ExecutionQuery(null, null, null, null, null, CursorPage.DEFAULT_PAGE_SIZE))
                             .stream().map(ExecutionSummaryResponse::from).toList()));
+            }
 
             List<Frame> frames = new ArrayList<>(forks.size());
 
             for (Future<Frame> fork : forks) {
                 frames.add(fork.get(deadlineNanos - System.nanoTime(), TimeUnit.NANOSECONDS));
+            }
+            if (!executionSnapshots) {
+                frames.add(new Frame("executions", new SnapshotEnvelope(asOf, Map.of("changed", true))));
             }
 
             return List.copyOf(frames);
@@ -370,8 +408,17 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
     }
 
     /** One subtask of the fan-out: the read runs on a virtual thread of THIS call's scope, and the result is born as a named event, enveloped with the snapshot's {@code asOf}. */
-    private static Future<Frame> fork(ExecutorService scope, String eventName, Instant asOf, Supplier<Object> read) {
-        return scope.submit(() -> new Frame(eventName, new SnapshotEnvelope(asOf, read.get())));
+    private Future<Frame> fork(ExecutorService scope, String eventName, Instant asOf, Supplier<Object> read) {
+        return scope.submit(() -> {
+            if (!readPermits.tryAcquire()) {
+                throw new IllegalStateException("overview read capacity is occupied by unfinished database requests");
+            }
+            try {
+                return new Frame(eventName, new SnapshotEnvelope(asOf, read.get()));
+            } finally {
+                readPermits.release();
+            }
+        });
     }
 
     /**
@@ -410,9 +457,11 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
     private void send(Subscriber subscriber, List<Frame> frames) {
         try {
             for (Frame frame : frames) {
+                SnapshotEnvelope data = "executions".equals(frame.name()) && !subscriber.executionSnapshots()
+                        ? new SnapshotEnvelope(frame.data().asOf(), Map.of("changed", true)) : frame.data();
                 subscriber
                         .emitter()
-                        .send(SseEmitter.event().name(frame.name()).data(frame.data(), MediaType.APPLICATION_JSON));
+                        .send(SseEmitter.event().name(frame.name()).data(data, MediaType.APPLICATION_JSON));
             }
         } catch (IOException | RuntimeException failure) {
             if (endOfStream(failure)) {
@@ -535,11 +584,13 @@ public final class OverviewStreamBroadcaster implements AutoCloseable {
      * An emitter plus two flags: {@code inFlight} is the CAS guaranteeing at most one send in flight
      * per client; {@code seated} is the CAS guaranteeing its seat is given back exactly once.
      */
-    private record Subscriber(SseEmitter emitter, AtomicBoolean inFlight, AtomicBoolean seated) {
+    private record CachedSnapshot(List<Frame> frames, long createdNanos, boolean executionSnapshots) {}
+
+    private record Subscriber(SseEmitter emitter, AtomicBoolean inFlight, AtomicBoolean seated, boolean executionSnapshots) {
 
         /** Born seated (its seat is already taken when it is built) and busy (the initial snapshot is about to go out). */
-        Subscriber(SseEmitter emitter) {
-            this(emitter, new AtomicBoolean(true), new AtomicBoolean(true));
+        Subscriber(SseEmitter emitter, boolean executionSnapshots) {
+            this(emitter, new AtomicBoolean(true), new AtomicBoolean(true), executionSnapshots);
         }
     }
 }

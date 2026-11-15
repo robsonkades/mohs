@@ -22,6 +22,11 @@
     <dependencies>
         <dependency>
             <groupId>io.github.robsonkades</groupId>
+            <artifactId>mohs-spring-boot-starter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-store-jdbc</artifactId>
             <scope>test</scope>
         </dependency>

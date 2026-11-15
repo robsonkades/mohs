@@ -114,11 +114,11 @@ final class JdbcSupport {
     }
 
     /** {@link JdbcDelegate#fencedLeaseDelete()}'s parameters — the whole fencing token, attempt included. */
-    static MapSqlParameterSource fencedLeaseDeleteParams(String executionId, String nodeId, long epoch, int attemptNumber) {
+    static MapSqlParameterSource fencedLeaseDeleteParams(String executionId, String nodeId, String claimToken, int attemptNumber) {
         return new MapSqlParameterSource()
                 .addValue("executionId", executionId)
                 .addValue("nodeId", nodeId)
-                .addValue("epoch", epoch)
+                .addValue("claimToken", claimToken)
                 .addValue("attemptNumber", attemptNumber);
     }
 

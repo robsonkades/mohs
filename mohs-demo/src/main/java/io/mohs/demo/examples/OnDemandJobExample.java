@@ -94,7 +94,7 @@ public class OnDemandJobExample {
      * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued sendWelcome(String address, String locale) {
-        return mohs.schedule(WELCOME_EMAIL, new WelcomeEmail(address, locale)).now();
+        return mohs.enqueue(WELCOME_EMAIL, new WelcomeEmail(address, locale));
     }
 
     /**

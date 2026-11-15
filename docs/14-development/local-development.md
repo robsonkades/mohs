@@ -8,7 +8,7 @@ Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 | --- | --- | --- |
 | JDK | **25** | Everything. `maven.compiler.release=25` |
 | Maven | The wrapper is included (`./mvnw`) | Everything |
-| **Docker** | Any recent version | `mohs-store-jdbc` and `mohs-benchmark` — Testcontainers starts PostgreSQL, MySQL and SQL Server |
+| **Docker** | Any recent version | `mohs-store-jdbc`, `mohs-demo` and `mohs-benchmark` — Testcontainers starts PostgreSQL, MySQL and SQL Server |
 | Node.js | Installed **automatically** by the build (v22.12.0, pinned) | Only if you develop the dashboard by hand |
 | `pwsh` | PowerShell 7+ | The benchmark and chaos scripts. **Windows PowerShell 5.1 will not do** |
 
@@ -46,6 +46,9 @@ continuations; in PowerShell use one line and quote each `-D...` argument as a w
 
 Its defaults come from `SpringApplication#setDefaultProperties`, not from an `application.yaml` — a
 library must not ship one, and `defaultProperties` loses to any external source.
+The demo selects `classpath:schema-${mohs.jdbc.dialect}.sql` for initialization, so setting
+`mohs.jdbc.dialect=postgresql` also selects the PostgreSQL installer. An explicit
+`spring.sql.init.schema-locations` or `spring.sql.init.mode=never` still overrides this default.
 
 To turn on the API and the dashboard:
 
@@ -81,9 +84,10 @@ docker exec mohs-postgres psql -v ON_ERROR_STOP=1 -U postgres -d mohs -f /tmp/sc
 ```
 
 These credentials are for the disposable local example. `spring.sql.init.mode=never`
-overrides the demo's H2 initializer: changing only the JDBC URL and dialect would otherwise
-apply `schema-h2.sql` to PostgreSQL. Use the [migration guide](../06-data/migrations.md)
-when upgrading an existing database.
+disables the demo's initializer because the installer was applied explicitly above. For a new
+development database, it can be omitted: the demo selects the installer for `mohs.jdbc.dialect`.
+The installer does not upgrade an older layout; see [schema installation](../06-data/migrations.md)
+for existing databases.
 
 ## The dashboard development loop
 
@@ -123,7 +127,7 @@ There is **no `npm test` and no linter** — see [testing strategy](../11-testin
 
 | Note | Detail |
 | --- | --- |
-| **Docker must be running** for `mohs-store-jdbc` | Otherwise: `Could not initialize class *TestSupport` — environment, not regression. Without Docker, skip them explicitly: `./mvnw test -DexcludedGroups=docker` (every container-backed class is `@Tag("docker")`; the H2 tests and the source scans still run, and a red suite then means a regression) |
+| **Docker must be running** for the JDBC integration tests and the demo's PostgreSQL startup test | Otherwise: `Could not initialize class *TestSupport` — environment, not regression. Without Docker, skip them explicitly: `./mvnw test -DexcludedGroups=docker` (every container-backed class is `@Tag("docker")`; the H2 tests and the source scans still run, and a red suite then means a regression) |
 | Container startup failure | Inspect Docker resources and container logs before classifying the failure; rerun the affected module after resolving the cause |
 | Benchmarks are excluded by default | Surefire's default pattern does not match `*Scenario`. Run them by name |
 
@@ -181,8 +185,8 @@ JFR's `jdk.VirtualThreadPinned` event.
 The following queries use PostgreSQL syntax.
 
 ```sql
-SELECT COUNT(*) FROM mohs_ready WHERE visible_at <= now();
-SELECT node_id, COUNT(*) FROM mohs_lease GROUP BY node_id;
+SELECT COUNT(*) FROM mohs_work WHERE work_state = 'READY' AND visible_at <= (clock_timestamp() AT TIME ZONE 'UTC');
+SELECT node_id, COUNT(*) FROM mohs_work WHERE work_state = 'LEASED' GROUP BY node_id;
 SELECT job_key, next_fire_at, paused FROM mohs_job_definitions;
 SELECT execution_id, state, scheduled_at FROM mohs_execution ORDER BY created_at DESC LIMIT 20;
 ```
@@ -229,13 +233,12 @@ Restart. The scanner registers it and the upsert arms its trigger.
 
 ### Change the schema
 
-1. Add `V<n>__description.sql` for **every** applicable dialect, under
-   `io/mohs/store/jdbc/migration/<dialect>/`.
-2. Make it **idempotent**; guard by *shape* where a name would be ambiguous.
-3. Update the matching `schema-<dialect>.sql` — the round-trip tests compare the two paths.
-4. **Never edit a published migration.** Nothing validates checksums any more, so an edited delta does not fail a boot — it silently leaves databases with different schemas depending on when they were installed.
-5. State the operational cost in a header comment if it moves rows or takes a table-level lock.
-6. Extend `SchemaPostgresChainMatchesInstallerTest`, the structural guardian that compares the installer against the delta chain.
+1. Update each applicable canonical `schema-<dialect>.sql` installer.
+2. Keep reapplication to an already matching schema idempotent. An installer is not an upgrade engine.
+3. Extend `SchemaInstallerTest` and the dialect round-trip/protocol tests for the changed contract.
+4. Document operational costs and schema assumptions in [schema installation](../06-data/migrations.md).
+5. Existing development data requires an explicit preservation/recreation plan; no legacy migration
+   chain or automatic conversion is shipped with the first release.
 
 ### Add a dialect
 

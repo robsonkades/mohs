@@ -30,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class EventValidationTest {
 
-    private static final ExecutionId ID = ExecutionId.of("exec-1");
+    private static final ExecutionId ID = ExecutionId.of("01991337-0000-7000-8000-00000000001c");
     private static final JobKey KEY = JobKey.of("welcome-email");
 
     @Test

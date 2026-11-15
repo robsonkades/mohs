@@ -15,20 +15,20 @@
  */
 package io.mohs.core.event;
 
-import java.util.Objects;
-
 import io.mohs.core.execution.ExecutionId;
 import io.mohs.core.job.JobKey;
+
+import java.util.Objects;
 
 /**
  * The execution failed for good. {@link #attemptsExhausted()} distinguishes "the retry policy ran
  * out" from other causes of terminal failure — the typical alerting hook, e.g.
  * {@code case Failed f when f.attemptsExhausted() -> alert(...)}.
  *
- * @param executionId the identity of the execution
- * @param jobKey the stable identity of the job
- * @param attempt the one-based attempt number
- * @param error the failure that ended the attempt
+ * @param executionId       the identity of the execution
+ * @param jobKey            the stable identity of the job
+ * @param attempt           the one-based attempt number
+ * @param error             the failure that ended the attempt
  * @param attemptsExhausted whether the retry policy refused further attempts because its budget was exhausted
  */
 /*
@@ -52,10 +52,10 @@ public record Failed(ExecutionId executionId, JobKey jobKey, int attempt, Throwa
     /**
      * Creates a {@code Failed} with the supplied values.
      *
-     * @param executionId the identity of the execution
-     * @param jobKey the stable identity of the job
-     * @param attempt the one-based attempt number
-     * @param error the failure that ended the attempt
+     * @param executionId       the identity of the execution
+     * @param jobKey            the stable identity of the job
+     * @param attempt           the one-based attempt number
+     * @param error             the failure that ended the attempt
      * @param attemptsExhausted whether the retry policy refused further attempts because its budget was exhausted
      */
     public Failed {

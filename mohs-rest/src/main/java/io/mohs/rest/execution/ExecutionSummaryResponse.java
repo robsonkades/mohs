@@ -24,7 +24,7 @@ import io.mohs.core.execution.Execution;
 import io.mohs.core.execution.ExecutionState;
 
 /**
- * The LIST form of {@link Execution} — a summary without {@code attempts}, which belong to the
+ * The LIST form of {@link Execution} — a summary without {@code lastAttempt}, which belongs to the
  * detail view ({@code GET /executions/{id}}, {@link ExecutionResponse}), as the REST design's table
  * always said.
  *

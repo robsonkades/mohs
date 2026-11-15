@@ -61,19 +61,9 @@ mohs:
 Then `mohs.lifecycle().start()` when you are ready. Useful when the application must warm caches or
 open connections before accepting work.
 
-### What a node does in its first tick
+### Initial membership and processing
 
-1. Write a heartbeat with `epoch = 1` and `expires_at = now + node-lease-ttl`.
-2. Load the definitions snapshot.
-3. Read `mohs_nodes` — serving both the reaper and the shard assignment.
-4. Run the reaper (it may immediately reclaim leases from a node that died earlier).
-5. Reconcile its own stray leases (none yet — it just started).
-6. Purge stale node rows.
-7. Fire any due triggers.
-8. Claim and dispatch.
-
-**Note `queueLooksEmpty` starts `false`**: a node that has just come up has no right to assume the
-queue is empty, so its first tick always runs the full lap.
+After startup delay, the node registers its immutable executable catalog and fresh session. A catalog mismatch refuses entry before claim. Each tick renews a valid session, then rotates bounded recovery, firing, acquisition and maintenance stages. Candidate policies are bulk-loaded per page; there is no full definitions snapshot on every tick. Initial queue state is unknown, so the node probes for work.
 
 ## Shutdown
 
@@ -184,10 +174,7 @@ Mohs ships no manifests, but the code makes specific assumptions:
 4. Anything the old pod could not finish within the grace is interrupted, fails with a
    node-shutdown cause, and **retries** — on any node with headroom.
 
-**If the new version adds a job**, part of the cluster lacks the handler during the rollout. A
-missing handler goes through the **retry budget on purpose**, so a node running the newer version
-may claim the retry. `RollingUpdateScenario` asserts both the survival case and the cost of a
-permanently blind node.
+A changed executable/input catalog cannot join while an incompatible live session remains, including paused or draining sessions. Stop the old catalog's sessions before publishing the new catalog. Compatible local class renames can retain the same explicit input contract. This first-release design does not implement blind-node retry as a rolling-upgrade strategy.
 
 ## Crash behaviour
 
@@ -197,5 +184,5 @@ permanently blind node.
 | Detection | A peer sees `expires_at <= now` and treats the node as dead |
 | Detection latency | The remaining node lease (0 to 15 s by default), plus peer polling and processing time; recovery can span additional ticks |
 | Recovery | The reaper reclaims each orphaned lease through the retry budget |
-| Measured | `kill -9` mid-drain: 50,000 executions terminal; **827 re-executions = exactly the set that was `RUNNING` at the kill**; reclaim wave 15.4 s after the kill; whole recovery finished at 19.6 s; zero exception lines |
-| If the node comes back | Its epoch bumps on the first tick that notices the expiry, so every write from the old incarnation loses the fence |
+| Historical pre-refactor measurement | `kill -9` mid-drain: 50,000 executions terminal; **827 re-executions = exactly the set that was `RUNNING` at the kill**; reclaim wave 15.4 s after the kill; whole recovery finished at 19.6 s; zero exception lines |
+| If the node comes back | An expired/revoked identity cannot renew. A fresh process session must rejoin; old grant results lose their fence. |

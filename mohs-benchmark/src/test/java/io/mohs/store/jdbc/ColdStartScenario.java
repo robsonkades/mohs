@@ -62,7 +62,7 @@ class ColdStartScenario {
             // inheriting the product default (1) would give a reclaim a second chance, let it end
             // SUCCEEDED, and make the `failed == 0` assertion tolerate exactly the event it exists
             // to catch
-            cluster.defineJob("cold", spec -> spec.retries(0));
+            cluster.defineJob("cold", spec -> spec.withRetries(0));
             for (int i = 0; i < NODES; i++) {
                 cluster.addNode(settings(), List.of());
             }
@@ -93,8 +93,7 @@ class ColdStartScenario {
     }
 
     private static EngineSettings settings() {
-        return new EngineSettings(Duration.ofMillis(25), Duration.ofMillis(200), 64, 32, 3,
-                Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60));
+        return new EngineSettings(Duration.ofMillis(25),Duration.ofMillis(200),64,32,3,Duration.ofSeconds(15),null,Duration.ofSeconds(60),Duration.ZERO,Duration.ZERO);
     }
 
     private static void report(boolean settled, int invocations, int succeeded, int failed,

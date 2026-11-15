@@ -15,6 +15,8 @@
  */
 package io.mohs.core.resource;
 
+import io.mohs.core.TechnicalKey;
+
 import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -29,8 +31,8 @@ import java.util.Set;
 import java.util.function.Predicate;
 
 /**
- * A firing exclusion window: a job whose scheduled time falls inside any configured exclusion does
- * not fire. Predicates exist only in code — there is no property-based equivalent, unlike
+ * An admission exclusion window: queued work waits while the claim-time instant matches any
+ * configured exclusion. Occurrences are retained for later admission. Predicates exist only in code — there is no property-based equivalent, unlike
  * {@link MohsRunner}.
  *
  * <p>This first version's predicates evaluate the {@link Instant} in UTC. Whether an exclusion
@@ -46,7 +48,7 @@ import java.util.function.Predicate;
  * rather than raw predicates: a larger change, out of scope while nothing depends on equality or
  * deduplication of this type.
  *
- * @param name the stable name used by job definitions to select this window
+ * @param name       the stable name used by job definitions to select this window
  * @param exclusions predicates that exclude firing instants; the list is defensively copied
  */
 public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) {
@@ -54,22 +56,12 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
     /**
      * Creates a {@code ExecutionWindow} with the supplied values.
      *
-     * @param name the stable name used by job definitions to select this window
+     * @param name       the stable name used by job definitions to select this window
      * @param exclusions predicates that exclude firing instants; the list is defensively copied
      */
     public ExecutionWindow {
-        Fields.requireNotBlank(name, "name");
+        TechnicalKey.require(name, "name");
         exclusions = List.copyOf(exclusions); // a defensive copy (Effective Java, Item 50)
-    }
-
-    /**
-     * {@code true} if the instant falls inside any configured exclusion.
-     *
-     * @param instant the instant to evaluate
-     * @return whether any configured exclusion matches the instant
-     */
-    public boolean excludes(Instant instant) {
-        return exclusions.stream().anyMatch(exclusion -> exclusion.test(instant));
     }
 
     /**
@@ -83,6 +75,16 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
     }
 
     /**
+     * {@code true} if the instant falls inside any configured exclusion.
+     *
+     * @param instant the instant to evaluate
+     * @return whether any configured exclusion matches the instant
+     */
+    public boolean excludes(Instant instant) {
+        return exclusions.stream().anyMatch(exclusion -> exclusion.test(instant));
+    }
+
+    /**
      * Accumulates exclusions evaluated against UTC instants.
      */
     public static final class Builder {
@@ -91,6 +93,13 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
 
         private Builder(String name) {
             this.name = name;
+        }
+
+        /**
+         * The one place the contract's "evaluated in UTC" lives — every exclusion reads the instant through it.
+         */
+        private static ZonedDateTime inUtc(Instant instant) {
+            return instant.atZone(ZoneOffset.UTC);
         }
 
         /**
@@ -128,7 +137,7 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
          * {@code [t, t)} is.
          *
          * @param from the inclusive start of the excluded daily interval in UTC
-         * @param to the exclusive end of the excluded daily interval in UTC
+         * @param to   the exclusive end of the excluded daily interval in UTC
          * @return this configuration stage for further customization
          */
         public Builder excludeDaily(LocalTime from, LocalTime to) {
@@ -148,11 +157,6 @@ public record ExecutionWindow(String name, List<Predicate<Instant>> exclusions) 
                 });
             }
             return this;
-        }
-
-        /** The one place the contract's "evaluated in UTC" lives — every exclusion reads the instant through it. */
-        private static ZonedDateTime inUtc(Instant instant) {
-            return instant.atZone(ZoneOffset.UTC);
         }
 
         /**

@@ -15,6 +15,8 @@
  */
 package io.mohs.core.resource;
 
+import io.mohs.core.TechnicalKey;
+
 import java.time.Duration;
 import java.util.Objects;
 
@@ -39,29 +41,29 @@ import java.util.Objects;
  * I/O-bound; here we know it is CPU-bound, and "backpressure at every boundary, never an unbounded
  * wait" is already a project rule.
  *
- * @param name the stable name used by jobs to select this runner
- * @param mode the runner workload mode
+ * @param name          the stable name used by jobs to select this runner
+ * @param mode          the runner workload mode
  * @param maxConcurrent the maximum concurrent IO executions
- * @param coreSize the number of core CPU worker threads
- * @param maxSize the maximum CPU worker thread count
+ * @param coreSize      the number of core CPU worker threads
+ * @param maxSize       the maximum CPU worker thread count
  * @param queueCapacity the capacity of the CPU runner waiting queue
- * @param keepAlive how long excess CPU workers may remain idle
+ * @param keepAlive     how long excess CPU workers may remain idle
  */
 public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int coreSize, int maxSize, int queueCapacity, Duration keepAlive) {
 
     /**
      * Creates a {@code MohsRunner} with the supplied values.
      *
-     * @param name the stable name used by jobs to select this runner
-     * @param mode the runner workload mode
+     * @param name          the stable name used by jobs to select this runner
+     * @param mode          the runner workload mode
      * @param maxConcurrent the maximum concurrent IO executions
-     * @param coreSize the number of core CPU worker threads
-     * @param maxSize the maximum CPU worker thread count
+     * @param coreSize      the number of core CPU worker threads
+     * @param maxSize       the maximum CPU worker thread count
      * @param queueCapacity the capacity of the CPU runner waiting queue
-     * @param keepAlive how long excess CPU workers may remain idle
+     * @param keepAlive     how long excess CPU workers may remain idle
      */
     public MohsRunner {
-        Fields.requireNotBlank(name, "name");
+        TechnicalKey.require(name, "name");
         Objects.requireNonNull(mode, "mode");
         Objects.requireNonNull(keepAlive, "keepAlive");
         if (mode == RunnerMode.IO) {
@@ -118,7 +120,9 @@ public record MohsRunner(String name, RunnerMode mode, int maxConcurrent, int co
         return new CpuBuilder(name);
     }
 
-    /** Builder for a {@link RunnerMode#IO} runner — only the permit count of the {@code Semaphore} that bounds concurrency. */
+    /**
+     * Builder for a {@link RunnerMode#IO} runner — only the permit count of the {@code Semaphore} that bounds concurrency.
+     */
     public static final class IoBuilder {
         private final String name;
         private int maxConcurrent = 64;

@@ -31,7 +31,7 @@ export function JobPicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
-  const jobs = useQuery({ queryKey: queryKeys.jobs(), queryFn: fetchJobs, enabled: open && !jobKey });
+  const jobs = useQuery({ queryKey: queryKeys.jobs(), queryFn: ({ signal }) => fetchJobs(signal), enabled: open && !jobKey });
 
   const results = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -46,14 +46,14 @@ export function JobPicker({
 
   if (jobKey) {
     return (
-      <Badge variant="secondary" className="h-8 gap-1.5 rounded-md pr-1 pl-3 font-mono text-sm font-medium">
-        {jobKey}
+      <Badge variant="secondary" className="h-8 max-w-full gap-1.5 rounded-md pr-1 pl-3 font-mono text-sm font-medium">
+        <span className="truncate" title={jobKey}>{jobKey}</span>
         <Button
           variant="ghost"
           size="icon-xs"
           onClick={() => onChange(undefined)}
           aria-label="Clear job filter"
-          className="size-5"
+          className="size-6 shrink-0"
         >
           <XIcon />
         </Button>
@@ -64,15 +64,19 @@ export function JobPicker({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button variant="outline" className="w-64 justify-start font-normal text-muted-foreground">
+        <Button variant="outline" className="w-64 max-w-full justify-start font-normal text-muted-foreground">
           <SearchIcon className="size-4" />
           {placeholder}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-72 p-0">
+      <PopoverContent align="start" className="w-72 max-w-[calc(100vw-2rem)] p-0">
         <Command shouldFilter={false}>
-          <CommandInput placeholder={placeholder} value={query} onValueChange={setQuery} />
+          <CommandInput aria-label="Search jobs" placeholder={placeholder} value={query} onValueChange={setQuery} />
           <CommandList>
+            {jobs.error && <div role="alert" className="space-y-2 px-3 py-2 text-sm text-critical">
+              <p>{jobs.error.message}</p>
+              <Button size="sm" variant="outline" onClick={() => void jobs.refetch()}>Try again</Button>
+            </div>}
             {jobs.isPending && <div className="px-3 py-2 text-sm text-muted-foreground">Loading…</div>}
             {jobs.data && results.length === 0 && <CommandEmpty>No jobs found</CommandEmpty>}
             {results.length > 0 && (
@@ -87,8 +91,8 @@ export function JobPicker({
                       setOpen(false);
                     }}
                   >
-                    <div className="flex flex-col items-start">
-                      <span className="font-mono text-sm font-medium">{job.jobKey}</span>
+                    <div className="flex min-w-0 flex-col items-start">
+                      <span className="max-w-full truncate font-mono text-sm font-medium">{job.jobKey}</span>
                       <span className="truncate text-xs text-muted-foreground">{job.name}</span>
                     </div>
                   </CommandItem>

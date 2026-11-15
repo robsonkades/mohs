@@ -28,7 +28,7 @@ import java.util.Objects;
  * @param succeeded the number of successful terminal executions
  * @param failed the number of failed terminal executions
  */
-public record BatchCounters(String batchId, String name, int total, int succeeded, int failed) {
+public record BatchCounters(String batchId, String name, long total, long succeeded, long failed) {
 
     /**
      * Creates a {@code BatchCounters} with the supplied values.
@@ -40,8 +40,11 @@ public record BatchCounters(String batchId, String name, int total, int succeede
      * @param failed the number of failed terminal executions
      */
     public BatchCounters {
-        Objects.requireNonNull(batchId, "batchId");
+        io.mohs.core.GeneratedId.require(batchId, "batchId");
         Objects.requireNonNull(name, "name");
+        if (succeeded > total || failed > total - succeeded) {
+            throw new IllegalArgumentException("terminal counters exceed total");
+        }
         if (total < 0 || succeeded < 0 || failed < 0) {
             throw new IllegalArgumentException("counters must not be negative");
         }
@@ -52,7 +55,7 @@ public record BatchCounters(String batchId, String name, int total, int succeede
      *
      * @return the total minus successful and failed members
      */
-    public int pending() {
+    public long pending() {
         return total - succeeded - failed;
     }
 }

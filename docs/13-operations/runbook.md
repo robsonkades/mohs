@@ -126,26 +126,26 @@ holds no shard slice and its peers pick up the work.
 To confirm:
 
 ```sql
-SELECT node_id, state, last_heartbeat_at, expires_at, expires_at > now() AS alive
+SELECT node_id, state, last_heartbeat_at, expires_at, NOT revoked AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC') AS alive
   FROM mohs_nodes ORDER BY last_heartbeat_at DESC;
 ```
 
 And `increase(mohs_lease_reclaimed_total[10m])` should be non-zero with `reason="retry"`.
 
 **If `reason="attempts_exhausted"` dominates**, jobs are declaring `retries = 0` and losing work under
-node failure. That is an opt-in to at-most-once, and it may not be what the job's author intended.
+node failure. It suppresses automatic recovery attempts; check whether that is the intended loss policy.
 
 ### A job is failing repeatedly
 
 ```sql
--- which exception class, in the last hour
-SELECT error_type, COUNT(*)
-  FROM mohs_attempt
- WHERE outcome = 'FAILED' AND finished_at > now() - interval '1 hour'
- GROUP BY error_type ORDER BY 2 DESC;
+-- latest-attempt exception classes in the last hour; not the count of every failure
+SELECT last_attempt_error_type, COUNT(*)
+  FROM mohs_execution
+ WHERE last_attempt_outcome = 'FAILED' AND last_attempt_finished_at > now() - interval '1 hour'
+ GROUP BY last_attempt_error_type ORDER BY 2 DESC;
 ```
 
-Then read the detail of one: `GET /executions/{id}` returns every attempt with its message. The
+Then read the detail of one: `GET /executions/{id}` returns the latest completed attempt with its message. The
 **full stack trace** is in the server log's WARN at the moment of failure — that is the only place it
 appears by default.
 
@@ -188,7 +188,7 @@ Check, in this order:
 4. **Watchdog bound too low.** `grep "exceeded mohs.engine.watchdog-timeout"` — it releases ownership
    of a still-healthy long-running job.
 
-Note that duplicates are **within contract** (at-least-once). The question is whether the *rate* is
+Note that duplicate effects are possible after uncertain completion. The question is whether the *rate* is
 explained by one of the above.
 
 ### A node is alive but claims nothing
@@ -235,8 +235,8 @@ grep -E "timeout .* >= mohs.engine.watchdog-timeout|dialect=h2|NO authentication
 ### Verifying the cluster's view of itself
 
 ```sql
-SELECT node_id, state, last_heartbeat_at, epoch, expires_at,
-       expires_at > now() AS alive
+SELECT node_id, state, last_heartbeat_at, revoked, expires_at,
+       NOT revoked AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC') AS alive
   FROM mohs_nodes ORDER BY last_heartbeat_at DESC;
 ```
 
@@ -269,5 +269,5 @@ the built-in `io` runner. Re-measure database, pool and downstream latency after
 | Lowered a rate limit too far | `PATCH` it back. The bucket refills from the moment of the change; it does not retroactively restore |
 | Cancelled the wrong execution | `POST .../retry` **if** it is `FAILED`. A `CANCELLED` execution **cannot** be retried — cancelling was an explicit decision. Schedule the job again |
 | Deleted a `@MohsJob` annotation by accident | Restore it and deploy. The upsert clears `ORPHANED` — the source reappearing is proof of life |
-| Called `Mohs.remove` by mistake | `mohs.define(...)` the same key. Retirement is soft; an upsert resurrects it |
-| Edited `mohs_ready`/`mohs_lease` by hand and set `attempt` (or `attempt_number`) to `0` | Every tick ends in `engine tick failed — will retry next tick` at ERROR, with `IllegalArgumentException: attemptNumber must be >= 1` underneath, and **nothing in that claim batch dispatches** until the row is fixed: an attempt below 1 is not fenceable by any path (claim, requeue, reap), so no grant can carry it and the whole batch unwinds. Set it back to `1`, or delete the row. The engine does not guard against it by decision — the column is written by the engine only, and a guard would be a flag for a hypothetical |
+| Called `Mohs.remove` by mistake | Call `mohs.reactivate(key)` explicitly with the installed catalog. Startup preserves retirement; cancelled old work stays cancelled |
+| Work rows edited manually | Complete-operation invariants and schema checks can reject malformed rows. Diagnose the source of the write; use the supported API instead of changing attempt/ownership fields manually. |

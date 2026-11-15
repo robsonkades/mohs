@@ -1,154 +1,50 @@
-# Data lifecycle and retention
+# Data lifecycle
 
-Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
+Status: Active · Last reviewed: 2026-09-10.
 
-**Read this before running Mohs in production.** History retention exists but is **opt-in**
-(`mohs.engine.history-retention`): with the property unset, three tables grow without bound
-and pruning them is your responsibility.
+| Data | Growth and removal |
+|---|---|
+| Active work | One `mohs_work` row per active execution; terminal completion or queued cancellation removes it. Backlog is not intrinsically bounded. |
+| Execution history | One immutable input snapshot and only the latest completed attempt per execution. Terminal history is removed only when retention is configured. |
+| Idempotency receipts | Independent fixed expiry set at acceptance; zero configured retention creates indefinite receipts. |
+| Sessions | Revoked old sessions without grants are purged; live sessions and sessions still referenced by work remain. |
+| Definitions/catalog/resources | Retained operational configuration; retirement preserves executable identity and input contract. |
+| Batches | Counters remain with member history. An empty retained batch can be collected with history retention. |
 
-## Growth profile per table
+## Work and history
 
-| Table | Grows with | Bounded? | Automatic cleanup |
-| --- | --- | --- | --- |
-| `mohs_job_definitions` | Number of jobs | **Yes** — by declarations | Soft retire; rows never deleted |
-| `mohs_rate_limits` | Number of limits | **Yes** | None needed |
-| `mohs_batches` | Number of batches created | **Only with `history-retention` set** | The hourly sweep, once no member remains |
-| `mohs_nodes` | Node incarnations (one per boot) | Effectively yes | **Yes** — the stale purge, on every tick |
-| `mohs_ready` | The current backlog | No fixed capacity — grows when enqueue outpaces claim | Structural |
-| `mohs_lease` | Work executing across the cluster (`nodes × dispatch-concurrency`) | **Yes** — thousands, never millions | Structural: a completion deletes the row |
-| `mohs_execution` | Every execution | **Only with `history-retention` set** | The hourly sweep, terminal rows outside the window |
-| `mohs_attempt` | Every attempt | **Only with `history-retention` set** | The hourly sweep, once the execution is gone |
-| `mohs_idempotency` | Every idempotent enqueue | Time-based retention, proportional to request volume (default 7d) | The hourly idempotency prune |
+READY/LEASED transitions update one active row. Losing resource admission preserves the attempt number; a completed retryable failure consumes an attempt and schedules the next one. Completion atomically updates the latest result, work, batch counters and eligible fixed-delay trigger.
 
-## What is purged automatically
+`mohs.engine.history-retention` is disabled by default. When positive, the coordinator attempts an hourly sweep of terminal executions older than the cutoff and batches with no remaining members. Each pass is bounded to 1,000 candidates per category, with statement deadlines, a two-second sweep sub-budget and the shared round deadline. A deferred or unsuccessful sweep leaves rows for later passes; retention is an eligibility window, not an exact deletion time.
 
-The stale-node purge, in `Engine#purgeStaleNodeRows`, riding along on the tick:
+The sweep uses finished-time predicates and excludes active work. It does not derive completion age from the timestamp inside a UUID. Removing a FAILED execution also removes the ability to manually retry that execution. Idempotency receipts remain independent and may still return an ID whose history has been pruned.
 
-```java
-Instant cutoff = clock.instant().minus(nodeLeaseTtl.multipliedBy(STALE_NODE_RETENTION_LEASES));
-int purged = nodeStore.deleteHeartbeatsBefore(cutoff);
-```
+History without retention grows with total accepted executions. The latest-attempt format limits diagnostics per execution, not the number or size of snapshots. Work indexes exclude retained terminal history, but cache, storage and database load are shared.
 
-| Property | Value |
-| --- | --- |
-| Retention | `node-lease-ttl × 10` — 2.5 minutes at the 15 s default |
-| Frequency | Every tick, on every node |
-| Isolation | Runs inside `runMaintenance`, so a failure does not stop the claim |
-| Logging | INFO when rows were actually removed |
+## Idempotency
 
-**It is not death detection.** Death is derived at read time from the promise's age. The purge
-merely collects rows no reader can use, because each boot generates a new `node_id`.
+The original receipt stores execution ID, normalized scheduled time, actor, acceptance time and `expires_at`. Database time decides expiry. At equality with `expires_at`, the key is expired even if the cleanup has not deleted it. A fresh acceptance replaces an expired receipt and creates its execution in the same transaction.
 
-Two details worth knowing:
+The default lifetime for new receipts is seven days. Zero creates receipts without expiry; changing configuration does not rewrite existing expiry times. Cleanup starts hourly when caught up, removing pages of at most 1,000 expired receipts within the shared tick budget and a two-second pass budget. A full last page or failed pass schedules continuation after one second; exhausted idle cleanup returns to the hourly cadence. Cleanup frequency never defines deduplication correctness.
 
-- It derives from `node-lease-ttl`, **not** `lease-ttl`. Using the execution TTL let an operator who
-  lowered `lease-ttl` delete the row of a node whose promise was still alive — and an absent row *is*
-  death at read time, so a peer's reaper would reclaim work in flight on a live node.
-- Every node issues the same `DELETE` on every tick, which is a classic deadlock candidate on SQL
-  Server. That is precisely why the step is isolated.
+Receipt retention does not guarantee uniqueness of a handler's external effects. Jobs can run again after lost confirmation, revoked sessions or retries. Business idempotency belongs at the effect boundary.
 
-## Built-in history retention (`mohs.engine.history-retention`)
+## Session cleanup
 
-Set a positive window and the engine sweeps history hourly, on the tick, on every node:
+Session expiry and revocation are distinct. A peer must atomically revoke an expired session before reclaiming its grants. A stale membership snapshot cannot revoke a session that renewed first. Cleanup removes only sufficiently old revoked sessions with no outstanding grants, using a cutoff derived from the last confirmed database heartbeat and ten session TTLs.
 
-| Property | Value |
-| --- | --- |
-| What goes | TERMINAL executions `finished_at` older than the window; attempts whose execution is gone; batches with no remaining member |
-| What never goes | Anything live (`PENDING`, queued, leased), an open batch (it always has a live member), and `mohs_idempotency` (its own window — below) |
-| Bounds | 1,000 rows per statement per pass; passes repeat only within a 2 s monotonic budget per hourly slot; 1 s query timeout per statement |
-| How it seeks | No index was added: ids are UUIDv7, so the sweep ranges the PRIMARY KEY below a bound synthesized from the cutoff instant |
-| Backlog | A months-deep backlog (a window enforced for the first time) drains across hourly slots, bounded every step |
-| Observability | An INFO line per sweeping slot; failures count into `mohs.tick.failed{step="history-prune"}` |
-| Consequence to accept | A `FAILED` row outside the window can no longer be manually retried — it is gone. That is what retention means |
+A stopped/revoked identity cannot renew. New process membership uses a new UUIDv7; there is no epoch compatibility fallback or nullable-expiry legacy path.
 
-With the property **unset** (the default), nothing prunes history. Consequences to plan for:
+## Coordinator budget
 
-| Consequence | Detail |
-| --- | --- |
-| Unbounded storage growth | Proportional to total executions ever run, plus every attempt |
-| Payload retention | Payloads are stored **forever**, which may itself be a data-protection concern |
-| Read costs that *do* scale with history | The execution listing's index keeps it `O(limit)` per job, but a full-table scan of history is available to any query you write yourself |
-| Read costs that **do not** | The claim (references only `mohs_ready`/`mohs_lease`) and the throughput window (a range scan whose cost is the window's activity) |
+One monotonic node-TTL/4 budget covers a whole round. The next round resumes from the stage after the one that exhausted the budget. Queue metrics, cleanup and cancellation observations may therefore be delayed under load. Failed maintenance retains its previous sample or persisted state and records a failure metric.
 
-### The idempotency window is its own contract
+Statement and transaction deadlines bound individual database operations. A pool wait or JDBC call already in progress is not forcibly completed by the round checkpoint. Membership fencing protects database transitions if the process loses its session while blocked; it cannot undo an external effect.
 
-`mohs_idempotency` answers to `mohs.engine.idempotency-retention` (default 7 days), pruned hourly by
-the engine — never to history retention. The two windows are deliberately independent, in both
-directions: a key must keep deduplicating for its whole window even after its execution's history is
-swept (deleting the key row with the execution would re-open the dedup window early), which also
-means the execution id a deduplicated enqueue returns may point at history that is already gone.
+## Input format
 
-## Operating with the sweep off
+`InputCodec.JSON` owns the strict JSON format used for stored inputs and HTTP conversion. Unknown properties are rejected. Snapshots identify a declared input contract rather than a Java class name; workers decode using their local registered type.
 
-With `history-retention` unset, retention is the **operator's** responsibility. What the schema
-supports today:
+An input update changes future recurring occurrences. Existing executions and retries retain their original JSON. A compatible class rename can preserve the same input contract. An incompatible format requires a different job identity; retirement/reactivation does not permit changing the retained contract. There is no tolerant legacy reader or dual format path.
 
-### Deleting old history
-
-```sql
--- Order matters: attempts reference executions logically (no FK is declared, but the
--- read model joins them).
-DELETE FROM mohs_attempt
- WHERE finished_at < :cutoff;
-
-DELETE FROM mohs_execution
- WHERE state IN ('SUCCEEDED','FAILED','CANCELLED')
-   AND finished_at < :cutoff;
-```
-
-| Guidance | Reason |
-| --- | --- |
-| **Delete in batches**, never one unbounded statement | An unbounded delete is a long transaction that holds back PostgreSQL's xmin horizon and bloats the hot tables the autovacuum settings were tuned to protect |
-| Only delete rows in a **terminal** state with a `finished_at` in the past | A `PENDING` row with no queue entry and no lease is a completion flush in progress, and deleting it would orphan a live execution |
-| Prefer off-peak | The tables are shared with the host application's database |
-| `mohs_attempt` first, then `mohs_execution` | The detail view joins them; the reverse order leaves attempts pointing at nothing |
-| `mohs_idempotency` separately, by its **own** window | It is pruned by the idempotency window, not by history retention — and its index exists for exactly this |
-
-### Deleting old batches
-
-```sql
-DELETE FROM mohs_batches
- WHERE created_at < :cutoff
-   AND succeeded + failed = total;    -- completed only
-```
-
-Only after the corresponding `mohs_execution` rows are gone, or the batch counters become
-unresolvable from history.
-
-## What must never be deleted while it is live
-
-| Row | Why |
-| --- | --- |
-| A `mohs_ready` row | It **is** the backlog. Deleting it loses the execution silently |
-| A `mohs_lease` row | It is live ownership. Deleting it makes the owner's completion lose the fence, and the result is discarded |
-| A `mohs_nodes` row of a live node | An absent row **is** death at read time, so a peer's reaper reclaims work still running there |
-| A `mohs_job_definitions` row | Retire it instead (`Mohs.remove`). Deleting it leaves history pointing at nothing and the queue draining nowhere |
-| A `mohs_execution` row that is `PENDING` | Either it is queued/owned, or it is a flush in progress |
-
-## Payload lifecycle
-
-| Aspect | Detail |
-| --- | --- |
-| Serialisation | Jackson, with the payload's **concrete class name** stored in `payload_type` |
-| Deserialisation | Reflective, at claim time |
-| Mapper | A **raw `JsonMapper`**, deliberately not the host's context `ObjectMapper` — the persisted format belongs to Mohs, and using the application's HTTP configuration would let it define a durable format shared between nodes, breaking already-written payloads the day it changed. The REST layer converts a request body into the job's payload type with the **same** mapper in a strict variant — an unknown property is a 422, not a silent `null` — so what the API accepts is exactly what the store reads back; the store itself stays tolerant, because a payload written by an older version of the class must still be readable after a field is removed |
-| Failure | A payload that will not deserialise (a corrupt row, a class gone from the classpath) is **terminal by nature**, with `attemptsExhausted = false`. It does not heal by re-reading |
-| Schema evolution | **Whatever Jackson tolerates.** Adding a nullable field is safe; renaming or retyping one breaks executions persisted before the deploy. There is no payload versioning mechanism |
-| Empty payloads | Scheduler occurrences persist a concrete `LinkedHashMap`, never `Map.of()` — `payload_type` stores the exact class, and reading it back needs a type Jackson can instantiate again |
-
-## Recommended retention design
-
-Set `mohs.engine.history-retention` and let the built-in sweep do this. The manual route above
-remains for the one shape the property does not cover: **separate windows for successes (short) and
-failures (long)** — failures are the forensic record, and the built-in window is deliberately one
-knob, not a policy language. A deployment that needs the split runs its own recurring job with the
-batched, terminal-only `DELETE`s shown above, and leaves the property unset.
-
-## Backup and restore considerations
-
-| Concern | Guidance |
-| --- | --- |
-| Mohs' tables live in the **host's** database | They are covered by the host's backup policy automatically |
-| Restoring to a point in the past | `mohs_nodes` rows will be stale; they expire and are purged within `node-lease-ttl × 10`. `mohs_lease` rows will be orphaned and reclaimed by the reaper — through the retry budget, so **work will re-execute** |
-| Restoring while nodes are running | Do not. A restored `mohs_ready`/`mohs_lease` pair against live nodes will produce duplicate execution |
-| Before running `V5` on PostgreSQL | **Take a backup.** It is the one migration that copies rows and has no undo |
+See [data model](data-model.md), [type contract](type-contract.md) and [transactions](../04-engineering/transactions.md).

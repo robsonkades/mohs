@@ -24,11 +24,23 @@ import static org.assertj.core.api.Assertions.assertThat;
 class HandlerRegistryTest {
 
     @Test
-    void registerWithoutPayloadTypeLeavesItEmpty() {
-        HandlerRegistry registry = new HandlerRegistry();
-        registry.register(JobKey.of("welcome-email"), (payload, ctx) -> { });
+    void frozenCatalogRejectsMutationAndIgnoresLocalClassNamesInItsFingerprint() {
+        var before = new HandlerRegistry();
+        before.register(JobKey.of("job"), (payload, ctx) -> {}, String.class, "format-v1");
+        var afterRename = new HandlerRegistry();
+        afterRename.register(JobKey.of("job"), (payload, ctx) -> {}, Object.class, "format-v1");
+        assertThat(before.freeze().fingerprint()).isEqualTo(afterRename.freeze().fingerprint());
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> before.register(JobKey.of("new-job"),
+                (payload, ctx) -> {}, Object.class)).isInstanceOf(IllegalStateException.class).hasMessageContaining("frozen");
+    }
 
-        assertThat(registry.payloadType(JobKey.of("welcome-email"))).isEmpty();
+    @Test
+    void noInputHasAnExplicitLocalTypeAndDurableContract() {
+        HandlerRegistry registry = new HandlerRegistry();
+        registry.register(JobKey.of("welcome-email"), (payload, ctx) -> { }, io.mohs.core.NoInput.class);
+
+        assertThat(registry.payloadType(JobKey.of("welcome-email"))).contains(io.mohs.core.NoInput.class);
+        assertThat(registry.reference(JobKey.of("welcome-email")).inputContract()).isEqualTo("welcome-email");
     }
 
     @Test

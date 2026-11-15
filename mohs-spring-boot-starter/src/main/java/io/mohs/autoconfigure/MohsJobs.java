@@ -45,7 +45,7 @@ import org.jspecify.annotations.Nullable;
 /**
  * Pure vocabulary for the {@link MohsJob} scanner — no state, no Spring, testable in isolation.
  * {@link MohsJobScanner} is its only caller; package-private for the same reason as
- * {@code JobSpecImpl} (Effective Java Item 15: minimise accessibility).
+ * {@code JobOptions} (Effective Java Item 15: minimise accessibility).
  */
 final class MohsJobs {
 
@@ -65,6 +65,10 @@ final class MohsJobs {
     static AdaptedHandler adaptHandler(Object bean, Method method) {
         Objects.requireNonNull(bean, "bean");
         Objects.requireNonNull(method, "method");
+        if (method.getReturnType() != void.class) {
+            throw new IllegalStateException(unsupportedSignature(method,
+                    "must return void and complete synchronously; asynchronous results are not awaited"));
+        }
         method.setAccessible(true);
 
         ParameterBinding binding = ParameterBinding.of(method);
@@ -174,25 +178,24 @@ final class MohsJobs {
      * record through its canonical constructor rather than the staged builder
      * ({@link JobDefinition#of}): {@code ANNOTATION} should only be producible by something that
      * actually scanned an annotation, and the public builder hardcodes
-     * {@code PROGRAMMATIC}/{@code name = null} on purpose (see {@code JobSpecImpl#toDefinition}).
+     * {@code PROGRAMMATIC}/{@code name = null} on purpose (see {@code JobDefinition#of}).
      * Every field-combination validation comes free from the record's compact constructor.
      */
-    static JobDefinition toDefinition(JobKey key, MohsJob annotation, Class<?> handlerType) {
+    static JobDefinition toDefinition(JobKey key, MohsJob annotation) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(annotation, "annotation");
-        Objects.requireNonNull(handlerType, "handlerType");
 
         Schedule declaredTrigger = triggerOrNull("@MohsJob(id=\"" + annotation.id() + "\")",
                 annotation.cron(), annotation.zone(), annotation.every(), annotation.everyAfterFinish());
         Schedule schedule = Objects.requireNonNullElse(declaredTrigger, new OnDemandSpec());
-        int maxConcurrentExecutions = annotation.allowConcurrentExecutions() ? 0 : annotation.maxConcurrentExecutions();
+        int maxConcurrentExecutions = annotation.maxConcurrentExecutions();
 
-        return new JobDefinition(key, blankToNull(annotation.name()), handlerType, schedule,
+        return new JobDefinition(key, blankToNull(annotation.name()),key, schedule,
                 blankToNull(annotation.runner()), blankToNull(annotation.window()),
                 blankToNull(annotation.rateLimit()), annotation.misfire(),
-                annotation.startPaused(), annotation.allowConcurrentExecutions(), maxConcurrentExecutions,
+                annotation.startPaused(), maxConcurrentExecutions,
                 annotation.retries(), parseDurationOrNull(annotation.timeout()), blankToNull(annotation.retryPolicy()),
-                DefinitionSource.ANNOTATION);
+                DefinitionSource.ANNOTATION, key.value());
     }
 
     /**

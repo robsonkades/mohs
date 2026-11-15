@@ -34,26 +34,26 @@ class Invoices {
 ```
 
 ```java
-mohs.schedule(SEND_INVOICE, new SendInvoice(4711))
-    .as("ops@acme.com")
-    .idempotencyKey("invoice-4711")
-    .now();
+mohs.enqueue(SEND_INVOICE, new SendInvoice(4711));
+mohs.scheduleAt(SEND_INVOICE, new SendInvoice(4712), when);
 ```
 
-That is the whole surface for the common case. No `Job` interface, no `implements`, no serialisation
-boundary.
+For programmatic registration, expose a `JobRegistration<T>` bean once, then reuse its `JobRef<T>`
+with different inputs for immediate, delayed or recurring work. Inputs are persisted as JSON;
+callbacks and injected services remain local. See [Programmatic jobs](docs/05-api/programmatic-jobs.md)
+for complete examples and optional execution policy.
 
 ## What it gives you
 
 | | |
 | --- | --- |
-| **At-least-once delivery** | Guaranteed when `retries > 0` — which is the default, for exactly this reason |
-| **Cluster-safe by construction** | No leader, no consensus, no lock service. Three database-arbitrated decisions: a CAS on the trigger, `SKIP LOCKED` on the claim, a fenced `DELETE` on the completion |
-| **Automatic recovery** | A dead node's lease expires; a peer's reaper reclaims its work through the retry budget. A revived zombie's writes lose by construction — every owned write carries a `(node_id, epoch, attempt)` fencing token |
+| **Durable work and retries** | Accepted work survives process failure and is retried through its configured budget. Handlers can run again after an unknown result; external effects need their own idempotency |
+| **Cluster coordination in the database** | Durable sessions, schedule-revision CAS, guarded acquisition, per-job capacity reservation and atomic fenced completion |
+| **Automatic recovery** | A peer atomically revokes an expired session before recovering its work through the retry budget. Owned writes match the session, a fresh `claim_token` and the attempt; an obsolete grant cannot complete a newer acquisition |
 | **Four schedule kinds** | Seconds-first cron with Quartz extensions, fixed rate, fixed delay, on demand — with DST fall-back suppression and three misfire policies |
 | **Cooperative cancellation** | Per-attempt timeouts, a shutdown drain with escalation, and an optional watchdog bound |
 | **Idempotent invocation** | `Idempotency-Key` deduplication that composes with your transaction as a savepoint |
-| **Batches** | All-or-nothing creation, atomic counting, exactly one `BatchCompleted` |
+| **Batches** | Atomic creation and durable member counters, with a queryable completion snapshot and best-effort global listeners |
 | **Cluster-wide rate limits and exclusion windows** | Token buckets and firing exclusions, referenced by name |
 | **An operational REST API and dashboard** | Both opt-in, served on your server, inside your security |
 | **Metrics out of the box** | `mohs.*` through Micrometer, always on |
@@ -82,7 +82,7 @@ the values at a point in time, and each series can be shown or hidden independen
   </tr>
   <tr>
     <td align="center"><sub>Searchable jobs, active filters and configurable columns</sub></td>
-    <td align="center"><sub>Execution metadata, attempt history and operational actions</sub></td>
+    <td align="center"><sub>Execution metadata, latest-attempt diagnostics and operational actions</sub></td>
   </tr>
 </table>
 
@@ -136,8 +136,8 @@ psql -U postgres -d yourdb -f schema-postgresql.sql
 ```
 
 Without it, the first write fails at boot with the driver's own message
-(`relation "mohs_rate_limits" does not exist`). Upgrading an existing database means applying the
-`V*.sql` deltas yourself — see [installing and upgrading the schema](docs/06-data/migrations.md).
+(`relation "mohs_rate_limits" does not exist`). This first-release baseline ships one canonical
+installer per database and no historical upgrade chain. See [schema installation](docs/06-data/migrations.md).
 An embedded library does not run DDL against a database it does not own.
 
 ## Architecture at a glance
@@ -162,8 +162,11 @@ flowchart TB
 Eleven Maven modules, ports and adapters, with the boundaries **executable by the reactor itself**:
 `mohs-api` cannot see `mohs-engine`, and `mohs-rest` cannot see it either.
 
-The hot path is split into four tables by **write profile**, so **history size does not affect claim
-cost** — measured flat between roughly 0 and 2 M history rows.
+The schema has **eight tables**. `mohs_work` holds queued and acquired work; execution snapshots,
+the latest attempt and idempotency receipts have separate retention. Active-work indexes stay
+separate from history, while database resources and cleanup remain shared. The
+[data model](docs/06-data/data-model.md) describes these contracts; the
+[benchmark guide](docs/10-performance/benchmarks.md) explains how to measure backlog and progress.
 
 ## Technology
 
@@ -180,8 +183,8 @@ cost** — measured flat between roughly 0 and 2 M history rows.
 ```text
 mohs-cron/                   seconds-first cron parsing, vendored, self-contained
 mohs-api/                    THE PUBLIC API — 100% contract
-mohs-engine/                 the engine and its ten ports (nine for persistence, one for the clock)
-mohs-store-jdbc/             JDBC adapters, dialects, migrations
+mohs-engine/                 execution, coordination and persistence ports
+mohs-store-jdbc/             JDBC adapters, dialects, canonical installers
 mohs-rest/                   the operational REST API v1
 mohs-ui/                     the dashboard — no Java, only the built bundle
 mohs-test/                   the test kit: MutableClock, InMemoryJobStore
@@ -225,7 +228,7 @@ a regression.
    exactly what it can do. Put a `SecurityFilterChain` in front of `/api/mohs/**`, `/mohs-ui` and
    `/mohs-ui/**`.
    See [security](docs/08-security/security-overview.md).
-2. **History retention is opt-in.** `mohs_execution`, `mohs_attempt` and `mohs_batches` grow
+2. **History retention is opt-in.** `mohs_execution` and `mohs_batches` grow
    forever unless you set `mohs.engine.history-retention` (default `0s`, meaning keep everything);
    with a window the engine sweeps terminal history hourly. `mohs_idempotency` is bounded separately
    by `mohs.engine.idempotency-retention` (default `7d`) — which is the deduplication window itself,

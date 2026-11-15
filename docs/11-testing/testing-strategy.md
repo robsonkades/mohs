@@ -12,7 +12,7 @@ from Surefire's default naming pattern and run explicitly.
 | Layer | Main locations | What it proves |
 | --- | --- | --- |
 | Domain and engine units | `mohs-core/src/test` | State transitions, scheduling, retries, admission, cancellation, listeners and lifecycle |
-| JDBC integration | `mohs-store-jdbc/src/test` | Claims, fencing, migrations, retention and dialect-specific SQL against real PostgreSQL, MySQL and SQL Server containers, plus H2 |
+| JDBC integration | `mohs-store-jdbc/src/test` | Claims, fencing, schema installers, retention and dialect-specific SQL against real PostgreSQL, MySQL and SQL Server containers, plus H2 |
 | REST contracts | `mohs-rest/src/test` | Endpoint status, pagination, validation, bounded error details and SSE behaviour |
 | Spring Boot integration | `mohs-spring-boot-starter/src/test` | Auto-configuration, bean conditions, configuration validation and dashboard resource serving |
 | Architecture and source guards | tests alongside their owning modules | Package boundaries and invariants that reflection or compilation alone cannot express |

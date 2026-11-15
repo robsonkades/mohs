@@ -23,49 +23,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import io.mohs.core.Mohs;
-import io.mohs.core.ScheduleCommand;
 import io.mohs.core.definition.OnDemandJob;
 import io.mohs.core.event.Enqueued;
 import io.mohs.core.execution.Priority;
 import io.mohs.core.job.JobRef;
 
-/**
- * <b>Scenario 7 — everything a single invocation can say.</b>
- *
- * <p>{@link Mohs#schedule} opens a {@link ScheduleCommand}: a chain over an ALREADY existing
- * definition. The pre-terminal steps adjust this one instance — priority, actor, idempotency key —
- * and the terminal persists it and closes the chain. Policy (retries, timeout, runner) belongs to
- * the definition and is deliberately not overridable here: a job's behaviour must not depend on
- * which call site scheduled it.
- *
- * <p>The three terminals:
- *
- * <table border="1">
- * <caption>When it becomes due</caption>
- * <tr><td>{@code now()}</td><td>as soon as a claim can take it</td></tr>
- * <tr><td>{@code at(instant)}</td><td>at an absolute point in time</td></tr>
- * <tr><td>{@code after(duration)}</td><td>relative to now</td></tr>
- * </table>
- *
- * <p>All three return an {@link Enqueued} receipt whose {@code ExecutionId} is already durable. The
- * non-terminal steps carry {@code @CheckReturnValue}, so a chain abandoned before its terminal is a
- * compiler warning rather than silence — the classic builder-without-build bug.
- *
- * <h2>The three modifiers, and what each is actually for</h2>
- *
- * <ul>
- * <li><b>{@code priority}</b> — five levels, used as the claim ordering. There is no aging in this
- *     version, so {@link Priority#BACKGROUND} can starve under sustained higher-priority load. Use
- *     it to separate classes of work, not to micro-manage a queue.</li>
- * <li><b>{@code as}</b> — the audit trail. It answers "who asked for this?" in the dashboard and in
- *     {@code Execution.actor}. The engine's own name is reserved: a manual schedule may not pass
- *     itself off as a trigger occurrence.</li>
- * <li><b>{@code idempotencyKey}</b> — deduplication by {@code (job, key)}, an Idempotent Receiver.
- *     A second call with the same key creates nothing and returns the ORIGINAL receipt. The key
- *     deduplicates for as long as the execution row exists, so derive it from the business event
- *     ({@code "charge-" + invoiceId}) and never from a timestamp.</li>
- * </ul>
- */
+/** Examples of direct typed submission with immutable priority, actor and deduplication options. */
 @Component
 public class SchedulingOptionsExample {
 
@@ -101,7 +64,7 @@ public class SchedulingOptionsExample {
      * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued chargeNow(Charge charge) {
-        return mohs.schedule(CHARGE, charge).now();
+        return mohs.enqueue(CHARGE, charge);
     }
 
     /**
@@ -114,7 +77,7 @@ public class SchedulingOptionsExample {
      * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued chargeAt(Charge charge, Instant when) {
-        return mohs.schedule(CHARGE, charge).at(when);
+        return mohs.scheduleAt(CHARGE, charge, when);
     }
 
     /**
@@ -125,7 +88,7 @@ public class SchedulingOptionsExample {
      * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued chargeAfter(Charge charge, Duration delay) {
-        return mohs.schedule(CHARGE, charge).after(delay);
+        return mohs.scheduleAfter(CHARGE, charge, delay);
     }
 
     /**
@@ -138,11 +101,9 @@ public class SchedulingOptionsExample {
      * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued chargeUrgently(Charge charge, String requestedBy) {
-        return mohs.schedule(CHARGE, charge)
-                .priority(Priority.CRITICAL)
-                .as(requestedBy)
-                .idempotencyKey("charge-" + charge.invoiceId())
-                .now();
+        return mohs.enqueue(CHARGE, charge, io.mohs.core.SubmissionOptions.defaults()
+                .withPriority(Priority.CRITICAL).withActor(requestedBy)
+                .withIdempotencyKey("charge-" + charge.invoiceId()));
     }
 
     /**
@@ -155,7 +116,7 @@ public class SchedulingOptionsExample {
      * @return the enqueue receipt, subject to commit of any enclosing transaction
      */
     public Enqueued chargeByName(String jobId, Charge charge) {
-        return mohs.schedule(jobId, charge).now();
+        return mohs.enqueue(JobRef.of(jobId, Charge.class), charge);
     }
 
     @OnDemandJob(id = "example-invoice-charge", name = "Charge an invoice", retries = 4, timeout = "PT2M")

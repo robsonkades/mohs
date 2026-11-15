@@ -48,8 +48,8 @@ and it is the only shape the reactor allows.
 | `SqlServerUnicodeScanTest` | `mohs-store-jdbc/src/test` | Guards `NVARCHAR` usage in the SQL Server dialect — `VARCHAR` is not Unicode there by default |
 | `KeyGenerationScanTest` | `mohs-store-jdbc/src/test` | Both halves of the UUIDv7 invariant: no `randomUUID` outside the UUIDv7 library in the module's `src/main/java`, and no `IDENTITY`/`SERIAL`/`AUTO_INCREMENT`/`SEQUENCE` in any `.sql` |
 | `SchemaPostgresRoundTripTest`, `SchemaMySqlRoundTripTest`, `SchemaSqlServerRoundTripTest` | `mohs-store-jdbc/src/test` | Exercise every store against a real container on the schema an operator would install |
-| `SchemaPostgresChainMatchesInstallerTest` | `mohs-store-jdbc/src/test` | Builds one database from `schema-postgresql.sql` and one from the `V*.sql` chain, then compares columns and index definitions. With no migration engine running them, this is the only thing keeping the installer and the upgrade path from drifting apart |
-| `JdbcDelegateStatementDriftTest` | `mohs-store-jdbc/src/test` | Compares the named parameters of all 66 statements across the four delegates — the price of spelling every statement out per database |
+| `SchemaInstallerTest` / `JdbcWorkShapeTest` | `mohs-store-jdbc/src/test` | Fresh/repeated canonical installation and rejection of contradictory READY/LEASED row shapes across the four databases |
+| `JdbcDelegateStatementDriftTest` | `mohs-store-jdbc/src/test` | Compares named parameters of shared and overridden statements, including folded claims; real protocol tests check their semantics |
 
 ## Runtime guardrails
 

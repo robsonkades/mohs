@@ -21,7 +21,7 @@ the host's `server.servlet.context-path`.
 | `PATCH` | `/jobs/{jobKey}/schedule` | Change the schedule at runtime | 200 |
 | `GET` | `/jobs/{jobKey}/executions` | That job's executions, paginated | 200 |
 | `GET` | `/executions` | Global execution search, paginated | 200 |
-| `GET` | `/executions/{id}` | One execution, with attempts | 200 |
+| `GET` | `/executions/{id}` | One execution, with its latest completed attempt | 200 |
 | `POST` | `/executions/{id}/cancel` | Cooperative cancellation | **202** |
 | `POST` | `/executions/{id}/retry` | Manual retry of a `FAILED` execution | **202** |
 | `GET` | `/rate-limits` | Declared limits and bucket balances | 200 |
@@ -233,28 +233,28 @@ Returns `CursorPage<ExecutionSummaryResponse>`. 404 for an unknown job.
 
 `firedAt` is the claim instant while `RUNNING`, and **`null` once the execution completes** —
 ownership lives in the lease table, which is deleted at completion. The historical question "when
-did each attempt start" belongs to `attempts[].startedAt` in the detail view.
+did the latest completed attempt start" belongs to `lastAttempt.startedAt` in the detail view.
 
 The `status` filter targets different storage per value: a terminal value filters the column,
 `RUNNING` filters ownership, and `ENQUEUED`/`RETRY_WAITING` filter the queue.
 
 ### `GET /executions/{id}`
 
-The same shape **plus `attempts`**:
+The same shape **plus nullable `lastAttempt`**:
 
 ```json
 {
   "executionId": "0198e...", "jobKey": "send-invoice", "state": "FAILED",
   "scheduledAt": "...", "firedAt": null, "actor": "ops@acme.com",
-  "attempts": [
-    { "number": 1, "startedAt": "...", "finishedAt": "...", "outcome": "FAILED",    "error": "connect timed out" },
-    { "number": 2, "startedAt": "...", "finishedAt": "...", "outcome": "FAILED",    "error": "connect timed out" }
-  ]
+  "lastAttempt": {
+    "number": 2, "startedAt": "...", "finishedAt": "...", "outcome": "FAILED", "error": "connect timed out"
+  }
 }
 ```
 
 `error` is non-null exactly when `outcome` is `FAILED`. Successful and cancelled
-attempts have no error message. 404 for an unknown id.
+attempts have no error message. Before any completion, `lastAttempt` is null. A running/waiting retry
+still shows its previous completed attempt. Earlier attempts are not retained. 404 for an unknown id.
 
 ### `POST /executions/{id}/cancel`
 

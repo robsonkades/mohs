@@ -39,8 +39,9 @@ import io.mohs.core.job.JobRef;
  *
  * <ul>
  * <li><b>All or nothing at creation.</b> Every member is validated before any write, and the batch
- *     row plus its members enter in a single transaction. An exception from {@link Mohs#batch}
- *     guarantees nothing was persisted, so the call can simply be repeated.</li>
+ *     row plus its members enter in a single transaction. Validation failures and a confirmed rollback
+ *     leave no members behind. A connection failure during commit can leave the outcome unknown;
+ *     reconcile it before repeating the call, since a batch submission has no idempotency key.</li>
  * <li><b>The total is fixed at creation</b>, and each member is born already carrying the
  *     {@code batchId} — which is what makes its completion count towards the batch.</li>
  * <li><b>An empty batch is refused.</b> With no members it would never complete, and a
@@ -56,10 +57,8 @@ import io.mohs.core.job.JobRef;
  *
  * <h2>Reading the outcome</h2>
  *
- * <p>{@link Batch#onCompletion} is a convenience notification, not a guarantee: it is delivered
- * best-effort, in the same spirit as {@link io.mohs.core.event.ExecutionListener}. If something MUST
- * happen when the batch closes, enqueue a job for it. {@link Mohs#findBatch} is the pull side, and
- * it is cheap at any size: the counter is maintained rather than aggregated over the members.
+ * <p>{@link Mohs#findBatch} reads durable counters. Global execution listeners offer best-effort
+ * notifications; a durable continuation requires an explicit application protocol.
  */
 @Component
 public class BatchExample {
@@ -92,9 +91,8 @@ public class BatchExample {
     }
 
     /**
-     * One member per row, one receipt for the whole thing. The {@code batchId} is durable by the
-     * time {@link Mohs#batch} returns — hand it back to whoever uploaded the file, and they can
-     * poll {@link #progressOf} with it.
+     * One member per row, one receipt for the batch. Inside a host transaction, acceptance is
+     * durable only when that transaction commits. Poll {@link #progressOf} for its counters.
      *
      * @param lines the input rows to import
      * @return the identity of the scheduled import batch
@@ -105,10 +103,6 @@ public class BatchExample {
                 members.add(IMPORT_ROW, new ImportRow(line + 1, lines.get(line)));
             }
         });
-
-        // Each call registers an independent callback; it never replaces the previous one.
-        batch.onCompletion(completed -> log.info("batch {} ({}) finished: {} succeeded, {} failed of {}",
-                completed.batchId(), completed.name(), completed.succeeded(), completed.failed(), completed.total()));
 
         return batch.batchId();
     }

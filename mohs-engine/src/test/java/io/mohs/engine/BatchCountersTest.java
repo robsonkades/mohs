@@ -24,7 +24,7 @@ class BatchCountersTest {
 
     @Test
     void pendingIsDerivedFromTheOtherThreeCounters() {
-        BatchCounters counters = new BatchCounters("batch-1", "nightly", 10, 6, 1);
+        BatchCounters counters = new BatchCounters("01991337-0000-7000-8000-00000000000e", "nightly", 10, 6, 1);
 
         assertThat(counters.pending()).isEqualTo(3);
     }
@@ -37,19 +37,19 @@ class BatchCountersTest {
 
     @Test
     void rejectsNegativeTotal() {
-        assertThatThrownBy(() -> new BatchCounters("batch-1", "n", -1, 0, 0))
+        assertThatThrownBy(() -> new BatchCounters("01991337-0000-7000-8000-00000000000e", "n", -1, 0, 0))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void rejectsNegativeSucceeded() {
-        assertThatThrownBy(() -> new BatchCounters("batch-1", "n", 0, -1, 0))
+        assertThatThrownBy(() -> new BatchCounters("01991337-0000-7000-8000-00000000000e", "n", 0, -1, 0))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void rejectsNegativeFailed() {
-        assertThatThrownBy(() -> new BatchCounters("batch-1", "n", 0, 0, -1))
+        assertThatThrownBy(() -> new BatchCounters("01991337-0000-7000-8000-00000000000e", "n", 0, 0, -1))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

@@ -35,6 +35,7 @@ module io.mohs.engine {
     requires spring.context;
     requires spring.tx;
     requires spring.beans;
+    requires tools.jackson.databind;
     requires io.github.robsonkades.uuidv7;
 
     exports io.mohs.engine to io.mohs.store.jdbc, io.mohs.autoconfigure, io.mohs.test;

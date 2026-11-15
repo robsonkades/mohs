@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { advanceCursor, type CursorHistory } from "./cursorHistory";
 
 /**
  * Client-side "Previous"/"Next" over a keyset-cursor API (CursorPage carries no total count and
@@ -6,25 +7,24 @@ import { useEffect, useState } from "react";
  * forward again re-hits the TanStack Query cache instead of the network.
  */
 export function useCursorHistory(resetKey: string) {
-  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
-  const [pageIndex, setPageIndex] = useState(0);
-
-  useEffect(() => {
-    setCursors([undefined]);
-    setPageIndex(0);
-  }, [resetKey]);
-
+  const [saved, setSaved] = useState<CursorHistory & { resetKey: string }>({ resetKey, cursors: [undefined], pageIndex: 0 });
+  const history = saved.resetKey === resetKey ? saved : { resetKey, cursors: [undefined], pageIndex: 0 };
+  // Reset before the query renders, so a new filter never fetches with an old filter's cursor.
+  if (saved.resetKey !== resetKey) setSaved(history);
+  const { cursors, pageIndex } = history;
   const after = cursors[pageIndex];
 
   function next(nextCursor: string | null) {
-    if (!nextCursor) return;
-    setCursors((prev) => (pageIndex + 1 < prev.length ? prev : [...prev, nextCursor]));
-    setPageIndex((i) => i + 1);
+    setSaved((current) => current.resetKey === resetKey
+      ? { ...advanceCursor(current, pageIndex, nextCursor), resetKey }
+      : current);
   }
 
   function prev() {
-    setPageIndex((i) => Math.max(0, i - 1));
+    setSaved((current) => ({ ...current, pageIndex: Math.max(0, current.pageIndex - 1) }));
   }
 
-  return { after, pageNumber: pageIndex + 1, hasPrev: pageIndex > 0, next, prev };
+  function reset() { setSaved({ resetKey, cursors: [undefined], pageIndex: 0 }); }
+
+  return { after, pageNumber: pageIndex + 1, hasPrev: pageIndex > 0, next, prev, reset };
 }

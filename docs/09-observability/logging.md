@@ -21,7 +21,6 @@ The tables below describe useful messages rather than a count of logging call si
 | `io.mohs.engine.Dispatcher` | Attempt outcomes, retries, fence losses |
 | `io.mohs.engine.CompletionBatcher` | Flush failures and fallbacks |
 | `io.mohs.engine.ExecutionEventPublisher` | Listener exceptions, dropped events |
-| `io.mohs.engine.BatchCompletionCallbacks` | Callback exceptions |
 | `io.mohs.engine.ExecutionWindowRegistry` | Unknown window names |
 | `io.mohs.engine.MohsImpl` | Manual retries |
 | `io.mohs.engine.RunnerRegistry` | Runner lifecycle |
@@ -52,7 +51,7 @@ shutdown's duration and record definitional drift.
 
 | Message | Meaning and action |
 | --- | --- |
-| `engine loop died — this node stops claiming. Its node lease will expire and peers will reclaim the work still running here (at-least-once). Restart the instance.` | The loop thread caught a `Throwable` and is exiting. **Restart the node.** This is the message that exists because an `Error` used to escape silently, leaving `state` at `RUNNING` forever while `MohsLifecycle#state` and `GET /nodes` lied |
+| `engine loop died — this node stops claiming. Its node lease will expire and peers will recover outstanding grants through their retry budget. Restart the instance.` | The loop thread caught a `Throwable` and is exiting. **Restart the node.** This is the message that exists because an `Error` used to escape silently, leaving `state` at `RUNNING` forever while `MohsLifecycle#state` and `GET /nodes` lied |
 | `overview stream tick died with an Error — the periodic task is CANCELLED and every connected dashboard will silently freeze on stale data. Restart the application.` | `scheduleWithFixedDelay` cancels a throwing task permanently |
 | `completion flush cycle failed unexpectedly — N result(s) fall to this node's stray-lease reconcile (or a peer's reaper if this node dies)` | Recovery is automatic, but the cause needs investigation |
 | `dispatch of execution {} threw outside the normal failure paths` | The outcome *write* itself threw — the zombie's only trace |
@@ -65,7 +64,7 @@ shutdown's duration and record definitional drift.
 
 | Message | Meaning |
 | --- | --- |
-| `node lease expired at {} while this node was stalled — epoch bumped to {}; peers may have reclaimed in-flight work` | **This node was dead to the cluster.** Their re-runs stand; this node's fenced completions are discarded |
+| Session expiry or renewal refusal | The session can no longer acquire/settle work. Restart with a fresh session; investigate database waits, pool saturation and process pauses. |
 | `clock moved backwards between heartbeats — the new lease promise ({}) is EARLIER than the previous one ({})… Check NTP, or mohs.time.mode/sync-interval` | Without this line, *"why did the cluster re-execute 60 jobs at 04:12?"* has no log connecting symptom to cause |
 | `attempt {} of execution {} finished {} but the incarnation was no longer ours (reaper/requeue passed first) — result discarded` | The fence worked. Expected during recovery |
 | `requeued N lease(s) this node was holding with no in-flight incarnation — work lost between claim and dispatch` | The stray-lease reconcile fired |
@@ -125,7 +124,7 @@ shutdown's duration and record definitional drift.
 | `executionId` in every execution-related line | An automatically propagated request/correlation id |
 | `jobKey` in claim, dispatch and completion lines | MDC populated by Mohs |
 | `actor` on audit lines | Trace and span ids |
-| `node_id` persisted per attempt in `mohs_attempt` | |
+| `last_attempt_node_id` persisted for the latest completed attempt in `mohs_execution` | |
 
 **Mohs populates no MDC.** The intended extension point is `ExecutionInterceptor`, which runs on the
 attempt's own thread and is documented as "the place for MDC, tracing spans and context through

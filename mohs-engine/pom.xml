@@ -17,6 +17,10 @@
 
     <dependencies>
         <dependency>
+            <groupId>tools.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.github.robsonkades</groupId>
             <artifactId>mohs-api</artifactId>
         </dependency>

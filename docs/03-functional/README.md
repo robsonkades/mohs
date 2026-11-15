@@ -23,7 +23,7 @@ Everything in this section ultimately serves one of these:
 
 ```mermaid
 flowchart LR
-    A["Recurring trigger<br/>actor = scheduler"] --> Q["mohs_ready"]
+    A["Recurring trigger<br/>origin = SCHEDULED"] --> Q["mohs_work READY"]
     B["Mohs.schedule(...)<br/>actor = application or caller"] --> Q
     C["Mohs.batch(...)<br/>N members sharing a batchId"] --> Q
     D["POST /jobs/{k}/schedule<br/>actor = X-Mohs-Actor"] --> Q

@@ -77,7 +77,8 @@ final class PostgresTestSupport {
     static DataSource freshSchema() {
         DataSource dataSource = dataSource();
         new JdbcTemplate(dataSource).execute(
-                "TRUNCATE TABLE mohs_job_definitions, mohs_batches, mohs_rate_limits, mohs_nodes, mohs_ready, mohs_lease, mohs_execution, mohs_attempt, mohs_idempotency CASCADE");
+                "TRUNCATE TABLE mohs_job_definitions, mohs_batches, mohs_rate_limits, mohs_nodes, mohs_work, mohs_execution, mohs_idempotency CASCADE");
+        new JdbcTemplate(dataSource).update("UPDATE mohs_catalog SET fingerprint = NULL WHERE singleton = 1");
         return dataSource;
     }
 

@@ -84,6 +84,7 @@ export const ENGINE_STATE_TONE: Record<EngineState, Tone> = {
   PAUSED: "warning",
   DRAINING: "serious",
   STOPPED: "cancelled",
+  FAILED: "critical",
 };
 
 export function EngineStateBadge({ state }: { state: EngineState }) {

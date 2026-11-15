@@ -17,52 +17,11 @@ package io.mohs.engine;
 
 import java.util.Optional;
 
-/**
- * Persistence of batch counters — a Repository (PoEAA), the port {@code io.mohs.store.jdbc}
- * implements.
- *
- * <p>{@link #incrementSucceeded}/{@link #incrementFailed} are atomic increments in SQL, not
- * read-then-write: executions of the same batch complete concurrently on different threads.
- *
- * <p>Both return the POST-increment balance because that is what elects who closes the batch:
- * exactly one caller sees {@link BatchCounters#pending()} at zero, and that is the one firing
- * {@code BatchCompleted}. Asking afterwards, through a separate {@link #find}, would not do — two
- * concurrent completions would read the same final balance and both would believe they closed it.
- */
+/** Queries durable batch counters. Complete submission, completion and cancellation own their writes. */
 public interface BatchStore {
-
     /**
-     * {@code name} is the caller's label — persisted, never derived.
-     *
-     * @param batchId the identity of the batch
-     * @param name the human-readable name
-     * @param total the total number of batch members
-     */
-    void insert(String batchId, String name, int total);
-
-    /**
-     * Looks up the current batch counters.
-     *
-     * @param batchId the identity of the batch
-     * @return the batch counters, or empty when the batch does not exist
+     * @param batchId the batch identity
+     * @return the durable counters, or empty when no retained batch exists
      */
     Optional<BatchCounters> find(String batchId);
-
-    /**
-     * Increments the successful-member count for the batch.
-     *
-     * @param batchId the identity of the batch
-     * @return the batch's balance after this increment; {@code pending() == 0} identifies this call
-     *         as the one that closed the batch
-     */
-    BatchCounters incrementSucceeded(String batchId);
-
-    /**
-     * Increments the failed-member count for the batch.
-     *
-     * @param batchId the identity of the batch
-     * @return the updated batch counters
-     * @see #incrementSucceeded
-     */
-    BatchCounters incrementFailed(String batchId);
 }

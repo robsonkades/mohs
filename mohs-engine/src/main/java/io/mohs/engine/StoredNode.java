@@ -17,41 +17,20 @@ package io.mohs.engine;
 
 import java.time.Instant;
 import java.util.Objects;
-
-import org.jspecify.annotations.Nullable;
-
 import io.mohs.core.EngineState;
 
-/**
- * A cluster node with the most recent known heartbeat — the internal representation of
- * {@link NodeStore}; the public form is {@code io.mohs.core.NodeSnapshot}, mapped by
- * {@code MohsImpl#nodes} (from which REST derives {@code io.mohs.rest.node.NodeResponse}).
- *
- * <p>{@code epoch} is the node's incarnation (bumped on the node itself when it notices its lease
- * expired); {@code expiresAt} is the NODE's lease, renewed by the heartbeat — {@code null} only on
- * a row written by an older jar (the reaper then falls back to the heartbeat's staleness).
- *
- * @param nodeId the identity of the engine node
- * @param state the current lifecycle state
- * @param lastHeartbeatAt the instant of the last recorded heartbeat
- * @param epoch the ownership generation used by the completion fence
- * @param expiresAt the instant when the liveness lease expires
- */
-public record StoredNode(String nodeId, EngineState state, Instant lastHeartbeatAt, long epoch,
-        @Nullable Instant expiresAt) {
-
-    /**
-     * Creates a {@code StoredNode} with the supplied values.
-     *
-     * @param nodeId the identity of the engine node
-     * @param state the current lifecycle state
-     * @param lastHeartbeatAt the instant of the last recorded heartbeat
-     * @param epoch the ownership generation used by the completion fence
-     * @param expiresAt the instant when the liveness lease expires
-     */
+/** A durable session snapshot; lifecycle state is independent of irrevocable revocation. */
+public record StoredNode(String nodeId, EngineState state, Instant lastHeartbeatAt,
+        Instant expiresAt, boolean revoked) {
     public StoredNode {
-        Objects.requireNonNull(nodeId, "nodeId");
+        io.mohs.core.GeneratedId.require(nodeId, "nodeId");
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(lastHeartbeatAt, "lastHeartbeatAt");
+        Objects.requireNonNull(expiresAt, "expiresAt");
+    }
+
+    /** Read-side estimate; the store rechecks validity when granting or completing work. */
+    public boolean validAt(Instant now) {
+        return !revoked && expiresAt.isAfter(now);
     }
 }

@@ -76,16 +76,13 @@ class HeaderActorResolverTest {
         assertThat(resolver.resolve(request)).isEqualTo(actor);
     }
 
-    /** 'scheduler' is the engine's reserved actor (load-bearing in the fixed-delay rearm) — forging it through the header, in any casing, becomes a 400 that teaches. */
     @Test
-    void rejectsTheReservedSchedulerActorInAnyCase() {
+    void acceptsSchedulerAsAnAuditIdentity() {
         for (String forged : new String[] {Execution.SCHEDULER_ACTOR, "Scheduler", "SCHEDULER"}) {
             HttpServletRequest request = Mockito.mock(HttpServletRequest.class);
             Mockito.when(request.getHeader("X-Mohs-Actor")).thenReturn(forged);
 
-            assertThatThrownBy(() -> resolver.resolve(request))
-                    .isInstanceOf(InvalidActorException.class)
-                    .hasMessageContaining("reserved for engine-fired occurrences");
+            assertThat(resolver.resolve(request)).isEqualTo(forged);
         }
     }
     /**

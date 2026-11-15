@@ -15,9 +15,9 @@
  */
 package io.mohs.core;
 
-import java.util.Objects;
-
 import io.mohs.core.resource.RateLimit;
+
+import java.util.Objects;
 
 /**
  * A {@link RateLimit} plus the current state of the token bucket enforcing it — the read form
@@ -25,7 +25,7 @@ import io.mohs.core.resource.RateLimit;
  * was declared, {@code available} is what the engine has right now.
  *
  * @param available tokens available at the instant of the read — how many firings fit NOW, not how
- *        many were used; a full bucket equals {@code rateLimit.max()}
+ *                  many were used; a full bucket equals {@code rateLimit.max()}
  * @param rateLimit the declared cluster-wide throughput limit
  */
 public record RateLimitSnapshot(RateLimit rateLimit, int available) {
@@ -42,8 +42,7 @@ public record RateLimitSnapshot(RateLimit rateLimit, int available) {
             throw new IllegalArgumentException("available must not be negative, got " + available);
         }
         if (available > rateLimit.max()) {
-            throw new IllegalArgumentException(
-                    "available must not exceed the bucket capacity of " + rateLimit.max() + ", got " + available);
+            throw new IllegalArgumentException("available must not exceed the bucket capacity of " + rateLimit.max() + ", got " + available);
         }
     }
 }

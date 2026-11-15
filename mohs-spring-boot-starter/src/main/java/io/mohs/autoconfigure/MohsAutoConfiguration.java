@@ -41,6 +41,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.util.function.SingletonSupplier;
 
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -52,7 +53,6 @@ import io.mohs.core.execution.RetryPolicy;
 import io.mohs.core.resource.ExecutionWindow;
 import io.mohs.core.resource.MohsRunner;
 import io.mohs.core.resource.RateLimit;
-import io.mohs.engine.BatchCompletionCallbacks;
 import io.mohs.engine.BatchStore;
 import io.mohs.engine.CompletionBatcher;
 import io.mohs.engine.Dispatcher;
@@ -70,7 +70,7 @@ import io.mohs.engine.NodeStore;
 import io.mohs.engine.RateLimitStore;
 import io.mohs.engine.RetryPolicyRegistry;
 import io.mohs.engine.RunnerRegistry;
-import io.mohs.engine.StoreTransactions;
+import io.mohs.engine.SubmissionStore;
 import io.mohs.engine.TriggerFirer;
 import io.mohs.engine.WorkQueue;
 import io.mohs.store.jdbc.DatabaseClock;
@@ -80,8 +80,7 @@ import io.mohs.store.jdbc.JdbcJobStore;
 import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcNodeStore;
 import io.mohs.store.jdbc.JdbcRateLimitStore;
-import io.mohs.store.jdbc.JdbcStoreTransactions;
-import io.mohs.store.jdbc.JdbcTriggerFirer;
+import io.mohs.store.jdbc.JdbcSubmissionStore;
 import io.mohs.store.jdbc.JdbcWorkQueue;
 import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.store.jdbc.delegate.JdbcDelegate;
@@ -294,7 +293,7 @@ public class MohsAutoConfiguration {
     }
 
     /**
-     * The payload mapper is Mohs' own, shared with the REST layer — {@link PayloadMapper} says why it is not the context's.
+     * History reads stored JSON snapshots; {@link io.mohs.engine.InputCodec} owns their typed decoding.
      *
      * @param dataSource the configured database connection source
      * @param delegate the database-specific SQL and timestamp adapter
@@ -302,7 +301,7 @@ public class MohsAutoConfiguration {
      */
     @Bean
     public HistoryStore mohsHistoryStore(DataSource dataSource, JdbcDelegate delegate) {
-        return new JdbcHistoryStore(dataSource, PayloadMapper.SHARED, delegate);
+        return new JdbcHistoryStore(dataSource, delegate);
     }
 
     /**
@@ -310,12 +309,11 @@ public class MohsAutoConfiguration {
      *
      * @param dataSource the configured database connection source
      * @param delegate the database-specific SQL and timestamp adapter
-     * @param mohsBatchStore the persistence port for batch counters
      * @return the configured {@code WorkQueue} bean
      */
     @Bean
-    public WorkQueue mohsWorkQueue(DataSource dataSource, JdbcDelegate delegate, BatchStore mohsBatchStore) {
-        return new JdbcWorkQueue(dataSource, delegate, mohsBatchStore);
+    public WorkQueue mohsWorkQueue(DataSource dataSource, JdbcDelegate delegate) {
+        return new JdbcWorkQueue(dataSource, delegate);
     }
 
     /**
@@ -323,23 +321,22 @@ public class MohsAutoConfiguration {
      *
      * @param dataSource the configured database connection source
      * @param delegate the database-specific SQL and timestamp adapter
-     * @param mohsBatchStore the persistence port for batch counters
      * @return the configured {@code LeaseStore} bean
      */
     @Bean
-    public LeaseStore mohsLeaseStore(DataSource dataSource, JdbcDelegate delegate, BatchStore mohsBatchStore) {
-        return new JdbcLeaseStore(dataSource, delegate, mohsBatchStore);
+    public LeaseStore mohsLeaseStore(DataSource dataSource, JdbcDelegate delegate) {
+        return new JdbcLeaseStore(dataSource, delegate);
     }
 
     /**
-     * The transactional boundary of the enqueue unit — NESTED: a savepoint inside the host's transaction, or a transaction of its own; {@link JdbcStoreTransactions} says why the savepoint is load-bearing.
+     * The transactional boundary of the enqueue unit — NESTED: a savepoint inside the host's transaction, or a transaction of its own; {@link JdbcSubmissionStore} says why the savepoint is load-bearing.
      *
      * @param dataSource the configured database connection source
-     * @return the configured {@code StoreTransactions} bean
+     * @return the configured {@code SubmissionStore} bean
      */
     @Bean
-    public StoreTransactions mohsStoreTransactions(DataSource dataSource) {
-        return new JdbcStoreTransactions(dataSource);
+    public JdbcSubmissionStore mohsSubmissionStore(DataSource dataSource, JdbcDelegate delegate, MohsProperties properties) {
+        return new JdbcSubmissionStore(dataSource, delegate, properties.engine().idempotencyRetention());
     }
 
     /**
@@ -349,6 +346,12 @@ public class MohsAutoConfiguration {
      * @param delegate the database-specific SQL and timestamp adapter
      * @return the configured {@code NodeStore} bean
      */
+    @Bean
+    @ConditionalOnMissingBean(io.mohs.engine.CatalogStore.class)
+    public io.mohs.engine.CatalogStore mohsCatalogStore(DataSource dataSource, @Qualifier("mohsClock") Clock clock, JdbcDelegate delegate) {
+        return new io.mohs.store.jdbc.JdbcCatalogStore(dataSource, clock, delegate);
+    }
+
     @Bean
     public NodeStore mohsNodeStore(DataSource dataSource, JdbcDelegate delegate) {
         return new JdbcNodeStore(dataSource, delegate);
@@ -382,13 +385,12 @@ public class MohsAutoConfiguration {
      * Creates the {@code RateLimitStore} bean for Mohs integration.
      *
      * @param dataSource the configured database connection source
-     * @param mohsClock the time source used by the component
      * @param delegate the database-specific SQL and timestamp adapter
      * @return the configured {@code RateLimitStore} bean
      */
     @Bean
-    public RateLimitStore mohsRateLimitStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, JdbcDelegate delegate) {
-        return new JdbcRateLimitStore(dataSource, mohsClock, delegate);
+    public RateLimitStore mohsRateLimitStore(DataSource dataSource, JdbcDelegate delegate) {
+        return new JdbcRateLimitStore(dataSource, delegate);
     }
 
     /**
@@ -421,28 +423,36 @@ public class MohsAutoConfiguration {
         return new ExecutionWindowRegistry(mohsExecutionWindowBeans);
     }
 
-    /**
-     * Creates the {@code TriggerFirer} bean for Mohs integration.
-     *
-     * @param dataSource the configured database connection source
-     * @param mohsHistoryStore the persistence port for execution history
-     * @param mohsWorkQueue the persistence port for ready work
-     * @param delegate the database-specific SQL and timestamp adapter
-     * @return the configured {@code TriggerFirer} bean
-     */
-    @Bean
-    public TriggerFirer mohsTriggerFirer(DataSource dataSource, HistoryStore mohsHistoryStore, WorkQueue mohsWorkQueue, JdbcDelegate delegate) {
-        return new JdbcTriggerFirer(dataSource, mohsHistoryStore, mohsWorkQueue, delegate);
-    }
+
 
     /**
      * Born empty — {@link MohsJobScanner} populates it in {@code afterSingletonsInstantiated}, before the {@link Engine} starts.
+     * Rate-limit beans are resolved at policy validation, so their configuration may itself inject {@link Mohs}.
      *
      * @return the configured {@code HandlerRegistry} bean
      */
     @Bean
-    public HandlerRegistry mohsHandlerRegistry() {
-        return new HandlerRegistry();
+    public HandlerRegistry mohsHandlerRegistry(RunnerRegistry mohsRunnerRegistry,
+            ExecutionWindowRegistry mohsExecutionWindowRegistry, RetryPolicyRegistry mohsRetryPolicyRegistry,
+            MohsProperties properties, ObjectProvider<RateLimit> mohsRateLimitBeans) {
+        // Resolve once after bean construction, then reuse the immutable names on submissions.
+        var rateNames = SingletonSupplier.of(() ->
+                MohsRateLimits.assemble(properties, mohsRateLimitBeans.orderedStream().toList()).stream()
+                        .map(RateLimit::name).collect(java.util.stream.Collectors.toUnmodifiableSet()));
+        return new HandlerRegistry(definition -> {
+            try {
+                mohsRunnerRegistry.resolve(definition.runner());
+                if (definition.window() != null && !mohsExecutionWindowRegistry.contains(definition.window())) {
+                    throw new IllegalArgumentException("no execution window named '" + definition.window() + "'");
+                }
+                if (definition.retryPolicy() != null) mohsRetryPolicyRegistry.require(definition.retryPolicy());
+                if (definition.rateLimit() != null && !rateNames.obtain().contains(definition.rateLimit())) {
+                    throw new IllegalArgumentException("no declared rate limit named '" + definition.rateLimit() + "'");
+                }
+            } catch (RuntimeException e) {
+                throw new IllegalArgumentException("invalid policy for job '" + definition.key().value() + "': " + e.getMessage(), e);
+            }
+        });
     }
 
     /**
@@ -510,13 +520,12 @@ public class MohsAutoConfiguration {
      * drains what the last handlers submitted.
      *
      * @param mohsLeaseStore the persistence port for execution ownership
-     * @param mohsJobStore the persistence port for job definitions and triggers
      * @return the configured {@code CompletionBatcher} bean
      */
     @Bean(initMethod = "start", destroyMethod = "close")
     @ConditionalOnProperty(name = "mohs.engine.completion-flush-on-every-result", havingValue = "false", matchIfMissing = true)
-    public CompletionBatcher mohsCompletionBatcher(LeaseStore mohsLeaseStore, JobStore mohsJobStore) {
-        return new CompletionBatcher(mohsLeaseStore, mohsJobStore, 256, Duration.ofMillis(5));
+    public CompletionBatcher mohsCompletionBatcher(LeaseStore mohsLeaseStore) {
+        return new CompletionBatcher(mohsLeaseStore, 256, Duration.ofMillis(5));
     }
 
     /**
@@ -557,11 +566,7 @@ public class MohsAutoConfiguration {
     ) {
         MohsProperties.Engine engineProperties = properties.engine();
         rejectNodeLeaseShorterThanTheTickCanRenew(engineProperties.nodeLeaseTtl());
-        EngineSettings settings = new EngineSettings(engineProperties.pollInterval(), engineProperties.maxPollInterval(),
-                engineProperties.batchSize(), engineProperties.dispatchConcurrency(), engineProperties.claimRounds(),
-                engineProperties.leaseTtl(), engineProperties.nodeLeaseTtl(), engineProperties.watchdogTimeout(),
-                engineProperties.misfireThreshold(), engineProperties.idempotencyRetention(),
-                engineProperties.historyRetention(), properties.lifecycle().startupDelay());
+        EngineSettings settings = new EngineSettings(engineProperties.pollInterval(),engineProperties.maxPollInterval(),engineProperties.batchSize(),engineProperties.dispatchConcurrency(),engineProperties.claimRounds(),engineProperties.nodeLeaseTtl(),engineProperties.watchdogTimeout(),engineProperties.misfireThreshold(),engineProperties.historyRetention(),properties.lifecycle().startupDelay());
         return new Engine(mohsWorkQueue, mohsDispatcher, mohsHistoryStore, mohsLeaseStore, mohsJobStore, mohsNodeStore,
                 mohsTriggerFirer, mohsExecutionWindowRegistry, mohsRateLimitStore, mohsClock, settings,
                 mohsRunnerRegistry, mohsEngineMetrics, mohsRetryPolicyRegistry);
@@ -644,13 +649,12 @@ public class MohsAutoConfiguration {
      * Creates the {@code BatchStore} bean for Mohs integration.
      *
      * @param dataSource the configured database connection source
-     * @param mohsClock the time source used by the component
      * @param delegate the database-specific SQL and timestamp adapter
      * @return the configured {@code BatchStore} bean
      */
     @Bean
-    public BatchStore mohsBatchStore(DataSource dataSource, @Qualifier("mohsClock") Clock mohsClock, JdbcDelegate delegate) {
-        return new JdbcBatchStore(dataSource, mohsClock, delegate);
+    public BatchStore mohsBatchStore(DataSource dataSource, JdbcDelegate delegate) {
+        return new JdbcBatchStore(dataSource, delegate);
     }
 
     /**
@@ -667,32 +671,19 @@ public class MohsAutoConfiguration {
     }
 
     /**
-     * Joins {@link #mohsDispatcher}'s {@code ExecutionListener} list like any other: that is how
-     * {@code Batch.onCompletion} receives the {@code BatchCompleted} the dispatcher publishes, with
-     * no parallel delivery path.
-     *
-     * @return the configured {@code BatchCompletionCallbacks} bean
-     */
-    @Bean
-    public BatchCompletionCallbacks mohsBatchCompletionCallbacks() {
-        return new BatchCompletionCallbacks();
-    }
-
-    /**
      * Creates the {@code Mohs} bean for Mohs integration.
      *
      * @param mohsJobStore the persistence port for job definitions and triggers
      * @param mohsWorkQueue the persistence port for ready work
      * @param mohsHistoryStore the persistence port for execution history
      * @param mohsLeaseStore the persistence port for execution ownership
-     * @param mohsStoreTransactions the transaction boundary shared by store operations
+     * @param mohsSubmissionStore the transaction boundary shared by store operations
      * @param mohsNodeStore the persistence port for node heartbeats
      * @param mohsRateLimitStore the persistence port for shared rate-limit buckets
      * @param mohsHandlerRegistry the registry of local job handlers and payload types
      * @param mohsClock the time source used by the component
      * @param mohsEngine the local execution engine
      * @param mohsBatchStore the persistence port for batch counters
-     * @param mohsBatchCompletionCallbacks the process-local batch completion callbacks
      * @param mohsRunnerRegistry the registry of local execution resources
      * @param listeners the listeners receiving execution events
      * @param mohsEventExecutor the executor that delivers execution events
@@ -700,16 +691,16 @@ public class MohsAutoConfiguration {
      */
     @Bean
     public Mohs mohs(JobStore mohsJobStore, WorkQueue mohsWorkQueue, HistoryStore mohsHistoryStore,
-            LeaseStore mohsLeaseStore, StoreTransactions mohsStoreTransactions, NodeStore mohsNodeStore,
+            LeaseStore mohsLeaseStore, SubmissionStore mohsSubmissionStore, NodeStore mohsNodeStore,
             RateLimitStore mohsRateLimitStore, HandlerRegistry mohsHandlerRegistry,
             @Qualifier("mohsClock") Clock mohsClock, Engine mohsEngine, BatchStore mohsBatchStore,
-            BatchCompletionCallbacks mohsBatchCompletionCallbacks, RunnerRegistry mohsRunnerRegistry,
+            RunnerRegistry mohsRunnerRegistry,
             List<ExecutionListener> listeners, @Qualifier("mohsEventExecutor") AsyncTaskExecutor mohsEventExecutor) {
         // The same listeners and executor the dispatcher publishes to: Enqueued is born on the
         // facade's side and must reach the same observers as every other event
-        return new MohsImpl(mohsJobStore, mohsWorkQueue, mohsHistoryStore, mohsLeaseStore, mohsStoreTransactions,
+        return new MohsImpl(mohsJobStore, mohsWorkQueue, mohsHistoryStore, mohsLeaseStore, mohsSubmissionStore,
                 mohsNodeStore, mohsRateLimitStore, mohsHandlerRegistry,
-                mohsClock, mohsEngine, mohsBatchStore, mohsBatchCompletionCallbacks, mohsRunnerRegistry,
+                mohsClock, mohsEngine, mohsBatchStore, mohsRunnerRegistry,
                 mohsEngine::signalWorkScheduled, listeners, mohsEventExecutor);
     }
 
@@ -730,9 +721,10 @@ public class MohsAutoConfiguration {
     public static MohsJobScanner mohsJobScanner(
             ObjectProvider<HandlerRegistry> mohsHandlerRegistry,
             ObjectProvider<JobStore> mohsJobStore,
+            ObjectProvider<io.mohs.engine.CatalogStore> mohsCatalogStore,
             ObjectProvider<MohsProperties> properties,
             ObjectProvider<OnExecutionRegistry> mohsOnExecutionRegistry
     ) {
-        return new MohsJobScanner(mohsHandlerRegistry, mohsJobStore, properties, mohsOnExecutionRegistry);
+        return new MohsJobScanner(mohsHandlerRegistry, mohsJobStore, mohsCatalogStore, properties, mohsOnExecutionRegistry);
     }
 }

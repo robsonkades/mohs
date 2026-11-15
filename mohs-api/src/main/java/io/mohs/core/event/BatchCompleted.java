@@ -15,41 +15,33 @@
  */
 package io.mohs.core.event;
 
+import io.mohs.core.GeneratedId;
+
 import java.util.Objects;
 
-import io.mohs.core.Batch;
-
 /**
- * A deliberate dual role, in the same spirit as {@link Enqueued}: it is both the data handed to
- * {@link Batch#onCompletion} and the corresponding {@link ExecutionEvent} variant — which avoids
- * duplicating the same shape under two names.
+ * Notification after the durable counters reach the batch total. Delivery to execution listeners
+ * is best-effort; use {@link io.mohs.core.Mohs#findBatch} to query durable progress.
  *
- * <p>It carries the batch's {@code name}: a batch-completion callback that does not know WHICH
- * batch finished is half a callback, and anyone registering {@link Batch#onCompletion} on more than
- * one batch had to match UUIDs by hand.
- *
- * @param batchId the identity of the batch
- * @param name the human-readable name
- * @param total the total number of batch members
+ * @param batchId   the identity of the batch
+ * @param name      the human-readable name
+ * @param total     the total number of batch members
  * @param succeeded the number of successful terminal executions
- * @param failed the number of failed terminal executions
+ * @param failed    the number of failed terminal executions
  */
-public record BatchCompleted(String batchId, String name, int total, int succeeded, int failed) implements ExecutionEvent {
+public record BatchCompleted(String batchId, String name, long total, long succeeded, long failed) implements ExecutionEvent {
 
     /**
      * Creates a {@code BatchCompleted} with the supplied values.
      *
-     * @param batchId the identity of the batch
-     * @param name the human-readable name
-     * @param total the total number of batch members
+     * @param batchId   the identity of the batch
+     * @param name      the human-readable name
+     * @param total     the total number of batch members
      * @param succeeded the number of successful terminal executions
-     * @param failed the number of failed terminal executions
+     * @param failed    the number of failed terminal executions
      */
     public BatchCompleted {
-        Objects.requireNonNull(batchId, "batchId");
-        if (batchId.isBlank()) {
-            throw new IllegalArgumentException("batchId must not be blank");
-        }
+        GeneratedId.require(batchId, "batchId");
         Objects.requireNonNull(name, "name");
         if (name.isBlank()) {
             throw new IllegalArgumentException("name must not be blank");
@@ -57,7 +49,7 @@ public record BatchCompleted(String batchId, String name, int total, int succeed
         if (total < 0 || succeeded < 0 || failed < 0) {
             throw new IllegalArgumentException("counters must not be negative");
         }
-        if (succeeded + failed > total) {
+        if (succeeded > total || failed > total - succeeded) {
             throw new IllegalArgumentException("succeeded + failed must not exceed total");
         }
     }

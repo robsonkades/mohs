@@ -28,32 +28,106 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import io.mohs.store.jdbc.JdbcTimestamps;
 
 /**
- * Every statement {@code io.mohs.store.jdbc} issues, answered by the delegate of the database it is
- * issued against — the shape Quartz uses ({@code StdJDBCDelegate}/{@code MSSQLDelegate}: each Delegate
- * holds the COMPLETE SQL for each operation), not Hibernate's fragment handlers.
- *
- * <p><b>No fragment is ever concatenated at runtime.</b> A delegate returns the whole statement, so what
- * a reader sees in {@code SqlServerJdbcDelegate} is literally the T-SQL the server receives. That was the
- * point of the shape even when only the claim lived here: SQL Server's {@code TOP} changes POSITION in
- * the query (right after {@code SELECT}, not at the end like {@code LIMIT}), so a composition of generic
- * fragments does not close cleanly — which is also how Hibernate implements {@code LimitHandler}
- * underneath (it receives the SQL and returns the rewritten SQL, not a fragment).
- *
- * <p><b>Every statement method is abstract on purpose.</b> A default implementation would let a delegate
- * inherit text written for another database in silence; without one, adding a statement breaks
- * compilation in all four delegates at once and each has to answer for its own SQL. The price is
- * deliberate and accepted: text that is identical today exists four times, and a correction has to be
- * applied four times — {@code JdbcDelegateStatementDriftTest} guards the parameter contract, and nothing
- * guards the rest but review.
- *
- * <p>The rationale for each statement's SHAPE lives here, on the method, and is not repeated in the
- * implementations: what is per-delegate is the SQL, not the argument for it.
- *
- * <p>Which delegate to use is an explicit choice, never auto-detection — the same pattern as Quartz's
- * ({@code org.quartz.jobStore.driverDelegateClass}): detecting through {@code Connection.getMetaData()}
- * is fragile across driver forks and versions.
+ * Shared SQL and database-specific locking, limiting, clock and claim shapes.
+ * Common statements have defaults; concrete delegates override actual database differences.
+ * Named-parameter checks and real four-database protocol tests verify the contract together.
+ * Transaction-owning stores may keep SQL specific to their complete operation locally.
  */
 public interface JdbcDelegate {
+
+    /**
+     * Reads identity, active state and schedule while holding the definition's update lock until transaction end.
+     * Bound writers lock distinct definitions in canonical key order; retirement uses the same
+     * lock before checking dependents. Missing rows are resolved by the unique-key/savepoint retry.
+     * PostgreSQL uses NO KEY UPDATE so foreign-key key-share locks remain compatible; SQL Server uses
+     * UPDLOCK. The query excludes JSON and does not rewrite a row merely to acquire a lock.
+     *
+     * @return the complete locking SELECT
+     */
+    String lockBindingOwner();
+
+    /** Current catalog fingerprint under its singleton mutex, independent of an older host snapshot. */
+    default String lockCatalog() {
+        return "SELECT fingerprint FROM mohs_catalog WHERE singleton = 1 FOR UPDATE";
+    }
+
+    /** findJobBinding statement for the durable executable binding. */
+    default String findJobBinding() {
+        return """
+                SELECT job_key, executable_key, recurring_payload, input_contract
+                FROM mohs_job_definitions WHERE job_key = :jobKey AND executable_key IS NOT NULL
+                """;
+    }
+
+    /** Indexed identity lookup; deliberately excludes potentially large recurring inputs. */
+    default String findExecutableKey() {
+        return """
+                SELECT executable_key FROM mohs_job_definitions WHERE job_key = :jobKey AND executable_key IS NOT NULL
+                """;
+    }
+
+    /** Returns 1 when another active job depends on the executable, otherwise 0. */
+    default String hasActiveJobDependents() {
+        return """
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM mohs_job_definitions
+                    WHERE executable_key = :jobKey AND job_key <> :jobKey AND retired = :retired
+                ) THEN 1 ELSE 0 END AS present
+                """;
+    }
+
+    /** findActiveJobBindings statement for the durable executable binding. */
+    default String findActiveJobBindings() {
+        return """
+                SELECT job_key, executable_key, recurring_payload, input_contract
+                FROM mohs_job_definitions WHERE retired = :retired AND executable_key IS NOT NULL
+                """;
+    }
+
+    /**
+     * Updates definition policy and its executable/input in one statement, under the owner lock.
+     * An unchanged schedule excludes next_fire_at entirely. Legacy definition updates use
+     * {@link #upsertJobUpdate} and preserve the binding columns.
+     *
+     * @param writeNextFire whether this statement replaces the trigger time
+     * @return the complete SQL for the bound definition update
+     */
+    default String upsertBoundJobUpdate(boolean writeNextFire) {
+        if (writeNextFire) {
+            return """
+                    UPDATE mohs_job_definitions SET
+                        name = :name, schedule_type = :scheduleType,
+                        cron_expression = :cronExpression, cron_zone = :cronZone,
+                        interval_micros = :intervalMicros, interval_after_finish = :intervalAfterFinish,
+                        runner = :runner, window_name = :windowName, rate_limit = :rateLimit,
+                        misfire = :misfire, start_paused = :startPaused,
+
+                        max_concurrent_executions = :maxConcurrentExecutions,
+                        retries = :retries, timeout_micros = :timeout_micros, retry_policy = :retryPolicy,
+                        executable_key = :executableKey, recurring_payload = :recurringPayload,
+                        input_contract = :inputContract,
+                        source = :source, retired = :retired,
+                        next_fire_at = :nextFireAt, schedule_revision = schedule_revision + 1, updated_at = :updatedAt
+                    WHERE job_key = :jobKey
+                    """;
+        }
+        return """
+                UPDATE mohs_job_definitions SET
+                    name = :name, schedule_type = :scheduleType,
+                    cron_expression = :cronExpression, cron_zone = :cronZone,
+                    interval_micros = :intervalMicros, interval_after_finish = :intervalAfterFinish,
+                    runner = :runner, window_name = :windowName, rate_limit = :rateLimit,
+                    misfire = :misfire, start_paused = :startPaused,
+
+                    max_concurrent_executions = :maxConcurrentExecutions,
+                    retries = :retries, timeout_micros = :timeout_micros, retry_policy = :retryPolicy,
+                    executable_key = :executableKey, recurring_payload = :recurringPayload,
+                    input_contract = :inputContract,
+                    source = :source, retired = :retired,
+                    updated_at = :updatedAt
+                WHERE job_key = :jobKey
+                """;
+    }
 
     // ---------------------------------------------------------------------------------------------
     // The database itself: clock and the temporal crossing
@@ -86,6 +160,12 @@ public interface JdbcDelegate {
      */
     String nowQuery();
 
+    /** Exclusive session lock shared by claim, completion, renewal and revocation. */
+    default String lockNode() {
+        return "SELECT node_id, state, last_heartbeat_at, expires_at, revoked FROM mohs_nodes WHERE node_id = :nodeId FOR UPDATE";
+    }
+
+
     /**
      * {@link #nowQuery()}'s crossing: the single column it selected, as an instant on the server's clock.
      *
@@ -95,39 +175,24 @@ public interface JdbcDelegate {
      */
     Instant readNow(ResultSet rs) throws SQLException;
 
-    /**
-     * The temporal crossing for the split tables: they were born {@code TIMESTAMPTZ} on Postgres and
-     * remain zoneless in the functional equivalents.
-     *
-     * <p>The usual crossing is a UTC {@code LocalDateTime}; Postgres uses {@code OffsetDateTime} — a
-     * {@code LocalDateTime} against a tz-aware column would be interpreted in the SESSION's zone, the
-     * class of bug that crossing was introduced to kill. The control-plane tables
-     * ({@code mohs_job_definitions}/{@code mohs_nodes}/{@code mohs_batches}) still go through
-     * {@link JdbcTimestamps} directly — reshaping them is a phase of its own.
-     *
-     * @param instant the instant to evaluate
-     * @return the timestamp value in the representation expected by this dialect
-     */
-    Object splitTimestamp(Instant instant);
+    /** Operational timestamps are UTC local JDBC 4.2 values at microsecond precision. */
+    default Object splitTimestamp(Instant instant) {
+        return JdbcTimestamps.toUtcLocalDateTime(instant);
+    }
 
-    /**
-     * {@link #splitTimestamp}'s inverse, reading the column back out of a {@code ResultSet}.
-     *
-     * @param rs the result set positioned on the row to read
-     * @param column the JDBC column to read
-     * @return the timestamp as an instant, or {@code null} for SQL NULL
-     * @throws java.sql.SQLException if the JDBC driver cannot read or write the requested value
-     */
-    @Nullable Instant readSplitTimestamp(ResultSet rs, String column) throws SQLException;
+    /** Reads a nullable operational timestamp without consulting JVM or session time zones. */
+    default @Nullable Instant readSplitTimestamp(ResultSet rs, String column) throws SQLException {
+        return JdbcTimestamps.fromUtcLocalDateTimeOrNull(rs.getObject(column, java.time.LocalDateTime.class));
+    }
 
     // ---------------------------------------------------------------------------------------------
-    // The claim: mohs_ready to mohs_lease
+    // The claim: mohs_work to mohs_work
     // ---------------------------------------------------------------------------------------------
 
     /**
      * The claim's candidate sweep: single-shard per statement (a measured lesson — a multi-shard
      * predicate kills the index's ordering), ordered by {@code (priority, visible_at)}, which the
-     * {@code idx_mohs_ready_claim} index supplies without a Sort. The rows must not be visible to a peer
+     * {@code idx_mohs_work_claim} index supplies without a Sort. The rows must not be visible to a peer
      * doing the same thing at the same instant: {@code FOR UPDATE SKIP LOCKED} where the database has
      * it, the {@code (UPDLOCK, ROWLOCK, READPAST)} emulation on SQL Server.
      *
@@ -135,27 +200,57 @@ public interface JdbcDelegate {
      */
     String readyCandidates();
 
-    /**
-     * {@link #readyCandidates()} with the inadmissible keys excluded — a separate statement rather than a
-     * concatenation because a {@code NOT IN} over an empty list does not expand.
-     *
-     * @return the SQL statement for locking ready candidates while excluding inadmissible jobs
-     */
-    String readyCandidatesFiltered();
+    /** Visible work identities in stable key order; one bounded page per shard probe. */
+    default String candidateJobKeys() {
+        return """
+                SELECT DISTINCT job_key FROM mohs_work
+                WHERE work_state = 'READY' AND shard = :shard AND job_key > :afterKey AND visible_at <= :now
+                ORDER BY job_key LIMIT :limit
+                """;
+    }
+
+    /** Bounded bulk policy read, using the same explicit projection as single-definition reads. */
+    default String findJobsByKeys() {
+        return findAllJobs() + " AND job_key IN (:jobKeys)";
+    }
+
+    /** Advisory candidates only. Job locks and a fresh occupancy read decide admission afterwards. */
+    default String admissionCandidates(boolean restrictJobs) {
+        return """
+                SELECT r.execution_id, r.job_key, r.attempt, r.priority
+                FROM mohs_work r JOIN mohs_job_definitions d ON d.job_key = r.job_key
+                WHERE r.work_state = 'READY' AND r.shard = :shard AND r.visible_at <= :now
+                  AND d.retired = :inactive
+                  AND (d.max_concurrent_executions = 0 OR d.max_concurrent_executions >
+                       (SELECT COUNT(*) FROM mohs_work l WHERE l.work_state = 'LEASED' AND l.job_key = d.job_key))
+                """ + (restrictJobs ? "AND r.job_key IN (:candidateJobs)\n" : "") + """
+                ORDER BY r.priority, r.visible_at, r.execution_id
+                LIMIT :limit
+                """;
+    }
 
     /**
      * The queue side of the claim: what was swept stops being queued.
      *
      * @return the SQL statement for removing claimed entries from the ready queue
      */
-    String readyDelete();
+    default String readyDelete() {
+        return "DELETE FROM mohs_work WHERE work_state = 'READY' AND execution_id IN (:ids)";
+    }
 
     /**
-     * The ownership side of the claim: what was swept becomes this node's, fenced by {@code (node_id, epoch, attempt_number)}.
+     * The ownership side of the claim: what was swept becomes this node's, fenced by {@code (node_id, claim_token, attempt_number)}.
      *
      * @return the SQL statement for inserting fenced execution ownership
      */
-    String leaseInsert();
+    default String fencedReleaseWork() {
+        return """
+                UPDATE mohs_work SET work_state = 'READY', visible_at = :visibleAt, attempt = :nextAttempt,
+                    node_id = NULL, claim_token = NULL, claimed_at = NULL, cancel_requested = :cancelRequested
+                WHERE execution_id = :executionId AND work_state = 'LEASED'
+                  AND node_id = :nodeId AND claim_token = :claimToken AND attempt = :attemptNumber
+                """;
+    }
 
     /**
      * The claim's candidate sweep, executed. Overridden only where the SQL's SHAPE forces a different
@@ -164,98 +259,72 @@ public interface JdbcDelegate {
      * @param jdbcTemplate the template used to execute database operations
      * @param shard the deterministic queue partition
      * @param limit the maximum number of results in one batch
-     * @param inadmissibleJobKeys the job identities to exclude from this claim
+     * @param executionIds the execution identities admitted under the authoritative job locks
      * @param now the current instant from the configured time source
      * @return the locked ready candidates matching the claim
      */
     default List<ClaimedReady> selectReadyCandidates(NamedParameterJdbcTemplate jdbcTemplate, int shard, int limit,
-            Collection<String> inadmissibleJobKeys, Instant now) {
+            Collection<String> executionIds, Instant now) {
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("shard", shard)
                 .addValue("now", splitTimestamp(now))
-                .addValue("limit", limit);
-        if (inadmissibleJobKeys.isEmpty()) {
-            return jdbcTemplate.query(readyCandidates(), params, ClaimedReady::fromReadyRow);
-        }
-        return jdbcTemplate.query(readyCandidatesFiltered(),
-                params.addValue("inadmissible", inadmissibleJobKeys), ClaimedReady::fromReadyRow);
+                .addValue("limit", (long) limit, java.sql.Types.BIGINT).addValue("ids", executionIds);
+        return jdbcTemplate.query(readyCandidates(), params, ClaimedReady::fromReadyRow);
     }
 
     /**
-     * The claim: it removes from the queue and inserts the ownership — the CALLER
-     * ({@code JdbcWorkQueue}) guarantees the transaction that makes both effects atomic (there is no
-     * instant of "neither queued nor owned"). The portable form is three statements (a locking SELECT, a
-     * DELETE, then a batched INSERT); Postgres overrides it with a single
-     * {@code WITH picked … DELETE … USING → INSERT … SELECT} statement, and SQL Server folds the SELECT
-     * and the DELETE into one {@code DELETE … OUTPUT} and keeps the batched INSERT
-     * ({@link #insertLeases}).
-     *
-     * @param jdbcTemplate the template used to execute database operations
-     * @param shard the deterministic queue partition
-     * @param nodeId the identity of the engine node
-     * @param epoch the ownership generation used by the completion fence
-     * @param limit the maximum number of results in one batch
-     * @param inadmissibleJobKeys the job identities to exclude from this claim
-     * @param now the current instant from the configured time source
-     * @return the ready entries successfully transferred to leased ownership
-     */
-    default List<ClaimedReady> claimReady(NamedParameterJdbcTemplate jdbcTemplate, int shard, String nodeId, long epoch,
-            int limit, Collection<String> inadmissibleJobKeys, Instant now) {
-        List<ClaimedReady> picked = selectReadyCandidates(jdbcTemplate, shard, limit, inadmissibleJobKeys, now);
-        if (picked.isEmpty()) {
-            return picked;
-        }
-        jdbcTemplate.update(readyDelete(), new MapSqlParameterSource()
-                .addValue("ids", picked.stream().map(ClaimedReady::executionId).toList()));
-        insertLeases(jdbcTemplate, picked, nodeId, epoch, now);
+ * Acquires selected ready identities inside the caller's locked session/job transaction.
+ * MySQL/H2 use a locking pick and guarded update; PostgreSQL/SQL Server fold this into one statement.
+ * @param jdbcTemplate transaction-bound template
+ * @param shard selected shard
+ * @param nodeId locked session identity
+ * @param claimToken fresh acquisition identity
+ * @param limit maximum result count
+ * @param executionIds identities admitted under job locks
+ * @param now database-bounded eligibility horizon
+ * @param grantedAt fresh database observation after admission locks
+ * @return acquired rows in priority, visibility and identity order
+ */
+    default List<ClaimedReady> claimReady(NamedParameterJdbcTemplate jdbcTemplate, int shard, String nodeId, String claimToken,
+            int limit, Collection<String> executionIds, Instant now, Instant grantedAt) {
+        List<ClaimedReady> picked = selectReadyCandidates(jdbcTemplate, shard, limit, executionIds, now);
+        if (picked.isEmpty()) return picked;
+        int changed = jdbcTemplate.update(claimPickedWork(), new MapSqlParameterSource()
+                .addValue("ids", picked.stream().map(ClaimedReady::executionId).toList())
+                .addValue("nodeId", nodeId).addValue("claimToken", claimToken)
+                .addValue("grantedAt", splitTimestamp(grantedAt)));
+        if (changed != picked.size()) throw new IllegalStateException("locked work changed during claim");
         return picked;
     }
 
-    /**
-     * The ownership side of the claim, executed: one {@link #leaseInsert()} per picked row, batched.
-     *
-     * @param jdbcTemplate the template used to execute database operations
-     * @param picked the selected queue candidates
-     * @param nodeId the identity of the engine node
-     * @param epoch the ownership generation used by the completion fence
-     * @param now the current instant from the configured time source
-     */
-    default void insertLeases(NamedParameterJdbcTemplate jdbcTemplate, List<ClaimedReady> picked, String nodeId, long epoch,
-            Instant now) {
-        Object claimedAt = splitTimestamp(now);
-        MapSqlParameterSource[] leases = picked.stream()
-                .map(row -> new MapSqlParameterSource()
-                        .addValue("executionId", row.executionId())
-                        .addValue("jobKey", row.jobKey())
-                        .addValue("nodeId", nodeId)
-                        .addValue("epoch", epoch)
-                        .addValue("attempt", row.attempt())
-                        .addValue("priority", row.priority())
-                        .addValue("now", claimedAt))
-                .toArray(MapSqlParameterSource[]::new);
-        jdbcTemplate.batchUpdate(leaseInsert(), leases);
+
+
+    // ---------------------------------------------------------------------------------------------
+    default String claimPickedWork() {
+        return """
+                UPDATE mohs_work SET work_state = 'LEASED', visible_at = NULL,
+                    node_id = :nodeId, claim_token = :claimToken, claimed_at = :grantedAt
+                WHERE execution_id IN (:ids) AND work_state = 'READY'
+                """;
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // The queue: mohs_ready and the fenced lease (JdbcWorkQueue)
+    // The queue: mohs_work and the fenced lease (JdbcWorkQueue)
     // ---------------------------------------------------------------------------------------------
 
     /**
-     * The {@code INSERT} into {@code mohs_ready} — enqueue, retry and requeue are the SAME operation with
-     * a different {@code visibleAt}: {@code JdbcWorkQueue#offer}/{@code #requeue} and the retry's rebirth
-     * inside {@code JdbcLeaseStore#complete}'s completion transaction share this statement.
-     *
-     * @return the SQL statement for inserting ready queue entries
-     */
-    String readyInsert();
+ * Initial READY work INSERT owned by atomic acceptance. Retry/requeue update the existing row.
+ * @return complete work-birth SQL
+ */
+    default String readyInsert() {
+        return """
+                INSERT INTO mohs_work (execution_id, job_key, shard, priority, attempt, visible_at, work_state)
+                VALUES (:executionId, :jobKey, :shard, :priority, :attempt, :visibleAt, 'READY')
+                """;
+    }
 
     /**
-     * The {@code DELETE} from {@code mohs_lease} fenced by {@code (node_id, epoch, attempt_number)} — the
-     * fencing token: the lease only drops if it still belongs to the observed incarnation. The attempt
-     * is part of it because a node's epoch only moves when its own lease expires: after a Watchdog
-     * Bound released an incarnation, the SAME node re-claims the retry with the same {@code (node_id,
-     * epoch)}, and the zombie's completion would otherwise pass the fence and delete the new
-     * incarnation's lease. The attempt number is what tells the two apart.
+     * Deletes only the exact observed acquisition. The token changes even when a requeue retains
+     * the same node and attempt number.
      *
      * <p>The SAME statement decides the fence in the requeue ({@code JdbcWorkQueue}) and in the
      * completion ({@code JdbcLeaseStore}) — one statement so the semantics can never diverge between the
@@ -263,47 +332,77 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for deleting only the observed lease incarnation
      */
-    String fencedLeaseDelete();
+    default String fencedLeaseDelete() {
+        return """
+                DELETE FROM mohs_work
+                WHERE execution_id = :executionId AND work_state = 'LEASED'
+                  AND node_id = :nodeId AND claim_token = :claimToken AND attempt = :attemptNumber
+                """;
+    }
 
     /**
      * Removing one entry from the queue by its primary key — the DELETE's row lock is what decides the race against a concurrent claim.
      *
      * @return the SQL statement for deleting a queued execution by identity
      */
-    String deleteReadyById();
+    default String deleteReadyById() {
+        return "DELETE FROM mohs_work WHERE work_state = 'READY' AND execution_id = :executionId";
+    }
 
     /**
-     * The advisory terminal for a cancellation, matched by id — the same match {@link #terminalStateUpdate()} makes.
+     * The advisory terminal for a cancellation, matched by execution id.
      *
      * @return the SQL statement for recording terminal cancellation
      */
-    String cancelExecution();
+    default String cancelExecution() {
+        // batch-counted: JdbcExecutionTransitions.finishCancellations increments the accepted batch in this transaction.
+        return """
+                UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :finishedAt
+                WHERE execution_id = :executionId
+                """;
+    }
 
     /**
      * The batch a cancelled execution belongs to, so the cancellation counts into it in the same transaction.
      *
      * @return the SQL statement for looking up an execution's batch identity
      */
-    String findBatchIdByExecution();
+    default String findBatchIdByExecution() {
+        return "SELECT batch_id FROM mohs_execution WHERE execution_id = :executionId";
+    }
 
     /**
      * The manual retry's CAS: it only wins with the advisory {@code FAILED} and the job alive.
      *
-     * <p>{@code correlation_id IS NULL} because a batch member does not rearm: the batch already counted
+     * <p>{@code batch_id IS NULL} because a batch member does not rearm: the batch already counted
      * this failure, and re-running would count the outcome TWICE in a batch that may already be closed
      * (a negative pending, a second {@code BatchCompleted}). The {@code EXISTS} narrows the window
      * against a concurrent {@code remove}.
      *
      * @return the SQL statement for conditionally marking a failed execution pending
      */
-    String rearmExecutionByCas();
+    default String rearmExecutionByCas() {
+        return """
+                UPDATE mohs_execution SET state = 'PENDING', finished_at = NULL
+                WHERE execution_id = :executionId AND state = 'FAILED'
+                  AND origin = 'MANUAL' AND batch_id IS NULL
+                  AND EXISTS (SELECT 1 FROM mohs_job_definitions j
+                              WHERE j.job_key = mohs_execution.job_key AND j.retired = :retired)
+                """;
+    }
 
     /**
      * The manual retry's rebirth in the queue — the attempt and the priority are derived from history itself, so the caller carries nothing.
      *
      * @return the SQL statement for rebuilding a ready entry for manual retry
      */
-    String rearmReadyFromHistory();
+    default String rearmReadyFromHistory() {
+        return """
+                INSERT INTO mohs_work (execution_id, job_key, shard, priority, attempt, visible_at, work_state)
+                SELECT e.execution_id, e.job_key, e.shard, e.priority, e.last_attempt_number + 1, :visibleAt, 'READY'
+                FROM mohs_execution e WHERE e.execution_id = :executionId
+                """;
+    }
 
     /**
      * The idle gate's probe: is there anything visible in THIS node's shards?
@@ -317,7 +416,13 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for checking for visible queue work
      */
-    String visibleWorkExists();
+    default String visibleWorkExists() {
+        return """
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM mohs_work WHERE work_state = 'READY' AND shard IN (:shards) AND visible_at <= :now
+                ) THEN 1 ELSE 0 END
+                """;
+    }
 
     /**
      * The backlog gauge. No shard predicate: the backlog is the queue's, not this node's.
@@ -328,7 +433,7 @@ public interface JdbcDelegate {
      *
      * <p>No index leads with {@code visible_at}, and none is added: a second index on the system's
      * hottest table, paid by every enqueue, claim and requeue, is a bad trade for a number sampled once
-     * every ten seconds. The count therefore SCANS, and what it scans is {@code mohs_ready} — the
+     * every ten seconds. The count therefore SCANS, and what it scans is {@code mohs_work} — the
      * queue, never history — which also means its cost grows with the very backlog it is reporting.
      *
      * @return the SQL statement for counting visible queue entries
@@ -336,7 +441,7 @@ public interface JdbcDelegate {
     String visibleWorkCount();
 
     // ---------------------------------------------------------------------------------------------
-    // History: mohs_execution, mohs_attempt, mohs_idempotency (JdbcHistoryStore)
+    // History: mohs_execution, mohs_idempotency (JdbcHistoryStore)
     // ---------------------------------------------------------------------------------------------
 
     /**
@@ -344,49 +449,76 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for inserting execution birth records
      */
-    String recordExecution();
+    default String recordExecution() {
+        return """
+                INSERT INTO mohs_execution (
+                    execution_id, job_key, shard, priority, state, scheduled_at, created_at, actor,
+                    batch_id, idempotency_key, payload, input_contract, origin, schedule_revision)
+                VALUES (:executionId, :jobKey, :shard, :priority, 'PENDING', :scheduledAt, :createdAt, :actor,
+                    :batchId, :idempotencyKey, :payload, :inputContract, :origin, :scheduleRevision)
+                """;
+    }
 
     /**
      * The Idempotent Receiver (EIP): the primary-key conflict IS the deduplication check, and it has to abort the unit before any history row is born.
      *
      * @return the SQL statement for claiming an idempotency key
      */
-    String insertIdempotency();
+    default String insertIdempotency() {
+        return """
+                INSERT INTO mohs_idempotency (job_key, idempotency_key, execution_id, created_at, expires_at, scheduled_at, actor)
+                VALUES (:jobKey, :idempotencyKey, :executionId, :createdAt, :expiresAt, :scheduledAt, :actor)
+                """;
+    }
+
+    /** The receipt retained with the deduplication key, falling back to legacy history. */
+    default String findIdempotencyReceipt() {
+        return """
+                SELECT execution_id, scheduled_at, actor FROM mohs_idempotency
+                WHERE job_key = :jobKey AND idempotency_key = :idempotencyKey
+                  AND (expires_at IS NULL OR expires_at > :now)
+                """;
+    }
 
     /**
      * The receipt lookup that answers a repeated {@code Idempotency-Key} with the execution it already produced.
      *
      * @return the SQL statement for looking up the retained idempotency winner
      */
-    String findExecutionIdByIdempotencyKey();
+
 
     /**
      * The dispatcher's batched read: the head plus the payload, for the executions a claim round just took.
      *
      * @return the SQL statement for reading execution payloads
      */
-    String findPayloads();
+    default String findPayloads() {
+        return """
+                SELECT execution_id, job_key, scheduled_at, created_at, actor, priority, batch_id,
+                       payload, input_contract
+                FROM mohs_execution WHERE execution_id IN (:ids)
+                """;
+    }
 
     /**
      * The head alone, for the paths that never deserialise a payload.
      *
      * @return the SQL statement for reading execution headers without payloads
      */
-    String findHeads();
+    default String findHeads() {
+        return """
+                SELECT execution_id, job_key, scheduled_at, created_at, actor, priority, batch_id
+                FROM mohs_execution WHERE execution_id IN (:ids)
+                """;
+    }
+
 
     /**
-     * An execution's attempts, in order — the detail view's second read (attempts in a join would multiply the row).
-     *
-     * @return the SQL statement for reading an execution's ordered attempts
-     */
-    String findAttempts();
-
-    /**
-     * The idempotency window's prune, bounded in TIME by the caller's query timeout rather than in rows.
+     * One page of expired receipts, bounded by :limit and the caller's transaction deadline.
      *
      * @return the SQL statement for deleting expired idempotency keys
      */
-    String pruneIdempotencyBefore();
+    String pruneExpiredIdempotency();
 
     /**
      * The history sweep's first statement: at most {@code :limit} TERMINAL executions finished before
@@ -405,26 +537,6 @@ public interface JdbcDelegate {
      */
     String pruneTerminalExecutionsBefore();
 
-    /**
-     * The sweep's second statement: at most {@code :limit} attempts finished before {@code :cutoff}
-     * whose execution no longer exists. Orphanhood, not a carried id list, is the predicate on
-     * purpose: it makes the statement self-sufficient across crashes (whatever the previous sweep
-     * deleted, this one's own predicate finds the leftover attempts) and race-free (an execution that
-     * survived the guarded delete keeps its attempts, and the attempt COUNT a rearm derives from
-     * stays correct).
-     *
-     * <p>The measured cost of that self-sufficiency: on PostgreSQL and SQL Server the planner answers
-     * this with a hash ANTI-JOIN over both tables — the {@code finished_at} predicate matches nearly
-     * every attempt, so no index makes it selective — which is a pass proportional to the tables'
-     * TOTAL size, not to {@code :limit} (~80 ms at half a million rows; MySQL probes the parent PK
-     * per row and is O(limit) already). That fits the 1s statement timeout until the tables reach the
-     * low millions; the O(limit) redesign for beyond that — the executions delete returning its ids,
-     * this one probing them, orphanhood kept as the crash backstop — is recorded with its measured
-     * trigger in the retention decision record.
-     *
-     * @return the SQL statement for deleting a bounded batch of orphaned attempts
-     */
-    String pruneOrphanedAttemptsBefore();
 
     /**
      * The sweep's last statement: at most {@code :limit} batches born before {@code :cutoffId} with
@@ -439,7 +551,7 @@ public interface JdbcDelegate {
      * the outer copy never saw a member committed concurrently). What closes that race is the
      * write path, not the statement: a batch and all of its members are inserted in one
      * transaction, and nothing adds a member to an existing batch later (a retry reuses the same
-     * execution row; the CAS that rearms one requires {@code correlation_id IS NULL}). A visible
+     * execution row; the CAS that rearms one requires {@code batch_id IS NULL}). A visible
      * batch with no member is therefore one whose members the previous statement already pruned.
      *
      * @return the SQL statement for deleting a bounded batch of empty batches
@@ -453,7 +565,19 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for reading an execution by identity
      */
-    String findExecutionById();
+    default String findExecutionById() {
+        return """
+                SELECT e.execution_id, e.job_key, e.state, e.scheduled_at, e.created_at, e.actor, e.priority,
+                       e.batch_id, e.idempotency_key,
+                       e.last_attempt_number, e.last_attempt_started_at, e.last_attempt_finished_at,
+                       e.last_attempt_outcome, e.last_attempt_error,
+                       w.node_id AS lease_node, w.claimed_at AS lease_claimed_at,
+                       CASE WHEN w.work_state = 'READY' THEN w.execution_id END AS ready_id, w.attempt AS ready_attempt, w.visible_at AS ready_visible_at
+                FROM mohs_execution e
+                LEFT JOIN mohs_work w ON w.execution_id = e.execution_id
+                WHERE e.execution_id = :executionId
+                """;
+    }
 
     /**
      * The read model's page over the same three tables, ordered by {@code execution_id DESC} (UUIDv7 —
@@ -483,25 +607,40 @@ public interface JdbcDelegate {
     String countRunning();
 
     /**
-     * The throughput window: terminal outcomes grouped by outcome since an instant.
+     * The throughput window: terminal execution outcomes grouped by outcome since an instant.
      *
      * @return the SQL statement for counting terminal outcomes over a time window
      */
     String countTerminalOutcomesSince();
 
     // ---------------------------------------------------------------------------------------------
-    // Ownership: mohs_lease and the completion (JdbcLeaseStore)
+    // Ownership: mohs_work and the completion (JdbcLeaseStore)
     // ---------------------------------------------------------------------------------------------
+
+    /** One session's bounded grant page, using the node/claimed-time index. */
+    default String nodeLeasePage() {
+        return """
+                SELECT execution_id, job_key, node_id, claim_token, attempt, priority, claimed_at, cancel_requested
+                FROM mohs_work WHERE work_state = 'LEASED' AND node_id = :nodeId
+                  AND (claimed_at > :afterTime OR (claimed_at = :afterTime AND execution_id > :afterId))
+                ORDER BY claimed_at, execution_id LIMIT :limit
+                """;
+    }
 
     /**
      * What a set of nodes owns — the engine's own view of its in-flight work.
      *
      * @return the SQL statement for reading leases owned by the specified nodes
      */
-    String findLeasesByNodes();
+    default String findLeasesByNodes() {
+        return """
+                SELECT execution_id, job_key, node_id, claim_token, attempt, priority, claimed_at, cancel_requested
+                FROM mohs_work WHERE work_state = 'LEASED' AND node_id IN (:nodeIds)
+                """;
+    }
 
     /**
-     * Every lease, oldest first, up to a ceiling: the reaper's sweep when no node is known to be alive.
+     * Grants of durably revoked sessions, oldest first, up to a ceiling.
      * {@code claimed_at} leads so a mass death drains oldest first.
      *
      * @return the SQL statement for finding leases with expired ownership
@@ -513,7 +652,6 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for finding orphaned leases while excluding live nodes
      */
-    String findOrphanedLeasesExceptAlive();
 
     /**
      * How many leases each job holds — the admission control's input for {@code allowConcurrentExecutions=false}.
@@ -527,39 +665,41 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for setting a lease's cancellation flag
      */
-    String requestLeaseCancellation();
+    default String requestLeaseCancellation() {
+        return """
+                UPDATE mohs_work SET cancel_requested = :flag
+                WHERE execution_id = :executionId AND work_state = 'LEASED'
+                """;
+    }
 
     /**
      * Which of the given executions have had cancellation requested — polled by the dispatcher.
      *
      * @return the SQL statement for reading cancellation requests for owned work
      */
-    String findCancelRequestedLeases();
+    default String findCancelRequestedLeases() {
+        return """
+                SELECT execution_id FROM mohs_work
+                WHERE work_state = 'LEASED' AND execution_id IN (:ids) AND cancel_requested = :flag
+                """;
+    }
 
-    /**
-     * The confirmed attempt, written in the completion transaction.
-     *
-     * @return the SQL statement for recording an attempt outcome
-     */
-    String insertAttempt();
 
-    /**
-     * The advisory terminal, matched by the primary key — one statement for both completion paths, the
-     * dispatcher's and the reaper's.
-     *
-     * <p>There used to be two, differing only in an extra {@code created_at = :createdAt}: on the
-     * partitioned schema the hot path carried the value so Postgres could prune partitions, and the
-     * reaper, which never loaded it, needed a version without. Neither the pruning nor the second
-     * statement outlived the partitioning — the plans measured identical (4 buffers, 0.047 ms, with
-     * {@code created_at} demoted to a {@code Filter} even when present). What kept them apart was a
-     * guarantee rather than a plan: {@code execution_id} alone was not unique by the schema. Now that
-     * it is the primary key, it is.
-     *
-     * @return the SQL statement for updating the advisory terminal state
-     */
-    String terminalStateUpdate();
 
     // ---------------------------------------------------------------------------------------------
+    /** SQL for the fenced winner's latest attempt and optional terminal state, in one update. */
+    default String completeExecution() {
+        return """
+                UPDATE mohs_execution SET
+                    last_claim_token = :claimToken, last_attempt_number = :number, last_attempt_node_id = :nodeId,
+                    last_attempt_started_at = :startedAt, last_attempt_finished_at = :finishedAt,
+                    last_attempt_outcome = :outcome, last_attempt_error_type = :errorType,
+                    last_attempt_error = :error,
+                    state = COALESCE(:terminalState, state), finished_at = :executionFinishedAt
+                WHERE execution_id = :executionId
+                """;
+    }
+
     // Definitions: mohs_job_definitions (JdbcJobStore)
     // ---------------------------------------------------------------------------------------------
 
@@ -572,58 +712,107 @@ public interface JdbcDelegate {
      *        (DDIA ch. 7) against the firing CAS and the completion's guarded rearm.
      * @return the SQL statement for updating an existing job definition
      */
-    String upsertJobUpdate(boolean writeNextFire);
+    default String upsertJobUpdate(boolean writeNextFire) {
+        if (writeNextFire) {
+            return """
+                    UPDATE mohs_job_definitions SET
+                        name = :name, schedule_type = :scheduleType,
+                        cron_expression = :cronExpression, cron_zone = :cronZone,
+                        interval_micros = :intervalMicros, interval_after_finish = :intervalAfterFinish,
+                        runner = :runner, window_name = :windowName, rate_limit = :rateLimit,
+                        misfire = :misfire, start_paused = :startPaused,
+
+                        max_concurrent_executions = :maxConcurrentExecutions,
+                        retries = :retries, timeout_micros = :timeout_micros, retry_policy = :retryPolicy,
+                        source = :source, retired = :retired,
+                        next_fire_at = :nextFireAt, schedule_revision = schedule_revision + 1, updated_at = :updatedAt
+                    WHERE job_key = :jobKey
+                    """;
+        }
+        return """
+                UPDATE mohs_job_definitions SET
+                    name = :name, schedule_type = :scheduleType,
+                    cron_expression = :cronExpression, cron_zone = :cronZone,
+                    interval_micros = :intervalMicros, interval_after_finish = :intervalAfterFinish,
+                    runner = :runner, window_name = :windowName, rate_limit = :rateLimit,
+                    misfire = :misfire, start_paused = :startPaused,
+
+                    max_concurrent_executions = :maxConcurrentExecutions,
+                    retries = :retries, timeout_micros = :timeout_micros, retry_policy = :retryPolicy,
+                    source = :source, retired = :retired,
+                    updated_at = :updatedAt
+                WHERE job_key = :jobKey
+                """;
+    }
 
     /**
      * The upsert's INSERT arm. {@code paused} is written only here: {@code startPaused} applies at birth, and the UPDATE never touches it.
      *
      * @return the SQL statement for inserting a new job definition
      */
-    String insertJob();
+    default String insertJob() {
+        return """
+                INSERT INTO mohs_job_definitions (
+                    job_key, name, schedule_type, cron_expression, cron_zone,
+                    interval_micros, interval_after_finish, runner, window_name, rate_limit,
+                    misfire, start_paused, max_concurrent_executions, retries,
+                    timeout_micros, retry_policy, source, executable_key, recurring_payload, input_contract,
+                    retired, paused, next_fire_at, created_at, updated_at)
+                VALUES (
+                    :jobKey, :name, :scheduleType, :cronExpression, :cronZone,
+                    :intervalMicros, :intervalAfterFinish, :runner, :windowName, :rateLimit,
+                    :misfire, :startPaused, :maxConcurrentExecutions, :retries,
+                    :timeout_micros, :retryPolicy, :source, :executableKey, :recurringPayload, :inputContract,
+                    :retired, :paused, :nextFireAt, :createdAt, :updatedAt)
+                """;
+    }
 
     /**
      * A reconfiguration: the schedule and the recomputed trigger in a single UPDATE — an explicit reconfiguration beats a concurrent firing.
      *
      * @return the SQL statement for replacing a job's schedule and trigger
      */
-    String rescheduleJob();
-
-    /**
-     * Whether the scheduler still has a live occurrence of this job — "live" in the split layout is the
-     * advisory still {@code PENDING}: queued, running or in backoff, all of them PENDING until the
-     * terminal outcome.
-     *
-     * @return the SQL statement for counting live automatic occurrences
-     */
-    String countLiveSchedulerOccurrences();
+    default String rescheduleJob() {
+        return """
+                UPDATE mohs_job_definitions SET
+                    schedule_type = :scheduleType, cron_expression = :cronExpression, cron_zone = :cronZone,
+                    interval_micros = :intervalMicros, interval_after_finish = :intervalAfterFinish,
+                    next_fire_at = :nextFireAt, schedule_revision = schedule_revision + 1, updated_at = :updatedAt
+                WHERE job_key = :jobKey AND retired = :retired
+                """;
+    }
 
     /**
      * The retirement's cancellation of what the drain actually took out of the queue.
      *
      * @return the SQL statement for marking drained queued executions cancelled
      */
-    String cancelDrainedExecutions();
+    default String cancelDrainedExecutions() {
+        // batch-counted: JdbcJobStore.cancelDrained/countCancelledMembers aggregate and count the drained set in this transaction.
+        return """
+                UPDATE mohs_execution SET state = 'CANCELLED', finished_at = :now
+                WHERE execution_id IN (:ids)
+                """;
+    }
 
-    /**
-     * The self-healing mark for a definition whose {@code handler_type} no longer resolves.
-     *
-     * @return the SQL statement for marking a definition absent from code
-     */
-    String markJobOrphaned();
 
     /**
      * One statement for pause and resume: the flag is the parameter, so the two differ only in the value bound.
      *
      * @return the SQL statement for changing a job's paused flag
      */
-    String setJobPaused();
+    default String setJobPaused() {
+        return "UPDATE mohs_job_definitions SET paused = :paused WHERE job_key = :jobKey";
+    }
 
     /**
      * The soft retire — never a {@code DELETE}: "preserve history" requires the row to stay alive, since history keeps pointing at it.
      *
      * @return the SQL statement for retiring a programmatic job definition
      */
-    String retireJob();
+    default String retireJob() {
+        return "UPDATE mohs_job_definitions SET retired = :retired, next_fire_at = NULL, schedule_revision = schedule_revision + 1, updated_at = :now WHERE job_key = :jobKey AND retired <> :retired";
+    }
 
     /**
      * The batches the drained executions belonged to, grouped — the retirement counts them in bulk.
@@ -637,14 +826,22 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for counting cancelled members of a batch
      */
-    String countCancelledBatchMembers();
+    default String countCancelledBatchMembers() {
+        return "UPDATE mohs_batches SET failed = failed + :pending WHERE id = :id";
+    }
 
     /**
-     * The persisted schedule plus {@code next_fire_at} — what the upsert compares to decide preserve versus recompute.
+     * Read-only trigger snapshot. Mutating decisions consume {@link #lockBindingOwner()} so a host
+     * REPEATABLE_READ snapshot cannot hide a concurrent reconfiguration.
      *
      * @return the SQL statement for reading a trigger's current state
      */
-    String findTriggerSnapshot();
+    default String findTriggerSnapshot() {
+        return """
+                SELECT schedule_type, cron_expression, cron_zone, interval_micros, interval_after_finish, next_fire_at, schedule_revision, retired
+                FROM mohs_job_definitions WHERE job_key = :jobKey
+                """;
+    }
 
     /**
      * One definition by key. {@code retired} stays out of every read as a PARAMETER, not a literal:
@@ -652,21 +849,33 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for looking up a stored job
      */
-    String findJobByKey();
+    default String findJobByKey() {
+        return """
+                SELECT job_key, executable_key, input_contract, name, schedule_type, cron_expression, cron_zone,
+                    interval_micros, interval_after_finish, runner, window_name, rate_limit,
+                    misfire, start_paused, max_concurrent_executions,
+                    retries, timeout_micros, retry_policy, source, paused, retired,
+                    next_fire_at, schedule_revision, created_at, updated_at
+                FROM mohs_job_definitions WHERE job_key = :jobKey AND retired = :retired
+                """;
+    }
 
     /**
      * Every live definition — streamed, with the fetch size the cursor needs.
      *
      * @return the SQL statement for streaming all stored jobs
      */
-    String findAllJobs();
+    default String findAllJobs() {
+        return """
+                SELECT job_key, executable_key, input_contract, name, schedule_type, cron_expression, cron_zone,
+                    interval_micros, interval_after_finish, runner, window_name, rate_limit,
+                    misfire, start_paused, max_concurrent_executions,
+                    retries, timeout_micros, retry_policy, source, paused, retired,
+                    next_fire_at, schedule_revision, created_at, updated_at
+                FROM mohs_job_definitions WHERE retired = :retired
+                """;
+    }
 
-    /**
-     * Every live definition born from an annotation — the scan's reconciliation reads this.
-     *
-     * @return the SQL statement for streaming annotation-sourced jobs
-     */
-    String findAllAnnotationSourcedJobs();
 
     /**
      * The due recurring triggers, oldest first, at most {@code :limit} — the ceiling is in the SQL so
@@ -683,14 +892,18 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for arming a disarmed trigger
      */
-    String armNextFire();
+    default String armNextFire() {
+        return "UPDATE mohs_job_definitions SET next_fire_at = :nextFireAt WHERE job_key = :jobKey AND next_fire_at IS NULL AND schedule_revision = :scheduleRevision AND retired = :retired";
+    }
 
     /**
-     * What a job still has queued, read before the retirement drains it row by row.
+     * Current queued work, locked after its job for atomic bulk retirement.
      *
      * @return the SQL statement for reading a job's queued execution identities
      */
-    String findQueuedExecutionIdsByJob();
+    default String findQueuedExecutionIdsByJob() {
+        return "SELECT execution_id FROM mohs_work WHERE work_state = 'READY' AND job_key = :jobKey ORDER BY execution_id FOR UPDATE";
+    }
 
     // ---------------------------------------------------------------------------------------------
     // Nodes: mohs_nodes (JdbcNodeStore)
@@ -701,28 +914,43 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for registering a node heartbeat
      */
-    String insertNode();
+    default String insertNode() {
+        return """
+                INSERT INTO mohs_nodes (node_id, state, last_heartbeat_at, expires_at, revoked)
+                VALUES (:nodeId, :state, :lastHeartbeatAt, :expiresAt, :revoked)
+                """;
+    }
 
     /**
      * The cluster view behind {@code GET /nodes}.
      *
      * @return the SQL statement for reading the node heartbeat registry
      */
-    String findAllNodes();
+    default String findAllNodes() {
+        return "SELECT node_id, state, last_heartbeat_at, expires_at, revoked FROM mohs_nodes";
+    }
 
     /**
      * The reaper's cleanup of nodes that stopped heartbeating long enough ago to be gone for good.
      *
      * @return the SQL statement for deleting stale node heartbeats
      */
-    String deleteHeartbeatsBefore();
+    default String deleteHeartbeatsBefore() {
+        return "DELETE FROM mohs_nodes WHERE last_heartbeat_at < :cutoff AND revoked = :revoked AND NOT EXISTS (SELECT 1 FROM mohs_work l WHERE l.work_state = 'LEASED' AND l.node_id = mohs_nodes.node_id)";
+    }
 
     /**
-     * The heartbeat itself — state, instant, epoch and lease expiry in one write.
+     * Renewal of an active session after its row lock and database-time validation.
      *
      * @return the SQL statement for refreshing a node's liveness promise
      */
-    String heartbeatUpdate();
+    default String heartbeatUpdate() {
+        return """
+                UPDATE mohs_nodes SET state = :state, last_heartbeat_at = :lastHeartbeatAt,
+                    expires_at = :expiresAt
+                WHERE node_id = :nodeId
+                """;
+    }
 
     // ---------------------------------------------------------------------------------------------
     // Rate limits: mohs_rate_limits (JdbcRateLimitStore)
@@ -733,35 +961,60 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for looking up a rate-limit bucket
      */
-    String findRateLimitByName();
+    default String findRateLimitByName() {
+        return """
+                SELECT name, max_count, window_micros, tokens, refilled_at, refill_remainder FROM mohs_rate_limits WHERE name = :name
+                """;
+    }
 
     /**
      * Every limit, streamed.
      *
      * @return the SQL statement for streaming declared rate-limit buckets
      */
-    String findAllRateLimits();
+    default String findAllRateLimits() {
+        return """
+                SELECT name, max_count, window_micros, tokens, refilled_at, refill_remainder FROM mohs_rate_limits
+                """;
+    }
 
     /**
      * The token bucket's four columns — the balance and everything that entered its calculation.
      *
      * @return the SQL statement for reading a bucket's balance and refill instant
      */
-    String readRateLimitBucket();
+    default String readRateLimitBucket() {
+        return """
+                SELECT max_count, window_micros, tokens, refilled_at, refill_remainder FROM mohs_rate_limits WHERE name = :name
+                """;
+    }
 
     /**
      * A spec change, clamping a balance that the new ceiling no longer allows.
      *
      * @return the SQL statement for updating a rate-limit specification
      */
-    String updateRateLimitSpec();
+    default String updateRateLimitSpec() {
+        return """
+                UPDATE mohs_rate_limits
+                   SET tokens = :tokens, refilled_at = :refilledAt, refill_remainder = 0,
+                       max_count = :maxCount, window_micros = :windowMicros
+                 WHERE name = :name AND tokens = :expectedTokens AND refilled_at = :expectedRefilledAt
+                   AND max_count = :expectedMax AND window_micros = :expectedWindow AND refill_remainder = :expectedRemainder
+                """;
+    }
 
     /**
      * A limit's birth, with a full bucket.
      *
      * @return the SQL statement for creating a full rate-limit bucket
      */
-    String insertFullRateLimitBucket();
+    default String insertFullRateLimitBucket() {
+        return """
+                INSERT INTO mohs_rate_limits (name, max_count, window_micros, tokens, refilled_at, refill_remainder)
+                VALUES (:name, :maxCount, :windowMicros, :maxCount, :refilledAt, 0)
+                """;
+    }
 
     /**
      * The charge: a CAS over the {@code (tokens, refilled_at)} pair — atomic by construction, like every
@@ -770,12 +1023,19 @@ public interface JdbcDelegate {
      * another node to charge on top of an already refilled balance, which is over-delivery.
      *
      * <p>The guard covers the FOUR columns that entered the calculation, not only the two it writes:
-     * {@code max_count} and {@code window_duration} define the refill interval, and a PATCH widening the
+     * {@code max_count} and {@code window_micros} define the refill interval, and a PATCH widening the
      * window mid-round would refill the balance at the old rate — a silent burst above the new limit.
      *
      * @return the SQL statement for conditionally charging a rate-limit bucket
      */
-    String chargeRateLimitByCas();
+    default String chargeRateLimitByCas() {
+        return """
+                UPDATE mohs_rate_limits
+                   SET tokens = :tokens, refilled_at = :refilledAt, refill_remainder = :remainder
+                 WHERE name = :name AND tokens = :expectedTokens AND refilled_at = :expectedRefilledAt
+                   AND max_count = :expectedMax AND window_micros = :expectedWindow AND refill_remainder = :expectedRemainder
+                """;
+    }
 
     // ---------------------------------------------------------------------------------------------
     // Batches: mohs_batches (JdbcBatchStore)
@@ -786,31 +1046,42 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for creating batch counters
      */
-    String insertBatch();
+    default String insertBatch() {
+        return """
+                INSERT INTO mohs_batches (id, name, total, succeeded, failed, created_at)
+                VALUES (:id, :name, :total, 0, 0, :createdAt)
+                """;
+    }
 
     /**
      * Explicit columns rather than {@code SELECT *}: {@code created_at} is operator forensics, never read here, and this re-read runs on EVERY member completion.
      *
      * @return the SQL statement for reading batch counters
      */
-    String findBatch();
+    default String findBatch() {
+        return "SELECT id, name, total, succeeded, failed FROM mohs_batches WHERE id = :id";
+    }
 
     /**
      * A member that succeeded.
      *
      * @return the SQL statement for incrementing successful batch members
      */
-    String incrementBatchSucceeded();
+    default String incrementBatchSucceeded() {
+        return "UPDATE mohs_batches SET succeeded = succeeded + 1 WHERE id = :id";
+    }
 
     /**
      * A member that failed — or was cancelled, which the batch counts as a failure (it answers "how many succeeded").
      *
      * @return the SQL statement for incrementing failed batch members
      */
-    String incrementBatchFailed();
+    default String incrementBatchFailed() {
+        return "UPDATE mohs_batches SET failed = failed + 1 WHERE id = :id";
+    }
 
     // ---------------------------------------------------------------------------------------------
-    // The firing: mohs_job_definitions' trigger (JdbcTriggerFirer)
+    // The firing: mohs_job_definitions' trigger (JdbcSubmissionStore)
     // ---------------------------------------------------------------------------------------------
 
     /**
@@ -822,5 +1093,11 @@ public interface JdbcDelegate {
      *
      * @return the SQL statement for advancing the observed trigger instant
      */
-    String advanceTriggerByCas();
+    default String advanceTriggerByCas() {
+        return """
+                UPDATE mohs_job_definitions SET next_fire_at = :newNextFireAt
+                WHERE job_key = :jobKey AND next_fire_at = :observedNextFireAt AND schedule_revision = :observedRevision
+                  AND retired = :retired AND paused = :paused
+                """;
+    }
 }

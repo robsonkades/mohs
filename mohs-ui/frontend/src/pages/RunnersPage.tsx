@@ -84,9 +84,9 @@ export function RunnersPage() {
   // balancer would write two different nodes' counters into one cache key twice a second.
   const runners = useQuery({
     queryKey: queryKeys.runners(),
-    queryFn: fetchRunners,
+    queryFn: ({ signal }) => fetchRunners(signal),
   });
-  const nodes = useQuery({ queryKey: queryKeys.nodes(), queryFn: fetchNodes });
+  const nodes = useQuery({ queryKey: queryKeys.nodes(), queryFn: ({ signal }) => fetchNodes(signal) });
 
   const data = runners.data ?? [];
   const totalRunning = data.reduce((sum, runner) => sum + runner.running, 0);
@@ -97,17 +97,18 @@ export function RunnersPage() {
       <StatGrid columns={4}>
         <StatCard
           label="Runners"
-          value={runners.isPending ? "…" : data.length}
+          value={runners.isPending ? "…" : runners.error ? "—" : data.length}
           icon={<IconServer className="size-4" />}
           accent
         />
-        <StatCard label="In flight" value={runners.isPending ? "…" : totalRunning} />
-        <StatCard label="Capacity" value={runners.isPending ? "…" : totalCapacity} />
+        <StatCard label="In flight" value={runners.isPending ? "…" : runners.error ? "—" : totalRunning} />
+        <StatCard label="Capacity" value={runners.isPending ? "…" : runners.error ? "—" : totalCapacity} />
         <StatCard
           label="Nodes in cluster"
-          value={nodes.isPending ? "…" : (nodes.data?.length ?? 0)}
+          value={nodes.isPending ? "…" : nodes.error ? "—" : (nodes.data?.length ?? 0)}
         />
       </StatGrid>
+      {nodes.error && <ErrorState message={nodes.error.message} onRetry={() => void nodes.refetch()} />}
 
       <Panel title="Runners on this node">
         <p className="pb-3 text-xs text-muted-foreground">

@@ -1,5 +1,9 @@
 # Getting started
 
+For jobs created from application code, follow the setup below and then
+[Programmatic jobs](../05-api/programmatic-jobs.md): one executable bean, typed submissions and
+independent recurring schedules. The annotation examples below remain supported.
+
 Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 This guide runs the demo first, then shows the minimum integration in a Spring Boot application.
@@ -78,8 +82,8 @@ Mohs never runs DDL. Apply the matching `schema-<dialect>.sql` from the
 psql -U app -d app -f schema-postgresql.sql
 ```
 
-Existing installations apply the ordered `V*.sql` deltas. See
-[installing and upgrading the schema](../06-data/migrations.md) before an upgrade.
+This unreleased baseline uses a fresh schema; it does not upgrade earlier development layouts. See
+[schema installation](../06-data/migrations.md).
 
 ## Declare and invoke a job
 
@@ -110,7 +114,7 @@ var receipt = mohs.schedule("generate-report", new ReportRequest("monthly"))
         .now();
 ```
 
-Handlers should tolerate redelivery because execution is at least once when retries are available.
+Handlers should tolerate duplicate effects after uncertain completion; finite retries do not guarantee eventual success.
 The idempotency key prevents duplicate creation for the same job and key; it does not replace
 idempotent side effects inside the handler.
 

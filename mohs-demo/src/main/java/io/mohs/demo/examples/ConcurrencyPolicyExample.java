@@ -74,7 +74,6 @@ public class ConcurrencyPolicyExample {
     @RecurringJob(
             id = "example-catalog-sync",
             every = "PT5M",
-            allowConcurrentExecutions = false,
             maxConcurrentExecutions = 1
     )
     void catalogSync() {
@@ -87,7 +86,7 @@ public class ConcurrencyPolicyExample {
      * how OFTEN work starts rather than how much is in flight, and different from a
      * {@link RunnerExample runner}, whose cap is per node and shared across jobs.
      */
-    @OnDemandJob(id = "example-legacy-export", allowConcurrentExecutions = false, maxConcurrentExecutions = 3)
+    @OnDemandJob(id = "example-legacy-export", maxConcurrentExecutions = 3)
     void legacyExport() {
         log.info("one of at most three");
     }

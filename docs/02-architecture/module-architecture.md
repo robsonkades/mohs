@@ -70,7 +70,7 @@ flowchart TB
 | --- | --- |
 | **Purpose** | The execution engine: poll loop, trigger firing, claim, admission, dispatch, retry, reaper, metrics — plus the persistence ports it runs over. |
 | **Key types** | `Engine` (implements `MohsLifecycle`), `Dispatcher`, `MohsImpl` (implements `Mohs`), `CompletionBatcher`, `RunnerRegistry`, `MohsExecutors`, `FiringPlanner`, `NextFireCalculator`, `RetrySchedule`, `Shards`, `CancellationSignal`, `EngineMetrics`, `EngineSettings` |
-| **Ports (interfaces this module defines and does not implement)** | `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `StoreTransactions`, `SyncableClock`, `JobHandler` |
+| **Ports (interfaces this module defines and does not implement)** | `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `SubmissionStore`, `SyncableClock`, `JobHandler` |
 | **Dependencies** | `mohs-api`, `mohs-cron`, `uuidv7`, `slf4j-api`, `micrometer-core`, `spring-context`, `spring-tx` |
 | **Consumers** | `mohs-store-jdbc`, `mohs-test`, `mohs-spring-boot-starter` |
 | **Extension points** | None public. `HandlerRegistry#register` is the manual seam used by the scanner and by tests. |
@@ -81,12 +81,12 @@ flowchart TB
 | | |
 | --- | --- |
 | **Purpose** | JDBC implementation of every engine port, plus schema ownership. |
-| **Key types** | `JdbcJobStore`, `JdbcWorkQueue`, `JdbcLeaseStore`, `JdbcHistoryStore`, `JdbcNodeStore`, `JdbcBatchStore`, `JdbcRateLimitStore`, `JdbcTriggerFirer`, `JdbcStoreTransactions`, `DatabaseClock`, `JdbcTimestamps`, `JdbcSupport` |
+| **Key types** | `JdbcJobStore`, `JdbcWorkQueue`, `JdbcLeaseStore`, `JdbcHistoryStore`, `JdbcNodeStore`, `JdbcBatchStore`, `JdbcRateLimitStore`, `JdbcSubmissionStore`, `JdbcExecutionTransitions`, `DatabaseClock`, `JdbcTimestamps`, `JdbcSupport` |
 | **Delegate subpackage** | `JdbcDelegate` plus `H2JdbcDelegate`, `PostgresJdbcDelegate`, `MySqlJdbcDelegate`, `SqlServerJdbcDelegate`, and the `ClaimedReady` row record |
 | **Dependencies** | `mohs-engine`, `spring-boot-starter-jdbc`, `spring-boot-starter-jackson`, `uuidv7`, `slf4j-api`. **No migration engine** — the module executes no DDL |
-| **Resources** | Four `schema-*.sql` installers at the classpath root, plus the per-database delta chain under `io/mohs/store/jdbc/migration/{h2,mysql,postgresql,sqlserver}/`. Both ship in the jar for the operator to apply; nothing runs them |
+| **Resources** | Four canonical `schema-*.sql` installers at the classpath root. The operator installs the schema; no delta chain or automatic DDL execution is shipped |
 | **Tests** | 27 classes. Testcontainers for PostgreSQL, MySQL and SQL Server; H2 in-process. **Requires Docker**; without it the container-backed tests fail on `Could not initialize class *TestSupport`, which is an environment failure, not a regression. |
-| **Notable guards** | `TerminalStateWriteScanTest` scans this module's own source; `SchemaPostgresChainMatchesInstallerTest` compares the installer against the delta chain; `SqlServerUnicodeScanTest` guards `NVARCHAR` usage; `KeyGenerationScanTest` guards the UUIDv7 invariant in source and schema. |
+| **Notable guards** | `TerminalStateWriteScanTest` scans this module's own source; `SchemaInstallerTest` verifies installers and reapplication; `SqlServerUnicodeScanTest` guards `NVARCHAR` usage; `KeyGenerationScanTest` guards the UUIDv7 invariant in source and schema. |
 
 ### `mohs-rest`
 

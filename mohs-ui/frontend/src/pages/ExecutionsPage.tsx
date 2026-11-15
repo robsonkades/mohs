@@ -12,7 +12,7 @@ import { PageStack, Section } from "../components/Layout";
 import { Panel } from "../components/Panel";
 import { FilterBar } from "../components/Form";
 import { ActiveFilters, type ActiveFilter } from "../components/ActiveFilters";
-import { AttemptTimeline } from "../components/AttemptTimeline";
+import { LastAttemptDetails } from "../components/LastAttemptDetails";
 import { useIsMobile } from "../hooks/use-mobile";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -38,6 +38,8 @@ import { useCursorHistory } from "../lib/useCursorHistory";
 import { setExecutionsLive, useExecutionsLive } from "../lib/liveExecutions";
 import type { AppFeatures } from "../lib/table";
 import { TIME_WINDOWS, TIME_WINDOW_KEYS, TIME_WINDOW_LABEL, type TimeWindow } from "../lib/timeWindows";
+import type { ExecutionsSearch } from "../lib/executionSearch";
+import { useRollingAnchor } from "../lib/useRollingAnchor";
 
 type ExecutionAction = "cancel" | "retry";
 
@@ -63,16 +65,6 @@ const ACTION_COPY: Record<
 
 /** States that can still be cancelled: the non-terminal ones. */
 const CANCELLABLE: readonly ExecutionState[] = ["ENQUEUED", "RUNNING", "RETRY_WAITING"];
-
-export interface ExecutionsSearch {
-  jobKey?: string;
-  status?: ExecutionState;
-  executionId?: string;
-  window?: TimeWindow;
-  /** Custom range (ISO) — takes precedence over `window`. */
-  from?: string;
-  to?: string;
-}
 
 const routeApi = getRouteApi("/executions");
 const PAGE_SIZE = 20;
@@ -306,16 +298,18 @@ export function ExecutionsPage() {
   const search = routeApi.useSearch();
   const navigate = routeApi.useNavigate();
   const queryClient = useQueryClient();
+  const live = useExecutionsLive();
+  const anchor = useRollingAnchor(live && !search.from && !search.to);
+  const [rangeError, setRangeError] = useState<string | null>(null);
 
-  // Minute-snapped and memoized per window, so paging within one window keeps a stable cursor
-  // chain — a cursor issued over a `from` that moves every render does not page.
+  // The minute anchor advances only while following the live list. Paging pauses it.
   const presetFrom = useMemo(() => {
     const span = search.window ? TIME_WINDOWS[search.window] : null;
     // `all` (and an absent window) carry no lower bound — the search goes back as far as the
     // retained history does, which is the point of having the option.
-    return span === null ? undefined : new Date(Math.floor(Date.now() / 60_000) * 60_000 - span).toISOString();
-  }, [search.window]);
-  const from = search.from ?? presetFrom;
+    return span === null ? undefined : new Date(anchor - span).toISOString();
+  }, [search.window, anchor]);
+  const from = search.from ?? (search.to ? undefined : presetFrom);
   const filters = useMemo(
     () => ({ jobKey: search.jobKey, status: search.status, from, to: search.to }),
     [search.jobKey, search.status, from, search.to],
@@ -330,8 +324,7 @@ export function ExecutionsPage() {
     return { from: start, to };
   }, [search.from, search.to, search.window]);
 
-  const { after, pageNumber, hasPrev, next, prev } = useCursorHistory(JSON.stringify(filters));
-  const live = useExecutionsLive();
+  const { after, pageNumber, hasPrev, next, prev, reset } = useCursorHistory(JSON.stringify(filters));
 
   /**
    * Paging is the other unambiguous "I am reading, not watching". A cursor page refetched every
@@ -339,7 +332,8 @@ export function ExecutionsPage() {
    * to the head of the stream.
    */
   const goToNextPage = useCallback(
-    (cursor: string | null) => {
+    (cursor: string | null, placeholder: boolean) => {
+      if (placeholder) return;
       setExecutionsLive(false);
       next(cursor);
     },
@@ -348,7 +342,7 @@ export function ExecutionsPage() {
 
   const executionsQuery = useQuery({
     queryKey: [...queryKeys.executions(filters), after],
-    queryFn: () => fetchExecutions(filters, after, PAGE_SIZE),
+    queryFn: ({ signal }) => fetchExecutions(filters, after, PAGE_SIZE, signal),
     placeholderData: keepPreviousData,
   });
 
@@ -359,7 +353,7 @@ export function ExecutionsPage() {
 
   const executionDetail = useQuery({
     queryKey: queryKeys.execution(selectedId ?? ""),
-    queryFn: () => fetchExecution(selectedId ?? ""),
+    queryFn: ({ signal }) => fetchExecution(selectedId ?? "", signal),
     enabled: selectedId !== undefined,
   });
 
@@ -386,7 +380,8 @@ export function ExecutionsPage() {
 
   const patchSearch = useCallback(
     (patch: Partial<ExecutionsSearch>) => {
-      void navigate({ search: (prev) => ({ ...prev, ...patch }) });
+      setRangeError(null);
+      void navigate({ search: (prev) => ({ ...prev, ...patch, filterWarning: undefined }) });
     },
     [navigate],
   );
@@ -429,6 +424,10 @@ export function ExecutionsPage() {
           from={new Date(search.from ?? new Date(rangeDefaults.from).toISOString())}
           to={new Date(search.to ?? new Date(rangeDefaults.to).toISOString())}
           onChange={({ from: start, to }) => {
+            if (!Number.isFinite(start.getTime()) || !Number.isFinite(to.getTime()) || start >= to) {
+              setRangeError("Choose an end date and time after the start.");
+              return;
+            }
             // Choosing an explicit range is an unambiguous statement of intent: the operator is
             // reading, not watching. Stopping the stream here is what makes the range readable.
             setExecutionsLive(false);
@@ -458,7 +457,7 @@ export function ExecutionsPage() {
           <Button
             variant={live ? "secondary" : "outline"}
             className="ml-auto gap-1.5"
-            onClick={() => setExecutionsLive(!live)}
+            onClick={() => { if (!live) reset(); setExecutionsLive(!live); }}
             aria-pressed={live}
             aria-label={live ? "Pause list updates" : "Resume list updates"}
             title={
@@ -481,6 +480,7 @@ export function ExecutionsPage() {
             )}
           </Button>
         </FilterBar>
+        {(rangeError || search.filterWarning) && <p role="alert" className="text-sm text-warning">{rangeError ?? search.filterWarning}</p>}
         {!live && <p role="status" className="text-xs text-muted-foreground">List updates paused. Jobs continue running; resume the list or refresh to update these rows.</p>}
         <ActiveFilters filters={activeFilters} onClear={() => patchSearch({ jobKey: undefined, status: undefined, from: undefined, to: undefined, window: "all" })} />
 
@@ -514,9 +514,9 @@ export function ExecutionsPage() {
                 <CursorPager
                   pageNumber={pageNumber}
                   hasPrev={hasPrev}
-                  hasNext={executions.nextCursor !== null}
+                  hasNext={!executionsQuery.isPlaceholderData && executions.nextCursor !== null}
                   onPrev={prev}
-                  onNext={() => goToNextPage(executions.nextCursor)}
+                  onNext={() => goToNextPage(executions.nextCursor, executionsQuery.isPlaceholderData)}
                 />
               }
             />
@@ -581,7 +581,7 @@ export function ExecutionsPage() {
               <Field label="Fired at">{detail.firedAt ? absoluteTime(detail.firedAt) : "—"}</Field>
             </div>
 
-            <AttemptTimeline attempts={detail.attempts} />
+            <LastAttemptDetails attempt={detail.lastAttempt} />
           </div>
         )}
       </Drawer>

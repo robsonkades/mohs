@@ -63,7 +63,7 @@ If `/api/mohs/v1/**` is reachable, the caller can:
 | `POST /executions/{id}/retry` | Re-run failed work, bypassing the retry budget |
 | `PATCH /jobs/{k}/schedule` | Change when a job runs, cluster-wide |
 | `PATCH /rate-limits/{n}` | Change throughput against an external resource, cluster-wide |
-| `GET /executions/{id}` | Read execution metadata, actors, error messages and attempt history |
+| `GET /executions/{id}` | Read execution metadata, actors, latest-attempt error messages |
 | `GET /jobs` | Enumerate every job, its handler class name and its schedule |
 | `GET /nodes` | Enumerate the cluster |
 | `GET /overview/stream` | Hold an SSE connection (capped at 64 concurrent) |
@@ -114,9 +114,11 @@ machine-only mTLS integration has no browser CSRF flow, but enabling browser acc
 assumption. The relevant distinction is whether the browser supplies credentials automatically,
 as described by [OWASP](https://owasp.org/www-community/attacks/csrf).
 
-The bundled dashboard is a same-origin SPA that sends no CSRF token and no header of its own; under
-a cookie session with CSRF on, its mutations (cancel, retry, pause, resume) get a 403 until the
-host adds the token to its requests. A gateway that swaps the session for a bearer token must
+The bundled same-origin dashboard reads a host-supplied Spring Security CSRF token/header from
+the request-specific `#mohs-config` JSON bootstrap and sends it on mutations. Keep the HTML
+response `no-store`; reload after a login/logout or session change to refresh that token.
+If the host does not expose its token on the request, the client cannot invent one and mutations
+under enforced CSRF return 403. Authentication and authorization remain the host's responsibility. A gateway that swaps the session for a bearer token must
 validate CSRF protection at the browser-facing boundary before forwarding mutations. Replacing
 the credential on the downstream hop alone does not protect the original cookie-authenticated
 request.
@@ -212,7 +214,7 @@ the generic 400 rather than exposing deeper diagnostics.
 | --- | --- |
 | SQL injection | **Not reachable.** Every statement uses named or positional parameters; there is no string concatenation of user input into SQL. The `IN (:ids)` lists go through Spring's parameter expansion |
 | Log injection | Mitigated by the actor validation above; SLF4J parameterised messages elsewhere |
-| Deserialisation | Jackson with an **explicit target type** read from `payload_type`, never polymorphic type resolution from the document. A missing class is a terminal failure, not a gadget path |
+| Deserialisation | Jackson with an **explicit registered input type**, validated against the persisted `input_contract`; never polymorphic type resolution from payload data. An incompatible snapshot is a terminal failure |
 | Path traversal | `checkResource` in the UI resolver |
 | Expression injection | No SpEL evaluation of user input anywhere |
 
@@ -221,10 +223,10 @@ the generic 400 rather than exposing deeper diagnostics.
 | Data | Where it lives | Exposure |
 | --- | --- | --- |
 | Job payloads | `mohs_execution.payload`, plaintext JSON, kept until `mohs.engine.history-retention` sweeps the execution — **forever by default** | Not returned by any REST endpoint. Readable by anyone with database access |
-| Exception messages | `mohs_attempt.error`, and in `Failed` events | Returned by `GET /executions/{id}` |
+| Exception messages | `mohs_execution.last_attempt_error`, and in `Failed` events | Returned by `GET /executions/{id}` |
 | Handler class names | `mohs_job_definitions.handler_type` | Returned by `GET /jobs` |
 | Actors | `mohs_execution.actor` | Returned by execution reads |
-| Node ids | `mohs_nodes`, `mohs_attempt.node_id` | Returned by `GET /nodes` |
+| Node ids | `mohs_nodes`, `mohs_execution.last_attempt_node_id` | Returned by `GET /nodes` |
 | Stack traces | Server logs only | Never on the wire — the catch-all returns a generic message |
 
 **A hazard recorded in the source and worth repeating**: `Execution` deliberately does not carry the
@@ -235,10 +237,10 @@ put secrets or personal data into exception messages** in a job handler.
 ## Cluster-internal trust
 
 There is **no authentication between nodes** — they coordinate only through shared database tables.
-The trust boundary is the database connection. Anyone who can write to `mohs_lease` can steal
-ownership; anyone who can write to `mohs_ready` can enqueue work.
+The trust boundary is the database connection. Anyone who can write to `mohs_work` can steal
+ownership; anyone who can write to `mohs_work` can enqueue work.
 
-The fencing token `(node_id, epoch, attempt)` protects against a **stale** node, not against a **malicious**
+The fencing token `(execution_id, node_id, claim_token, attempt)` protects against a **stale** node, not against a **malicious**
 one.
 
 ## Dependency surface

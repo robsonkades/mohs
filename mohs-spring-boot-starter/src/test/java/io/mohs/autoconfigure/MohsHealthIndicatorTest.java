@@ -42,6 +42,7 @@ class MohsHealthIndicatorTest {
             "DRAINING, OUT_OF_SERVICE",
             "CREATED,  DOWN",
             "STOPPED,  DOWN",
+            "FAILED,   DOWN",
     })
     void mapsTheEngineStateToAStatusAndReportsItAsADetail(EngineState state, String expectedStatus) {
         MohsLifecycle lifecycle = mock(MohsLifecycle.class);

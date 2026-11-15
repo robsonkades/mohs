@@ -65,10 +65,10 @@ class RollingUpdateScenario {
         JobHandler handler = (_, _) -> executed.incrementAndGet();
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC())) {
-            cluster.defineJob(JOB, spec -> spec.retries(RETRIES));
+            cluster.defineJob(JOB, spec -> spec.withRetries(RETRIES));
             ScenarioCluster.Node upgraded = cluster.addNode(settings(), List.of());
             ScenarioCluster.Node lagging = cluster.addNode(settings(), List.of());
-            upgraded.handlers().register(JobKey.of(JOB), handler);
+            upgraded.handlers().register(JobKey.of(JOB), handler, Object.class);
 
             cluster.seedReady(JOB, SEED, 20);
             cluster.startAll();
@@ -76,7 +76,7 @@ class RollingUpdateScenario {
             // The rollout reaches the second node: that is what a real deploy does, and it is the
             // difference between "a rollout window" and "a permanently heterogeneous cluster"
             ScenarioCluster.awaitUntil(Duration.ofSeconds(10), () -> executed.get() > 0);
-            lagging.handlers().register(JobKey.of(JOB), handler);
+            lagging.handlers().register(JobKey.of(JOB), handler, Object.class);
 
             boolean settled = ScenarioCluster.awaitUntil(OBSERVATION, cluster::isDrained);
             int succeeded = cluster.countTerminal("SUCCEEDED");
@@ -107,10 +107,10 @@ class RollingUpdateScenario {
         AtomicInteger executed = new AtomicInteger();
 
         try (ScenarioCluster cluster = new ScenarioCluster(dataSource, Clock.systemUTC())) {
-            cluster.defineJob(JOB, spec -> spec.retries(RETRIES));
+            cluster.defineJob(JOB, spec -> spec.withRetries(RETRIES));
             ScenarioCluster.Node upgraded = cluster.addNode(settings(), List.of());
             cluster.addNode(settings(), List.of()); // blind forever
-            upgraded.handlers().register(JobKey.of(JOB), (_, _) -> executed.incrementAndGet());
+            upgraded.handlers().register(JobKey.of(JOB), (_, _) -> executed.incrementAndGet(), Object.class);
 
             cluster.seedReady(JOB, SEED, 20);
             cluster.startAll();
@@ -139,8 +139,7 @@ class RollingUpdateScenario {
     }
 
     private static EngineSettings settings() {
-        return new EngineSettings(Duration.ofMillis(25), Duration.ofMillis(200), 64, 32, 3,
-                Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60));
+        return new EngineSettings(Duration.ofMillis(25),Duration.ofMillis(200),64,32,3,Duration.ofSeconds(15),null,Duration.ofSeconds(60),Duration.ZERO,Duration.ZERO);
     }
 
     private static void report(String arm, boolean settled, int executed, int succeeded, int failed, int attempts,

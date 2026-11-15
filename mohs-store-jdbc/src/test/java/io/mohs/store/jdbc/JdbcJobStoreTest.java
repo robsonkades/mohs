@@ -49,7 +49,6 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
 import io.mohs.core.definition.DefinitionSource;
 import io.mohs.core.definition.JobDefinition;
-import io.mohs.core.definition.PolicySpec;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.schedule.CronSpec;
 import io.mohs.core.schedule.IntervalSpec;
@@ -89,26 +88,18 @@ class JdbcJobStoreTest {
     }
 
     private static JobDefinition definition(String id, Schedule schedule) {
-        return JobDefinition.of(id, Handler.class, spec -> {
-            PolicySpec policySpec = switch (schedule) {
-                case CronSpec cron -> spec.cron(cron.expression(), cron.zone());
-                case IntervalSpec interval -> interval.afterFinish()
-                        ? spec.everyAfterFinish(interval.interval())
-                        : spec.every(interval.interval());
-                case OnDemandSpec onDemand -> spec.onDemand();
-            };
-            policySpec.runner("io").retries(3);
-        });
+        return JobDefinition.of(id, schedule, io.mohs.core.definition.JobOptions.defaults()
+                .withRunner("io").withRetries(3), Misfire.IGNORE, false);
     }
 
     private static JobDefinition definitionWithCap(String id, int max) {
-        return JobDefinition.of(id, Handler.class, spec -> spec.onDemand().maxConcurrentExecutions(max));
+        return JobDefinition.of(id, new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withMaxConcurrentExecutions(max), io.mohs.core.schedule.Misfire.IGNORE, false);
     }
 
     /** The public builder always stamps PROGRAMMATIC; only the canonical constructor yields ANNOTATION. */
     private static JobDefinition annotationSourcedDefinition(String id) {
-        return new JobDefinition(JobKey.of(id), null, Handler.class, new OnDemandSpec(),
-                null, null, null, Misfire.IGNORE, false, true, 0, 0, null, null, DefinitionSource.ANNOTATION);
+        return new JobDefinition(JobKey.of(id), null,JobKey.of(id), new OnDemandSpec(),
+                null, null, null, Misfire.IGNORE, false, 0, 0, null, null, DefinitionSource.ANNOTATION, JobKey.of(id).value());
     }
 
     @Test
@@ -120,24 +111,23 @@ class JdbcJobStoreTest {
 
         assertThat(stored).isPresent();
         assertThat(stored.get().definition()).isEqualTo(definition);
-        assertThat(stored.get().orphaned()).isFalse();
         assertThat(stored.get().paused()).isFalse();
     }
 
     /** startPaused only arms at birth — the job is born paused and its trigger is not swept until the resume. */
     @Test
     void upsertCreatesAStartPausedJobBornPaused() {
-        store.upsert(JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused()));
+        store.upsert(JobDefinition.of("dormant", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, true));
 
         assertThat(store.find(JobKey.of("dormant")).orElseThrow().paused()).isTrue();
         clock.advance(Duration.ofMinutes(5));
-        assertThat(store.findDueRecurring(clock.instant(), 10)).isEmpty();
+        assertThat(store.findDueRecurring(clock.instant(), 10).jobs()).isEmpty();
     }
 
     /** After birth, paused belongs to the operator — a redeploy with startPaused=true never re-pauses a job the operator turned on. */
     @Test
     void redeployNeverReappliesStartPaused() {
-        JobDefinition definition = JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused());
+        JobDefinition definition = JobDefinition.of("dormant", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, true);
         store.upsert(definition);
         store.resume(JobKey.of("dormant"));
 
@@ -149,13 +139,13 @@ class JdbcJobStoreTest {
     /** The feature's complete happy path: born paused, then resumed, and the trigger armed at birth (now aged) becomes due — the misfire policy decides from there. */
     @Test
     void resumedDormantJobBecomesDueWithItsBirthTrigger() {
-        store.upsert(JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused()));
+        store.upsert(JobDefinition.of("dormant", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, true));
         clock.advance(Duration.ofMinutes(5));
-        assertThat(store.findDueRecurring(clock.instant(), 10)).isEmpty();
+        assertThat(store.findDueRecurring(clock.instant(), 10).jobs()).isEmpty();
 
         store.resume(JobKey.of("dormant"));
 
-        assertThat(store.findDueRecurring(clock.instant(), 10))
+        assertThat(store.findDueRecurring(clock.instant(), 10).jobs())
                 .extracting(stored -> stored.definition().key().value())
                 .containsExactly("dormant");
     }
@@ -163,12 +153,13 @@ class JdbcJobStoreTest {
     /** "The row is the memory": a soft retire preserves the row, so a resurrection through an upsert does NOT re-apply startPaused — paused comes back as the operator left it. */
     @Test
     void resurrectionAfterRetireKeepsTheOperatorPauseState() {
-        JobDefinition definition = JobDefinition.of("dormant", Handler.class, spec -> spec.every(Duration.ofMinutes(1)).startPaused());
+        JobDefinition definition = JobDefinition.of("dormant", new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, true);
         store.upsert(definition);
         store.resume(JobKey.of("dormant"));
         store.remove(JobKey.of("dormant"));
 
-        store.upsert(definition);
+        assertThatThrownBy(() -> store.upsert(definition)).hasMessageContaining("use reactivate");
+        assertThat(store.reactivate(definition.key(), new io.mohs.engine.ExecutableCatalog(java.util.Map.of(definition.key(), definition.inputContract())))).isTrue();
 
         assertThat(store.find(JobKey.of("dormant")).orElseThrow().paused()).isFalse();
     }
@@ -192,37 +183,10 @@ class JdbcJobStoreTest {
     }
 
     @Test
-    void upsertGeneratesAnIdDistinctPerJobKey() {
-        store.upsert(definition("welcome-email", new OnDemandSpec()));
-        store.upsert(definition("import-file", new OnDemandSpec()));
-
-        JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
-        String idA = rawJdbcTemplate.queryForObject("SELECT id FROM mohs_job_definitions WHERE job_key = ?", String.class, "welcome-email");
-        String idB = rawJdbcTemplate.queryForObject("SELECT id FROM mohs_job_definitions WHERE job_key = ?", String.class, "import-file");
-
-        assertThat(idA).isNotBlank();
-        assertThat(idB).isNotBlank();
-        assertThat(idA).isNotEqualTo(idB);
-    }
-
-    @Test
-    void upsertKeepsTheSameIdAcrossReupsertOfTheSameJobKey() {
-        store.upsert(definition("welcome-email", new OnDemandSpec()));
-        JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
-        String idBeforeReupsert = rawJdbcTemplate.queryForObject("SELECT id FROM mohs_job_definitions WHERE job_key = ?", String.class, "welcome-email");
-
-        store.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand().retries(9)));
-
-        String idAfterReupsert = rawJdbcTemplate.queryForObject("SELECT id FROM mohs_job_definitions WHERE job_key = ?", String.class, "welcome-email");
-        assertThat(idAfterReupsert).isEqualTo(idBeforeReupsert);
-    }
-
-    @Test
     void upsertOnExistingKeyAppliesDefinitionalChanges() {
         store.upsert(definition("welcome-email", new CronSpec("0 0 2 * * *", ZoneId.of("UTC"))));
 
-        JobDefinition changed = JobDefinition.of("welcome-email", Handler.class,
-                spec -> spec.cron("0 0 3 * * *", ZoneId.of("UTC")).retries(9));
+        JobDefinition changed = JobDefinition.of("welcome-email", new io.mohs.core.schedule.CronSpec("0 0 3 * * *", ZoneId.of("UTC")), io.mohs.core.definition.JobOptions.defaults().withRetries(9), io.mohs.core.schedule.Misfire.IGNORE, false);
         store.upsert(changed);
 
         StoredJob stored = store.find(JobKey.of("welcome-email")).orElseThrow();
@@ -257,38 +221,8 @@ class JdbcJobStoreTest {
         }
     }
 
-    /** The source filter is applied in the WHERE, not in memory — PROGRAMMATIC never leaves the cursor. */
-    @Test
-    void findAllAnnotationSourcedExcludesProgrammaticJobs() {
-        store.upsert(definition("programmatic-job", new OnDemandSpec()));
-        store.upsert(annotationSourcedDefinition("annotation-job"));
 
-        try (Stream<StoredJob> annotationSourced = store.findAllAnnotationSourced()) {
-            assertThat(annotationSourced).extracting(job -> job.definition().key()).containsExactly(JobKey.of("annotation-job"));
-        }
-    }
 
-    @Test
-    void markOrphanedSetsTheFlag() {
-        JobKey key = JobKey.of("welcome-email");
-        store.upsert(definition("welcome-email", new OnDemandSpec()));
-
-        store.markOrphaned(key);
-
-        assertThat(store.find(key)).map(StoredJob::orphaned).contains(true);
-    }
-
-    /** orphaned is inferred by the system, unlike paused, which an operator chose: a re-upsert means the annotation is back, so it clears. */
-    @Test
-    void upsertClearsOrphanedOnReupsert() {
-        JobKey key = JobKey.of("welcome-email");
-        store.upsert(definition("welcome-email", new OnDemandSpec()));
-        store.markOrphaned(key);
-
-        store.upsert(definition("welcome-email", new OnDemandSpec()));
-
-        assertThat(store.find(key)).map(StoredJob::orphaned).contains(false);
-    }
 
     @Test
     void pauseAndResumeToggleTheFlag() {
@@ -306,14 +240,14 @@ class JdbcJobStoreTest {
     private void seedExecution(String id, String jobKey, String state, boolean queued) {
         JdbcTemplate raw = new JdbcTemplate(dataSource);
         raw.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
                 VALUES (?, ?, ?, ?, ?, 'test', '{}', 'java.lang.String')
                 """, id, jobKey, state,
                 JdbcTimestamps.toUtcLocalDateTime(clock.instant()), JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
         if (queued) {
             raw.update("""
-                    INSERT INTO mohs_ready (execution_id, job_key, shard, priority, attempt, visible_at)
-                    VALUES (?, ?, 0, 20, 1, ?)
+                    INSERT INTO mohs_work (work_state, execution_id, job_key, shard, priority, attempt, visible_at)
+                    VALUES ('READY', ?, ?, 0, 20, 1, ?)
                     """, id, jobKey, JdbcTimestamps.toUtcLocalDateTime(clock.instant()));
         }
     }
@@ -328,8 +262,8 @@ class JdbcJobStoreTest {
     void removeRetiresTheJobDrainingTheQueueAndPreservingHistory() {
         JobKey key = JobKey.of("welcome-email");
         store.upsert(definition("welcome-email", new OnDemandSpec()));
-        seedExecution("exec-done", "welcome-email", "SUCCEEDED", false);
-        seedExecution("exec-queued", "welcome-email", "PENDING", true);
+        seedExecution("01991337-0000-7000-8000-00000000002a", "welcome-email", "SUCCEEDED", false);
+        seedExecution("01991337-0000-7000-8000-000000000047", "welcome-email", "PENDING", true);
 
         store.remove(key);
 
@@ -338,9 +272,9 @@ class JdbcJobStoreTest {
             assertThat(all).isEmpty();
         }
         JdbcTemplate raw = new JdbcTemplate(dataSource);
-        assertThat(raw.queryForObject("SELECT state FROM mohs_execution WHERE execution_id = ?", String.class, "exec-done")).isEqualTo("SUCCEEDED");
-        assertThat(raw.queryForObject("SELECT state FROM mohs_execution WHERE execution_id = ?", String.class, "exec-queued")).isEqualTo("CANCELLED");
-        assertThat(raw.queryForObject("SELECT COUNT(*) FROM mohs_ready", Integer.class)).isZero();
+        assertThat(raw.queryForObject("SELECT state FROM mohs_execution WHERE execution_id = ?", String.class, "01991337-0000-7000-8000-00000000002a")).isEqualTo("SUCCEEDED");
+        assertThat(raw.queryForObject("SELECT state FROM mohs_execution WHERE execution_id = ?", String.class, "01991337-0000-7000-8000-000000000047")).isEqualTo("CANCELLED");
+        assertThat(raw.queryForObject("SELECT COUNT(*) FROM mohs_work WHERE work_state = 'READY'", Integer.class)).isZero();
     }
 
     /** The same rationale as {@link #upsertClearsOrphanedOnReupsert}: the upsert happening at all proves a real source wants the job again. */
@@ -348,10 +282,10 @@ class JdbcJobStoreTest {
     void upsertAfterRemoveResurrectsTheDefinitionWithItsHistory() {
         JobKey key = JobKey.of("welcome-email");
         store.upsert(definition("welcome-email", new OnDemandSpec()));
-        seedExecution("exec-done", "welcome-email", "SUCCEEDED", false);
+        seedExecution("01991337-0000-7000-8000-00000000002a", "welcome-email", "SUCCEEDED", false);
         store.remove(key);
 
-        store.upsert(definition("welcome-email", new OnDemandSpec()));
+        store.reactivate(key, new io.mohs.engine.ExecutableCatalog(java.util.Map.of(key, key.value())));
 
         assertThat(store.find(key)).isPresent();
         JdbcTemplate raw = new JdbcTemplate(dataSource);
@@ -390,20 +324,20 @@ class JdbcJobStoreTest {
     }
 
     @Test
-    void findSkipsRowsWhoseHandlerTypeNoLongerResolves() {
+    void definitionReadsDoNotRequireAJavaHandlerClass() {
         // Simulates a handler removed from the code: it inserts the row directly, without going through
         // the store (which demands a real Class<?>).
         LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_job_definitions (
-                    id, job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
-                VALUES ('ghost-id', 'ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', TRUE, FALSE, ?, ?)
+                    job_key, input_contract, executable_key, schedule_type, misfire, retries, source, paused, created_at, updated_at)
+                VALUES ('ghost-handler', 'ghost-handler', 'ghost-handler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, ?, ?)
                 """, now, now);
         store.upsert(definition("still-here", new OnDemandSpec()));
 
         try (Stream<StoredJob> all = store.findAll()) {
-            assertThat(all).extracting(job -> job.definition().key()).containsExactly(JobKey.of("still-here"));
+            assertThat(all).extracting(job -> job.definition().key()).containsExactlyInAnyOrder(JobKey.of("ghost-handler"), JobKey.of("still-here"));
         }
     }
 
@@ -414,9 +348,9 @@ class JdbcJobStoreTest {
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_job_definitions (
-                    id, job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
-                VALUES ('corrupt-id', 'corrupt-schedule', ?, 'GARBAGE', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
-                """, Handler.class.getName(), now, now);
+                    job_key, input_contract, executable_key, schedule_type, misfire, retries, source, paused, created_at, updated_at)
+                VALUES ('corrupt-schedule', 'corrupt-schedule', ?, 'GARBAGE', 'IGNORE', 0, 'ANNOTATION', FALSE, ?, ?)
+                """, "corrupt-schedule", now, now);
 
         assertThatThrownBy(() -> store.find(JobKey.of("corrupt-schedule")))
                 .isInstanceOf(IllegalStateException.class)
@@ -426,39 +360,39 @@ class JdbcJobStoreTest {
 
     /** A row with an unresolved handler becomes visible as ORPHANED rather than simply vanishing from both sides (find and findAll). */
     @Test
-    void findAllMarksRowsWithUnresolvedHandlerAsOrphaned() {
+    void streamingDefinitionsDoesNotMutateCatalogState() {
         LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_job_definitions (
-                    id, job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
-                VALUES ('ghost-id', 'ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
+                    job_key, input_contract, executable_key, schedule_type, misfire, retries, source, paused, created_at, updated_at)
+                VALUES ('ghost-handler', 'ghost-handler', 'ghost-handler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, ?, ?)
                 """, now, now);
 
         try (Stream<StoredJob> all = store.findAll()) {
             all.forEach(job -> { });
         }
 
-        Boolean orphaned = rawJdbcTemplate.queryForObject(
-                "SELECT orphaned FROM mohs_job_definitions WHERE job_key = ?", Boolean.class, "ghost-handler");
-        assertThat(orphaned).isTrue();
+        Boolean retired = rawJdbcTemplate.queryForObject(
+                "SELECT retired FROM mohs_job_definitions WHERE job_key = ?", Boolean.class, "ghost-handler");
+        assertThat(retired).isFalse();
     }
 
     @Test
-    void findMarksTheRowWithUnresolvedHandlerAsOrphaned() {
+    void findingADefinitionDoesNotMutateCatalogState() {
         LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
         JdbcTemplate rawJdbcTemplate = new JdbcTemplate(dataSource);
         rawJdbcTemplate.update("""
                 INSERT INTO mohs_job_definitions (
-                    id, job_key, handler_type, schedule_type, misfire, retries, source, orphaned, paused, created_at, updated_at)
-                VALUES ('ghost-id', 'ghost-handler', 'com.example.LongGoneHandler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, FALSE, ?, ?)
+                    job_key, input_contract, executable_key, schedule_type, misfire, retries, source, paused, created_at, updated_at)
+                VALUES ('ghost-handler', 'ghost-handler', 'ghost-handler', 'ON_DEMAND', 'IGNORE', 0, 'ANNOTATION', FALSE, ?, ?)
                 """, now, now);
 
-        assertThat(store.find(JobKey.of("ghost-handler"))).isEmpty();
+        assertThat(store.find(JobKey.of("ghost-handler"))).isPresent();
 
-        Boolean orphaned = rawJdbcTemplate.queryForObject(
-                "SELECT orphaned FROM mohs_job_definitions WHERE job_key = ?", Boolean.class, "ghost-handler");
-        assertThat(orphaned).isTrue();
+        Boolean retired = rawJdbcTemplate.queryForObject(
+                "SELECT retired FROM mohs_job_definitions WHERE job_key = ?", Boolean.class, "ghost-handler");
+        assertThat(retired).isFalse();
     }
 
     /** The trigger's state: what arms, preserves, recomputes and cures {@code next_fire_at} is the upsert; the due read is {@code findDueRecurring}. */
@@ -524,26 +458,26 @@ class JdbcJobStoreTest {
             assertThat(nextFireAtOf("poll")).isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
         }
 
-        /** Curing a new column on an old database: a recurring schedule with a NULL next_fire_at rearms at boot. */
+        /** Registration preserves operational state. Explicit rescheduling starts a new series. */
         @Test
-        void upsertHealsAnUnarmedRecurringTrigger() {
+        void upsertDoesNotRepairManuallyCorruptedTriggerState() {
             JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), false));
             store.upsert(definition);
             disarm("poll");
 
             store.upsert(definition);
 
-            assertThat(nextFireAtOf("poll")).isEqualTo(clock.instant().plus(Duration.ofMinutes(5)));
+            assertThat(nextFireAtOf("poll")).isNull();
         }
 
         /** afterFinish with a live scheduler occurrence does NOT cure — arming would create the overlap fixed-delay promises not to have. */
         @Test
-        void upsertDoesNotHealAnAfterFinishChainWithALiveSchedulerOccurrence() {
+        void upsertPreservesAnAfterFinishSeriesInFlight() {
             JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), true));
             store.upsert(definition);
             disarm("poll");
             // "Live" means the advisory is still PENDING (queued, running, or in backoff)
-            seedExecution("occ-1", "poll", "scheduler", "PENDING");
+            seedExecution("01991337-0000-7000-8000-000000000074", "poll", "scheduler", "PENDING");
 
             store.upsert(definition);
 
@@ -551,15 +485,17 @@ class JdbcJobStoreTest {
         }
 
         @Test
-        void upsertHealsAnAfterFinishChainWhoseOccurrencesAllFinished() {
+        void onlyExplicitReschedulingRestartsADisarmedSeries() {
             JobDefinition definition = definition("poll", new IntervalSpec(Duration.ofMinutes(5), true));
             store.upsert(definition);
             disarm("poll");
-            seedExecution("occ-1", "poll", "scheduler", "SUCCEEDED");
-            seedExecution("man-1", "poll", "api:user", "PENDING"); // a manual execution is not the chain
+            seedExecution("01991337-0000-7000-8000-000000000074", "poll", "scheduler", "SUCCEEDED");
+            seedExecution("01991337-0000-7000-8000-00000000005c", "poll", "api:user", "PENDING"); // a manual execution is not the chain
 
             store.upsert(definition);
 
+            assertThat(nextFireAtOf("poll")).isNull();
+            store.reschedule(JobKey.of("poll"), definition.schedule());
             assertThat(nextFireAtOf("poll")).isEqualTo(clock.instant().plus(Duration.ofMinutes(5)));
         }
 
@@ -572,14 +508,12 @@ class JdbcJobStoreTest {
             store.upsert(definition("import-file", new OnDemandSpec()));
             store.upsert(definition("paused", new IntervalSpec(Duration.ofMinutes(1), false)));
             store.pause(JobKey.of("paused"));
-            store.upsert(definition("orphaned", new IntervalSpec(Duration.ofMinutes(1), false)));
-            store.markOrphaned(JobKey.of("orphaned"));
             clock.advance(Duration.ofMinutes(2));
 
-            assertThat(store.findDueRecurring(clock.instant(), 10))
+            assertThat(store.findDueRecurring(clock.instant(), 10).jobs())
                     .extracting(stored -> stored.definition().key().value())
                     .containsExactly("due-late", "due-recent");
-            assertThat(store.findDueRecurring(clock.instant(), 1))
+            assertThat(store.findDueRecurring(clock.instant(), 1).jobs())
                     .extracting(stored -> stored.definition().key().value())
                     .containsExactly("due-late");
         }
@@ -590,7 +524,7 @@ class JdbcJobStoreTest {
             Instant armedAt = clock.instant().plus(Duration.ofMinutes(1));
             clock.advance(Duration.ofMinutes(2));
 
-            assertThat(store.findDueRecurring(clock.instant(), 10))
+            assertThat(store.findDueRecurring(clock.instant(), 10).jobs())
                     .singleElement()
                     .extracting(StoredJob::nextFireAt)
                     .isEqualTo(armedAt);
@@ -686,17 +620,6 @@ class JdbcJobStoreTest {
             assertThat(store.reschedule(JobKey.of("poll"), new OnDemandSpec())).isFalse();
         }
 
-        /** A fixed-delay chain in flight (its trigger disarmed) rescheduled — the new series wins; the completion's late rearm no-ops on the IS NULL guard. */
-        @Test
-        void rescheduleArmsTheNewSeriesAndTheLateCompletionRearmLoses() {
-            store.upsert(definition("chain", new IntervalSpec(Duration.ofMinutes(5), true)));
-            disarm("chain"); // An occurrence in flight: next_fire_at = NULL, as the firing leaves it
-
-            store.reschedule(JobKey.of("chain"), new IntervalSpec(Duration.ofMinutes(1), true));
-            store.armNextFire(JobKey.of("chain"), clock.instant().plus(Duration.ofMinutes(5))); // the completion arrives late
-
-            assertThat(nextFireAtOf("chain")).isEqualTo(clock.instant().plus(Duration.ofMinutes(1)));
-        }
 
         /** An unrealisable cron fails BEFORE any write — the old schedule stays intact. */
         @Test
@@ -710,24 +633,11 @@ class JdbcJobStoreTest {
                     .isEqualTo(new IntervalSpec(Duration.ofMinutes(5), false));
         }
 
-        @Test
-        void armNextFireOnlyArmsAnUnarmedTrigger() {
-            store.upsert(definition("poll", new IntervalSpec(Duration.ofMinutes(5), true)));
-            Instant armedAt = nextFireAtOf("poll");
-
-            store.armNextFire(JobKey.of("poll"), clock.instant().plus(Duration.ofHours(1)));
-            assertThat(nextFireAtOf("poll")).isEqualTo(armedAt); // already armed — the IS NULL guard protects it
-
-            disarm("poll");
-            Instant rearmAt = clock.instant().plus(Duration.ofHours(1));
-            store.armNextFire(JobKey.of("poll"), rearmAt);
-            assertThat(nextFireAtOf("poll")).isEqualTo(rearmAt);
-        }
 
         private void seedExecution(String id, String jobKey, String actor, String state) {
             LocalDateTime now = JdbcTimestamps.toUtcLocalDateTime(clock.instant());
             rawJdbc().update("""
-                    INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, priority, payload, payload_type)
+                    INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, priority, payload, input_contract)
                     VALUES (?, ?, ?, ?, ?, ?, 20, '{}', 'java.util.LinkedHashMap')
                     """, id, jobKey, state, now, now, actor);
         }
@@ -742,16 +652,16 @@ class JdbcJobStoreTest {
     void removeCountsCancelledBatchMembersIntoTheirBatch() {
         JdbcTemplate raw = new JdbcTemplate(dataSource);
         store.upsert(definition("welcome-email", new OnDemandSpec()));
-        new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate()).insert("b6", "nightly", 3);
-        seedExecution("m1", "welcome-email", "PENDING", true);
-        seedExecution("m2", "welcome-email", "PENDING", true);
-        seedExecution("m3", "welcome-email", "SUCCEEDED", false);
-        raw.update("UPDATE mohs_execution SET correlation_id = ? WHERE execution_id IN (?, ?, ?)", "b6", "m1", "m2", "m3");
+        TestWork.batch(dataSource, new H2JdbcDelegate(), "01991337-0000-7000-8000-00000000000c", "nightly", 3);
+        seedExecution("01991337-0000-7000-8000-000000000059", "welcome-email", "PENDING", true);
+        seedExecution("01991337-0000-7000-8000-00000000005a", "welcome-email", "PENDING", true);
+        seedExecution("01991337-0000-7000-8000-00000000005b", "welcome-email", "SUCCEEDED", false);
+        raw.update("UPDATE mohs_execution SET batch_id = ? WHERE execution_id IN (?, ?, ?)", "01991337-0000-7000-8000-00000000000c", "01991337-0000-7000-8000-000000000059", "01991337-0000-7000-8000-00000000005a", "01991337-0000-7000-8000-00000000005b");
 
         store.remove(JobKey.of("welcome-email"));
 
         // Only the two in the queue were cancelled now; the SUCCEEDED one was already terminal
-        assertThat(raw.queryForObject("SELECT failed FROM mohs_batches WHERE id = ?", Integer.class, "b6"))
+        assertThat(raw.queryForObject("SELECT failed FROM mohs_batches WHERE id = ?", Integer.class, "01991337-0000-7000-8000-00000000000c"))
                 .isEqualTo(2);
     }
 }

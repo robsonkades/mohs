@@ -68,8 +68,8 @@ class CompletionBatcherTest {
 
     private static final Instant NOW = Instant.parse("2026-08-14T12:00:00Z");
     private static final Duration LONG_INTERVAL = Duration.ofMinutes(5);
-    private static final String NODE = "node-a";
-    private static final long EPOCH = 1;
+    private static final String NODE = "01991337-0000-7000-8000-000000000065";
+    private final java.util.Map<String, String> claimTokens = new java.util.HashMap<>();
 
     private DataSource dataSource;
     private MutableClock clock;
@@ -88,10 +88,11 @@ class CompletionBatcherTest {
         dataSource = h2;
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate());
-        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate(), batchStore);
-        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), batchStore);
-        jobStore.upsert(JobDefinition.of("welcome-email", Handler.class, spec -> spec.onDemand()));
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, new H2JdbcDelegate());
+        leaseStore = new JdbcLeaseStore(dataSource, new H2JdbcDelegate());
+        workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate());
+        io.mohs.store.jdbc.TestSessions.seed(dataSource, new H2JdbcDelegate(), NODE, io.mohs.core.EngineState.RUNNING, Duration.ofMinutes(5));
+        jobStore.upsert(JobDefinition.of("welcome-email", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
     }
 
     @AfterEach
@@ -103,23 +104,81 @@ class CompletionBatcherTest {
 
     /** Creates and starts the batcher in the field — {@code tearDown} closes whatever the test did not. */
     private void startBatcher(LeaseStore store, int flushSize, Duration flushInterval) {
-        batcher = new CompletionBatcher(store, jobStore, flushSize, flushInterval);
+        batcher = new CompletionBatcher(store, flushSize, flushInterval);
         batcher.start();
     }
 
     /** History, queue and claim — the ownership is born through the real path, with the (NODE, EPOCH) fence. */
     private void seedLeasedExecution(String id) {
         new JdbcTemplate(dataSource).update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
                 VALUES (?, 'welcome-email', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
                 """, id, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of("welcome-email"), 0, 20, 1, NOW.minusSeconds(1))));
-        workQueue.claim(0, NODE, EPOCH, 10, List.of(), NOW);
+        io.mohs.store.jdbc.TestWork.ready(dataSource, new H2JdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), JobKey.of("welcome-email"), 0, 20, 1, NOW.minusSeconds(1))));
+        workQueue.claim(0, NODE, 10, List.of(), NOW).forEach(work -> claimTokens.put(work.executionId().value(), work.claimToken()));
     }
 
     private LeaseStore.CompletionResult successResult(String id) {
-        return new LeaseStore.CompletionResult(ExecutionId.of(id), JobKey.of("welcome-email"), NODE, EPOCH, 1,
-                NOW, NOW, ExecutionState.SUCCEEDED, null, null, ExecutionState.SUCCEEDED, null);
+        return new LeaseStore.CompletionResult(ExecutionId.of(id), JobKey.of("welcome-email"), NODE, claimTokens.get(id), 1,
+                NOW, NOW, ExecutionState.SUCCEEDED, null, null, null);
+    }
+
+    @Test
+    void anOldCompletionCannotClearANewerGrantsTransitMarker() throws Exception {
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001c");
+        var first = successResult("01991337-0000-7000-8000-00000000001c");
+        var second = new LeaseStore.CompletionResult(first.executionId(), first.jobKey(), NODE, "01991337-0000-7000-8000-000000000060",
+                1, NOW, NOW, ExecutionState.SUCCEEDED, null, null, null);
+        var firstEntered = new CountDownLatch(1);
+        var releaseFirst = new CountDownLatch(1);
+        var secondEntered = new CountDownLatch(1);
+        var releaseSecond = new CountDownLatch(1);
+        var delivered = new CountDownLatch(2);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        LeaseStore controlled = mock(LeaseStore.class);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            if (calls.incrementAndGet() == 1) {
+                firstEntered.countDown();
+                assertThat(releaseFirst.await(5, TimeUnit.SECONDS)).isTrue();
+            } else {
+                secondEntered.countDown();
+                assertThat(releaseSecond.await(5, TimeUnit.SECONDS)).isTrue();
+            }
+            return java.util.Map.of(first.executionId(), LeaseStore.Completion.FENCED_OUT);
+        }).when(controlled).complete(any());
+        startBatcher(controlled, 1, LONG_INTERVAL);
+        try {
+            batcher.submit(first, _ -> delivered.countDown());
+            assertThat(firstEntered.await(5, TimeUnit.SECONDS)).isTrue();
+            batcher.submit(second, _ -> delivered.countDown());
+            releaseFirst.countDown();
+            assertThat(secondEntered.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(batcher.completionInTransit(first.executionId(), first.claimToken())).isFalse();
+            assertThat(batcher.completionInTransit(second.executionId(), second.claimToken())).isTrue();
+            releaseSecond.countDown();
+            assertThat(delivered.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(batcher.completionInTransit(second.executionId(), second.claimToken())).isFalse();
+        } finally {
+            releaseFirst.countDown();
+            releaseSecond.countDown();
+        }
+    }
+
+    @Test
+    void twoGrantsForOneExecutionReceiveTheirOwnVerdicts() throws Exception {
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001c");
+        var old = successResult("01991337-0000-7000-8000-00000000001c");
+        var current = new LeaseStore.CompletionResult(old.executionId(), old.jobKey(), NODE, "01991337-0000-7000-8000-000000000018",
+                1, NOW, NOW, ExecutionState.SUCCEEDED, null, null, null);
+        new JdbcTemplate(dataSource).update("UPDATE mohs_work SET claim_token = '01991337-0000-7000-8000-000000000018' WHERE execution_id = '01991337-0000-7000-8000-00000000001c'");
+        var oldVerdict = new java.util.concurrent.CompletableFuture<LeaseStore.Completion>();
+        var currentVerdict = new java.util.concurrent.CompletableFuture<LeaseStore.Completion>();
+        startBatcher(leaseStore, 2, LONG_INTERVAL);
+        batcher.submit(old, oldVerdict::complete);
+        batcher.submit(current, currentVerdict::complete);
+        assertThat(oldVerdict.get(5, TimeUnit.SECONDS)).isEqualTo(LeaseStore.Completion.FENCED_OUT);
+        assertThat(currentVerdict.get(5, TimeUnit.SECONDS).owned()).isTrue();
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     private ExecutionState stateOf(String id) {
@@ -130,43 +189,43 @@ class CompletionBatcherTest {
     /** The N trigger: the interval is deliberately long — if the flush depended on it, the await would time out. */
     @Test
     void flushesWhenTheBatchFillsBeforeTheInterval() throws Exception {
-        seedLeasedExecution("exec-1");
-        seedLeasedExecution("exec-2");
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001c");
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001e");
         startBatcher(leaseStore, 2, LONG_INTERVAL);
         CountDownLatch delivered = new CountDownLatch(2);
 
-        batcher.submit(successResult("exec-1"), completion -> delivered.countDown());
-        batcher.submit(successResult("exec-2"), completion -> delivered.countDown());
+        batcher.submit(successResult("01991337-0000-7000-8000-00000000001c"), completion -> delivered.countDown());
+        batcher.submit(successResult("01991337-0000-7000-8000-00000000001e"), completion -> delivered.countDown());
 
         assertThat(delivered.await(5, TimeUnit.SECONDS)).isTrue();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
-        assertThat(stateOf("exec-2")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001e")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     /** The T trigger: a batch far from full — the result becomes durable within the interval rather than waiting for neighbours. */
     @Test
     void flushesOnTheIntervalWhenTheBatchDoesNotFill() throws Exception {
-        seedLeasedExecution("exec-1");
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001c");
         startBatcher(leaseStore, 100, Duration.ofMillis(50));
         CountDownLatch delivered = new CountDownLatch(1);
 
-        batcher.submit(successResult("exec-1"), completion -> delivered.countDown());
+        batcher.submit(successResult("01991337-0000-7000-8000-00000000001c"), completion -> delivered.countDown());
 
         assertThat(delivered.await(5, TimeUnit.SECONDS)).isTrue();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     /** The fence's verdict crosses the batch: whoever already lost ownership (a reaper or requeue got there first) receives FENCED_OUT, never silence. */
     @Test
     void deliversFencedOutWhenTheIncarnationWasLost() throws Exception {
-        seedLeasedExecution("exec-1");
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001c");
         // Ownership changed hands: a reaper dropped the lease and another node re-claimed it
-        new JdbcTemplate(dataSource).update("UPDATE mohs_lease SET node_id = 'node-b', epoch = 9 WHERE execution_id = 'exec-1'");
+        new JdbcTemplate(dataSource).update("UPDATE mohs_work SET node_id = '01991337-0000-7000-8000-000000000067', claim_token = '01991337-0001-7000-8000-000000000097' WHERE execution_id = '01991337-0000-7000-8000-00000000001c'");
         startBatcher(leaseStore, 1, LONG_INTERVAL);
         ConcurrentLinkedQueue<LeaseStore.Completion> outcomes = new ConcurrentLinkedQueue<>();
         CountDownLatch delivered = new CountDownLatch(1);
 
-        batcher.submit(successResult("exec-1"), completion -> {
+        batcher.submit(successResult("01991337-0000-7000-8000-00000000001c"), completion -> {
             outcomes.add(completion);
             delivered.countDown();
         });
@@ -175,28 +234,31 @@ class CompletionBatcherTest {
         assertThat(outcomes).containsExactly(LeaseStore.Completion.FENCED_OUT);
         // The loser wrote nothing: the advisory intact, the new incarnation's lease standing
         assertThat(new JdbcTemplate(dataSource).queryForObject(
-                "SELECT state FROM mohs_execution WHERE execution_id = 'exec-1'", String.class)).isEqualTo("PENDING");
+                "SELECT state FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", String.class)).isEqualTo("PENDING");
         assertThat(new JdbcTemplate(dataSource).queryForObject(
-                "SELECT node_id FROM mohs_lease WHERE execution_id = 'exec-1'", String.class)).isEqualTo("node-b");
+                "SELECT node_id FROM mohs_work WHERE work_state = 'LEASED' AND  execution_id = '01991337-0000-7000-8000-00000000001c'", String.class)).isEqualTo("01991337-0000-7000-8000-000000000067");
     }
 
-    /** A batch flush failure discards no result: it falls back to individual completion, in the same transaction as ever. */
+    /** A transient error retries the same fenced group once. */
     @Test
-    void fallsBackToPerResultCompletionWhenTheBatchFlushFails() throws Exception {
-        seedLeasedExecution("exec-1");
-        seedLeasedExecution("exec-2");
+    void retriesTheWholeGroupWhenTheFirstFlushFails() throws Exception {
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001c");
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001e");
         LeaseStore failingOnce = mock(LeaseStore.class, delegatesTo(leaseStore));
-        doThrow(new IllegalStateException("simulated flush failure"))
-                .when(failingOnce).complete(argThatIsBatchOfTwo(), any());
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        org.mockito.Mockito.doAnswer(call -> {
+            if (calls.incrementAndGet() == 1) throw new org.springframework.dao.DataAccessResourceFailureException("simulated flush failure");
+            return leaseStore.complete(call.getArgument(0));
+        }).when(failingOnce).complete(argThatIsBatchOfTwo());
         startBatcher(failingOnce, 2, LONG_INTERVAL);
         CountDownLatch delivered = new CountDownLatch(2);
 
-        batcher.submit(successResult("exec-1"), completion -> delivered.countDown());
-        batcher.submit(successResult("exec-2"), completion -> delivered.countDown());
+        batcher.submit(successResult("01991337-0000-7000-8000-00000000001c"), completion -> delivered.countDown());
+        batcher.submit(successResult("01991337-0000-7000-8000-00000000001e"), completion -> delivered.countDown());
 
         assertThat(delivered.await(5, TimeUnit.SECONDS)).isTrue();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
-        assertThat(stateOf("exec-2")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001e")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
     private static List<LeaseStore.CompletionResult> argThatIsBatchOfTwo() {
@@ -206,44 +268,46 @@ class CompletionBatcherTest {
     /** The reconcile's state-based guard: an id stays in transit between the submit and the verdict, and disappears on EVERY outcome. */
     @Test
     void completionInTransitTracksSubmitToOutcome() throws Exception {
-        seedLeasedExecution("exec-1");
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001c");
         startBatcher(leaseStore, 100, LONG_INTERVAL); // a batch far from full: only the close flushes
         CountDownLatch delivered = new CountDownLatch(1);
 
-        batcher.submit(successResult("exec-1"), completion -> delivered.countDown());
-        assertThat(batcher.completionInTransit(ExecutionId.of("exec-1"))).isTrue();
+        batcher.submit(successResult("01991337-0000-7000-8000-00000000001c"), completion -> delivered.countDown());
+        assertThat(batcher.completionInTransit(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), claimTokens.get("01991337-0000-7000-8000-00000000001c"))).isTrue();
 
         batcher.close();
         assertThat(delivered.await(5, TimeUnit.SECONDS)).isTrue();
-        assertThat(batcher.completionInTransit(ExecutionId.of("exec-1"))).isFalse();
+        assertThat(batcher.completionInTransit(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), claimTokens.get("01991337-0000-7000-8000-00000000001c"))).isFalse();
     }
 
     /** The close is the shutdown's drain: whatever was in the queue becomes durable before it returns. */
     @Test
     void closeDrainsWhatIsStillQueued() {
-        seedLeasedExecution("exec-1");
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001c");
         startBatcher(leaseStore, 100, LONG_INTERVAL);
         AtomicBoolean deliveredBeforeCloseReturned = new AtomicBoolean();
 
-        batcher.submit(successResult("exec-1"), completion -> deliveredBeforeCloseReturned.set(true));
+        batcher.submit(successResult("01991337-0000-7000-8000-00000000001c"), completion -> deliveredBeforeCloseReturned.set(true));
         batcher.close();
 
         assertThat(deliveredBeforeCloseReturned).isTrue();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(stateOf("01991337-0000-7000-8000-00000000001c")).isEqualTo(ExecutionState.SUCCEEDED);
     }
 
-    /** A zombie finishing after the shutdown does not lose its result: a submit after the close completes synchronously, on the calling thread. */
+    /** Shutdown ends local acceptance of results; peers recover the unresolved grant. */
     @Test
-    void submitAfterCloseCompletesSynchronously() {
-        seedLeasedExecution("exec-1");
+    void submitAfterCloseLeavesTheGrantForRecovery() {
+        seedLeasedExecution("01991337-0000-7000-8000-00000000001c");
         startBatcher(leaseStore, 100, LONG_INTERVAL);
         batcher.close();
         List<LeaseStore.Completion> outcomes = new ArrayList<>();
 
-        batcher.submit(successResult("exec-1"), outcomes::add);
+        batcher.submit(successResult("01991337-0000-7000-8000-00000000001c"), outcomes::add);
 
-        assertThat(outcomes).hasSize(1);
-        assertThat(outcomes.get(0).owned()).isTrue();
-        assertThat(stateOf("exec-1")).isEqualTo(ExecutionState.SUCCEEDED);
+        assertThat(outcomes).isEmpty();
+        assertThat(new JdbcTemplate(dataSource).queryForObject(
+                "SELECT state FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'", String.class)).isEqualTo("PENDING");
+        assertThat(new JdbcTemplate(dataSource).queryForObject(
+                "SELECT COUNT(*) FROM mohs_work WHERE work_state = 'LEASED' AND  execution_id = '01991337-0000-7000-8000-00000000001c'", Long.class)).isEqualTo(1L);
     }
 }

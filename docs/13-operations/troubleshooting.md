@@ -40,7 +40,7 @@ flowchart TB
     D -->|"GET /jobs is empty"| D1["The scan found nothing — is the bean a singleton?<br/>Is @MohsJob on a Spring-managed bean?"]
     D -->|"present but paused"| D2["POST .../resume"]
     D -->|"present, next_fire_at is NULL"| D3["On-demand, or fixed-delay awaiting a completion,<br/>or the chain is disarmed"]
-    D -->|"present and armed"| E{"Is mohs_ready empty?"}
+    D -->|"present and armed"| E{"Is READY work empty?"}
     E -->|yes| E1["Triggers are not firing — check mohs.tick.failed<br/>and 'firing job ... failed' in the log"]
     E -->|no| F{"Does this node own any shard?"}
     F -->|"WARN 'owns no shard of 64'"| F1["More than 64 RUNNING nodes"]
@@ -68,7 +68,7 @@ completion transaction, the reaper, a cancel of a queued occurrence, and the ups
 
 ## Work runs twice
 
-Duplicates are **within contract** (at-least-once). The question is whether the *rate* is explained:
+Duplicate effects are possible after uncertain completion. The question is whether the *rate* is explained:
 
 | Cause | Evidence | Fix |
 | --- | --- | --- |
@@ -87,7 +87,7 @@ attempt.
 
 | Cause | Evidence | Fix |
 | --- | --- | --- |
-| **`retries = 0`** | `mohs.lease.reclaimed{reason="attempts_exhausted"}` after a node death | **This is the opt-in to at-most-once.** The default is 1 for exactly this reason |
+| **`retries = 0`** | `mohs.lease.reclaimed{reason="attempts_exhausted"}` after a node death | No automatic retry remains. Finite retry budgets can also exhaust before successful execution. |
 | The job was retired mid-flight | `reason="job_retired"` | A retired job never reschedules — its rearmed entry would never be claimed |
 | A cancel was honoured | `reason="cancelled"` | The operator's order beats the budget |
 | An unreadable payload | Terminal `FAILED` with `attemptsExhausted=false` | A corrupt row or a class gone from the classpath. It does not heal by re-reading |
@@ -173,11 +173,21 @@ grep -E "mohs|lease expired|clock moved|owns no shard|tick step" app.log | tail 
 
 ```sql
 -- 5. The cluster's own view
-SELECT node_id, state, last_heartbeat_at, epoch, expires_at > now() AS alive FROM mohs_nodes;
-SELECT COUNT(*) AS backlog FROM mohs_ready WHERE visible_at <= now();
-SELECT node_id, COUNT(*) AS in_flight FROM mohs_lease GROUP BY node_id;
-SELECT job_key, next_fire_at, paused, orphaned, retired FROM mohs_job_definitions;
+SELECT node_id, state, last_heartbeat_at, revoked, NOT revoked AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC') AS alive FROM mohs_nodes;
+SELECT COUNT(*) AS backlog FROM mohs_work WHERE work_state = 'READY' AND visible_at <= (clock_timestamp() AT TIME ZONE 'UTC');
+SELECT node_id, COUNT(*) AS in_flight FROM mohs_work WHERE work_state = 'LEASED' GROUP BY node_id;
+SELECT job_key, next_fire_at, paused, retired FROM mohs_job_definitions;
 ```
 
 The single most informative artefact is usually the **thread dump**: every Mohs thread is named,
 deliberately, for exactly this moment.
+
+## Changed runtime contracts
+
+| Symptom | Check |
+| --- | --- |
+| Engine state `FAILED`, health `DOWN` | The coordinator exited unexpectedly. Inspect the original `engine loop died` failure, stop/drain, then restart the application; resume cannot revive a terminated loop |
+| A recurrence no longer has a separate metric series | The `job` metric label identifies its registered executable. Use concrete recurrence keys in history/events; update old metric selectors |
+| Startup rejects a returning or `@Async` job | Annotated handlers must return `void` and finish synchronously; await asynchronous work inside the handler |
+| Dashboard mutations fail after login/logout | Reload to refresh the host CSRF token in `#mohs-config`; inspect host authorization and CSRF filters |
+| Custom SSE client expected arrays | Arrays remain the default. Only `?executionMode=invalidation` changes executions to `{changed:true}` within the envelope |

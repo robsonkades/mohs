@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
  * height is a design decision that may change, the "most of the screen, not all of it" intent
  * does not.
  */
-const TABLE_MAX_HEIGHT = "max-h-[calc(100vh-22rem)] min-h-64";
+const TABLE_MAX_HEIGHT = "max-h-[max(16rem,calc(100dvh-22rem))] min-h-64";
 
 function columnLabel(header: unknown, fallbackId: string): string {
   return typeof header === "string" ? header : fallbackId;
@@ -93,8 +93,9 @@ export function DataTable<T extends RowData>({
         re-measures the content — a relative timestamp growing by one character is enough to
         shove every column sideways.
       */}
-      <div className={cn("overflow-auto", TABLE_MAX_HEIGHT)} role="region" aria-label={`${title} table`} tabIndex={0}>
-        <Table className="table-fixed">
+        <Table className="table-fixed" aria-label={title}
+          style={{ minWidth: table.getVisibleLeafColumns().reduce((width, column) => width + column.getSize(), onRowClick ? 48 : 0) }}
+          containerProps={{ className: TABLE_MAX_HEIGHT, role: "region", "aria-label": `${title} table`, tabIndex: 0 }}>
           <colgroup>
             {table.getVisibleLeafColumns().map((column) => (
               <col key={column.id} style={{ width: `${column.getSize()}px` }} />
@@ -105,11 +106,11 @@ export function DataTable<T extends RowData>({
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id} className="hover:bg-transparent">
                 {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id} className="mono-label h-9 font-mono text-muted-foreground first:sticky first:left-0 first:z-20 first:bg-card">
+                  <TableHead key={header.id} scope="col" className="mono-label h-9 font-mono text-muted-foreground sm:first:sticky sm:first:left-0 sm:first:z-20 sm:first:bg-card">
                     {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
                   </TableHead>
                 ))}
-                {onRowClick && <TableHead><span className="sr-only">Details</span></TableHead>}
+                {onRowClick && <TableHead scope="col"><span className="sr-only">Details</span></TableHead>}
               </TableRow>
             ))}
           </TableHeader>
@@ -127,7 +128,7 @@ export function DataTable<T extends RowData>({
                   {row.getVisibleCells().map((cell) => (
                     // Fixed widths mean content can no longer push a column wider, so it has to
                     // be told what to do instead: clip, with the full value one hover away.
-                    <TableCell key={cell.id} className="truncate first:sticky first:left-0 first:z-10 first:bg-card">
+                    <TableCell key={cell.id} className="truncate sm:first:sticky sm:first:left-0 sm:first:z-10 sm:first:bg-card">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </TableCell>
                   ))}
@@ -142,7 +143,6 @@ export function DataTable<T extends RowData>({
             })}
           </TableBody>
         </Table>
-      </div>
       {footer && <PanelFooter>{footer}</PanelFooter>}
     </Panel>
   );

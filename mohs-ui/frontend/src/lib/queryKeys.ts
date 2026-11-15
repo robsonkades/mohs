@@ -14,6 +14,7 @@ export const queryKeys = {
   runners: () => ["runners"] as const,
   rateLimits: () => ["rate-limits"] as const,
   executions: (filters: ExecutionFilters) => ["executions", filters] as const,
+  attention: () => ["execution-attention"] as const,
   execution: (executionId: string) => ["execution", executionId] as const,
   jobExecutions: (jobKey: string) => ["job-executions", jobKey] as const,
 } as const;

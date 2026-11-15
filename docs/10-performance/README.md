@@ -1,17 +1,21 @@
 # 10. Performance
 
-Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
+Status: Active · Last Reviewed: 2026-09-10 · Source of Truth: Repository
 
 | Document | What it covers |
 | --- | --- |
-| [performance-characteristics.md](performance-characteristics.md) | Structural properties that transfer, measured throughput and latency, idle cost, write amplification, the cost model, known bottlenecks |
-| [tuning.md](tuning.md) | The knobs ordered by impact, per-workload starting points, database-side settings, how to diagnose where the ceiling is |
-| [benchmarks.md](benchmarks.md) | The ten scenarios, the three scripts, prerequisites, and how to write a new one |
+| [tuning.md](tuning.md) | Configuration controls, workload starting points and database diagnosis |
+| [benchmarks.md](benchmarks.md) | Current scenarios and scripts, prerequisites, methodology and limits |
+| [data model](../06-data/data-model.md) | Current table layout and authoritative state |
+| [indexes](../06-data/indexes.md) | Access paths and the operations they support |
+
+The removed experimental reports are not shipped here. The harnesses describe how to collect
+current evidence; their presence alone does not establish throughput or validate this working tree.
 
 ## The caveat, stated once
 
-Every number in this section was measured on a **local development machine** against **Docker
-Desktop containers** — not production hardware, not CI. They compare dialects and arms **against each
+Historical benchmark numbers in this section came from a **local development machine** against **Docker
+containers** — not production hardware, not CI. They compare dialects and arms **against each
 other within one round**, and detect relative regression in later rounds on the same machine. **They
 are not capacity-planning inputs for your hardware.**
 
@@ -20,13 +24,8 @@ are not capacity-planning inputs for your hardware.**
 1. **The defaults are latency-oriented.** The 25 ms poll floor favours prompt dispatch, while
    adaptive backoff reduces idle traffic. Backlog throughput still depends on batch size, claim
    rounds, dispatch capacity, handler duration and database capacity.
-2. **History size does not affect claim cost** — the claim references only `mohs_ready` and
-   `mohs_lease`. What does cost is the *backlog*: `GET /overview`'s `COUNT(*)` over the queue, and
-   the idle probe when a large non-visible backlog exists.
-3. **Cross-node dispatch latency is bounded by `max-poll-interval`.** The local hand-off wakes only
-   the JVM that enqueued. A LISTEN/NOTIFY tier was built to close that gap and **withdrawn** after
-   measurement — it serialised the ingest, taking a 10 k REST load from ~15 s to ~29 s and average
-   POST latency from ~8 ms to ~1,300 ms.
+2. **Active work has its own indexes**, separate from retained snapshots. Shared database resources and cleanup still affect observed cost; the old archive-size experiment is historical evidence.
+3. **The poll ceiling bounds sleep, not dispatch latency.** Candidate pages, resource admission, backlog and database waits add delay. Local wakeup only reaches the submitting process.
 
 ## The measurement rule the codebase applies to itself
 

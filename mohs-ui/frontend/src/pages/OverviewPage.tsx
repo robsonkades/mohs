@@ -125,28 +125,29 @@ export function OverviewPage() {
 
   const overview = useQuery({
     queryKey: queryKeys.overview(window),
-    queryFn: () => fetchOverview(window),
+    queryFn: ({ signal }) => fetchOverview(window, signal),
     // Switching the window changes the key, and dropping to `undefined` would blank the throughput
     // panel and the three stat cards fed by this query. Keeping the previous snapshot lets the new
     // one ease in over it — the numbers change, the layout does not.
     placeholderData: keepPreviousData,
   });
-  const jobs = useQuery({ queryKey: queryKeys.jobs(), queryFn: fetchJobs });
-  const nodes = useQuery({ queryKey: queryKeys.nodes(), queryFn: fetchNodes });
+  const jobs = useQuery({ queryKey: queryKeys.jobs(), queryFn: ({ signal }) => fetchJobs(signal) });
+  const nodes = useQuery({ queryKey: queryKeys.nodes(), queryFn: ({ signal }) => fetchNodes(signal) });
   // Seeded by the stream's `runners` frame every 2s; the fetch is the fallback for when
   // SSE never comes up.
-  const runners = useQuery({ queryKey: queryKeys.runners(), queryFn: fetchRunners });
+  const runners = useQuery({ queryKey: queryKeys.runners(), queryFn: ({ signal }) => fetchRunners(signal) });
   const failedRecent = useQuery({
-    queryKey: queryKeys.executions({ status: "FAILED" }),
-    queryFn: () => fetchExecutions({ status: "FAILED" }, undefined, 5),
+    queryKey: queryKeys.attention(),
+    queryFn: ({ signal }) => fetchExecutions({ status: "FAILED" }, undefined, 5, signal),
   });
 
   const counts = overview.data?.executionCountsByStatus;
   const pausedJobs = (jobs.data ?? []).filter((job) => job.paused);
-  const onlineNodes = (nodes.data ?? []).filter((node) => isNodeOnline(node.lastHeartbeatAt)).length;
-  const staleNodes = (nodes.data ?? []).filter((node) => !isNodeOnline(node.lastHeartbeatAt));
+  const onlineNodes = (nodes.data ?? []).filter((node) => isNodeOnline(node)).length;
+  const staleNodes = (nodes.data ?? []).filter((node) => !isNodeOnline(node));
 
   const attentionLoaded = !!failedRecent.data && !!jobs.data && !!nodes.data;
+  const attentionError = failedRecent.error ?? jobs.error ?? nodes.error;
   const attentionEmpty =
     attentionLoaded && failedRecent.data!.items.length === 0 && pausedJobs.length === 0 && staleNodes.length === 0;
 
@@ -218,11 +219,15 @@ export function OverviewPage() {
       </StatGrid>
 
       <Panel title="Needs attention">
-        {!attentionLoaded && !failedRecent.error && <Spinner label="Checking" />}
-        {failedRecent.error && (
-          <ErrorState message={failedRecent.error.message} onRetry={() => failedRecent.refetch()} />
+        {!attentionLoaded && !attentionError && <Spinner label="Checking" />}
+        {attentionError && (
+          <ErrorState message={attentionError.message} onRetry={() => {
+            if (failedRecent.error) void failedRecent.refetch();
+            if (jobs.error) void jobs.refetch();
+            if (nodes.error) void nodes.refetch();
+          }} />
         )}
-        {attentionEmpty && (
+        {attentionEmpty && !attentionError && (
           <div className="flex items-center gap-2.5 py-6">
             <span className="size-2 shrink-0 rounded-full bg-good" />
             <p className="text-sm font-medium">All clear — nothing needs attention right now.</p>
@@ -254,14 +259,14 @@ export function OverviewPage() {
               </AttentionRow>
             ))}
             {staleNodes.map((node) => {
-              const status = nodeFreshness(node.lastHeartbeatAt);
+              const status = nodeFreshness(node);
               return (
                 <AttentionRow
                   key={node.nodeId}
                   badge={<StatusBadge tone={status.tone} label={status.label} />}
                   meta={`last heartbeat ${relativeTime(node.lastHeartbeatAt)}`}
                 >
-                  <span className="font-mono text-xs">{node.nodeId}</span> stopped sending heartbeats
+                  <span className="font-mono text-xs">{node.nodeId}</span> · {status.label.toLowerCase()}
                 </AttentionRow>
               );
             })}
@@ -313,7 +318,7 @@ export function OverviewPage() {
           {nodes.data && nodes.data.length > 0 && (
             <ul className="flex flex-col divide-y">
               {nodes.data.map((node) => {
-                const status = nodeFreshness(node.lastHeartbeatAt);
+                const status = nodeFreshness(node);
                 return (
                   <li key={node.nodeId} className="flex items-center justify-between gap-3 py-2.5">
                     <span className="truncate font-mono text-sm" title={node.nodeId}>

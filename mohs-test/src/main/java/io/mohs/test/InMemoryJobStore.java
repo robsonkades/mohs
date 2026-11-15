@@ -30,40 +30,87 @@ import io.mohs.core.definition.JobDefinition;
 import io.mohs.core.job.JobKey;
 import io.mohs.core.schedule.Schedule;
 import io.mohs.engine.JobStore;
+import io.mohs.engine.JobBinding;
 import io.mohs.engine.NextFireCalculator;
 import io.mohs.engine.StoredJob;
 
 /**
- * In-memory {@link JobStore} — the "in-memory storage" implementation of the test kit
- * ({@code @MohsTest}).
- *
- * <p>It draws the same line between a job's DEFINITION (what it is: schedule, handler, policies)
- * and its OPERATIONAL state (what is true of it right now: paused, orphaned, when it fires next)
- * as {@code JdbcJobStore} (io.mohs.store.jdbc) — without touching a database at all, which is also
- * the proof that {@link JobStore} leaked nothing JDBC-specific.
- *
- * <p>The {@link Clock} constructor exists for trigger state: the upsert initialises
- * {@code nextFireAt} from the test's own deterministic clock ({@link MutableClock}). The no-arg
- * constructor uses the system clock, as a convenience for tests that do not exercise scheduling.
- *
- * <p>Two deliberate divergences from the JDBC adapter, documented rather than accidental:
- * <ol>
- *   <li>Healing a disarmed trigger is not implemented. With no {@code TriggerFirer} and no
- *       in-memory {@code HistoryStore}/{@code WorkQueue}, a disarmed recurring trigger is an
- *       unreachable state in this store, so the cure would be dead code; it arrives together with
- *       the kit's in-memory engine.</li>
- *   <li>{@link #remove} is a hard delete, whereas JDBC soft-retires and keeps the row. So here a
- *       post-remove "resurrection" is a birth and {@code startPaused} applies again, while in JDBC
- *       the row survives as the memory of the operator's decision and {@code paused} comes back as
- *       they left it.</li>
- * </ol>
- *
- * <p>Thread-safe: state lives in a {@link ConcurrentHashMap} and every mutation goes through an
- * atomic {@code compute}.
+ * Deterministic definition and catalog fixture. Retains retired identities, pause decisions and schedule revisions.
+ * It has no distributed sessions, queue, history or transaction manager; JDBC protocol tests cover those guarantees.
  */
-public final class InMemoryJobStore implements JobStore {
+public final class InMemoryJobStore implements JobStore, io.mohs.engine.CatalogStore {
 
     private final Map<JobKey, StoredJob> jobs = new ConcurrentHashMap<>();
+    private final Map<JobKey, JobBinding> bindings = new ConcurrentHashMap<>();
+    private final Map<JobKey, StoredJob> retired = new ConcurrentHashMap<>();
+
+    @Override
+    public synchronized void reconcile(io.mohs.engine.ExecutableCatalog catalog, List<JobDefinition> definitions, Conflict conflict) {
+        definitions = List.copyOf(definitions);
+        Objects.requireNonNull(conflict, "conflict");
+        catalog.requireDefinitions(definitions);
+        var staged = new java.util.LinkedHashMap<JobKey, JobDefinition>();
+        for (var incoming : definitions) {
+            catalog.require(incoming.key(), incoming.inputContract());
+            var previous = bindings.get(incoming.key());
+            if (previous != null && !previous.executableKey().equals(incoming.key())) {
+                throw new IllegalStateException("executable collides with a retained named recurrence");
+            }
+            var existing = jobs.get(incoming.key());
+            if (existing == null && previous != null) {
+                var retained = retired.get(incoming.key());
+                if (retained != null) catalog.require(incoming.key(), retained.definition().inputContract());
+                continue;
+            }
+            if (existing != null) {
+                catalog.require(incoming.key(), existing.definition().inputContract());
+                if (!existing.definition().equals(incoming)) {
+                    if (conflict == Conflict.FAIL) throw new IllegalStateException("definition diverged from the stored one");
+                    if (conflict == Conflict.PRESERVE) continue;
+                }
+            }
+            staged.put(incoming.key(), incoming);
+        }
+        for (var existing : jobs.values()) {
+            catalog.require(existing.definition().executableKey(), existing.definition().inputContract());
+        }
+        staged.values().forEach(this::upsert);
+    }
+
+    @Override
+    public synchronized StoredJob upsertBound(JobDefinition definition, JobBinding binding) {
+        if (!definition.key().equals(binding.key())) throw new IllegalArgumentException("binding key differs from definition");
+        if (!binding.key().equals(binding.executableKey())) {
+            if (find(binding.executableKey()).isEmpty()) {
+                throw new IllegalArgumentException("no active executable '" + binding.executableKey().value() + "'");
+            }
+            JobBinding target = bindings.get(binding.executableKey());
+            if (target != null && target.input() != null) {
+                throw new IllegalArgumentException("a recurrence cannot reference another recurrence");
+            }
+        }
+        JobBinding previous = bindings.get(binding.key());
+        StoredJob existing = jobs.get(binding.key());
+        if (previous != null && !previous.executableKey().equals(binding.executableKey())
+                || existing != null && (previous == null && !binding.key().equals(binding.executableKey()))) {
+            throw new IllegalArgumentException("job '" + binding.key().value() + "' belongs to another definition or executable");
+        }
+        definition = definition.withExecutableKey(binding.executableKey());
+        if (binding.input() != null) definition = definition.withInputContract(binding.input().inputContract());
+        upsert(definition);
+        bindings.put(binding.key(), binding);
+        return jobs.get(definition.key());
+    }
+
+    @Override
+    public synchronized Optional<JobBinding> findBinding(JobKey key) {
+        return Optional.ofNullable(bindings.get(key));
+    }
+
+    @Override
+    public synchronized List<JobBinding> bindings() {
+        return bindings.values().stream().filter(binding -> jobs.containsKey(binding.key())).toList();
+    }
     private final Clock clock;
     private final NextFireCalculator nextFireCalculator = new NextFireCalculator();
 
@@ -83,36 +130,42 @@ public final class InMemoryJobStore implements JobStore {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    /**
-     * {@code orphaned} is always cleared here, whereas {@code paused} is preserved.
-     *
-     * <p>The asymmetry is deliberate: pause is an operator decision, while orphaned is an
-     * inference by the system ("the annotation is gone") — and the upsert happening at all is
-     * itself proof that a real source wants this job again. {@code nextFireAt} follows the trigger
-     * rule: an unchanged schedule keeps it, so a redeploy does not silently shift the next firing;
-     * a new or altered one recomputes it from the clock.
-     *
-     * @param definition the definition to store
-     * @return the same definition, for call-site chaining
-     */
+    /** Updates an active definition, preserving operator pause and unchanged trigger state. */
     @Override
-    public JobDefinition upsert(JobDefinition definition) {
+    public synchronized JobDefinition upsert(JobDefinition definition) {
         Objects.requireNonNull(definition, "definition");
+        if (retired.containsKey(definition.key())) throw new IllegalStateException("job is retired; use reactivate before updating it");
         jobs.compute(definition.key(), (_, existing) -> {
+            if (existing != null && !existing.definition().inputContract().equals(definition.inputContract())) {
+                throw new IllegalArgumentException("input contract is immutable for a retained job identity");
+            }
             // startPaused only applies at birth: a re-upsert must not undo a resume the operator did
             boolean paused = existing != null ? existing.paused() : definition.startPaused();
             Instant nextFireAt = existing != null && existing.definition().schedule().equals(definition.schedule())
                     ? existing.nextFireAt()
                     : nextFireCalculator.nextFireAfter(definition.schedule(), clock.instant()).orElse(null);
-            return new StoredJob(definition, false, paused, nextFireAt);
+            return new StoredJob(definition, paused, nextFireAt, existing == null ? 1L : existing.definition().schedule().equals(definition.schedule())
+                    ? existing.scheduleRevision() : existing.scheduleRevision() + 1);
         });
+        bindings.putIfAbsent(definition.key(), new JobBinding(definition.key(), definition.executableKey(), null));
         return definition;
     }
 
     @Override
-    public Optional<StoredJob> find(JobKey key) {
+    public synchronized Optional<StoredJob> find(JobKey key) {
         Objects.requireNonNull(key, "key");
         return Optional.ofNullable(jobs.get(key));
+    }
+
+    @Override
+    public List<StoredJob> findByKeys(java.util.Collection<JobKey> keys) {
+        return keys.stream().distinct().map(jobs::get).filter(Objects::nonNull).toList();
+    }
+
+    @Override
+    public Optional<Instant> nextFireAfter(Instant now) {
+        return jobs.values().stream().filter(job -> !job.paused()).map(StoredJob::nextFireAt)
+                .filter(Objects::nonNull).filter(instant -> instant.isAfter(now)).min(Instant::compareTo);
     }
 
     @Override
@@ -120,30 +173,20 @@ public final class InMemoryJobStore implements JobStore {
         return jobs.values().stream();
     }
 
-    @Override
-    public Stream<StoredJob> findAllAnnotationSourced() {
-        return jobs.values().stream().filter(stored -> stored.definition().source() == DefinitionSource.ANNOTATION);
-    }
 
     @Override
-    public List<StoredJob> findDueRecurring(Instant now, int limit) {
-        Objects.requireNonNull(now, "now");
-        return jobs.values().stream()
-                .filter(stored -> !stored.paused() && !stored.orphaned())
+    public DueJobs findDueRecurring(Instant horizon, int limit) {
+        Objects.requireNonNull(horizon, "horizon");
+        if (limit < 1 || limit > 1000) throw new IllegalArgumentException("due page limit must be in [1, 1000]");
+        Instant sample = clock.instant();
+        Instant now = io.mohs.core.TimePrecision.observed(horizon.isBefore(sample) ? horizon : sample);
+        return new DueJobs(now, jobs.values().stream()
+                .filter(stored -> !stored.paused())
                 .filter(stored -> stored.nextFireAt() != null && !stored.nextFireAt().isAfter(now))
                 .sorted(Comparator.comparing(StoredJob::nextFireAt))
-                .limit(limit)
-                .toList();
+                .limit(limit).toList());
     }
 
-    @Override
-    public void armNextFire(JobKey key, Instant nextFireAt) {
-        Objects.requireNonNull(key, "key");
-        Objects.requireNonNull(nextFireAt, "nextFireAt");
-        jobs.computeIfPresent(key, (_, stored) -> stored.nextFireAt() != null
-                ? stored
-                : new StoredJob(stored.definition(), stored.orphaned(), stored.paused(), nextFireAt));
-    }
 
     @Override
     public boolean reschedule(JobKey key, Schedule schedule) {
@@ -152,35 +195,49 @@ public final class InMemoryJobStore implements JobStore {
         // The remapping never returns null, so a non-null computeIfPresent result means the job existed
         return jobs.computeIfPresent(key, (_, stored) -> {
             JobDefinition current = stored.definition();
-            JobDefinition redefined = new JobDefinition(current.key(), current.name(), current.handlerType(), schedule,
-                    current.runner(), current.window(), current.rateLimit(), current.misfire(), current.startPaused(),
-                    current.allowConcurrentExecutions(), current.maxConcurrentExecutions(), current.retries(),
-                    current.timeout(), current.retryPolicy(), current.source());
+            JobDefinition redefined = new JobDefinition(current.key(), current.name(), current.executableKey(), schedule,
+                    current.runner(), current.window(), current.rateLimit(), current.misfire(), current.startPaused(), current.maxConcurrentExecutions(), current.retries(),
+                    current.timeout(), current.retryPolicy(), current.source(), current.inputContract());
             Instant nextFireAt = nextFireCalculator.nextFireAfter(schedule, clock.instant()).orElse(null);
-            return new StoredJob(redefined, stored.orphaned(), stored.paused(), nextFireAt);
+            return new StoredJob(redefined, stored.paused(), nextFireAt, stored.scheduleRevision() + 1);
         }) != null;
     }
 
-    @Override
-    public void markOrphaned(JobKey key) {
-        jobs.computeIfPresent(key, (_, stored) ->
-                new StoredJob(stored.definition(), true, stored.paused(), stored.nextFireAt()));
-    }
 
     @Override
     public void pause(JobKey key) {
         jobs.computeIfPresent(key, (_, stored) ->
-                new StoredJob(stored.definition(), stored.orphaned(), true, stored.nextFireAt()));
+                new StoredJob(stored.definition(), true, stored.nextFireAt(), stored.scheduleRevision()));
     }
 
     @Override
     public void resume(JobKey key) {
         jobs.computeIfPresent(key, (_, stored) ->
-                new StoredJob(stored.definition(), stored.orphaned(), false, stored.nextFireAt()));
+                new StoredJob(stored.definition(), false, stored.nextFireAt(), stored.scheduleRevision()));
     }
 
     @Override
-    public void remove(JobKey key) {
-        jobs.remove(key);
+    public synchronized void remove(JobKey key) {
+        if (bindings().stream().anyMatch(binding -> binding.executableKey().equals(key) && !binding.key().equals(key))) {
+            throw new IllegalArgumentException("remove the executable's recurring schedules first");
+        }
+        var previous = jobs.remove(key);
+        if (previous != null) retired.put(key, new StoredJob(previous.definition(), previous.paused(),
+                null, previous.scheduleRevision() + 1));
+    }
+
+    @Override
+    public synchronized boolean reactivate(JobKey key, io.mohs.engine.ExecutableCatalog catalog) {
+        var stored = retired.get(key);
+        if (stored == null) return false;
+        var definition = stored.definition();
+        catalog.require(definition.executableKey(), definition.inputContract());
+        if (!key.equals(definition.executableKey()) && find(definition.executableKey()).isEmpty()) {
+            throw new IllegalStateException("reactivate the executable before its named recurrences");
+        }
+        var next = nextFireCalculator.nextFireAfter(definition.schedule(), clock.instant()).orElse(null);
+        jobs.put(key, new StoredJob(definition, stored.paused(), next, stored.scheduleRevision() + 1));
+        retired.remove(key);
+        return true;
     }
 }

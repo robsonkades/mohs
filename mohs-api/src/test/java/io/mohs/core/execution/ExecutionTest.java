@@ -18,8 +18,7 @@ package io.mohs.core.execution;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Optional;
 
 import io.mohs.core.job.JobKey;
 
@@ -29,42 +28,48 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ExecutionTest {
 
     @Test
-    void copiesAttemptsDefensively() {
-        List<Attempt> mutable = new ArrayList<>();
-        mutable.add(new Attempt(1, Instant.now(), null, ExecutionState.RUNNING, null));
-
-        Execution execution = new Execution(
-                ExecutionId.of("exec-1"), JobKey.of("job-1"), ExecutionState.RUNNING,
-                Instant.now(), null, mutable, "application");
-
-        mutable.add(new Attempt(2, Instant.now(), null, ExecutionState.RUNNING, null));
-
-        assertThat(execution.attempts()).hasSize(1);
+    void exposesTheCompletedAttemptSeparatelyFromCurrentExecutionState() {
+        Instant now = Instant.parse("2026-09-08T12:00:00Z");
+        var attempt = new Attempt(3, now.minusSeconds(1), now, ExecutionState.FAILED, "boom");
+        var execution = new Execution(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-1"),
+                ExecutionState.RETRY_WAITING, now, null, Optional.of(attempt), "application");
+        assertThat(execution.lastAttempt()).contains(attempt);
+        assertThat(execution.lastAttempt().orElseThrow().number()).isEqualTo(3);
+        assertThat(execution.state()).isEqualTo(ExecutionState.RETRY_WAITING);
     }
 
     @Test
-    void attemptsIsImmutable() {
-        Execution execution = new Execution(
-                ExecutionId.of("exec-1"), JobKey.of("job-1"), ExecutionState.RUNNING,
-                Instant.now(), null, List.of(new Attempt(1, Instant.now(), null, ExecutionState.RUNNING, null)), "application");
+    void acceptsNoCompletedAttemptAndRejectsANullOptional() {
+        Instant now = Instant.parse("2026-09-08T12:00:00Z");
+        assertThat(Execution.enqueued(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-1"),
+                now, "application", Priority.NORMAL).lastAttempt()).isEmpty();
+        assertThatThrownBy(() -> new Execution(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-1"),
+                ExecutionState.ENQUEUED, now, null, null, "application"))
+                .isInstanceOf(NullPointerException.class).hasMessageContaining("lastAttempt");
+    }
 
-        assertThatThrownBy(() -> execution.attempts().add(new Attempt(2, Instant.now(), null, ExecutionState.RUNNING, null)))
-                .isInstanceOf(UnsupportedOperationException.class);
+    @Test
+    void rejectsAnUnfinishedLastAttempt() {
+        Instant now = Instant.parse("2026-09-08T12:00:00Z");
+        assertThatThrownBy(() -> new Execution(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-1"),
+                ExecutionState.RUNNING, now, now,
+                Optional.of(new Attempt(1, now, null, ExecutionState.RUNNING, null)), "application"))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("completed attempt");
     }
 
     @Test
     void rejectsNullActor() {
         assertThatThrownBy(() -> new Execution(
-                ExecutionId.of("exec-1"), JobKey.of("job-1"), ExecutionState.RUNNING,
-                Instant.now(), null, List.of(), null))
+                ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-1"), ExecutionState.RUNNING,
+                Instant.now(), null, Optional.empty(), null))
                 .isInstanceOf(NullPointerException.class);
     }
 
     @Test
     void rejectsBlankActor() {
         assertThatThrownBy(() -> new Execution(
-                ExecutionId.of("exec-1"), JobKey.of("job-1"), ExecutionState.RUNNING,
-                Instant.now(), null, List.of(), " "))
+                ExecutionId.of("01991337-0000-7000-8000-00000000001c"), JobKey.of("job-1"), ExecutionState.RUNNING,
+                Instant.now(), null, Optional.empty(), " "))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

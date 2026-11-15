@@ -56,8 +56,9 @@ import io.mohs.store.jdbc.JdbcJobStore;
 import io.mohs.store.jdbc.JdbcLeaseStore;
 import io.mohs.store.jdbc.JdbcNodeStore;
 import io.mohs.store.jdbc.JdbcRateLimitStore;
-import io.mohs.store.jdbc.JdbcTriggerFirer;
+import io.mohs.store.jdbc.JdbcSubmissionStore;
 import io.mohs.store.jdbc.JdbcWorkQueue;
+import io.mohs.store.jdbc.JdbcTimestamps;
 import io.mohs.store.jdbc.delegate.H2JdbcDelegate;
 import io.mohs.test.MutableClock;
 
@@ -108,11 +109,11 @@ class ClusterEngineTest {
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         rawJdbcTemplate = new JdbcTemplate(dataSource);
         jobStore = new JdbcJobStore(dataSource, clock, delegate);
-        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, clock, delegate);
-        historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), delegate);
-        workQueue = new JdbcWorkQueue(dataSource, delegate, batchStore);
-        leaseStore = new JdbcLeaseStore(dataSource, delegate, batchStore);
-        rateLimitStore = new JdbcRateLimitStore(dataSource, clock, delegate);
+        JdbcBatchStore batchStore = new JdbcBatchStore(dataSource, delegate);
+        historyStore = new JdbcHistoryStore(dataSource, delegate);
+        workQueue = new JdbcWorkQueue(dataSource, delegate);
+        leaseStore = new JdbcLeaseStore(dataSource, delegate);
+        rateLimitStore = new JdbcRateLimitStore(dataSource, io.mohs.store.jdbc.TestDatabaseClock.at(delegate, clock));
         nodeStore = new JdbcNodeStore(dataSource, delegate);
         handlerRegistry = new HandlerRegistry();
     }
@@ -124,16 +125,16 @@ class ClusterEngineTest {
         Dispatcher dispatcher = new Dispatcher(leaseStore, jobStore, handlerRegistry, clock, List.of(), listeners, eventExecutor, metrics);
         RunnerRegistry runners = new RunnerRegistry(List.of(MohsRunner.io(RunnerRegistry.DEFAULT_RUNNER).maxConcurrent(BATCH_SIZE).build()));
         return new Engine(workQueue, dispatcher, historyStore, leaseStore, jobStore, heartbeatPath,
-                new JdbcTriggerFirer(dataSource, historyStore, workQueue, delegate),
+                new JdbcSubmissionStore(dataSource, delegate, java.time.Duration.ofDays(7)),
                 new ExecutionWindowRegistry(List.of()), rateLimitStore, clock,
-                new EngineSettings(POLL_INTERVAL, BATCH_SIZE, LEASE_TTL), runners, metrics);
+                new EngineSettings(POLL_INTERVAL,POLL_INTERVAL,BATCH_SIZE,Integer.MAX_VALUE,1,LEASE_TTL,null,EngineSettings.DEFAULT_MISFIRE_THRESHOLD,Duration.ZERO,Duration.ZERO), runners, metrics);
     }
 
     private void offer(String id) {
         int shard = Shards.of(ExecutionId.of(id));
-        historyStore.record(List.of(new HistoryStore.NewExecution(ExecutionId.of(id), WELCOME, shard, 20,
-                NOW.minusSeconds(1), NOW, "test", null, null, id)));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), WELCOME, shard, 20, 1, NOW.minusSeconds(1))));
+        io.mohs.store.jdbc.TestWork.history(dataSource, new io.mohs.store.jdbc.delegate.PostgresJdbcDelegate(), List.of(new SubmissionStore.NewExecution(ExecutionId.of(id), WELCOME, shard, 20,
+                NOW.minusSeconds(1), NOW, "test", null, null, io.mohs.test.InputFixtures.encode(WELCOME, id), io.mohs.engine.SubmissionStore.Origin.MANUAL, null)));
+        io.mohs.store.jdbc.TestWork.ready(dataSource, new io.mohs.store.jdbc.delegate.PostgresJdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of(id), WELCOME, shard, 20, 1, NOW.minusSeconds(1))));
     }
 
     /** Observe each engine's own membership read before offering work, avoiding a startup overlap. */
@@ -171,12 +172,25 @@ class ClusterEngineTest {
         }
 
         @Override
-        public void heartbeat(String nodeId, EngineState state, long epoch, Instant at, Instant expiresAt) {
+        public StoredNode register(String nodeId, EngineState state, Duration ttl, io.mohs.engine.ExecutableCatalog catalog) {
             if (partitioned) {
                 throw new IllegalStateException("simulated network partition: the heartbeat never reaches the database");
             }
-            delegate.heartbeat(nodeId, state, epoch, at, expiresAt);
-        }
+            var result = delegate.register(nodeId, state, ttl, catalog);
+            return result;
+            }
+
+            @Override
+            public java.util.Optional<StoredNode> renew(String nodeId, EngineState state, Duration ttl) {
+            if (partitioned) {
+                throw new IllegalStateException("simulated network partition: the heartbeat never reaches the database");
+            }
+            var result = delegate.renew(nodeId, state, ttl);
+            return result;
+            }
+
+            @Override public boolean revokeExpired(String nodeId) { return delegate.revokeExpired(nodeId); }
+            @Override public void stop(String nodeId) { delegate.stop(nodeId); }
 
         @Override
         public List<StoredNode> findAll() {
@@ -195,16 +209,16 @@ class ClusterEngineTest {
      */
     @Test
     void everyExecutionRunsExactlyOnceAcrossTwoLiveNodes() throws Exception {
-        jobStore.upsert(JobDefinition.of(WELCOME.value(), Handler.class, spec -> spec.onDemand().retries(0)));
+        jobStore.upsert(JobDefinition.of(WELCOME.value(), new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(0), io.mohs.core.schedule.Misfire.IGNORE, false));
         Map<Integer, String> executionByShard = new HashMap<>();
         for (int i = 1; i <= 10_000 && executionByShard.size() < Shards.SHARD_COUNT; i++) {
-            String id = "exec-" + i;
+            String id = io.mohs.test.TestIds.value("exec-" + i);
             executionByShard.putIfAbsent(Shards.of(ExecutionId.of(id)), id);
         }
         assertThat(executionByShard).hasSize(Shards.SHARD_COUNT);
         int executions = executionByShard.size();
         Map<String, Integer> handlerCalls = new ConcurrentHashMap<>();
-        handlerRegistry.register(WELCOME, (payload, ctx) -> handlerCalls.merge((String) payload, 1, Integer::sum));
+        handlerRegistry.register(WELCOME, (payload, ctx) -> handlerCalls.merge((String) payload, 1, Integer::sum), Object.class);
         CountDownLatch succeeded = new CountDownLatch(executions);
         CompletableFuture<Void> joinedA = new CompletableFuture<>();
         CompletableFuture<Void> joinedB = new CompletableFuture<>();
@@ -225,13 +239,13 @@ class ClusterEngineTest {
         assertThat(handlerCalls).hasSize(executions);
         assertThat(handlerCalls.values()).containsOnly(1);
         assertThat(rawJdbcTemplate.queryForList(
-                "SELECT execution_id FROM mohs_attempt GROUP BY execution_id HAVING COUNT(*) <> 1", String.class))
+                "SELECT execution_id FROM mohs_execution WHERE last_attempt_number <> 1", String.class))
                 .as("an execution with more or less than one attempt").isEmpty();
-        assertThat(rawJdbcTemplate.queryForList("SELECT DISTINCT node_id FROM mohs_attempt", String.class))
+        assertThat(rawJdbcTemplate.queryForList("SELECT DISTINCT last_attempt_node_id FROM mohs_execution WHERE last_attempt_number > 0", String.class))
                 .containsExactlyInAnyOrder(nodeA.nodeId(), nodeB.nodeId());
         assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_execution WHERE state = 'SUCCEEDED'", Integer.class))
                 .isEqualTo(executions);
-        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isZero();
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_work WHERE work_state = 'LEASED'", Integer.class)).isZero();
     }
 
     /**
@@ -246,8 +260,8 @@ class ClusterEngineTest {
      */
     @Test
     void aPeerReclaimsAndRetriesTheExecutionOfANodeThatStoppedHeartbeatingAndFencesItsZombie() throws Exception {
-        jobStore.upsert(JobDefinition.of(WELCOME.value(), Handler.class, spec -> spec.onDemand().retries(1)));
-        offer("exec-1");
+        jobStore.upsert(JobDefinition.of(WELCOME.value(), new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(1), io.mohs.core.schedule.Misfire.IGNORE, false));
+        offer("01991337-0000-7000-8000-00000000001c");
         AtomicInteger handlerCalls = new AtomicInteger();
         CountDownLatch firstAttemptStarted = new CountDownLatch(1);
         CountDownLatch releaseFirstAttempt = new CountDownLatch(1);
@@ -265,7 +279,7 @@ class ClusterEngineTest {
                 }
                 default -> throw new AssertionError("a third attempt ran");
             }
-        });
+        }, Object.class);
         PartitionableNodeStore heartbeatOfA = new PartitionableNodeStore(nodeStore);
         CompletableFuture<Instant> retryAtOnB = new CompletableFuture<>();
         CountDownLatch succeededOnB = new CountDownLatch(1);
@@ -283,22 +297,30 @@ class ClusterEngineTest {
             // A loses its network while its handler runs; the shared clock then passes A's lease
             heartbeatOfA.partition();
             clock.advance(LEASE_TTL.plusSeconds(1));
+            rawJdbcTemplate.update("UPDATE mohs_nodes SET expires_at = ? WHERE node_id = ?",
+                    JdbcTimestamps.toUtcLocalDateTime(NOW), nodeA.nodeId());
             nodeB.start();
             try {
                 // The reclaim requeues attempt 2 behind the retry backoff; on a frozen clock that
                 // instant never arrives by itself
                 clock.setTo(retryAtOnB.get(10, TimeUnit.SECONDS).plusSeconds(1));
                 assertThat(secondAttemptStarted.await(10, TimeUnit.SECONDS)).isTrue();
+                Map<String, Object> reclaimed = rawJdbcTemplate.queryForMap(
+                        "SELECT last_attempt_number, last_attempt_node_id, last_attempt_outcome, last_attempt_error FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'");
+                assertThat(reclaimed).containsEntry("LAST_ATTEMPT_NUMBER", 1)
+                        .containsEntry("LAST_ATTEMPT_NODE_ID", nodeA.nodeId())
+                        .containsEntry("LAST_ATTEMPT_OUTCOME", "FAILED");
+                assertThat(reclaimed.get("LAST_ATTEMPT_ERROR").toString()).contains("presumed dead");
                 // The zombie finishes while B owns attempt 2; stop returns only after A's dispatch —
                 // and its fenced delete — ran
                 releaseFirstAttempt.countDown();
                 nodeA.stop(Duration.ofSeconds(5));
                 List<Map<String, Object>> leases = rawJdbcTemplate.queryForList(
-                        "SELECT node_id, attempt_number FROM mohs_lease WHERE execution_id = 'exec-1'");
+                        "SELECT node_id, attempt FROM mohs_work WHERE work_state = 'LEASED' AND  execution_id = '01991337-0000-7000-8000-00000000001c'");
                 assertThat(leases).as("B's lease survives the zombie's completion").singleElement()
-                        .satisfies(lease -> assertThat(lease).containsEntry("NODE_ID", nodeB.nodeId()).containsEntry("ATTEMPT_NUMBER", 2));
+                        .satisfies(lease -> assertThat(lease).containsEntry("NODE_ID", nodeB.nodeId()).containsEntry("ATTEMPT", 2));
                 assertThat(rawJdbcTemplate.queryForObject(
-                        "SELECT COUNT(*) FROM mohs_attempt WHERE execution_id = 'exec-1' AND outcome = 'SUCCEEDED'", Integer.class))
+                        "SELECT COUNT(*) FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c' AND last_attempt_outcome = 'SUCCEEDED'", Integer.class))
                         .as("the zombie's SUCCEEDED must not have been written").isZero();
                 releaseSecondAttempt.countDown();
                 assertThat(succeededOnB.await(10, TimeUnit.SECONDS)).isTrue();
@@ -314,14 +336,12 @@ class ClusterEngineTest {
         }
 
         assertThat(handlerCalls).hasValue(2);
-        assertThat(historyStore.find(ExecutionId.of("exec-1"), clock.instant()).orElseThrow().state())
+        assertThat(historyStore.find(ExecutionId.of("01991337-0000-7000-8000-00000000001c"), clock.instant()).orElseThrow().state())
                 .isEqualTo(ExecutionState.SUCCEEDED);
-        List<Map<String, Object>> attempts = rawJdbcTemplate.queryForList(
-                "SELECT number, node_id, outcome, error FROM mohs_attempt WHERE execution_id = 'exec-1' ORDER BY number");
-        assertThat(attempts).hasSize(2);
-        assertThat(attempts.get(0)).containsEntry("NUMBER", 1).containsEntry("NODE_ID", nodeA.nodeId()).containsEntry("OUTCOME", "FAILED");
-        assertThat((String) attempts.get(0).get("ERROR")).contains("presumed dead");
-        assertThat(attempts.get(1)).containsEntry("NUMBER", 2).containsEntry("NODE_ID", nodeB.nodeId()).containsEntry("OUTCOME", "SUCCEEDED");
-        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_lease", Integer.class)).isZero();
+        Map<String, Object> latest = rawJdbcTemplate.queryForMap(
+                "SELECT last_attempt_number, last_attempt_node_id, last_attempt_outcome, last_attempt_error FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-00000000001c'");
+        assertThat(latest).containsEntry("LAST_ATTEMPT_NUMBER", 2).containsEntry("LAST_ATTEMPT_NODE_ID", nodeB.nodeId())
+                .containsEntry("LAST_ATTEMPT_OUTCOME", "SUCCEEDED").containsEntry("LAST_ATTEMPT_ERROR", null);
+        assertThat(rawJdbcTemplate.queryForObject("SELECT COUNT(*) FROM mohs_work WHERE work_state = 'LEASED'", Integer.class)).isZero();
     }
 }

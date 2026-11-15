@@ -112,7 +112,7 @@ ActorResolver authenticatedActor() {
     return request -> {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         String name = auth == null ? ActorResolver.ANONYMOUS : auth.getName();
-        return "scheduler".equalsIgnoreCase(name.strip()) ? "svc:" + name : name;   // see below
+        return name;
     };
 }
 ```
@@ -121,10 +121,7 @@ The default `HeaderActorResolver` reads `X-Mohs-Actor` and falls back to `"anony
 is the intended path once real authentication exists — this is exactly what the `@ConditionalOnMissingBean`
 is for.
 
-**One hard rule**: never return `Execution.SCHEDULER_ACTOR` (`"scheduler"`), in any casing. It is
-the engine's reserved name; `ScheduleCommand#as` rejects it, and a rejection coming from this SPI
-would surface as a generic 500 rather than the 400 the boundary gives. An authenticated principal
-carrying that name — a `scheduler` service account — must be mapped to another identifier here.
+Actor is audit data. Scheduled control flow uses persisted origin and schedule revision; a principal named scheduler no longer needs a compatibility mapping. Validate the actor before persistence.
 
 The default implementation also validates length (255, the column's ceiling) and **denies a specific
 character family**, which is worth understanding before writing your own:
@@ -155,10 +152,10 @@ Not extension points in the SPI sense, but the way you extend Mohs' vocabulary:
 
 | Interface | Reason |
 | --- | --- |
-| `Mohs`, `MohsLifecycle`, `ScheduleCommand`, `Batch`, `BatchBuilder`, `JobContext` | Non-sealed only because the implementation lives in another module and the project does not use a JPMS `permits` clause across them. **They may gain methods in minor releases.** Implementing them breaks with `AbstractMethodError` on the first new method |
-| `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `StoreTransactions` | Internal ports in `io.mohs.engine`. Not published as an SPI, and the auto-configuration registers concrete implementations with no `@ConditionalOnMissingBean` |
-| `JdbcDelegate` | Internal, but a bean of your own replaces it: `mohsJdbcDelegate` is `@ConditionalOnMissingBean`. Adding a *supported* database is still a change to the library. The named parameters are the contract: `fencedLeaseDelete()` must match `execution_id`, `node_id`, `epoch` **and** `attempt_number` — a statement that ignores a bound parameter runs without error and keeps a weaker fence |
-| Any sealed type (`Schedule`, `ExecutionEvent`, `JobSpec`, `PolicySpec`, `ScheduleView`) | Not implementable by consumers; additions to a sealed hierarchy may require updating exhaustive switches |
+| `Mohs`, `MohsLifecycle`, `Batch`, `BatchBuilder`, `JobContext` | Non-sealed only because the implementation lives in another module and the project does not use a JPMS `permits` clause across them. **They may gain methods in minor releases.** Implementing them breaks with `AbstractMethodError` on the first new method |
+| `JobStore`, `WorkQueue`, `LeaseStore`, `HistoryStore`, `NodeStore`, `BatchStore`, `RateLimitStore`, `TriggerFirer`, `SubmissionStore` | Internal ports in `io.mohs.engine`. Not published as an SPI, and the auto-configuration registers concrete implementations with no `@ConditionalOnMissingBean` |
+| `JdbcDelegate` | Internal, but a bean of your own replaces it: `mohsJdbcDelegate` is `@ConditionalOnMissingBean`. Adding a *supported* database is still a change to the library. The named parameters are the contract: `fencedLeaseDelete()` must match `execution_id`, `node_id`, `claim_token` **and** `attempt_number` — a statement that ignores a bound parameter runs without error and keeps a weaker fence |
+| Any sealed type (`Schedule`, `ExecutionEvent`, `ScheduleView`) | Not implementable by consumers; additions to a sealed hierarchy may require updating exhaustive switches |
 
 To test handlers, use `io.mohs.test` (`MutableClock`, `InMemoryJobStore`) rather than implementing
 `Mohs` yourself.
@@ -176,24 +173,15 @@ Both were names without behaviour in an earlier build; both are delivered now.
 
 Not a consumer extension, but the shape is worth recording because the design supports it cleanly:
 
-1. Implement `JdbcDelegate`. **Every statement method is abstract**: write out all 66, even the ones
-   that will read the same as PostgreSQL's. That includes the clock — `nowQuery()` and `readNow()`
-   are a pair, and answering one without the other is the bug they exist to prevent: state whether
-   your server's `now` carries a zone, and if it does not, ask it for UTC outright.
-   `selectReadyCandidates` and `claimReady` carry defaults, but those are the claim *algorithm*,
-   not SQL.
-2. Add `src/main/resources/schema-<dialect>.sql` — the installer, idempotent, so re-running it against
-   an existing database is a no-op.
-3. Add `src/main/resources/io/mohs/store/jdbc/migration/<dialect>/V1..Vn` — the delta chain for an
-   operator upgrading a database that already has an older schema. Also idempotent.
-4. Add the enum value to `MohsProperties.Jdbc.Dialect` and the branch in
+1. Implement the dialect-specific `JdbcDelegate` operations, reusing shared defaults only where
+   SQL and locking semantics match. Review clock authority, timeout binding, key comparison and
+   eligibility rounding against the [type contract](../06-data/type-contract.md).
+2. Add an idempotent canonical `schema-<dialect>.sql` installer. Reapplication supports an already
+   matching schema; it does not convert previous development layouts.
+3. Add the enum value to `MohsProperties.Jdbc.Dialect` and the branch in
    `MohsAutoConfiguration#mohsJdbcDelegate`.
-5. Add a Testcontainers `*TestSupport`, a `Schema<Dialect>RoundTripTest` (the stores against a real
-   database) and a `JdbcWorkQueue<Dialect>Test`. If the database gets a delta chain, add the
-   structural guardian too — `SchemaPostgresChainMatchesInstallerTest` is the model: it builds one
-   database from the installer and one from the chain and compares the structure, which is the only
-   thing keeping the two copies of the schema honest.
+4. Add real-database support, installer reapplication checks, round-trip tests and the shared
+   concurrency protocols. H2 alone cannot validate a new server dialect's lock/isolation behavior.
 
 The declared constraint is that **the claim's contract is identical in all dialects**: the returned
-list comes back in `(priority, visible_at)` order, and the queue-removal plus ownership-insert are
-atomic.
+list comes back in `(priority, visible_at)` order, and the guarded READY-to-LEASED transition is atomic.

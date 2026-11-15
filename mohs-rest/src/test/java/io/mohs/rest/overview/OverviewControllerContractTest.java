@@ -149,7 +149,7 @@ class OverviewControllerContractTest {
         when(mohs.overview(OverviewController.DEFAULT_THROUGHPUT_WINDOW)).thenReturn(new OverviewSnapshot(
                 Map.of(ExecutionState.ENQUEUED, 4L), new ThroughputReading(Duration.ofSeconds(60), 7L, 1L), RECENT));
         when(mohs.jobs()).thenReturn(List.of());
-        when(mohs.nodes()).thenReturn(List.of(new NodeSnapshot("node-1", EngineState.RUNNING, NOW)));
+        when(mohs.nodes()).thenReturn(List.of(new NodeSnapshot("01991337-0000-7000-8000-000000000064", EngineState.RUNNING, NOW)));
         when(mohs.executions(any())).thenReturn(List.of());
 
         MvcResult result = mockMvc.perform(get(ApiPaths.V1 + "/overview/stream"))
@@ -162,6 +162,6 @@ class OverviewControllerContractTest {
         // The {asOf, data} envelope: the snapshot's stamp (from the injected clock) travels on every event
         assertThat(body).contains("\"asOf\":\"2026-08-17T12:00:00Z\"");
         assertThat(body).contains("\"succeeded\":7");
-        assertThat(body).contains("node-1");
+        assertThat(body).contains("01991337-0000-7000-8000-000000000064");
     }
 }

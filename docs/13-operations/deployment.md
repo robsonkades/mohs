@@ -118,7 +118,7 @@ automatically and no replica races another to apply anything.
 | You are | Do this, before the replicas start |
 | --- | --- |
 | Installing fresh | Apply `schema-<dialect>.sql` — the complete current schema, idempotent |
-| Upgrading | Apply the `V*.sql` deltas after the version this database is on |
+| Pre-release databases | Install the fresh baseline. No migration chain or automatic conversion of prior development layouts is shipped. |
 
 Both ship inside `mohs-store-jdbc`'s jar. See
 [installing and upgrading the schema](../06-data/migrations.md) for how to extract and apply them,
@@ -190,3 +190,12 @@ mohs:
 | A separate port for the API or the dashboard | Same reason, stated explicitly in `MohsUiAutoConfiguration`: an application that protected itself carefully would still expose pause/cancel/retry on a side port |
 | An official image | There is no process to image |
 | A Helm chart | There is no workload of Mohs' own to template |
+
+## Dashboard configuration in the host
+
+Serve the dashboard HTML without shared caching (`Cache-Control: no-store`). The starter
+provides context-aware API/UI paths and an optional host CSRF token in `#mohs-config` JSON;
+relative assets use the injected base path. Keep host authentication/authorization and CSRF
+checks enabled as appropriate. Reload after session changes to refresh the bootstrap token.
+See [dashboard deployment](dashboard.md) for nested paths and [streaming](../05-api/streaming.md)
+for the default array contract and optional execution invalidations.

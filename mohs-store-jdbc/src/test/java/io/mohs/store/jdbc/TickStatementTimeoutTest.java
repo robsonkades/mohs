@@ -15,6 +15,8 @@
  */
 package io.mohs.store.jdbc;
 
+import io.mohs.engine.SubmissionStore;
+
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -61,7 +63,7 @@ class TickStatementTimeoutTest {
     }
 
     private static final Instant NOW = Instant.parse("2026-09-04T12:00:00Z");
-    private static final String NODE = "node-a";
+    private static final String NODE = "01991337-0000-7000-8000-000000000065";
 
     /** One record per prepared statement, in order — the key is the statement, not its SQL text, so two preparations of the same text with different ceilings cannot mask each other. */
     private final List<Prepared> prepared = new ArrayList<>();
@@ -75,10 +77,12 @@ class TickStatementTimeoutTest {
         }
     }
 
+    private DataSource recording;
     private JdbcNodeStore nodeStore;
+    private String claimToken;
     private JdbcLeaseStore leaseStore;
     private JdbcWorkQueue workQueue;
-    private JdbcTriggerFirer triggerFirer;
+    private JdbcSubmissionStore triggerFirer;
     private JdbcJobStore jobStore;
     private JdbcHistoryStore historyStore;
     private JdbcBatchStore batchStore;
@@ -86,21 +90,23 @@ class TickStatementTimeoutTest {
     @BeforeEach
     void setUp() {
         DataSource h2 = freshH2DataSource();
-        DataSource recording = recordingDataSource(h2);
+        recording = recordingDataSource(h2);
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         H2JdbcDelegate delegate = new H2JdbcDelegate();
-        batchStore = new JdbcBatchStore(recording, clock, delegate);
+        batchStore = new JdbcBatchStore(recording, delegate);
         nodeStore = new JdbcNodeStore(recording, delegate);
-        leaseStore = new JdbcLeaseStore(recording, delegate, batchStore);
-        workQueue = new JdbcWorkQueue(recording, delegate, batchStore);
-        historyStore = new JdbcHistoryStore(recording, JsonMapper.builder().build(), delegate);
-        triggerFirer = new JdbcTriggerFirer(recording, historyStore, workQueue, delegate);
+        leaseStore = new JdbcLeaseStore(recording, delegate);
+        workQueue = new JdbcWorkQueue(recording, delegate);
+        historyStore = new JdbcHistoryStore(recording, delegate);
+        triggerFirer = new JdbcSubmissionStore(recording, delegate, java.time.Duration.ofDays(7));
         jobStore = new JdbcJobStore(recording, clock, delegate);
+        TestSessions.seed(recording, delegate, NODE, EngineState.RUNNING, java.time.Duration.ofMinutes(5));
+        forgetSetupStatements();
     }
 
     @Test
     void theHeartbeatAndThePeersReadAreBounded() {
-        nodeStore.heartbeat(NODE, EngineState.RUNNING, 1, NOW, NOW.plusSeconds(15));
+        nodeStore.renew(NODE, EngineState.RUNNING, java.time.Duration.ofSeconds(15));
         nodeStore.findAll();
 
         assertEveryStatementIsBounded();
@@ -109,66 +115,91 @@ class TickStatementTimeoutTest {
     @Test
     void theLeaseReadsTheTickIssuesAreBounded() {
         leaseStore.findByNodes(List.of(NODE));
-        leaseStore.findOrphaned(List.of(NODE), 10);
-        leaseStore.findCancelRequested(List.of(ExecutionId.of("e1")));
-        leaseStore.countByJob(List.of(JobKey.of("job-a")));
+        leaseStore.findOrphaned( 10);
+        leaseStore.findCancelRequested(List.of(ExecutionId.of("01991337-0000-7000-8000-00000000001b")));
 
         assertEveryStatementIsBounded();
     }
 
     /**
      * The reaper's completion runs on the loop thread too, but its cost is a whole transaction — the
-     * fenced delete, the attempt, the terminal update, a rearm in another store — so the ceiling is a
+     * fenced delete, the attempt, the terminal update and batch counters — so the ceiling is a
      * transaction deadline, which Spring hands to each statement as the time that remains.
      */
     @Test
     void theReapersCompletionIsBoundedByItsTransactionDeadline() {
-        batchStore.insert("batch-1", "nightly", 1);
-        claimOneExecution("batch-1");
+        TestWork.batch(recording, new H2JdbcDelegate(), "01991337-0000-7000-8000-00000000000e", "nightly", 1);
+        claimOneExecution("01991337-0000-7000-8000-00000000000e");
+        nodeStore.stop(NODE);
+        forgetSetupStatements();
 
-        leaseStore.reclaim(List.of(new LeaseStore.CompletionResult(ExecutionId.of("e1"), JobKey.of("job-a"), NODE, 1, 1,
-                NOW, NOW, ExecutionState.FAILED, "java.lang.IllegalStateException", "reaped", ExecutionState.FAILED,
-                null, "batch-1", NOW.plusSeconds(60))), jobStore);
+        leaseStore.reclaim(List.of(new LeaseStore.CompletionResult(ExecutionId.of("01991337-0000-7000-8000-00000000001b"), JobKey.of("job-a"), NODE, claimToken, 1,
+                NOW, NOW, ExecutionState.FAILED, "java.lang.IllegalStateException", "reaped", null)));
 
-        // The rearm (the job store's template) and the batch counters (the batch store's) are the whole
-        // point of a TRANSACTION deadline: neither carries a ceiling of its own
+        // The batch-counter template has no separate ceiling: it inherits this transaction's deadline.
         assertThat(prepared).extracting(statement -> statement.sql)
-                .anyMatch(sql -> sql.contains("next_fire_at"))
                 .anyMatch(sql -> sql.contains("mohs_batches"));
         assertThat(prepared).allSatisfy(statement -> assertThat(statement.timeout).as(statement.sql)
                 .isBetween(1, JdbcSupport.TICK_STATEMENT_TIMEOUT_SECONDS));
     }
 
-    /** The flusher's completion is the same transaction without the deadline: a group commit may wait as long as it needs. */
     @Test
-    void theFlushersCompletionIsNot() {
+    void theReapersRecurringRearmInheritsItsTransactionDeadline() {
+        var key = JobKey.of("job-a");
+        var id = ExecutionId.of("01991337-0000-7000-8000-00000000001b");
+        var interval = java.time.Duration.ofSeconds(60);
+        jobStore.upsert(JobDefinition.of(key.value(), new io.mohs.core.schedule.IntervalSpec(interval, true),
+                io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        var observed = jobStore.find(key).orElseThrow();
+        Instant started = observed.nextFireAt();
+        assertThat(triggerFirer.fire(key, observed.scheduleRevision(), started, null,
+                List.of(io.mohs.core.execution.Execution.enqueued(id, key, started,
+                        io.mohs.core.execution.Execution.SCHEDULER_ACTOR, io.mohs.core.execution.Priority.NORMAL)), started)).isTrue();
+        var grant = workQueue.claim(io.mohs.engine.Shards.of(id), NODE, 1, List.of(), started).getFirst();
+        nodeStore.stop(NODE);
+        forgetSetupStatements();
+
+        Instant finished = started.plusSeconds(1);
+        leaseStore.reclaim(List.of(new LeaseStore.CompletionResult(id, key, NODE, grant.claimToken(), 1,
+                started, finished, ExecutionState.FAILED, "java.lang.IllegalStateException", "reaped", null)));
+
+        assertThat(prepared).extracting(statement -> statement.sql)
+                .anyMatch(sql -> sql.contains("e.schedule_revision = d.schedule_revision"))
+                .anyMatch(sql -> sql.contains("UPDATE mohs_job_definitions") && sql.contains("next_fire_at"));
+        assertThat(prepared).allSatisfy(statement -> assertThat(statement.timeout).as(statement.sql)
+                .isBetween(1, JdbcSupport.TICK_STATEMENT_TIMEOUT_SECONDS));
+        assertThat(jobStore.find(key).orElseThrow().nextFireAt()).isEqualTo(finished.plus(interval));
+    }
+
+    /** The flusher's completion also bounds the entire transaction, including a group commit. */
+    @Test
+    void theFlushersCompletionAlsoHasATransactionDeadline() {
         claimOneExecution(null);
 
-        leaseStore.complete(List.of(new LeaseStore.CompletionResult(ExecutionId.of("e1"), JobKey.of("job-a"), NODE, 1, 1,
-                NOW, NOW, ExecutionState.SUCCEEDED, null, null, ExecutionState.SUCCEEDED, null, null, null)), jobStore);
+        leaseStore.complete(List.of(new LeaseStore.CompletionResult(ExecutionId.of("01991337-0000-7000-8000-00000000001b"), JobKey.of("job-a"), NODE, claimToken, 1,
+                NOW, NOW, ExecutionState.SUCCEEDED, null, null, null)));
 
-        assertNoStatementIsBounded();
+        assertEveryStatementIsBounded();
     }
 
     @Test
-    void theCancelRequestFromTheApiIsNot() {
-        leaseStore.requestCancellation(ExecutionId.of("e1"));
+    void theAtomicCancelRequestHasATransactionDeadline() {
+        workQueue.cancel(ExecutionId.of("01991337-0000-7000-8000-00000000001b"), NOW);
 
-        assertNoStatementIsBounded();
+        assertEveryStatementIsBounded();
     }
 
     @Test
     void theClaimTheProbeAndTheRequeueAreBounded() {
-        jobStore.upsert(JobDefinition.of("job-a", Handler.class, spec -> spec.onDemand()));
-        historyStore.record(List.of(new HistoryStore.NewExecution(ExecutionId.of("e1"), JobKey.of("job-a"), 0, 20,
-                NOW, NOW, "test", null, null, "payload")));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("e1"), JobKey.of("job-a"), 0, 20, 1, NOW)));
+        jobStore.upsert(JobDefinition.of("job-a", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        TestWork.history(recording, new H2JdbcDelegate(), List.of(new SubmissionStore.NewExecution(ExecutionId.of("01991337-0000-7000-8000-00000000001b"), JobKey.of("job-a"), 0, 20,
+                NOW, NOW, "test", null, null, io.mohs.test.InputFixtures.encode(JobKey.of("job-a"), "payload"), io.mohs.engine.SubmissionStore.Origin.MANUAL, null)));
+        TestWork.ready(recording, new H2JdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of("01991337-0000-7000-8000-00000000001b"), JobKey.of("job-a"), 0, 20, 1, NOW)));
         forgetSetupStatements();
 
         workQueue.hasVisibleWork(List.of(0), NOW);
-        List<WorkQueue.ClaimedWork> claimed = workQueue.claim(0, NODE, 1, 10, List.of(), NOW);
-        int requeued = workQueue.requeue(List.of(new WorkQueue.Requeue(ExecutionId.of("e1"), NODE, 1, 1,
-                new WorkQueue.ReadyEntry(ExecutionId.of("e1"), JobKey.of("job-a"), 0, 20, 1, NOW))));
+        List<WorkQueue.ClaimedWork> claimed = workQueue.claim(0, NODE, 10, List.of(), NOW);
+        int requeued = workQueue.requeue(List.of(new WorkQueue.Requeue(ExecutionId.of("01991337-0000-7000-8000-00000000001b"), NODE, claimed.getFirst().claimToken(), 1, NOW)));
 
         assertThat(claimed).hasSize(1);
         assertThat(requeued).isEqualTo(1);
@@ -176,22 +207,20 @@ class TickStatementTimeoutTest {
     }
 
     @Test
-    void theEnqueueWritesJoinTheCallerAndAreNot() {
-        jobStore.upsert(JobDefinition.of("job-a", Handler.class, spec -> spec.onDemand()));
+    void completeAcceptanceBoundsEveryWriteByOneDeadline() {
+        jobStore.upsert(JobDefinition.of("job-a", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         forgetSetupStatements();
 
-        historyStore.record(List.of(new HistoryStore.NewExecution(ExecutionId.of("e1"), JobKey.of("job-a"), 0, 20,
-                NOW, NOW, "test", null, null, "payload")));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("e1"), JobKey.of("job-a"), 0, 20, 1, NOW)));
-
-        assertNoStatementIsBounded();
+        triggerFirer.accept(List.of(new SubmissionStore.NewExecution(ExecutionId.of("01991337-0000-7000-8000-00000000001b"), JobKey.of("job-a"), 0, 20,
+                NOW, NOW, "test", null, "acceptance-key", io.mohs.test.InputFixtures.encode(JobKey.of("job-a"), "payload"), io.mohs.engine.SubmissionStore.Origin.MANUAL, null)), null, () -> {});
+        assertEveryStatementIsBounded();
     }
 
     @Test
     void theFiringCasIsBounded() {
         // A stale observed value: the CAS loses, so only the UPDATE is issued — the record and the
         // offer that follow a win belong to their own stores and are covered above
-        boolean fired = triggerFirer.fire(JobKey.of("job-a"), NOW, NOW.plusSeconds(60), List.of(), "payload", NOW);
+        boolean fired = triggerFirer.fire(JobKey.of("job-a"), 1L, NOW, NOW.plusSeconds(60), List.of(), NOW);
 
         assertThat(fired).isFalse();
         assertEveryStatementIsBounded();
@@ -202,22 +231,22 @@ class TickStatementTimeoutTest {
      * definitions, which a ceiling would turn into a tick that dies every cycle. Deliberately out.
      */
     @Test
-    void theDefinitionScansAreNot() {
+    void coordinatorPolicyAndTriggerReadsHaveDeadlinesWhileAdministrativeStreamingDoesNot() {
         jobStore.findDueRecurring(NOW, 10);
-        try (var all = jobStore.findAll()) {
-            all.toList();
-        }
-
+        jobStore.findByKeys(List.of(JobKey.of("job-a")));
+        jobStore.nextFireAfter(NOW);
+        workQueue.findCandidateJobs(0, null, 128, NOW);
+        assertEveryStatementIsBounded();
+        prepared.clear();
+        try (var all = jobStore.findAll()) { all.toList(); }
         assertNoStatementIsBounded();
     }
 
-    /** The upsert is the boot's, the arming is the facade's cancel: neither runs on the loop thread. */
+    /** Registration takes job locks and must leave enough time for heartbeat and completion traffic. */
     @Test
-    void theDefinitionUpsertAndTheTriggerArmingFromTheApiAreNot() {
-        jobStore.upsert(JobDefinition.of("job-a", Handler.class, spec -> spec.onDemand()));
-        jobStore.armNextFire(JobKey.of("job-a"), NOW);
-
-        assertNoStatementIsBounded();
+    void theDefinitionUpsertHasATransactionDeadline() {
+        jobStore.upsert(JobDefinition.of("job-a", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        assertEveryStatementIsBounded();
     }
 
     private void assertEveryStatementIsBounded() {
@@ -238,11 +267,11 @@ class TickStatementTimeoutTest {
 
     /** One execution of {@code job-a}, enqueued and claimed by {@link #NODE} as attempt 1 — the fixture every completion test starts from. */
     private void claimOneExecution(@Nullable String batchId) {
-        jobStore.upsert(JobDefinition.of("job-a", Handler.class, spec -> spec.onDemand()));
-        historyStore.record(List.of(new HistoryStore.NewExecution(ExecutionId.of("e1"), JobKey.of("job-a"), 0, 20,
-                NOW, NOW, "test", batchId, null, "payload")));
-        workQueue.offer(List.of(new WorkQueue.ReadyEntry(ExecutionId.of("e1"), JobKey.of("job-a"), 0, 20, 1, NOW)));
-        workQueue.claim(0, NODE, 1, 10, List.of(), NOW);
+        jobStore.upsert(JobDefinition.of("job-a", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
+        TestWork.history(recording, new H2JdbcDelegate(), List.of(new SubmissionStore.NewExecution(ExecutionId.of("01991337-0000-7000-8000-00000000001b"), JobKey.of("job-a"), 0, 20,
+                NOW, NOW, "test", batchId, null, io.mohs.test.InputFixtures.encode(JobKey.of("job-a"), "payload"), io.mohs.engine.SubmissionStore.Origin.MANUAL, null)));
+        TestWork.ready(recording, new H2JdbcDelegate(), List.of(new WorkQueue.ReadyEntry(ExecutionId.of("01991337-0000-7000-8000-00000000001b"), JobKey.of("job-a"), 0, 20, 1, NOW)));
+        claimToken = workQueue.claim(0, NODE, 10, List.of(), NOW).getFirst().claimToken();
         forgetSetupStatements();
     }
 

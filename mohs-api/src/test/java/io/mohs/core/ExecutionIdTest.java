@@ -27,7 +27,7 @@ class ExecutionIdTest {
 
     @Test
     void ofWrapsValue() {
-        assertThat(ExecutionId.of("01J4X").value()).isEqualTo("01J4X");
+        assertThat(ExecutionId.of("01991337-0000-7000-8000-000000000005").value()).isEqualTo("01991337-0000-7000-8000-000000000005");
     }
 
     @ParameterizedTest

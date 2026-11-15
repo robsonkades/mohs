@@ -12,7 +12,7 @@ The complete feature inventory, each row traceable to code. Status markers are d
 | Declare a job on a Spring bean method with `@MohsJob` | Implemented | `io.mohs.core.definition.MohsJob`, `MohsJobScanner` |
 | Stereotypes `@RecurringJob` / `@OnDemandJob` | Implemented | Meta-annotated over `@MohsJob` with `@AliasFor`; resolved through merged annotations |
 | User-defined composed stereotypes | Implemented | `@MohsJob` targets `ANNOTATION_TYPE`; scanner uses `MergedAnnotations` |
-| Programmatic definition via staged builder | Implemented | `JobDefinition.of(id, handlerType, spec -> ...)`, `JobSpec` then `PolicySpec` |
+| Typed programmatic registration | Implemented | `JobRegistration.of(JobRef<T>, JobAction<T>)` with immutable `JobOptions` |
 | Handler signature: optional payload + optional `JobContext`, any order | Implemented | `MohsJobs.ParameterBinding.of` |
 | Typed job reference (`JobRef<T>`) for compile-time payload safety | Implemented | `io.mohs.core.job.JobRef` |
 | Definition drift policy on redeploy (`override` / `preserve` / `fail`) | Implemented | `MohsProperties.Registration.OnConflict`, `MohsJobScanner#reconcile` |
@@ -63,10 +63,10 @@ The complete feature inventory, each row traceable to code. Status markers are d
 
 | Capability | Status | Evidence |
 | --- | --- | --- |
-| Node heartbeat plus node lease (`epoch`, `expires_at`) | Implemented | `NodeStore#heartbeat`, table `mohs_nodes` |
+| Node heartbeat plus node lease (`revoked`, `expires_at`) | Implemented | `NodeStore#renew`, table `mohs_nodes` |
 | Reaper reclaims dead nodes' leases through the retry budget | Implemented | `Engine#reapOrphanedLeases` |
-| Fencing token `(node_id, epoch, attempt)` on every completion | Implemented | `LeaseStore#complete` |
-| Self-diagnosed lease expiry bumps the local epoch | Implemented | `Engine#renewNodeLease` |
+| Fencing token `(execution_id, node_id, claim_token, attempt)` on every completion | Implemented | `LeaseStore#complete` |
+| Expired session cannot renew; fresh process identity required | Implemented | NodeMembership / JdbcNodeStore |
 | Stray-lease reconcile for work lost between claim and dispatch | Implemented | `Engine#reconcileOwnStrayLeases` |
 | Watchdog bound: release ownership of an over-running execution | Implemented, off by default | `mohs.engine.watchdog-timeout` |
 | Retry with exponential backoff and full jitter | Implemented | `RetrySchedule`: base 1 s, cap 10 min |
@@ -98,7 +98,7 @@ The complete feature inventory, each row traceable to code. Status markers are d
 | --- | --- | --- |
 | PostgreSQL, MySQL 8.0+, SQL Server dialects | Implemented, production tiers | `io.mohs.store.jdbc.delegate` |
 | H2 dialect | Implemented, test/dev tier only, WARN at boot | `MohsAutoConfiguration#mohsJdbcDelegate` |
-| Schema installed by the operator, never by the library | By design | `schema-<dialect>.sql` and the `V*.sql` chain, both shipped in the jar |
+| Schema installed by the operator, never by the library | By design | Canonical `schema-<dialect>.sql` shipped in the jar; no pre-release upgrade chain |
 | Idempotent baseline that adopts an existing hand-created schema | Implemented | `V1__mohs_baseline.sql` per dialect |
 | Any externally managed schema | The only mode there is | Mohs executes no DDL at all |
 | UUIDv7 primary keys everywhere; no sequences, no UUIDv4 | Implemented; **convention, not enforced** | `io.github.robsonkades.uuidv7.UUIDv7` at every call site |

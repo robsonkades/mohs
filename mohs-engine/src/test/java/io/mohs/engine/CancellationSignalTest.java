@@ -110,6 +110,8 @@ class CancellationSignalTest {
         Thread.sleep(Duration.ofMillis(20));
         assertThat(signal.handlerRunningLongerThan(Duration.ofMillis(5))).isTrue();
         assertThat(signal.handlerRunningLongerThan(Duration.ofMinutes(5))).isFalse();
+        assertThat(signal.handlerRunningLongerThan(Duration.ofDays(200_000)))
+                .as("a valid long timeout must not overflow while checking a running handler").isFalse();
 
         signal.unregisterHandlerThreadAndClearInterrupt();
         assertThat(signal.handlerRunningLongerThan(Duration.ofMillis(5))).isFalse();

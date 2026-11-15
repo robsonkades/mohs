@@ -19,7 +19,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 
 /**
- * One row claimed from the queue ({@code mohs_ready} to {@code mohs_lease}) — identity and the attempt
+ * One row claimed from the queue (READY to LEASED {@code mohs_work}) — identity and the attempt
  * the entry becomes, never the payload (the dispatcher follows with ONE batched read of history).
  *
  * @param executionId the identity of the execution
@@ -29,8 +29,8 @@ import java.sql.SQLException;
  */
 public record ClaimedReady(String executionId, String jobKey, int attempt, int priority) {
 
-    /** A {@code mohs_ready} row (the {@code attempt}/{@code priority} columns) — one mapping for all four delegates: Postgres's single statement also returns from the ordered SELECT over {@code picked}, not from the lease's {@code RETURNING}. */
-    static ClaimedReady fromReadyRow(ResultSet rs, int rowNum) throws SQLException {
+    /** A READY work row (the {@code attempt}/{@code priority} columns) — one mapping for all four delegates: Postgres's single statement also returns from the ordered SELECT over {@code picked}, not from the lease's {@code RETURNING}. */
+    public static ClaimedReady fromReadyRow(ResultSet rs, int rowNum) throws SQLException {
         return new ClaimedReady(rs.getString("execution_id"), rs.getString("job_key"), rs.getInt("attempt"), rs.getInt("priority"));
     }
 }

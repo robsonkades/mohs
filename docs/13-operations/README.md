@@ -12,14 +12,13 @@ Status: Active · Last Reviewed: 2026-09-05 · Source of Truth: Repository
 
 ## The five things an operator must know
 
-1. **Recovery after a node dies is automatic**, and the latency floor is `node-lease-ttl` (15 s by
-   default). Any non-zero `mohs.lease.reclaimed` means a node died or stopped.
+1. **Recovery follows remaining session expiry, revocation and bounded processing.** Retry policy may make it terminal. Reclaim metrics identify the decision; a configured TTL alone is not a recovery-latency guarantee.
 2. **A resume produces a burst** proportional to the pause length. That is not misfire — occurrences
    within the misfire threshold fire late under any policy.
 3. **Every `PATCH` reverts on the next boot** under the default conflict policy. The response says so
    in a `notice` field. Follow up with a code change.
 4. **History retention is opt-in.** Configure `mohs.engine.history-retention` when execution payloads
-   and attempts must expire. Idempotency records have their own automatic retention, seven days by
+   and latest attempt results must expire. Idempotency records have their own automatic retention, seven days by
    default.
 5. **`terminationGracePeriodSeconds` must exceed** `mohs.lifecycle.shutdown.grace-period` **plus** the
    web server's graceful-shutdown phase — otherwise pods are killed mid-drain and their work is

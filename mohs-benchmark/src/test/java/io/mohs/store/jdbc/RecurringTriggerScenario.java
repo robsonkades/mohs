@@ -137,16 +137,14 @@ class RecurringTriggerScenario {
                        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY delay_ms))    AS p50_ms,
                        round(percentile_cont(0.95) WITHIN GROUP (ORDER BY delay_ms))   AS p95_ms,
                        round(max(delay_ms))                                            AS max_ms
-                  FROM (SELECT EXTRACT(EPOCH FROM (a.started_at - e.scheduled_at)) * 1000 AS delay_ms
+                  FROM (SELECT EXTRACT(EPOCH FROM (e.last_attempt_started_at - e.scheduled_at)) * 1000 AS delay_ms
                           FROM mohs_execution e
-                          JOIN mohs_attempt a ON a.execution_id = e.execution_id AND a.number = 1
-                         WHERE e.job_key = ?) delays
+                         WHERE e.job_key = ? AND e.last_attempt_number = 1) delays
                 """, JOB);
     }
 
     private static EngineSettings settings() {
-        return new EngineSettings(Duration.ofMillis(25), Duration.ofMillis(200), 32, 16, 1,
-                Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60));
+        return new EngineSettings(Duration.ofMillis(25),Duration.ofMillis(200),32,16,1,Duration.ofSeconds(15),null,Duration.ofSeconds(60),Duration.ZERO,Duration.ZERO);
     }
 
     private static void report(int fired, long expected, List<Map<String, Object>> duplicates,

@@ -2,8 +2,7 @@ import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet 
 import { AppLayout } from "./components/AppLayout";
 import { UI_BASE } from "./lib/api";
 import type { JobsSearch } from "./pages/JobsPage";
-import type { ExecutionsSearch } from "./pages/ExecutionsPage";
-import { isTimeWindow } from "./lib/timeWindows";
+import { validateExecutionsSearch } from "./lib/executionSearch";
 
 /*
  * One chunk per route, via `lazyRouteComponent` below. Every page used to sit in the entry
@@ -11,9 +10,8 @@ import { isTimeWindow } from "./lib/timeWindows";
  * ever opens — a megabyte of JavaScript to render six stat cards.
  *
  * Only the COMPONENT is deferred: the `validateSearch` functions stay eager, because the router
- * has to parse the URL of a route it has not navigated to yet. The two imports above are
- * type-only, and `verbatimModuleSyntax` erases them, so naming the page modules here does not
- * drag them back into the entry chunk.
+ * has to parse the URL of a route it has not navigated to yet. The jobs page import is type-only;
+ * execution filter validation lives in a small module independent of page components.
  */
 
 function str(value: unknown): string | undefined {
@@ -48,16 +46,7 @@ const jobsRoute = createRoute({
 const executionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/executions",
-  validateSearch: (search: Record<string, unknown>): ExecutionsSearch => ({
-    jobKey: str(search.jobKey),
-    status: str(search.status) as ExecutionsSearch["status"],
-    executionId: str(search.executionId),
-    // An unrecognised window falls back to the last hour rather than to "all": landing on a
-    // full-history scan because of a typo in a shared URL is the wrong kind of surprise.
-    window: isTimeWindow(search.window) ? search.window : "1h",
-    from: str(search.from),
-    to: str(search.to),
-  }),
+  validateSearch: validateExecutionsSearch,
   component: lazyRouteComponent(() => import("./pages/ExecutionsPage"), "ExecutionsPage"),
 });
 

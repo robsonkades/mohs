@@ -49,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link JdbcTriggerFirer} — the transactional CAS over the split tables: the {@code next_fire_at}
+ * {@link JdbcSubmissionStore} — the transactional CAS over the split tables: the {@code next_fire_at}
  * advance, history ({@code mohs_execution}) and the queue ({@code mohs_ready}) all win or lose together.
  */
 class JdbcTriggerFirerTest {
@@ -62,7 +62,7 @@ class JdbcTriggerFirerTest {
     private DataSource dataSource;
     private MutableClock clock;
     private JdbcJobStore jobStore;
-    private JdbcTriggerFirer firer;
+    private JdbcSubmissionStore firer;
     private JdbcTemplate rawJdbc;
 
     @BeforeEach
@@ -70,9 +70,9 @@ class JdbcTriggerFirerTest {
         dataSource = freshH2DataSource();
         clock = new MutableClock(NOW, ZoneId.of("UTC"));
         jobStore = new JdbcJobStore(dataSource, clock, new H2JdbcDelegate());
-        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, JsonMapper.builder().build(), new H2JdbcDelegate());
-        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate(), new JdbcBatchStore(dataSource, clock, new H2JdbcDelegate()));
-        firer = new JdbcTriggerFirer(dataSource, historyStore, workQueue, new H2JdbcDelegate());
+        JdbcHistoryStore historyStore = new JdbcHistoryStore(dataSource, new H2JdbcDelegate());
+        JdbcWorkQueue workQueue = new JdbcWorkQueue(dataSource, new H2JdbcDelegate());
+        firer = new JdbcSubmissionStore(dataSource, new H2JdbcDelegate(), java.time.Duration.ofDays(7));
         rawJdbc = new JdbcTemplate(dataSource);
     }
 
@@ -87,7 +87,7 @@ class JdbcTriggerFirerTest {
 
     /** The upsert arms the trigger at {@code NOW + 1min} — the value the tests observe. */
     private Instant armEveryMinuteJob(String jobKey) {
-        jobStore.upsert(JobDefinition.of(jobKey, Handler.class, spec -> spec.every(Duration.ofMinutes(1))));
+        jobStore.upsert(JobDefinition.of(jobKey, new io.mohs.core.schedule.IntervalSpec(Duration.ofMinutes(1), false), io.mohs.core.definition.JobOptions.defaults(), io.mohs.core.schedule.Misfire.IGNORE, false));
         return NOW.plus(Duration.ofMinutes(1));
     }
 
@@ -113,23 +113,23 @@ class JdbcTriggerFirerTest {
         Instant observed = armEveryMinuteJob("poll");
         Instant newNextFire = observed.plus(Duration.ofMinutes(1));
 
-        boolean fired = firer.fire(JobKey.of("poll"), observed, newNextFire,
-                List.of(occurrence("occ-1", "poll", observed)), new LinkedHashMap<String, Object>(), NOW);
+        boolean fired = firer.fire(JobKey.of("poll"), 1L, observed, newNextFire,
+                List.of(occurrence("01991337-0000-7000-8000-000000000074", "poll", observed)), observed);
 
         assertThat(fired).isTrue();
         assertThat(nextFireAtOf("poll")).isEqualTo(newNextFire);
         // Advisory history plus a queue entry due at scheduledAt — the enqueue unit
-        assertThat(historyStateOf("occ-1")).isEqualTo("PENDING");
+        assertThat(historyStateOf("01991337-0000-7000-8000-000000000074")).isEqualTo("PENDING");
         assertThat(rawJdbc.queryForObject(
-                "SELECT actor FROM mohs_execution WHERE execution_id = 'occ-1'", String.class))
+                "SELECT actor FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-000000000074'", String.class))
                 .isEqualTo(Execution.SCHEDULER_ACTOR);
         assertThat(rawJdbc.queryForObject(
-                "SELECT visible_at FROM mohs_ready WHERE execution_id = 'occ-1'", LocalDateTime.class))
+                "SELECT visible_at FROM mohs_work WHERE work_state = 'READY' AND  execution_id = '01991337-0000-7000-8000-000000000074'", LocalDateTime.class))
                 .isEqualTo(JdbcTimestamps.toUtcLocalDateTime(observed));
         // createdAt = the firing's now, not the scheduledAt
         assertThat(rawJdbc.queryForObject(
-                "SELECT created_at FROM mohs_execution WHERE execution_id = 'occ-1'", LocalDateTime.class))
-                .isEqualTo(JdbcTimestamps.toUtcLocalDateTime(NOW));
+                "SELECT created_at FROM mohs_execution WHERE execution_id = '01991337-0000-7000-8000-000000000074'", LocalDateTime.class))
+                .isEqualTo(JdbcTimestamps.toUtcLocalDateTime(observed));
     }
 
     /** The race between nodes: whoever observes a next_fire_at that has already advanced loses and inserts nothing. */
@@ -138,12 +138,12 @@ class JdbcTriggerFirerTest {
         Instant observed = armEveryMinuteJob("poll");
         Instant stale = observed.minus(Duration.ofMinutes(1));
 
-        boolean fired = firer.fire(JobKey.of("poll"), stale, observed,
-                List.of(occurrence("occ-1", "poll", stale)), new LinkedHashMap<String, Object>(), NOW);
+        boolean fired = firer.fire(JobKey.of("poll"), 1L, stale, observed,
+                List.of(occurrence("01991337-0000-7000-8000-000000000074", "poll", stale)), NOW);
 
         assertThat(fired).isFalse();
         assertThat(nextFireAtOf("poll")).isEqualTo(observed);
-        assertThat(historyStateOf("occ-1")).isNull();
+        assertThat(historyStateOf("01991337-0000-7000-8000-000000000074")).isNull();
     }
 
     /** fixed-delay: the plan disarms the trigger — the completion rearms it. */
@@ -151,8 +151,8 @@ class JdbcTriggerFirerTest {
     void fireCanDisarmTheTrigger() {
         Instant observed = armEveryMinuteJob("poll");
 
-        boolean fired = firer.fire(JobKey.of("poll"), observed, null,
-                List.of(occurrence("occ-1", "poll", observed)), new LinkedHashMap<String, Object>(), NOW);
+        boolean fired = firer.fire(JobKey.of("poll"), 1L, observed, null,
+                List.of(occurrence("01991337-0000-7000-8000-000000000074", "poll", observed)), observed);
 
         assertThat(fired).isTrue();
         assertThat(nextFireAtOf("poll")).isNull();
@@ -164,11 +164,11 @@ class JdbcTriggerFirerTest {
         Instant observed = armEveryMinuteJob("poll");
         jobStore.remove(JobKey.of("poll"));
 
-        boolean fired = firer.fire(JobKey.of("poll"), observed, observed.plus(Duration.ofMinutes(1)),
-                List.of(occurrence("occ-1", "poll", observed)), new LinkedHashMap<String, Object>(), NOW);
+        boolean fired = firer.fire(JobKey.of("poll"), 1L, observed, observed.plus(Duration.ofMinutes(1)),
+                List.of(occurrence("01991337-0000-7000-8000-000000000074", "poll", observed)), observed);
 
         assertThat(fired).isFalse();
-        assertThat(historyStateOf("occ-1")).isNull();
+        assertThat(historyStateOf("01991337-0000-7000-8000-000000000074")).isNull();
     }
 
     /** The advance and the insert are atomic: a failing insert undoes the advance — the occurrence is not lost, and the next tick tries again. */
@@ -177,16 +177,15 @@ class JdbcTriggerFirerTest {
         Instant observed = armEveryMinuteJob("poll");
         // The second occurrence collides with a pre-existing execution — the primary key is violated in record
         rawJdbc.update("""
-                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, payload_type)
-                VALUES ('occ-2', 'poll', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
+                INSERT INTO mohs_execution (execution_id, job_key, state, scheduled_at, created_at, actor, payload, input_contract)
+                VALUES ('01991337-0000-7000-8000-000000000075', 'poll', 'PENDING', ?, ?, 'test', '{}', 'java.lang.Object')
                 """, JdbcTimestamps.toUtcLocalDateTime(NOW), JdbcTimestamps.toUtcLocalDateTime(NOW));
 
-        assertThatThrownBy(() -> firer.fire(JobKey.of("poll"), observed, observed.plus(Duration.ofMinutes(1)),
-                List.of(occurrence("occ-1", "poll", observed), occurrence("occ-2", "poll", observed)),
-                new LinkedHashMap<String, Object>(), NOW))
+        assertThatThrownBy(() -> firer.fire(JobKey.of("poll"), 1L, observed, observed.plus(Duration.ofMinutes(1)),
+                List.of(occurrence("01991337-0000-7000-8000-000000000074", "poll", observed), occurrence("01991337-0000-7000-8000-000000000075", "poll", observed)), observed))
                 .isInstanceOf(DataIntegrityViolationException.class);
 
         assertThat(nextFireAtOf("poll")).isEqualTo(observed);
-        assertThat(historyStateOf("occ-1")).isNull();
+        assertThat(historyStateOf("01991337-0000-7000-8000-000000000074")).isNull();
     }
 }

@@ -36,7 +36,7 @@ export function SiteHeader({ streamStatus }: { streamStatus: StreamStatus }) {
       <SidebarTrigger />
       <Separator orientation="vertical" className="h-4" />
       <div className="flex min-w-0 flex-col">
-        <h1 className="text-base font-semibold leading-tight tracking-tight sm:text-lg">{currentItem?.label}</h1>
+        <h1 className="truncate text-base font-semibold leading-tight tracking-tight sm:text-lg">{currentItem?.label}</h1>
         {currentItem?.subtitle && (
           <p className="mt-1 hidden truncate text-xs leading-tight text-muted-foreground sm:block">{currentItem.subtitle}</p>
         )}
@@ -44,12 +44,12 @@ export function SiteHeader({ streamStatus }: { streamStatus: StreamStatus }) {
       <Button
         variant="outline"
         onClick={() => setPaletteOpen(true)}
-        className="ml-1 shrink-0 gap-2 text-xs text-muted-foreground md:ml-5 md:w-48 md:justify-start"
+        className="ml-1 shrink-0 gap-2 text-xs text-muted-foreground lg:ml-5 lg:w-48 lg:justify-start"
         aria-label="Open global search"
       >
         <IconSearch className="size-3.5" />
-        <span className="hidden md:inline">Search pages & jobs</span>
-        <kbd className="ml-auto hidden rounded-sm border bg-background px-1 font-mono text-[10px] md:inline">/</kbd>
+        <span className="hidden lg:inline">Search pages & jobs</span>
+        <kbd className="ml-auto hidden rounded-sm border bg-background px-1 font-mono text-[10px] lg:inline">/</kbd>
       </Button>
       <RefreshControls streamStatus={streamStatus} />
 

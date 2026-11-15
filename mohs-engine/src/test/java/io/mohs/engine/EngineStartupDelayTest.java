@@ -46,15 +46,28 @@ class EngineStartupDelayTest {
     private final RateLimitStore limits = mock(RateLimitStore.class);
 
     private EngineSettings settings(Duration delay) {
-        return new EngineSettings(Duration.ofMillis(25), Duration.ofSeconds(2), 50, 64, 1,
-                Duration.ofSeconds(30), Duration.ofSeconds(15), null, Duration.ofSeconds(60),
-                Duration.ZERO, Duration.ZERO, delay);
+        return new EngineSettings(Duration.ofMillis(25),Duration.ofSeconds(2),50,64,1,Duration.ofSeconds(15),null,Duration.ofSeconds(60),Duration.ZERO,delay);
     }
 
     private Engine engine(Duration delay) {
         return new Engine(queue, dispatcher, history, leases, jobs, nodes, firer,
                 mock(ExecutionWindowRegistry.class), limits, Clock.systemUTC(), settings(delay),
                 mock(RunnerRegistry.class), mock(EngineMetrics.class));
+    }
+
+    @Test
+    void invalidDrainBudgetDoesNotChangeLifecycleState() {
+        Engine engine = engine(Duration.ofHours(1));
+        engine.start();
+        try {
+            assertThatThrownBy(() -> engine.stop(Duration.ofDays(200_000)))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("grace is too large");
+            assertThatThrownBy(() -> engine.drain(Duration.ofNanos(-1)))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("grace must be nonnegative");
+            assertThat(engine.state()).isEqualTo(EngineState.STARTING);
+        } finally {
+            engine.stop(Duration.ZERO);
+        }
     }
 
     @Test
@@ -66,8 +79,9 @@ class EngineStartupDelayTest {
         doAnswer(invocation -> {
             firstTick.compareAndSet(0, System.nanoTime());
             firstHeartbeat.countDown();
-            return null;
-        }).when(nodes).heartbeat(anyString(), any(), anyLong(), any(), any());
+            var now = java.time.Instant.now();
+            return new StoredNode(invocation.getArgument(0), invocation.getArgument(1), now, now.plusSeconds(15), false);
+        }).when(nodes).register(anyString(), any(), any(), any());
         long began = System.nanoTime();
         engine.start();
         try {

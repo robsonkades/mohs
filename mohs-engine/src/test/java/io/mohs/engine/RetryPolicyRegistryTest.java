@@ -37,12 +37,11 @@ class RetryPolicyRegistryTest {
     }
 
     private static JobDefinition jobWithoutPolicy(int retries) {
-        return JobDefinition.of("invoices", Handler.class, spec -> spec.onDemand().retries(retries));
+        return JobDefinition.of("invoices", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(retries), io.mohs.core.schedule.Misfire.IGNORE, false);
     }
 
     private static JobDefinition job(int retries, String policy) {
-        return JobDefinition.of("invoices", Handler.class,
-                spec -> spec.onDemand().retries(retries).retryPolicy(policy));
+        return JobDefinition.of("invoices", new io.mohs.core.schedule.OnDemandSpec(), io.mohs.core.definition.JobOptions.defaults().withRetries(retries).withRetryPolicy(policy), io.mohs.core.schedule.Misfire.IGNORE, false);
     }
 
     /** No policy named: the built-in schedule decides, and its budget still governs. */
